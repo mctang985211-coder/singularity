@@ -10,7 +10,9 @@
 
 export { ProtocolRefusal, refuse, REFUSAL_CODES, type Refusal, type RefusalCode } from './protocol/refusal.ts'
 export {
+  assertClosedKeys,
   assertEnvelope,
+  assertLosslessJson,
   canonicalJson,
   digestOf,
   digestOfBody,
@@ -20,9 +22,9 @@ export {
   type EnvelopeBody,
 } from './protocol/envelope.ts'
 export {
+  defineKind,
   ProtocolRegistry,
-  GUARANTEES,
-  type Guarantee,
+  type Guarantees,
   type KindRule,
   type ProtocolSpec,
 } from './protocol/registry.ts'
@@ -31,14 +33,20 @@ export { foldSubject, foldSubjects } from './protocol/fold.ts'
 
 export {
   assertContract,
+  assertContractShape,
+  assertCriterionShape,
   contractDigest,
   verifierRegistryOf,
+  CONTRACT_MEMBERS,
+  CRITERION_MEMBERS,
   type AcceptanceCriterion,
   type TaskContract,
   type VerifierRegistry,
 } from './task/contract.ts'
 export {
   declareTaskProtocol,
+  verifierRoleOf,
+  SCHEDULER_ROLE,
   TASK_KINDS,
   TASK_PROTOCOL,
   TASK_VERSION,

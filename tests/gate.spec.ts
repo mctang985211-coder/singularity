@@ -1,35 +1,37 @@
 /**
- * The version gate, the guarantee ladder, and illegal transitions: what the stack refuses.
- *
- * Covers the two remaining required properties (an unknown version, and an illegal transition),
- * plus the declarations that make a refusal trustworthy — and the two fold scopes, which are a
- * deliberate decision rather than an accident.
+ * The version gate, the guarantee vocabulary, the emitter discipline, and command identity:
+ * everything the stack refuses, each refused by name.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  defineKind,
   foldSubject,
   foldSubjects,
-  GUARANTEES,
   ProtocolLog,
   ProtocolRegistry,
   REFUSAL_CODES,
   refuse,
-  type Guarantee,
+  type EmitInput,
+  type Guarantees,
   type ProtocolSpec,
   type RefusalCode,
 } from '../src/index.ts'
 import {
-  AUDIT_V1,
   asyncRefusalOf,
+  AUDIT_V1,
   bumped,
   chainOf,
   closed,
+  DEMO_SUBJECTS,
   DEMO_V1,
   demoRegistry,
+  fact,
   newLogPath,
+  openDemoLog,
   opened,
+  POINTER_V1,
   refusalOf,
   type Gate,
   type Journal,
@@ -43,8 +45,7 @@ beforeEach(async () => {
 
 describe('the one version gate', () => {
   it('refuses an unknown protocol, then an unknown version, then an unknown kind', async () => {
-    const registry = demoRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
+    const log = await openDemoLog(logPath)
 
     expect((await asyncRefusalOf(() => log.emit({ ...opened(), protocol: 'nope' }))).code).toBe<RefusalCode>('unknown-protocol')
     expect((await asyncRefusalOf(() => log.emit({ ...opened(), version: 7 }))).code).toBe<RefusalCode>('version-mismatch')
@@ -52,7 +53,17 @@ describe('the one version gate', () => {
 
     // The gate runs before the append: nothing reached the disk.
     expect(log.entries()).toHaveLength(0)
-    expect(await (await import('node:fs/promises')).readFile(logPath, 'utf8').catch(() => '')).toBe('')
+  })
+
+  it('refuses an inherited member name as a kind, not as a function', () => {
+    const registry = demoRegistry()
+    // The reviewer's counterexample: property lookup reached Object.prototype, so these were
+    // returned as "rules" instead of being refused.
+    for (const kind of ['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf']) {
+      const refusal = refusalOf(() => registry.ruleFor('demo', 1, kind))
+      expect(refusal.code).toBe<RefusalCode>('unknown-kind')
+      expect(refusal.detail).toContain('declares no kind')
+    }
   })
 
   it('reports what it does declare, so a refusal names the alternative', () => {
@@ -63,71 +74,211 @@ describe('the one version gate', () => {
   })
 
   it('applies on load too: a log carrying a protocol this build does not know is refused', async () => {
-    const written = await ProtocolLog.open(logPath, demoRegistry())
+    const written = await openDemoLog(logPath)
     await written.emit(opened())
 
     const narrowed = new ProtocolRegistry()
     narrowed.declare<Journal>('audit', 1, AUDIT_V1)
-    expect((await asyncRefusalOf(() => ProtocolLog.open(logPath, narrowed))).code).toBe<RefusalCode>('unknown-protocol')
+    const refusal = await asyncRefusalOf(() =>
+      ProtocolLog.open(logPath, narrowed, { subjects: DEMO_SUBJECTS }),
+    )
+    expect(refusal.code).toBe<RefusalCode>('unknown-protocol')
   })
 })
 
-describe('the one guarantee ladder', () => {
-  it('refuses a derived kind at the log boundary', async () => {
+describe('the guarantee vocabulary', () => {
+  it('composes: a fact may be appended, business-atomic and conditional at once', () => {
+    const registry = new ProtocolRegistry()
+    registry.declare('pointer', 1, POINTER_V1)
+    expect(registry.ruleFor('pointer', 1, 'switched').guarantees).toEqual({
+      appended: true,
+      conditional: true,
+      atomicFact: true,
+    })
+    expect(registry.conditionalOwner()).toBe('pointer')
+  })
+
+  it('refuses a guarantee combination that cannot hold', () => {
+    const registry = new ProtocolRegistry()
+    const derivedAndAppended: ProtocolSpec<unknown> = {
+      initialState: {},
+      kinds: {
+        x: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: true, derived: true },
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+      },
+    }
+    expect(refusalOf(() => registry.declare('demo', 1, derivedAndAppended)).code).toBe<RefusalCode>('unknown-guarantee')
+
+    const conditionalOnly: ProtocolSpec<unknown> = {
+      initialState: {},
+      kinds: {
+        y: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: false, conditional: true },
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+      },
+    }
+    expect(refusalOf(() => registry.declare('demo', 1, conditionalOnly)).code).toBe<RefusalCode>('unknown-guarantee')
+  })
+
+  it('refuses a derived kind at the log boundary: derived state is folded, never written', async () => {
     const registry = new ProtocolRegistry()
     registry.declare<{ total: number }>('demo', 2, {
       initialState: { total: 0 },
       kinds: {
-        counted: {
-          guarantee: 'G1',
-          reduce: (state, envelope) => ({ total: state.total + Number((envelope.payload as { by?: unknown }).by ?? 0) }),
-        },
-        summary: { guarantee: 'G4', reduce: state => state },
+        counted: defineKind<{ total: number }, { by: number }>({
+          guarantees: { appended: true },
+          emitter: 'writer',
+          parse: raw => {
+            const by = (raw as { by?: unknown }).by
+            if (typeof by !== 'number' || !Number.isInteger(by)) refuse('malformed-payload', 'counted.by must be an integer')
+            return { by }
+          },
+          reduce: (state, _envelope, payload) => ({ total: state.total + payload.by }),
+        }),
+        summary: defineKind<{ total: number }, Record<string, never>>({
+          guarantees: { appended: false, derived: true },
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
       },
     })
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit({ protocol: 'demo', version: 2, kind: 'counted', subject: 's', actor: 'test', payload: { by: 3 } })
+    const log = await ProtocolLog.open(logPath, registry, { subjects: DEMO_SUBJECTS })
+    await log.emit({ commandId: 'c1', protocol: 'demo', version: 2, kind: 'counted', subject: 's', payload: { by: 3 } })
 
     const refusal = await asyncRefusalOf(() =>
-      log.emit({ protocol: 'demo', version: 2, kind: 'summary', subject: 's', actor: 'test', payload: {} }),
+      log.emit({ commandId: 'c2', protocol: 'demo', version: 2, kind: 'summary', subject: 's', payload: {} }),
     )
-    expect(refusal.code).toBe<RefusalCode>('g4-not-persistable')
+    expect(refusal.code).toBe<RefusalCode>('derived-not-persistable')
     expect(foldSubject<{ total: number }>(registry, log.entries(), 'demo', 2, 's')).toEqual({ total: 3 })
   })
 
-  it('allows exactly one protocol to own compare-and-swap', () => {
+  it('allows exactly one conditional-update owner, and a refused claim leaves none behind', () => {
     const registry = new ProtocolRegistry()
-    const switched: ProtocolSpec<{ revision: string }> = {
-      initialState: { revision: 'r0001' },
+    registry.declare('pointer', 1, POINTER_V1)
+    expect(registry.conditionalOwner()).toBe('pointer')
+
+    const rival: ProtocolSpec<unknown> = {
+      initialState: {},
       kinds: {
-        switched: {
-          guarantee: 'G3',
-          reduce: (_state, envelope) => ({ revision: String((envelope.payload as { to: string }).to) }),
-        },
+        moved: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: true, conditional: true },
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
       },
     }
-    registry.declare('pointer', 1, switched)
-    expect(registry.g3Owner()).toBe('pointer')
+    expect(refusalOf(() => registry.declare('rival', 1, rival)).code).toBe<RefusalCode>('second-conditional-owner')
+    expect(registry.conditionalOwner()).toBe('pointer')
+  })
+})
 
-    const rival: ProtocolSpec<unknown> = { initialState: {}, kinds: { moved: { guarantee: 'G3', reduce: state => state } } }
-    expect(refusalOf(() => registry.declare('rival', 1, rival)).code).toBe<RefusalCode>('second-g3-instance')
-    expect(registry.g3Owner()).toBe('pointer')
+describe('declaration is all-or-nothing', () => {
+  /** The reviewer's counterexample: the owner was claimed before the rest was validated. */
+  it('leaves no conditional owner behind when a later kind is invalid', () => {
+    const registry = new ProtocolRegistry()
+    const spec: ProtocolSpec<unknown> = {
+      initialState: {},
+      kinds: {
+        claims: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: true, conditional: true },
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+        broken: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: true, bogus: true } as unknown as Guarantees,
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+      },
+    }
+    expect(refusalOf(() => registry.declare('broken-protocol', 1, spec)).code).toBe<RefusalCode>('unknown-guarantee')
+    expect(registry.conditionalOwner()).toBeUndefined()
+    expect(refusalOf(() => registry.versionsOf('broken-protocol')).code).toBe<RefusalCode>('unknown-protocol')
   })
 
-  it('refuses a declaration it cannot honour', () => {
+  it('refuses a declaration it cannot honour, all before publishing', () => {
     const registry = new ProtocolRegistry()
-    const bad: ProtocolSpec<unknown> = {
-      initialState: {},
-      kinds: { x: { guarantee: 'G9' as unknown as Guarantee, reduce: state => state } },
-    }
-    expect(refusalOf(() => registry.declare('demo', 1, bad)).code).toBe<RefusalCode>('unknown-guarantee')
     expect(refusalOf(() => registry.declare('demo', 0, DEMO_V1)).code).toBe<RefusalCode>('malformed-declaration')
     expect(refusalOf(() => registry.declare('', 1, DEMO_V1)).code).toBe<RefusalCode>('malformed-declaration')
     expect(refusalOf(() => registry.declare('demo', 1, { initialState: {}, kinds: {} })).code).toBe<RefusalCode>('malformed-declaration')
 
-    registry.declare<Gate>('demo', 1, DEMO_V1)
+    const noEmitter: ProtocolSpec<Gate> = {
+      initialState: { open: false, bumps: 0 },
+      kinds: {
+        opened: {
+          guarantees: { appended: true },
+          emitter: () => '',
+          parse: () => ({}),
+          reduce: () => ({ open: true, bumps: 0 }),
+        },
+      },
+    }
+    registry.declare<Gate>('demo', 1, noEmitter)
+
+    // A duplicate is refused, and the original declaration still answers.
     expect(refusalOf(() => registry.declare('demo', 1, DEMO_V1)).code).toBe<RefusalCode>('duplicate-declaration')
-    expect(GUARANTEES).toEqual(['G1', 'G2', 'G3', 'G4'])
+    expect(registry.kindsOf('demo', 1)).toEqual(['opened'])
+  })
+})
+
+describe('the emitter discipline', () => {
+  it('refuses a fact whose role this deployment holds no identity for', async () => {
+    const registry = demoRegistry()
+    // A deployment that holds the auditor but not the writer.
+    const log = await ProtocolLog.open(logPath, registry, { subjects: { auditor: 'auditor-1' } })
+
+    const refusal = await asyncRefusalOf(() => log.emit(opened()))
+    expect(refusal.code).toBe<RefusalCode>('unknown-emitter-role')
+    expect(refusal.detail).toContain('writer')
+    expect(log.entries()).toHaveLength(0)
+  })
+
+  it('offers no parameter for an author, so a caller cannot claim a role', async () => {
+    const log = await openDemoLog(logPath)
+    const input = { ...opened(), actor: 'auditor-1', emitter: 'auditor' } as unknown as EmitInput
+    const envelope = await log.emit(input)
+
+    // Whatever the caller wrote is ignored: the kind's declared role decides.
+    expect(envelope.emitter).toBe('writer')
+    expect(envelope.actor).toBe('writer-1')
+  })
+})
+
+describe('command identity', () => {
+  it('returns the recorded fact when the same command is delivered twice', async () => {
+    const log = await openDemoLog(logPath)
+    const command: EmitInput = { commandId: 'same-command', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-a', payload: {} }
+
+    const first = await log.emit(command)
+    const again = await log.emit(command)
+
+    expect(again.digest).toBe(first.digest)
+    expect(again.seq).toBe(first.seq)
+    // A redelivery is not a second fact.
+    expect(log.entries()).toHaveLength(1)
+  })
+
+  it('refuses the same command id carrying a different request', async () => {
+    const log = await openDemoLog(logPath)
+    await log.emit({ commandId: 'c-fixed', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-a', payload: {} })
+
+    const refusal = await asyncRefusalOf(() =>
+      log.emit({ commandId: 'c-fixed', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-b', payload: {} }),
+    )
+    expect(refusal.code).toBe<RefusalCode>('command-conflict')
+    expect(refusal.detail).toContain('c-fixed')
+    expect(log.entries()).toHaveLength(1)
   })
 })
 
@@ -154,14 +305,35 @@ describe('illegal transitions', () => {
   })
 
   it('refuses an illegal fact at append time, so the log never records a sequence it would reject', async () => {
-    const log = await ProtocolLog.open(logPath, demoRegistry())
+    const log = await openDemoLog(logPath)
     await log.emit(opened('gate-b'))
     await log.emit(closed('gate-b'))
 
     const refusal = await asyncRefusalOf(() => log.emit(bumped('gate-b')))
     expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-    // Nothing reached the disk beyond the two legal facts.
     expect(log.entries()).toHaveLength(2)
+  })
+
+  it('lets a tenant declare its own compare-and-swap and refuses a stale expectation', async () => {
+    const registry = new ProtocolRegistry()
+    registry.declare('pointer', 1, POINTER_V1)
+    const log = await ProtocolLog.open(logPath, registry, { subjects: DEMO_SUBJECTS })
+    const emit = (commandId: string, expected: string, to: string): EmitInput => ({
+      commandId,
+      protocol: 'pointer',
+      version: 1,
+      kind: 'switched',
+      subject: 'env-1',
+      payload: { expected, to },
+    })
+
+    await log.emit(emit('p1', 'r0001', 'r0002'))
+    expect(log.stateOf('pointer', 1, 'env-1')).toEqual({ revision: 'r0002', generation: 1 })
+
+    const stale = await asyncRefusalOf(() => log.emit(emit('p2', 'r0001', 'r0003')))
+    expect(stale.code).toBe<RefusalCode>('illegal-transition')
+    expect(stale.detail).toContain('active revision is "r0002"')
+    expect(log.stateOf('pointer', 1, 'env-1')).toEqual({ revision: 'r0002', generation: 1 })
   })
 })
 
@@ -173,5 +345,6 @@ describe('the one refusal contract', () => {
     expect(refusal.detail).toContain('bumped')
     expect(REFUSAL_CODES).toContain(refusal.code)
     expect(refusalOf(() => refuse('unknown-protocol', 'x')).code).toBe<RefusalCode>('unknown-protocol')
+    expect(fact('opened').commandId).toMatch(/^cmd-\d+$/)
   })
 })

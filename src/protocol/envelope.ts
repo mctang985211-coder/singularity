@@ -12,7 +12,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { refuse } from './refusal.ts'
+import { refuse, type RefusalCode } from './refusal.ts'
 
 /** The one envelope. `Payload` stays typed per kind; the frame never interprets it. */
 export interface Envelope<Payload = unknown> {
@@ -24,7 +24,12 @@ export interface Envelope<Payload = unknown> {
   readonly kind: string
   /** What the fact is about: the id whose fold state this fact advances. */
   readonly subject: string
-  /** Who emitted it. */
+  /**
+   * The trusted role that produced the fact, from the kind's own declaration. A caller cannot
+   * choose this: it is what makes "an executor never judges its own run" checkable on roles.
+   */
+  readonly emitter: string
+  /** The identity the emitter role resolved to at commit time. Also never caller-supplied. */
   readonly actor: string
   /** When, as an ISO-8601 instant. */
   readonly at: string
@@ -45,6 +50,7 @@ export const ENVELOPE_MEMBERS = [
   'version',
   'kind',
   'subject',
+  'emitter',
   'actor',
   'at',
   'seq',
@@ -55,8 +61,52 @@ export const ENVELOPE_MEMBERS = [
 
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/
 
+/**
+ * Read one value as **losslessly** JSON, or refuse it by name.
+ *
+ * Content identity is the one place where a silent coercion is fatal: `JSON.stringify` turns
+ * `NaN` into `null` and drops `undefined` members, so `digestOf({v: NaN})` would equal
+ * `digestOf({v: null})` and `digestOf({v: undefined})` would equal `digestOf({})`. Two facts
+ * that are not the same would carry the same content identity. This walks the value and refuses
+ * anything JSON cannot round-trip exactly; it is a domain restriction, not a serializer.
+ */
+export function assertLosslessJson(value: unknown, where: string, seen = new Set<object>()): void {
+  if (value === null) return
+  switch (typeof value) {
+    case 'boolean':
+    case 'string':
+      return
+    case 'number':
+      if (!Number.isFinite(value))
+        refuse('not-lossless-json', `${where} is ${String(value)}, which JSON round-trips as null`)
+      return
+    case 'object':
+      break
+    default:
+      // undefined, function, symbol, bigint: JSON drops or mangles each of them.
+      refuse('not-lossless-json', `${where} is a ${typeof value}, which JSON cannot round-trip`)
+  }
+
+  const container = value as object
+  if (seen.has(container)) refuse('not-lossless-json', `${where} is cyclic; JSON cannot round-trip it`)
+  seen.add(container)
+  try {
+    if (Array.isArray(container)) {
+      for (const [index, entry] of container.entries()) assertLosslessJson(entry, `${where}[${index}]`, seen)
+      return
+    }
+    const prototype: unknown = Object.getPrototypeOf(container)
+    if (prototype !== Object.prototype && prototype !== null)
+      refuse('not-lossless-json', `${where} is a ${container.constructor?.name ?? 'non-plain object'}, whose members JSON would not restore`)
+    for (const [key, entry] of Object.entries(container)) assertLosslessJson(entry, `${where}.${key}`, seen)
+  } finally {
+    seen.delete(container)
+  }
+}
+
 /** Deterministic JSON: object keys sorted, so equal values always digest equally. */
 export function canonicalJson(value: unknown): string {
+  assertLosslessJson(value, 'canonicalJson input')
   return JSON.stringify(sortValue(value))
 }
 
@@ -80,6 +130,25 @@ export function digestOfBody(body: EnvelopeBody): string {
 /** Frame one body into a complete envelope. The only place a digest is minted. */
 export function sealEnvelope(body: EnvelopeBody): Envelope {
   return { ...body, digest: digestOfBody(body) }
+}
+
+/**
+ * Refuse a record that carries a member outside its declared set.
+ *
+ * A closed shape is how "unknown field" becomes an error instead of a silently ignored typo.
+ * Both the frame and every domain payload use this one rule; they differ only in which refusal
+ * code names the violation.
+ */
+export function assertClosedKeys(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+  where: string,
+  code: RefusalCode = 'malformed-payload',
+): void {
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key))
+      refuse(code, `${where} carries unknown member ${JSON.stringify(key)}; the shape is closed (known: ${allowed.join(', ')})`)
+  }
 }
 
 function describe(value: unknown): string {
@@ -118,17 +187,12 @@ export function assertEnvelope(raw: unknown): Envelope {
     refuse('malformed-envelope', `an envelope is an object, got ${describe(raw)}`)
   const record = raw as Record<string, unknown>
 
-  for (const key of Object.keys(record)) {
-    if (!(ENVELOPE_MEMBERS as readonly string[]).includes(key))
-      refuse(
-        'malformed-envelope',
-        `unknown envelope member ${JSON.stringify(key)}; the envelope is closed (known: ${ENVELOPE_MEMBERS.join(', ')})`,
-      )
-  }
+  assertClosedKeys(record, ENVELOPE_MEMBERS, 'envelope', 'malformed-envelope')
 
   const protocol = requireText(record, 'protocol')
   const kind = requireText(record, 'kind')
   const subject = requireText(record, 'subject')
+  const emitter = requireText(record, 'emitter')
   const actor = requireText(record, 'actor')
   const at = requireText(record, 'at')
   const version = requireCount(record, 'version')
@@ -141,12 +205,14 @@ export function assertEnvelope(raw: unknown): Envelope {
 
   if (!('payload' in record)) refuse('malformed-envelope', 'envelope is missing "payload"')
   const payload = record['payload']
+  // A payload that JSON cannot round-trip would carry a content identity it does not have.
+  assertLosslessJson(payload, `envelope ${protocol}/${kind} #${seq} payload`)
 
   const digest = requireText(record, 'digest')
   if (!DIGEST_PATTERN.test(digest))
     refuse('malformed-envelope', `envelope digest must be a sha256 hex digest, got ${JSON.stringify(digest)}`)
 
-  const body: EnvelopeBody = { protocol, version, kind, subject, actor, at, seq, prevDigest, payload }
+  const body: EnvelopeBody = { protocol, version, kind, subject, emitter, actor, at, seq, prevDigest, payload }
   const computed = digestOfBody(body)
   if (computed !== digest)
     refuse('digest-mismatch', `envelope ${protocol}/${kind} #${seq} carries digest ${digest.slice(0, 12)}… but its body reads ${computed.slice(0, 12)}…`)

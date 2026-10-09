@@ -12,42 +12,56 @@
 export const REFUSAL_CODES = [
   /** The framing itself is wrong: a missing member, an unknown member, or a wrong type. */
   'malformed-envelope',
+  /** A payload carries a member its kind does not declare, or a member has the wrong type. */
+  'malformed-payload',
+  /**
+   * A value offered as content identity is not losslessly JSON. JSON turns `NaN` into `null` and
+   * drops `undefined` members, so without this restriction two different facts could carry one
+   * content identity.
+   */
+  'not-lossless-json',
   /** The envelope names a protocol this build declares no version of. */
   'unknown-protocol',
   /** The protocol is declared, but not at the version the fact claims. */
   'version-mismatch',
   /** The protocol and version are declared, but this kind is not. */
   'unknown-kind',
-  /** A declaration itself is wrong: an empty name, a bad version, or no kinds. */
+  /** A declaration itself is wrong: an empty name, a bad version, an empty kind set, or no emitter. */
   'malformed-declaration',
-  /** A declaration names a guarantee outside G1..G4. */
+  /** A declaration names a guarantee combination that cannot hold. */
   'unknown-guarantee',
-  /** A derived (G4) kind was offered for persistence. Derived state is never stored. */
-  'g4-not-persistable',
-  /** A second protocol claimed the one compare-and-swap guarantee. */
-  'second-g3-instance',
+  /** A fact's kind names an emitter role this deployment has no trusted identity for. */
+  'unknown-emitter-role',
+  /** A derived kind was offered for persistence. Derived state is folded, never written. */
+  'derived-not-persistable',
+  /** A second protocol claimed the one conditional-update (compare-and-swap) discipline. */
+  'second-conditional-owner',
   /** The same protocol and version were declared twice. */
   'duplicate-declaration',
-  /** The envelope's own digest does not match its body. */
-  'digest-mismatch',
-  /** A fact does not link to its predecessor, or its sequence number is not contiguous. */
-  'chain-broken',
-  /** A reducer met a fact it cannot accept in the state it is in. */
-  'illegal-transition',
-  /** A write was acknowledged but the bytes read back differently. */
-  'write-not-durable',
   /** The log changed underneath this writer: another writer holds the append path. */
   'concurrent-writer',
-  /** A task contract is not a contract: no goal, no criteria, or a malformed criterion. */
+  /** The same command id arrived carrying a different request. */
+  'command-conflict',
+  /** A write was acknowledged but the bytes read back differently, or did not arrive at all. */
+  'write-not-durable',
+  /** A fact does not link to its predecessor, or its sequence number is not contiguous. */
+  'chain-broken',
+  /** The envelope's own digest does not match its body. */
+  'digest-mismatch',
+  /** A reducer met a fact it cannot accept in the state it is in. */
+  'illegal-transition',
+  /** A task contract is not a contract: no goal, no criteria, an unknown member, or a bad criterion. */
   'malformed-contract',
-  /** A criterion names a verifier this deployment has not registered at that version. */
+  /** A criterion names a verifier this deployment cannot currently run at that version. */
   'unregistered-verifier',
   /** A fact names a run this task never started. */
   'unknown-run',
   /** A fact names a criterion this task's contract does not declare. */
   'unknown-criterion',
-  /** The actor that executed a run tried to judge it, or a verifier judged a criterion that is not its own. */
+  /** The emitter role that produced a verdict may not judge this run, or may not decide this criterion. */
   'self-reported-evidence',
+  /** A verdict came from a different verifier implementation than the criterion names. */
+  'wrong-verifier',
   /** A criterion already carries a verdict for this run; one criterion has one verdict. */
   'evidence-conflict',
   /** A run cannot settle verified while a criterion has no passing verdict. */

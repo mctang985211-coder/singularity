@@ -1,6 +1,7 @@
 # Singularity 重构蓝图
 
 > 单一入口。审查从这里开始。
+> 第一轮审核、补充遗漏与后续构建检查点：[review.md](review.md)。
 > 证据基础：旧仓 `packages/singularity` @ `6a0edde` 的只读审计、DSH 源码与已装 `0.2.0-rc.2` 的实测、新骨架 `singularity-core` 的 S1/S2。
 > 历史工作件（按需查证）：`~/Documents/singularity-refactor-plan.md`（冗余总账）、`singularity-rrsi-diagnosis.md`（RSI 断点）、`singularity-s0-spine.md`（核心脉络）、`singularity-s0-correction.md`（对 DSH 的更正）、`singularity-probe-results.md`（实测）、`singularity-f1-design.md`。
 

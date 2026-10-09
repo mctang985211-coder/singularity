@@ -1,33 +1,47 @@
 /**
  * The one append path.
  *
- * A fact is durable when `emit` returns: the line is written, fsynced, read back from disk,
- * and its digest verified. Nothing else in this codebase may write a durable file — the gate
- * script enforces that, because a second writer is how a protocol stack grows a second format.
+ * Three rules live here, and each of them exists because a counterexample showed the cost of
+ * leaving it out:
  *
- * Loading verifies the chain and the version gate; it never interprets a raw line itself.
- * `entries()` hands the facts to the fold engine, which is the only thing that derives state.
+ * 1. **Commits are serialized.** Two concurrent `emit` calls must not both read the same cursor:
+ *    that produced two facts at `seq = 0` and a log that could not be reopened. The queue makes
+ *    "read the state, decide, append" one critical section per log.
+ * 2. **The emitter is declared, not supplied.** A caller passes no actor. The fact's role comes
+ *    from its kind's declaration and its identity from the subjects this log was opened with, so
+ *    no caller can claim to be a verifier.
+ * 3. **A command is identified by its result.** The same `commandId` carrying the same request
+ *    returns the recorded fact — the answer a caller may have lost — while the same id carrying a
+ *    different request is refused. That is what makes "committed but the reply never arrived"
+ *    distinguishable from "not committed".
+ *
+ * Storage is DSH's job in the target system; this module owns the order and the rules, not the
+ * medium. It is the only module allowed to write durably, and the gate that says so stays until
+ * the medium moves behind the DSH adapter.
  *
  * @module singularity-core/protocol/log
  */
 
 import { open, readFile, stat } from 'node:fs/promises'
-import { assertEnvelope, sealEnvelope, type Envelope, type EnvelopeBody } from './envelope.ts'
+import { assertEnvelope, digestOf, sealEnvelope, type Envelope, type EnvelopeBody } from './envelope.ts'
 import { foldSubjects } from './fold.ts'
 import { refuse } from './refusal.ts'
 import type { ProtocolRegistry } from './registry.ts'
 
-/** What a caller supplies to record one fact. The frame's own members are never caller-supplied. */
+/** What a caller supplies to record one fact. The frame's own members, including the author, are never caller-supplied. */
 export interface EmitInput<Payload = unknown> {
+  /** The caller's own id for this command, so a lost reply can be recognized. */
+  readonly commandId: string
   readonly protocol: string
   readonly version: number
   readonly kind: string
   readonly subject: string
-  readonly actor: string
   readonly payload: Payload
 }
 
 export interface LogOptions {
+  /** The trusted identity each emitter role resolves to. A role absent here cannot emit. */
+  readonly subjects: Readonly<Record<string, string>>
   /** The instant one fact is stamped with. Injectable so a fold can be tested deterministically. */
   readonly now?: () => string
 }
@@ -36,6 +50,7 @@ export interface LogOptions {
 export class ProtocolLog {
   readonly #path: string
   readonly #registry: ProtocolRegistry
+  readonly #subjects: Readonly<Record<string, string>>
   readonly #now: () => string
   readonly #entries: Envelope[]
   /**
@@ -44,12 +59,22 @@ export class ProtocolLog {
    * reducer, the same one `foldSubjects` replays. A spec asserts the two agree.
    */
   readonly #states = new Map<string, unknown>()
+  /** One command id maps to the fact it committed and the request that produced it. */
+  readonly #commands = new Map<string, { requestDigest: string; envelope: Envelope }>()
+  #queue: Promise<unknown> = Promise.resolve()
   #size: number
 
-  private constructor(path: string, registry: ProtocolRegistry, now: () => string, entries: Envelope[], size: number) {
+  private constructor(
+    path: string,
+    registry: ProtocolRegistry,
+    options: LogOptions,
+    entries: Envelope[],
+    size: number,
+  ) {
     this.#path = path
     this.#registry = registry
-    this.#now = now
+    this.#subjects = options.subjects
+    this.#now = options.now ?? ((): string => new Date().toISOString())
     this.#entries = entries
     this.#size = size
   }
@@ -57,15 +82,15 @@ export class ProtocolLog {
   /**
    * Open (or create) one log, verifying everything a reader must not have to re-derive:
    * each line frames, each digest matches its body, the chain links, sequence numbers are
-   * contiguous from 0, and every fact's `(protocol, version, kind)` is declared by this build.
+   * contiguous from 0, every fact's kind is declared, and every subject's sequence is legal.
    */
-  static async open(path: string, registry: ProtocolRegistry, options: LogOptions = {}): Promise<ProtocolLog> {
+  static async open(path: string, registry: ProtocolRegistry, options: LogOptions): Promise<ProtocolLog> {
     const now = options.now ?? ((): string => new Date().toISOString())
     let text: string
     try {
       text = await readFile(path, 'utf8')
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new ProtocolLog(path, registry, now, [], 0)
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new ProtocolLog(path, registry, options, [], 0)
       throw error
     }
 
@@ -98,14 +123,14 @@ export class ProtocolLog {
             entry.prevDigest === null ? 'null' : `${entry.prevDigest.slice(0, 12)}…`
           } but its predecessor reads ${expected === null ? 'null' : `${expected.slice(0, 12)}…`}`,
         )
-      // The version gate applies to loading too: a log written by a build that knew a kind this
-      // one does not is refused by name, never skipped and never reinterpreted.
+      // The kind gate applies to loading too: a log written by a build that knew a kind this one
+      // does not is refused by name, never skipped and never reinterpreted.
       registry.ruleFor(entry.protocol, entry.version, entry.kind)
     }
 
-    const log = new ProtocolLog(path, registry, now, entries, await sizeOf(path))
-    // Loading also replays every subject through its reducers, so a log whose sequence is
-    // illegal is refused when it is opened rather than when a reader happens to ask.
+    const log = new ProtocolLog(path, registry, { ...options, now }, entries, await sizeOf(path))
+    // Loading also replays every subject through its reducers, so a log whose sequence is illegal
+    // is refused when it is opened rather than when a reader happens to ask.
     for (const pair of new Set(entries.map(entry => `${entry.protocol}@${entry.version}`))) {
       const separator = pair.lastIndexOf('@')
       const protocol = pair.slice(0, separator)
@@ -120,18 +145,58 @@ export class ProtocolLog {
   /**
    * Record one fact, returning the sealed envelope.
    *
-   * The gate runs before anything is written: an unknown protocol, version, kind, or a derived
-   * (G4) kind is refused with nothing on disk. The fact's own reducer then runs against this
-   * subject's state so far, so a fact the protocol cannot accept is refused **before** it is
-   * durable — the log never records a sequence its own fold would reject.
+   * Serialized per log: the gate, the cursor read, the reducer check and the append happen as one
+   * critical section, so two concurrent commands cannot both claim `seq` 0.
    */
   async emit<Payload>(input: EmitInput<Payload>): Promise<Envelope<Payload>> {
+    const run = this.#queue.then(
+      () => this.#commit(input),
+      () => this.#commit(input),
+    )
+    this.#queue = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
+  async #commit<Payload>(input: EmitInput<Payload>): Promise<Envelope<Payload>> {
     const rule = this.#registry.ruleFor(input.protocol, input.version, input.kind)
-    if (rule.guarantee === 'G4')
+    if (rule.guarantees.derived === true)
       refuse(
-        'g4-not-persistable',
-        `${input.protocol}@${input.version} kind ${input.kind} is G4 (derived state); it is folded from persisted facts, never appended`,
+        'derived-not-persistable',
+        `${input.protocol}@${input.version} kind ${input.kind} is derived state; it is folded from persisted facts, never appended`,
       )
+
+    // Parse first, so the emitter function and the reducer both see a closed shape.
+    const position = this.#entries.length
+    const payload = rule.parse(input.payload, `${input.protocol}@${input.version} ${input.kind} #${position}`)
+
+    // The author is a property of the protocol, not of the caller.
+    const role = rule.emitter(payload)
+    const actor = this.#subjects[role]
+    if (actor === undefined)
+      refuse(
+        'unknown-emitter-role',
+        `kind ${input.kind} is emitted by role ${JSON.stringify(role)}, which this deployment has no trusted identity for (known roles: ${Object.keys(this.#subjects).sort().join(', ') || 'none'})`,
+      )
+
+    // Command identity: a repeated request returns its recorded fact; a different one is refused.
+    const requestDigest = digestOf({
+      protocol: input.protocol,
+      version: input.version,
+      kind: input.kind,
+      subject: input.subject,
+      payload,
+    })
+    const recorded = this.#commands.get(input.commandId)
+    if (recorded !== undefined) {
+      if (recorded.requestDigest === requestDigest) return recorded.envelope as Envelope<Payload>
+      refuse(
+        'command-conflict',
+        `command ${JSON.stringify(input.commandId)} already committed ${recorded.envelope.protocol}/${recorded.envelope.kind} #${recorded.envelope.seq} for a different request`,
+      )
+    }
 
     // Single-writer first: a cursor that no longer matches the file is the symptom of a second
     // writer, and reporting that as an illegal transition would name the wrong cause.
@@ -147,11 +212,12 @@ export class ProtocolLog {
       version: input.version,
       kind: input.kind,
       subject: input.subject,
-      actor: input.actor,
+      emitter: role,
+      actor,
       at: this.#now(),
-      seq: this.#entries.length,
+      seq: position,
       prevDigest: this.#entries.at(-1)?.digest ?? null,
-      payload: input.payload,
+      payload,
     }
     const envelope = sealEnvelope(body)
 
@@ -159,21 +225,14 @@ export class ProtocolLog {
     const key = stateKey(input.protocol, input.version, input.subject)
     const before = this.#states.get(key)
     const spec = this.#registry.specFor(input.protocol, input.version)
-    const after = rule.reduce(before === undefined ? spec.initialState : before, envelope)
+    const after = rule.reduce(before === undefined ? spec.initialState : before, envelope, payload)
 
     const sizeAfter = await this.#appendLine(envelope)
     this.#entries.push(envelope)
     this.#states.set(key, after)
+    this.#commands.set(input.commandId, { requestDigest, envelope })
     this.#size = sizeAfter
     return envelope as Envelope<Payload>
-  }
-
-  /**
-   * The folded state of one subject as of everything appended so far, or `undefined` when this
-   * log holds none of its facts. Equal by construction to folding `entries()` afresh.
-   */
-  stateOf<State>(protocol: string, version: number, subject: string): State | undefined {
-    return this.#states.get(stateKey(protocol, version, subject)) as State | undefined
   }
 
   /** Every fact this log holds, oldest first. The fold engine's only input. */
@@ -184,6 +243,14 @@ export class ProtocolLog {
   /** The facts of one protocol version, oldest first. */
   entriesOf(protocol: string, version: number): readonly Envelope[] {
     return this.#entries.filter(entry => entry.protocol === protocol && entry.version === version)
+  }
+
+  /**
+   * The folded state of one subject as of everything appended so far, or `undefined` when this
+   * log holds none of its facts. Equal by construction to folding `entries()` afresh.
+   */
+  stateOf<State>(protocol: string, version: number, subject: string): State | undefined {
+    return this.#states.get(stateKey(protocol, version, subject)) as State | undefined
   }
 
   /** Write one line, flush it, read those exact bytes back from disk, and verify the seal. */

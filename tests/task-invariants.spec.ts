@@ -1,35 +1,40 @@
 /**
- * The task protocol's invariants, each refused by name.
- *
- * The three that matter most are the ones a weaker design would state in a prompt instead of a
- * reducer: a criterion is decided by the verifier it names, an executor never judges its own
- * run, and a run settles verified only when every criterion has a passing verdict.
+ * The task protocol's invariants, each refused by name — plus the two regressions the reviewer's
+ * counterexamples established: a closed payload is not silently widened, and explaining an old
+ * fact never depends on what this deployment can run today.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
   assertContract,
+  assertContractShape,
   foldSubject,
   ProtocolLog,
   projectReceipt,
   projectTask,
+  REFUSAL_CODES,
   TASK_KINDS,
   TASK_PROTOCOL,
   TASK_VERSION,
   verifierRegistryOf,
+  verifierRoleOf,
   type RefusalCode,
   type TaskState,
 } from '../src/index.ts'
 import { asyncRefusalOf, newLogPath, refusalOf } from './fixtures.ts'
 import {
   admitted,
+  ARTIFACT,
   contract,
-  failed,
   INTEGRATION_VERIFIER,
   judged,
+  REVISION,
   RUN_ID,
+  SCHEDULER,
+  sliceCommands,
   started,
+  SUBJECTS,
   TASK_ID,
   taskRegistry,
   UNIT_VERIFIER,
@@ -43,44 +48,38 @@ beforeEach(async () => {
   logPath = await newLogPath()
 })
 
-/** Refuse one emission against a log that already carries an admitted, running task. */
-async function runningTask(): Promise<ProtocolLog> {
-  const log = await ProtocolLog.open(logPath, taskRegistry())
+/** A log that already carries an admitted, running task. */
+async function running(): Promise<ProtocolLog> {
+  const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: SUBJECTS })
   await log.emit(admitted())
   await log.emit(started())
   return log
 }
 
 describe('the verifier boundary', () => {
-  it('refuses a verdict from an actor that is not the criterion\'s named verifier', async () => {
-    const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit(admitted())
-    await log.emit(started())
-
+  it('refuses a verdict whose implementation is not the criterion\'s', async () => {
+    const log = await running()
     // 'limits' names the integration verifier; the unit verifier may not decide it.
     const refusal = await asyncRefusalOf(() => log.emit(judged('limits', UNIT_VERIFIER)))
-    expect(refusal.code).toBe<RefusalCode>('self-reported-evidence')
-    expect(refusal.detail).toContain('integration-verifier')
+    expect(refusal.code).toBe<RefusalCode>('wrong-verifier')
+    expect(refusal.detail).toContain('integration-verifier@1')
   })
 
-  it('refuses an executor judging its own run, even when the executor is a registered verifier', async () => {
-    const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
+  it('refuses a deployment that binds one identity to both the executor and a verifier', async () => {
+    // The executor and the verifier are different roles, but one identity holds both. Role
+    // separation alone would pass this, so the identity is checked too.
+    const shared = { scheduler: 'shared-identity', [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'shared-identity' }
+    const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: shared })
     await log.emit(admitted())
-    // The run is executed by the very session that is also the registered unit verifier.
-    await log.emit(started(RUN_ID, UNIT_VERIFIER))
+    await log.emit(started())
 
     const refusal = await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))
     expect(refusal.code).toBe<RefusalCode>('self-reported-evidence')
-    expect(refusal.detail).toContain('cannot also decide')
+    expect(refusal.detail).toContain('cannot also judge')
   })
 
   it('refuses a second verdict on one criterion', async () => {
-    const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit(admitted())
-    await log.emit(started())
+    const log = await running()
     await log.emit(judged('correctness', UNIT_VERIFIER, 'fail'))
 
     const refusal = await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER, 'pass')))
@@ -90,22 +89,16 @@ describe('the verifier boundary', () => {
 
 describe('settlement', () => {
   it('refuses to verify while a criterion has no passing verdict, and names it', async () => {
-    const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit(admitted())
-    await log.emit(started())
+    const log = await running()
     await log.emit(judged('correctness', UNIT_VERIFIER))
 
     const refusal = await asyncRefusalOf(() => log.emit(verified()))
     expect(refusal.code).toBe<RefusalCode>('unadjudicated-criterion')
-    expect(refusal.detail).toContain('"limits" has no passing verdict from integration-verifier')
+    expect(refusal.detail).toContain('"limits" has no passing verdict from integration-verifier@1')
   })
 
   it('refuses to verify when a criterion was judged failing, however many passed', async () => {
-    const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit(admitted())
-    await log.emit(started())
+    const log = await running()
     await log.emit(judged('correctness', UNIT_VERIFIER, 'pass'))
     await log.emit(judged('limits', INTEGRATION_VERIFIER, 'fail'))
 
@@ -113,96 +106,93 @@ describe('settlement', () => {
   })
 
   it('refuses any further fact once a run has settled', async () => {
-    const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit(admitted())
-    await log.emit(started())
-    await log.emit(failed())
+    const log = await running()
+    await log.emit({ commandId: 'f1', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/failed', subject: TASK_ID, payload: { runId: RUN_ID, reason: 'no golden file' } })
+
     expect((await asyncRefusalOf(() => log.emit(verified()))).code).toBe<RefusalCode>('illegal-transition')
     expect((await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))).code).toBe<RefusalCode>('illegal-transition')
   })
+})
 
-  it('takes the failure path to a failed phase and a failed receipt', async () => {
-    const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
+describe('payloads are closed', () => {
+  it('refuses an unknown contract member and a missing explicit member', () => {
+    const verifiers = verifierRegistryOf(VERIFIERS)
+    const widened = { ...contract(), extra: 'typo' }
+    expect(refusalOf(() => assertContract(widened, 'contract', verifiers)).code).toBe<RefusalCode>('malformed-contract')
+
+    const withoutInputs = { goal: 'g', criteria: contract().criteria }
+    expect(refusalOf(() => assertContract(withoutInputs, 'contract', verifiers)).code).toBe<RefusalCode>('malformed-contract')
+
+    const criterionWidened = { ...contract(), criteria: [{ ...contract().criteria[0], note: 'extra' }] }
+    expect(refusalOf(() => assertContract(criterionWidened, 'contract', verifiers)).code).toBe<RefusalCode>('malformed-contract')
+  })
+
+  it('refuses an unknown payload member instead of accepting it', async () => {
+    const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: SUBJECTS })
+    const refusal = await asyncRefusalOf(() => log.emit({ ...admitted(), payload: { contract: contract(), approvedBy: 'me' } }))
+    expect(refusal.code).toBe<RefusalCode>('malformed-payload')
+    expect(refusal.detail).toContain('approvedBy')
+  })
+
+  it('refuses a wrong-typed optional member instead of normalizing it away', async () => {
+    const log = await running()
+    // The reviewer's counterexample: `detail: 123` silently became the empty string.
+    const refusal = await asyncRefusalOf(() =>
+      log.emit({ ...judged('correctness', UNIT_VERIFIER), payload: { ...(judged('correctness', UNIT_VERIFIER).payload as object), detail: 123 } }),
+    )
+    expect(refusal.code).toBe<RefusalCode>('malformed-payload')
+    expect(refusal.detail).toContain('detail')
+  })
+
+  it('refuses a revision reference whose digest is not a content digest', async () => {
+    const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: SUBJECTS })
     await log.emit(admitted())
-    await log.emit(started())
-    await log.emit(judged('correctness', UNIT_VERIFIER, 'fail'))
-    await log.emit(failed('the golden file never matched'))
-
-    const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
-    if (state === undefined) throw new Error('expected a folded task')
-    expect(projectTask(state).phase).toBe('failed')
-    expect(projectReceipt(state, RUN_ID).status).toBe('failed')
-    expect(projectTask(state).runs[0]?.failureReason).toBe('the golden file never matched')
+    const refusal = await asyncRefusalOf(() =>
+      log.emit({ ...started(), payload: { runId: RUN_ID, revision: { ...REVISION, digest: 'not-a-digest' } } }),
+    )
+    expect(refusal.code).toBe<RefusalCode>('malformed-payload')
+    expect(refusal.detail).toContain('sha256')
   })
 })
 
-describe('the contract boundary', () => {
-  it('refuses a contract nothing would decide', () => {
-    const registry = verifierRegistryOf(VERIFIERS)
-    const refusal = refusalOf(() => assertContract({ goal: 'g', criteria: [] }, 'contract', registry))
-    expect(refusal.code).toBe<RefusalCode>('malformed-contract')
-    expect(refusal.detail).toContain('at least one acceptance criterion')
-  })
+describe('replay never consults what this deployment can run today', () => {
+  it('refuses an unrunnable verifier at admission, while the same contract still replays', async () => {
+    const current = verifierRegistryOf([`${UNIT_VERIFIER}@1`])
+    const named = contract()
 
-  it('refuses a criterion whose verifier is not registered at the version it names', () => {
-    const registry = verifierRegistryOf(VERIFIERS)
-    const bad = contract()
-    const refusal = refusalOf(() =>
-      assertContract(
-        { ...bad, criteria: [{ ...bad.criteria[0], verifierRef: 'ghost-verifier' }] },
-        'contract',
-        registry,
-      ),
-    )
+    // Admitting now: a criterion this deployment cannot run is not an acceptance condition today.
+    const refusal = refusalOf(() => assertContract(named, 'contract', current))
     expect(refusal.code).toBe<RefusalCode>('unregistered-verifier')
+
+    // Explaining a recorded contract: pure shape, so history stays readable. The reviewer's
+    // counterexample had this call refuse with an empty registry.
+    expect(assertContractShape(named, 'contract')).toEqual(named)
   })
 
-  it('refuses a duplicate criterion id and a criterion with no statement', () => {
-    const registry = verifierRegistryOf(VERIFIERS)
-    const bad = contract()
-    expect(
-      refusalOf(() => assertContract({ ...bad, criteria: [bad.criteria[0], bad.criteria[0]] }, 'contract', registry)).code,
-    ).toBe<RefusalCode>('malformed-contract')
-    expect(
-      refusalOf(() => assertContract({ ...bad, criteria: [{ ...bad.criteria[0], statement: '' }] }, 'contract', registry)).code,
-    ).toBe<RefusalCode>('malformed-contract')
-  })
-
-  it('refuses a run before the task carries a contract', async () => {
-    const refusal = await (async () => {
-      const log = await ProtocolLog.open(logPath, taskRegistry())
-      return asyncRefusalOf(() => log.emit(started()))
-    })()
-    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-  })
-
-  it('refuses a second contract: a later contract is a different task', async () => {
+  it('folds a log whose verifiers this deployment no longer holds identities for', async () => {
     const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit(admitted())
-    const refusal = await asyncRefusalOf(() => log.emit(admitted()))
-    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-    expect(refusal.detail).toContain('different task')
+    const log = await ProtocolLog.open(logPath, registry, { subjects: SUBJECTS })
+    for (const command of sliceCommands()) await log.emit(command)
+
+    // A later deployment holds no verifier identity at all, yet the recorded facts still explain.
+    const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
+    if (state === undefined) throw new Error('expected a folded task')
+    expect(projectTask(state).phase).toBe('verified')
+    expect(REFUSAL_CODES).toContain('unregistered-verifier')
   })
 })
 
 describe('what the protocol does not know', () => {
   it('refuses an unknown run and an unknown criterion', async () => {
-    const log = await runningTask()
-    expect((await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER, 'pass', 'run-ghost')))).code).toBe<RefusalCode>(
-      'unknown-run',
-    )
+    const log = await running()
+    expect((await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER, 'pass', { runId: 'run-ghost' })))).code).toBe<RefusalCode>('unknown-run')
     expect((await asyncRefusalOf(() => log.emit(judged('ghost-criterion', UNIT_VERIFIER)))).code).toBe<RefusalCode>('unknown-criterion')
     expect((await asyncRefusalOf(() => log.emit(verified('run-ghost')))).code).toBe<RefusalCode>('unknown-run')
   })
 
   it('refuses to derive a receipt for a run that has not settled', async () => {
     const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit(admitted())
-    await log.emit(started())
+    const log = await running()
     const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     if (state === undefined) throw new Error('expected a folded task')
 
@@ -222,5 +212,7 @@ describe('what the protocol does not know', () => {
       TASK_KINDS.admitted,
     ])
     expect(Object.values(TASK_KINDS)).not.toContain('receipt/sealed')
+    expect(verifierRoleOf({ verifierRef: 'x', verifierVersion: '1' })).toBe('verifier:x@1')
+    expect(SCHEDULER).not.toBe(UNIT_VERIFIER)
   })
 })

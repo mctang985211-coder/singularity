@@ -1,7 +1,10 @@
 /**
  * A task with its contract, its runs and its verifiers, as the fixtures every task spec shares.
  *
- * Two registered verifiers, so a verdict can come from the wrong one and be refused.
+ * Two registered verifier implementations, so a verdict can come from the wrong one and be
+ * refused. The trusted identities are keyed by emitter role, which for a verdict is
+ * `verifier:<ref>@<version>` — so a deployment literally cannot emit a verdict for an
+ * implementation it does not hold.
  */
 
 import {
@@ -10,30 +13,38 @@ import {
   TASK_KINDS,
   TASK_PROTOCOL,
   TASK_VERSION,
-  verifierRegistryOf,
+  verifierRoleOf,
   type EmitInput,
   type TaskContract,
 } from '../src/index.ts'
 
 export const TASK_ID = 'task-a'
 export const RUN_ID = 'run-1'
-export const EXECUTOR = 'worker-session'
+export const SCHEDULER = 'runtime-1'
 export const UNIT_VERIFIER = 'unit-verifier'
 export const INTEGRATION_VERIFIER = 'integration-verifier'
+export const ARTIFACT = 'b'.repeat(64)
 
-/** The verifiers this deployment has registered. */
+/** The verifier implementations this deployment can currently run. */
 export const VERIFIERS = [`${UNIT_VERIFIER}@1`, `${INTEGRATION_VERIFIER}@1`]
 
-/** One revision the run is pinned to. */
+/** The trusted identities held, keyed by emitter role. */
+export const SUBJECTS: Readonly<Record<string, string>> = {
+  scheduler: SCHEDULER,
+  [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'unit-verifier-service',
+  [verifierRoleOf({ verifierRef: INTEGRATION_VERIFIER, verifierVersion: '1' })]: 'integration-verifier-service',
+}
+
+/** One revision the run is pinned to. The digest is the content identity. */
 export const REVISION = { revisionId: 'r0001', digest: 'a'.repeat(64) }
 
 export function taskRegistry(): ProtocolRegistry {
   const registry = new ProtocolRegistry()
-  declareTaskProtocol(registry, verifierRegistryOf(VERIFIERS))
+  declareTaskProtocol(registry)
   return registry
 }
 
-/** A contract whose two criteria are decided by two different verifiers. */
+/** A contract whose two criteria are decided by two different verifier implementations. */
 export function contract(): TaskContract {
   return {
     goal: 'implement a word counter',
@@ -45,21 +56,47 @@ export function contract(): TaskContract {
   }
 }
 
-const emit = (kind: string, actor: string, payload: unknown): EmitInput => ({
-  protocol: TASK_PROTOCOL,
-  version: TASK_VERSION,
-  kind,
-  subject: TASK_ID,
-  actor,
-  payload,
-})
+let counter = 0
 
-export const admitted = (value: TaskContract = contract(), actor = 'root'): EmitInput =>
-  emit(TASK_KINDS.admitted, actor, { contract: value })
-export const started = (runId = RUN_ID, actor = EXECUTOR): EmitInput =>
-  emit(TASK_KINDS.runStarted, actor, { runId, revision: REVISION })
-export const judged = (criterionId: string, actor: string, verdict: 'pass' | 'fail' = 'pass', runId = RUN_ID): EmitInput =>
-  emit(TASK_KINDS.evidenceProduced, actor, { runId, criterionId, verdict, detail: `${verdict} on ${criterionId}` })
-export const verified = (runId = RUN_ID, actor = 'root'): EmitInput => emit(TASK_KINDS.runVerified, actor, { runId })
-export const failed = (reason = 'the golden file never matched', runId = RUN_ID, actor = 'root'): EmitInput =>
-  emit(TASK_KINDS.runFailed, actor, { runId, reason })
+function emit(kind: string, payload: unknown, commandId?: string): EmitInput {
+  counter += 1
+  return {
+    commandId: commandId ?? `task-cmd-${counter}`,
+    protocol: TASK_PROTOCOL,
+    version: TASK_VERSION,
+    kind,
+    subject: TASK_ID,
+    payload,
+  }
+}
+
+export const admitted = (value: TaskContract = contract(), commandId?: string): EmitInput =>
+  emit(TASK_KINDS.admitted, { contract: value }, commandId)
+export const started = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runStarted, { runId, revision: REVISION })
+export const judged = (
+  criterionId: string,
+  verifierRef: string,
+  verdict: 'pass' | 'fail' = 'pass',
+  options: { runId?: string; verifierVersion?: string; artifactDigest?: string; detail?: string } = {},
+): EmitInput =>
+  emit(TASK_KINDS.evidenceProduced, {
+    runId: options.runId ?? RUN_ID,
+    criterionId,
+    verdict,
+    verifierRef,
+    verifierVersion: options.verifierVersion ?? '1',
+    artifactDigest: options.artifactDigest ?? ARTIFACT,
+    ...(options.detail === undefined ? {} : { detail: options.detail }),
+  })
+export const verified = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runVerified, { runId })
+export const failed = (reason?: string, runId = RUN_ID): EmitInput =>
+  emit(TASK_KINDS.runFailed, reason === undefined ? { runId } : { runId, reason })
+
+/** The whole slice: admit, start, judge both criteria with their own verifiers, settle. */
+export const sliceCommands = (): readonly EmitInput[] => [
+  admitted(),
+  started(),
+  judged('correctness', UNIT_VERIFIER),
+  judged('limits', INTEGRATION_VERIFIER),
+  verified(),
+]

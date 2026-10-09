@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "test": "vitest run",
-    "gates": "node scripts/gates.mjs",
+    "gates": "node scripts/gates.mjs && node scripts/gates.mjs --probe",
     "verify": "pnpm build && pnpm test && pnpm gates"
   },
   "devDependencies": {

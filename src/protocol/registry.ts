@@ -1,14 +1,23 @@
 /**
- * The one version gate and the one guarantee ladder.
+ * The one version gate, the one guarantee vocabulary, and the one emitter discipline.
  *
  * A fact is admissible only when its `(protocol, version)` is declared and its `kind` exists
- * within that version. The declared guarantee then decides whether the fact may be persisted
- * at all: a **G4** kind is derived state and is refused at the log boundary rather than stored
- * twice.
+ * within that version. Four rules keep the declared surface honest:
  *
- * Exactly one protocol may own **G3** (compare-and-swap). In the target system that single
- * instance is the environment-version pointer; a second claimant is a refusal, not a review
- * item.
+ * 1. **Guarantees compose.** Durability, business atomicity, conditional update and pure
+ *    derivation are different dimensions; a kind names the ones it needs. `derived` is the only
+ *    one that forbids persistence, because derived state is folded from persisted facts.
+ * 2. **The payload is parsed once, at the boundary.** Each kind declares its own parser, so a
+ *    closed shape is a property of the kind rather than a convention each reducer re-checks.
+ *    Parsing runs before the emitter resolves, so an emitter function never sees a malformed body.
+ * 3. **The emitter is declared, never supplied.** Each kind names the trusted role that may
+ *    produce it — a literal role, or a function of the parsed payload when the role *is* the
+ *    implementation (a verifier's verdict belongs to that verifier). A caller passes no author,
+ *    which is what makes "an executor never judges its own run" checkable on roles.
+ * 4. **Declaration is all-or-nothing.** A refused declaration leaves the registry exactly as it
+ *    was, so a failed claim can never leave an owner behind.
+ *
+ * Kind lookup uses own keys: `toString`, `constructor` and `__proto__` are not kinds.
  *
  * @module singularity-core/protocol/registry
  */
@@ -17,25 +26,79 @@ import type { Envelope } from './envelope.ts'
 import { refuse } from './refusal.ts'
 
 /**
- * The guarantee ladder. One fact has exactly one level; nothing is "also atomic".
- *
- * - `G1` append + fold — the default: durable on append, state derived at load.
- * - `G2` multi-record atomic — a batch is all-visible or all-invisible.
- * - `G3` compare-and-swap — single point, persisted intent, read-back. Exactly one instance.
- * - `G4` derived — never persisted; folded from G1 facts.
+ * What a kind's facts need. These compose: a conditional update is *also* durably appended, and a
+ * business-atomic fact is *also* appended.
  */
-export type Guarantee = 'G1' | 'G2' | 'G3' | 'G4'
+export interface Guarantees {
+  /** Durable on append: the write does not resolve until the fact survives a restart. */
+  readonly appended: boolean
+  /** The fact is one complete fact standing for a business-atomic operation. */
+  readonly atomicFact?: boolean
+  /** The fact must be checked against an expected prior state inside the commit queue. */
+  readonly conditional?: boolean
+  /** Derived state: never persisted, always folded. */
+  readonly derived?: boolean
+}
 
-export const GUARANTEES: readonly Guarantee[] = ['G1', 'G2', 'G3', 'G4']
+/** The closed guarantee vocabulary. An undeclared key is refused, like any other closed shape. */
+const GUARANTEE_KEYS = ['appended', 'atomicFact', 'conditional', 'derived'] as const
 
-/** How one kind advances its subject's state. Pure, and the only authority on legality. */
+function assertGuarantees(guarantees: Guarantees, where: string): void {
+  const record = guarantees as unknown as Record<string, unknown>
+  for (const key of Object.keys(record)) {
+    if (!(GUARANTEE_KEYS as readonly string[]).includes(key))
+      refuse(
+        'unknown-guarantee',
+        `${where} carries unknown guarantee ${JSON.stringify(key)}; the vocabulary is closed (known: ${GUARANTEE_KEYS.join(', ')})`,
+      )
+  }
+  for (const key of GUARANTEE_KEYS) {
+    if (record[key] !== undefined && typeof record[key] !== 'boolean')
+      refuse('unknown-guarantee', `${where}.${key} must be a boolean, got ${typeof record[key]}`)
+  }
+  if (record['appended'] !== true && record['derived'] !== true)
+    refuse('unknown-guarantee', `${where} declares neither appended nor derived; every fact is one of the two`)
+  if (record['derived'] === true && record['appended'] === true)
+    refuse(
+      'unknown-guarantee',
+      `${where} is derived and appended at once; derived state is folded from persisted facts and is never written`,
+    )
+  if (record['conditional'] === true && record['appended'] !== true)
+    refuse('unknown-guarantee', `${where} is conditional without being appended; there is no committed state to compare against`)
+}
+
+/** What the framework needs from one kind, with the payload type erased. */
 export interface KindRule<State> {
-  readonly guarantee: Guarantee
-  /**
-   * Return the next state, or call `refuse('illegal-transition', …)`. A reducer must not read
-   * the wall clock, the network, or any file: the same facts always fold to the same state.
-   */
-  readonly reduce: (state: State, envelope: Envelope) => State
+  readonly guarantees: Guarantees
+  /** The trusted role that may emit this kind, given the parsed payload. */
+  readonly emitter: (payload: unknown) => string
+  /** Parse and close the payload, or refuse it by name. */
+  readonly parse: (raw: unknown, where: string) => unknown
+  /** Advance the state, or refuse. Reads the parsed payload. */
+  readonly reduce: (state: State, envelope: Envelope, payload: unknown) => State
+}
+
+/**
+ * Define one kind, keeping the payload type through to the reducer.
+ *
+ * This is the single place the framework's heterogeneous registry erases a payload type, so no
+ * reducer has to cast its own body.
+ */
+export function defineKind<State, Payload>(spec: {
+  readonly guarantees: Guarantees
+  readonly emitter: string | ((payload: Payload) => string)
+  readonly parse: (raw: unknown, where: string) => Payload
+  readonly reduce: (state: State, envelope: Envelope, payload: Payload) => State
+}): KindRule<State> {
+  const declared = spec.emitter
+  const emitter: (payload: unknown) => string =
+    typeof declared === 'string' ? (): string => declared : (raw: unknown): string => declared(raw as Payload)
+  return {
+    guarantees: spec.guarantees,
+    emitter,
+    parse: spec.parse,
+    reduce: (state, envelope, payload) => spec.reduce(state, envelope, payload as Payload),
+  }
 }
 
 /** One protocol version: one initial state, one closed kind set. */
@@ -54,17 +117,16 @@ function keyOf(protocol: string, version: number): string {
   return `${protocol}@${version}`
 }
 
-/** The one registry. Declarations happen once at module load and never change afterwards. */
+/** The one registry. Declarations happen once at load and never change afterwards. */
 export class ProtocolRegistry {
   readonly #declared = new Map<string, Declared>()
   readonly #versionsByProtocol = new Map<string, Set<number>>()
-  #g3Owner: string | undefined
+  #conditionalOwner: string | undefined
 
   /**
    * Declare one protocol at one version: its initial state and its closed kind set.
    *
-   * Refuses an empty protocol name, a version below 1, an empty kind set, an undeclared
-   * guarantee, a duplicate `(protocol, version)`, and a second G3 claimant.
+   * Validates everything before publishing anything, so a refused declaration leaves no trace.
    */
   declare<State>(protocol: string, version: number, spec: ProtocolSpec<State>): void {
     if (protocol.length === 0) refuse('malformed-declaration', 'a protocol name must be a non-empty string')
@@ -74,30 +136,34 @@ export class ProtocolRegistry {
     const kinds = Object.keys(spec.kinds)
     if (kinds.length === 0) refuse('malformed-declaration', `protocol ${protocol}@${version} declares no kinds`)
 
+    let conditionalClaimant: string | undefined
     for (const kind of kinds) {
       if (kind.length === 0) refuse('malformed-declaration', `protocol ${protocol}@${version} declares an empty kind name`)
-      const guarantee = spec.kinds[kind]?.guarantee
-      if (guarantee === undefined || !GUARANTEES.includes(guarantee))
-        refuse(
-          'unknown-guarantee',
-          `protocol ${protocol}@${version} kind ${kind} declares guarantee ${JSON.stringify(guarantee ?? null)}; one of ${GUARANTEES.join(' / ')}`,
-        )
-      if (guarantee === 'G3' && this.#g3Owner !== undefined && this.#g3Owner !== protocol)
-        refuse(
-          'second-g3-instance',
-          `protocol ${protocol} claims G3 (compare-and-swap) while ${this.#g3Owner} already owns it; the ladder allows exactly one instance`,
-        )
-      if (guarantee === 'G3') this.#g3Owner = protocol
+      if (!Object.hasOwn(spec.kinds, kind))
+        refuse('malformed-declaration', `protocol ${protocol}@${version} kind ${kind} is inherited, not declared`)
+      const rule = spec.kinds[kind] as KindRule<State>
+      const where = `protocol ${protocol}@${version} kind ${kind}`
+      assertGuarantees(rule.guarantees, where)
+      if (typeof rule.emitter !== 'function' || typeof rule.parse !== 'function' || typeof rule.reduce !== 'function')
+        refuse('malformed-declaration', `${where} must declare an emitter, a payload parser and a reducer (use defineKind)`)
+      if (rule.guarantees.conditional === true) conditionalClaimant = protocol
     }
 
-    const key = keyOf(protocol, version)
-    if (this.#declared.has(key))
-      refuse('duplicate-declaration', `protocol ${protocol}@${version} is already declared`)
+    if (conditionalClaimant !== undefined && this.#conditionalOwner !== undefined && this.#conditionalOwner !== conditionalClaimant)
+      refuse(
+        'second-conditional-owner',
+        `protocol ${conditionalClaimant} claims conditional updates while ${this.#conditionalOwner} already owns them; one environment has one authoritative switch path`,
+      )
 
+    const key = keyOf(protocol, version)
+    if (this.#declared.has(key)) refuse('duplicate-declaration', `protocol ${protocol}@${version} is already declared`)
+
+    // Everything validated: publish, so a refused declaration leaves no trace.
     this.#declared.set(key, { spec: spec as ProtocolSpec<unknown> })
     const versions = this.#versionsByProtocol.get(protocol) ?? new Set<number>()
     versions.add(version)
     this.#versionsByProtocol.set(protocol, versions)
+    if (conditionalClaimant !== undefined) this.#conditionalOwner = conditionalClaimant
   }
 
   /**
@@ -121,16 +187,18 @@ export class ProtocolRegistry {
     )
   }
 
-  /** The rule for one fact. The last gate before a fact reaches a reducer or a log. */
+  /**
+   * The rule for one fact. The last gate before a fact reaches a reducer or a log. Lookup is by
+   * own key, so an inherited member name is an unknown kind rather than a function.
+   */
   ruleFor<State = unknown>(protocol: string, version: number, kind: string): KindRule<State> {
     const spec = this.specFor<State>(protocol, version)
-    const rule = spec.kinds[kind]
-    if (rule === undefined)
+    if (!Object.hasOwn(spec.kinds, kind))
       refuse(
         'unknown-kind',
         `protocol ${protocol}@${version} declares no kind ${JSON.stringify(kind)} (declared: ${Object.keys(spec.kinds).sort().join(', ')})`,
       )
-    return rule
+    return spec.kinds[kind] as KindRule<State>
   }
 
   /** The kind set one protocol version declares, sorted. */
@@ -149,8 +217,8 @@ export class ProtocolRegistry {
     return [...versions].sort((a, b) => a - b)
   }
 
-  /** The protocol that owns the single compare-and-swap guarantee, when one has claimed it. */
-  g3Owner(): string | undefined {
-    return this.#g3Owner
+  /** The protocol that owns the one conditional-update discipline, when one has claimed it. */
+  conditionalOwner(): string | undefined {
+    return this.#conditionalOwner
   }
 }

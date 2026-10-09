@@ -36,8 +36,11 @@ function applyFacts<State>(
     if (entry.protocol !== protocol || entry.version !== version) continue
     if (!keepSubject(entry.subject)) continue
     const rule = registry.ruleFor<State>(protocol, version, entry.kind)
+    // Parse at the fold boundary too: a stored payload is re-checked against its kind's closed
+    // shape, so a log edited outside the append path is refused rather than half-understood.
+    const payload = rule.parse(entry.payload, `${entry.protocol}@${entry.version} ${entry.kind} #${entry.seq}`)
     const before = states.get(entry.subject)
-    states.set(entry.subject, rule.reduce(before === undefined ? spec.initialState : before, entry))
+    states.set(entry.subject, rule.reduce(before === undefined ? spec.initialState : before, entry, payload))
   }
 
   return states

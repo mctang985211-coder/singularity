@@ -2,15 +2,17 @@
  * The one read projection for a task, and the two renderings of it.
  *
  * There is exactly one projection per subject, owned here. An agent reads it as text; a UI
- * consumes the same `TaskView` object unchanged. Neither re-derives anything — that is what
- * keeps a second interpretation of the facts from existing, which is how a stack grows a
- * second truth.
+ * consumes the same `TaskView` object unchanged. Neither re-derives anything — that is what keeps
+ * a second interpretation of the facts from existing.
  *
- * The **receipt** is where the guarantee ladder pays off. An execution receipt is *derived*
- * from the run's own recorded facts at read time, so it is G4: it is never written, and the
- * log refuses it. The previous system persisted a second scan of the same session facts; here
- * there is nothing to keep in step, and two readers computing the receipt from the same facts
- * produce the same digest by construction.
+ * The **receipt** is where the guarantee vocabulary pays off. An execution receipt is *derived*
+ * from the run's own recorded facts at read time, so it is never written and the protocol declares
+ * no kind for it. It carries what the verdicts actually pinned — the verifier implementation and
+ * the artifact content it judged — so a later artifact change cannot inherit an old verdict.
+ *
+ * A phase is never inferred from absence. A task that has a contract and no run is
+ * `awaiting-run`, not `failed`; a failure with no recorded reason reports `null` rather than an
+ * invented sentence.
  *
  * @module singularity-core/task/view
  */
@@ -24,19 +26,28 @@ import type { RevisionRef, RunState, RunStatus, TaskState } from './protocol.ts'
 export interface CriterionVerdictView {
   readonly criterionId: string
   readonly statement: string
+  /** The implementation this criterion names. */
   readonly verifierRef: string
+  readonly verifierVersion: string
   readonly verdict: 'pass' | 'fail' | 'unjudged'
+  /** The implementation that actually decided it, or `null` while unjudged. */
+  readonly decidedBy: string | null
+  /** The artifact content the verdict was formed on, or `null` while unjudged. */
+  readonly artifactDigest: string | null
   readonly actor: string | null
-  readonly detail: string
+  readonly detail: string | null
 }
 
 export interface RunView {
   readonly runId: string
   readonly status: RunStatus
+  /** The trusted role and identity that started it, as the log stamped them. */
+  readonly emitter: string
   readonly actor: string
   readonly revision: RevisionRef
   readonly startedAt: string
   readonly finishedAt: string | null
+  /** `null` when the failure recorded no reason — never an invented one. */
   readonly failureReason: string | null
   readonly verdicts: readonly CriterionVerdictView[]
 }
@@ -48,7 +59,7 @@ export interface TaskView {
   readonly contractDigest: string
   readonly admittedBy: string
   readonly admittedAt: string
-  readonly phase: 'running' | 'verified' | 'failed'
+  readonly phase: 'awaiting-run' | 'running' | 'verified' | 'failed'
   readonly criteria: readonly AcceptanceCriterion[]
   readonly runs: readonly RunView[]
 }
@@ -59,14 +70,16 @@ export interface ReceiptView {
   readonly runId: string
   readonly contractDigest: string
   readonly revision: RevisionRef
-  readonly executor: string
+  readonly executor: { readonly emitter: string; readonly actor: string }
   readonly status: 'verified' | 'failed'
   readonly startedAt: string
   readonly finishedAt: string
   readonly criteria: readonly {
     readonly criterionId: string
     readonly verifierRef: string
+    readonly verifierVersion: string
     readonly verdict: 'pass' | 'fail' | 'unjudged'
+    readonly artifactDigest: string | null
     readonly actor: string | null
   }[]
 }
@@ -81,13 +94,12 @@ function requireContract(state: TaskState): { contract: TaskContract; digest: st
   return { contract, digest: contractDigest, by: admittedBy, at: admittedAt }
 }
 
-function verdictOf(run: RunState, criterionId: string): { verdict: 'pass' | 'fail' | 'unjudged'; actor: string | null; detail: string } {
-  const evidence = run.evidence.find(entry => entry.criterionId === criterionId)
-  if (evidence === undefined) return { verdict: 'unjudged', actor: null, detail: '' }
-  return { verdict: evidence.verdict, actor: evidence.actor, detail: evidence.detail }
+function verdictOf(run: RunState, criterionId: string): RunState['evidence'][number] | undefined {
+  return run.evidence.find(entry => entry.criterionId === criterionId)
 }
 
 function phaseOf(runs: readonly RunState[]): TaskView['phase'] {
+  if (runs.length === 0) return 'awaiting-run'
   if (runs.some(run => run.status === 'running')) return 'running'
   if (runs.some(run => run.status === 'verified')) return 'verified'
   return 'failed'
@@ -102,6 +114,7 @@ export function projectTask(state: TaskState): TaskView {
   const runs: RunView[] = runStates.map(run => ({
     runId: run.runId,
     status: run.status,
+    emitter: run.emitter,
     actor: run.actor,
     revision: run.revision,
     startedAt: run.startedAt,
@@ -113,9 +126,12 @@ export function projectTask(state: TaskState): TaskView {
         criterionId: criterion.criterionId,
         statement: criterion.statement,
         verifierRef: criterion.verifierRef,
-        verdict: judged.verdict,
-        actor: judged.actor,
-        detail: judged.detail,
+        verifierVersion: criterion.verifierVersion,
+        verdict: judged?.verdict ?? 'unjudged',
+        decidedBy: judged === undefined ? null : `${judged.verifierRef}@${judged.verifierVersion}`,
+        artifactDigest: judged?.artifactDigest ?? null,
+        actor: judged?.actor ?? null,
+        detail: judged?.detail ?? null,
       }
     }),
   }))
@@ -141,8 +157,7 @@ export function projectTask(state: TaskState): TaskView {
 export function projectReceipt(state: TaskState, runId: string): ReceiptView {
   const { contract, digest } = requireContract(state)
   const run = state.runs[runId]
-  if (run === undefined)
-    refuse('unknown-run', `task "${state.taskId}" never started run "${runId}", so it has no receipt`)
+  if (run === undefined) refuse('unknown-run', `task "${state.taskId}" never started run "${runId}", so it has no receipt`)
   if (run.status === 'running')
     refuse('illegal-transition', `run "${runId}" is still running; a receipt is what a terminal run leaves behind`)
   if (run.finishedAt === undefined)
@@ -153,13 +168,20 @@ export function projectReceipt(state: TaskState, runId: string): ReceiptView {
     runId,
     contractDigest: digest,
     revision: run.revision,
-    executor: run.actor,
+    executor: { emitter: run.emitter, actor: run.actor },
     status: run.status,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     criteria: contract.criteria.map(criterion => {
       const judged = verdictOf(run, criterion.criterionId)
-      return { criterionId: criterion.criterionId, verifierRef: criterion.verifierRef, verdict: judged.verdict, actor: judged.actor }
+      return {
+        criterionId: criterion.criterionId,
+        verifierRef: criterion.verifierRef,
+        verifierVersion: criterion.verifierVersion,
+        verdict: judged?.verdict ?? 'unjudged',
+        artifactDigest: judged?.artifactDigest ?? null,
+        actor: judged?.actor ?? null,
+      }
     }),
   }
 }
@@ -176,17 +198,25 @@ export function renderTaskForAgent(view: TaskView): string {
     `  goal: ${view.goal}`,
     `  contract ${view.contractDigest.slice(0, 12)}… admitted by ${view.admittedBy} at ${view.admittedAt}`,
     `  criteria (${view.criteria.length}):`,
-    ...view.criteria.map(criterion => `    - ${criterion.criterionId}: ${criterion.statement} [decided by ${criterion.verifierRef}@${criterion.verifierVersion}]`),
+    ...view.criteria.map(
+      criterion =>
+        `    - ${criterion.criterionId}: ${criterion.statement} [decided by ${criterion.verifierRef}@${criterion.verifierVersion}]`,
+    ),
     `  runs (${view.runs.length}):`,
   ]
 
+  if (view.runs.length === 0) lines.push('    (none yet: this task is admitted and awaiting a run)')
+
   for (const run of view.runs) {
     lines.push(
-      `    - ${run.runId}: ${run.status} by ${run.actor} on revision ${run.revision.revisionId} (${run.revision.digest.slice(0, 12)}…)`,
+      `    - ${run.runId}: ${run.status} by ${run.actor} (role ${run.emitter}) on revision ${run.revision.revisionId} (${run.revision.digest.slice(0, 12)}…)`,
     )
     for (const verdict of run.verdicts) {
-      const by = verdict.actor === null ? 'unjudged' : `${verdict.verdict} by ${verdict.actor}`
-      lines.push(`        ${verdict.criterionId}: ${by}${verdict.detail === '' ? '' : ` — ${verdict.detail}`}`)
+      const by =
+        verdict.artifactDigest === null
+          ? 'unjudged'
+          : `${verdict.verdict} by ${verdict.decidedBy} on artifact ${verdict.artifactDigest.slice(0, 12)}…`
+      lines.push(`        ${verdict.criterionId}: ${by}${verdict.detail === null ? '' : ` — ${verdict.detail}`}`)
     }
     if (run.failureReason !== null) lines.push(`        failure: ${run.failureReason}`)
   }

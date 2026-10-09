@@ -1,28 +1,43 @@
 /**
  * The task protocol: a contract, its runs, and the independent verdicts that settle them.
  *
- * Three invariants live in the reducers, which is why they cannot be talked around:
+ * Three invariants live in the reducers, which is why nothing can talk around them:
  *
- * 1. **A criterion is decided by a named verifier.** The actor of an `evidence/produced` fact
- *    must be exactly the `verifierRef` its criterion names — not a similar one, not a proxy.
- * 2. **An executor never judges its own run.** The verifier that decides a criterion must not
- *    be the actor that ran it, even when the executor happens to be a registered verifier.
- * 3. **A run settles verified only when every criterion has a passing verdict.** No partial
- *    acceptance, no "close enough", and the run's terminal state is the only place a receipt
- *    could ever come from.
+ * 1. **An executor never judges its own run.** The emitter role of a verdict must differ from the
+ *    role that started the run. Roles and identities are stamped by the log from the kind's
+ *    declaration, so no caller can claim to be a verifier — the check is not on a caller's word.
+ * 2. **A verdict belongs to the verifier implementation its criterion names.** The emitter role is
+ *    `verifier:<ref>@<version>`, so a deployment must actually hold that implementation's identity
+ *    to emit its verdicts, and the reducer refuses a verdict whose implementation is not the
+ *    criterion's.
+ * 3. **A run settles verified only when every criterion has a passing verdict**, and the refusal
+ *    names the criterion that is missing. No partial acceptance.
  *
- * The verifier registry is captured by the declaration's closures, so the fold enforces the
- * first two purely: a fact that violates them is refused at fold time, not at the caller.
+ * What admission checks and what the fold checks are deliberately different. Admission requires
+ * that the criterion's verifier is runnable **now**; the fold only reads the recorded shape, so a
+ * log stays explainable after a verifier retires.
+ *
+ * Payloads are closed: an undeclared member is a refusal, and a missing optional member stays
+ * missing rather than becoming an invented value.
  *
  * @module singularity-core/task/protocol
  */
 
+import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
-import type { ProtocolRegistry } from '../protocol/registry.ts'
-import { assertContract, contractDigest, type TaskContract, type VerifierRegistry } from './contract.ts'
+import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
+import { assertContractShape, contractDigest, type TaskContract } from './contract.ts'
 
 export const TASK_PROTOCOL = 'task'
 export const TASK_VERSION = 1
+
+/** The trusted role that admits contracts and starts, settles or fails runs. */
+export const SCHEDULER_ROLE = 'scheduler'
+
+/** The trusted role a verdict must come from: the verifier implementation the criterion names. */
+export function verifierRoleOf(payload: { verifierRef: string; verifierVersion: string }): string {
+  return `verifier:${payload.verifierRef}@${payload.verifierVersion}`
+}
 
 /** The method revision a run is pinned to. Pin the digest too: an id alone can be re-pointed. */
 export interface RevisionRef {
@@ -36,13 +51,21 @@ export type RunStatus = 'running' | 'verified' | 'failed'
 export interface EvidenceRecord {
   readonly criterionId: string
   readonly verdict: 'pass' | 'fail'
+  /** Which verifier implementation decided it: the criterion's own, or the fold refuses. */
+  readonly verifierRef: string
+  readonly verifierVersion: string
+  /** The artifact content the verdict was formed on. A later artifact change does not inherit it. */
+  readonly artifactDigest: string
+  /** The emitter role and identity the log stamped. Never what a caller asked for. */
+  readonly emitter: string
   readonly actor: string
-  readonly detail: string
+  readonly detail?: string
   readonly at: string
 }
 
 export interface RunState {
   readonly runId: string
+  readonly emitter: string
   readonly actor: string
   readonly revision: RevisionRef
   readonly startedAt: string
@@ -70,22 +93,33 @@ export const TASK_KINDS = {
   runFailed: 'run/failed',
 } as const
 
-function field(payload: unknown): Record<string, unknown> {
-  if (payload === null || typeof payload !== 'object' || Array.isArray(payload))
-    refuse('malformed-envelope', `a ${TASK_PROTOCOL} payload must be an object, got ${payload === null ? 'null' : typeof payload}`)
-  return payload as Record<string, unknown>
+const DIGEST = /^[0-9a-f]{64}$/
+const APPENDED = { appended: true } as const
+
+function record(raw: unknown, where: string): Record<string, unknown> {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
+    refuse('malformed-payload', `${where} must be an object, got ${raw === null ? 'null' : Array.isArray(raw) ? 'an array' : typeof raw}`)
+  return raw as Record<string, unknown>
 }
 
-function text(record: Record<string, unknown>, key: string, where: string): string {
-  const value = record[key]
+function text(source: Record<string, unknown>, key: string, where: string): string {
+  const value = source[key]
   if (typeof value !== 'string' || value.length === 0)
-    refuse('malformed-envelope', `${where} needs a non-empty ${key}, got ${value === null ? 'null' : typeof value}`)
+    refuse('malformed-payload', `${where}.${key} must be a non-empty string, got ${value === null ? 'null' : typeof value}`)
   return value
 }
 
-function optionalText(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key]
-  return typeof value === 'string' && value.length > 0 ? value : undefined
+/** An optional member: absent stays absent; present-but-wrong is refused rather than normalized. */
+function maybeText(source: Record<string, unknown>, key: string, where: string): string | undefined {
+  if (!Object.hasOwn(source, key)) return undefined
+  return text(source, key, where)
+}
+
+function digest(source: Record<string, unknown>, key: string, where: string): string {
+  const value = text(source, key, where)
+  if (!DIGEST.test(value))
+    refuse('malformed-payload', `${where}.${key} must be a sha256 hex content digest, got ${JSON.stringify(value)}`)
+  return value
 }
 
 /** The run a fact names, or a refusal naming the run. */
@@ -95,122 +129,170 @@ function requireRun(state: TaskState, runId: string, where: string): RunState {
   return run
 }
 
-/** One revision reference, pinned by id and digest. */
-function revisionOf(raw: unknown, where: string): RevisionRef {
-  const record = field(raw)
-  return { revisionId: text(record, 'revisionId', where), digest: text(record, 'digest', where) }
+function requireContractOf(state: TaskState, where: string, subject: string): TaskContract {
+  if (state.contract === undefined) refuse('illegal-transition', `${where} arrived before task "${subject}" carried a contract`)
+  return state.contract
+}
+
+/** One run's settlement, shared by the verified and failed kinds. */
+function settled(run: RunState, status: RunStatus, at: string, reason?: string): RunState {
+  return reason === undefined
+    ? { ...run, status, finishedAt: at }
+    : { ...run, status, finishedAt: at, failureReason: reason }
 }
 
 /**
- * Declare the task protocol. Call once at load with the deployment's verifier registry; the
- * registry is captured here, so every fold of this protocol enforces it.
+ * Declare the task protocol. Call once at load. The deployment's runnable verifiers are not
+ * captured here: what can run today is a command-time question, not a replay-time one.
  */
-export function declareTaskProtocol(registry: ProtocolRegistry, verifiers: VerifierRegistry): void {
+export function declareTaskProtocol(registry: ProtocolRegistry): void {
   registry.declare<TaskState>(TASK_PROTOCOL, TASK_VERSION, {
     initialState: { taskId: '', runs: {} },
     kinds: {
-      [TASK_KINDS.admitted]: {
-        guarantee: 'G1',
-        reduce: (state, envelope) => {
+      [TASK_KINDS.admitted]: defineKind<TaskState, { contract: TaskContract }>({
+        guarantees: APPENDED,
+        emitter: SCHEDULER_ROLE,
+        parse: raw => {
+          const source = record(raw, `${TASK_KINDS.admitted} payload`)
+          assertClosedKeys(source, ['contract'], `${TASK_KINDS.admitted} payload`)
+          return { contract: assertContractShape(source['contract'], `${TASK_KINDS.admitted} payload.contract`) }
+        },
+        reduce: (state, envelope, payload) => {
           if (state.contract !== undefined)
             refuse(
               'illegal-transition',
               `task "${state.taskId}" already carries a contract admitted at ${state.admittedAt ?? 'an unrecorded time'}; a later contract is a different task`,
             )
-          const where = `${TASK_KINDS.admitted} #${envelope.seq}`
-          const contract = assertContract(field(envelope.payload)['contract'], `${where} contract`, verifiers)
           return {
             taskId: envelope.subject,
-            contract,
-            contractDigest: contractDigest(contract),
+            contract: payload.contract,
+            contractDigest: contractDigest(payload.contract),
             admittedBy: envelope.actor,
             admittedAt: envelope.at,
             runs: {},
           }
         },
-      },
+      }),
 
-      [TASK_KINDS.runStarted]: {
-        guarantee: 'G1',
-        reduce: (state, envelope) => {
+      [TASK_KINDS.runStarted]: defineKind<TaskState, { runId: string; revision: RevisionRef }>({
+        guarantees: APPENDED,
+        emitter: SCHEDULER_ROLE,
+        parse: raw => {
+          const where = `${TASK_KINDS.runStarted} payload`
+          const source = record(raw, where)
+          assertClosedKeys(source, ['runId', 'revision'], where)
+          const revision = record(source['revision'], `${where}.revision`)
+          assertClosedKeys(revision, ['revisionId', 'digest'], `${where}.revision`)
+          return {
+            runId: text(source, 'runId', where),
+            revision: { revisionId: text(revision, 'revisionId', `${where}.revision`), digest: digest(revision, 'digest', `${where}.revision`) },
+          }
+        },
+        reduce: (state, envelope, payload) => {
           const where = `${TASK_KINDS.runStarted} #${envelope.seq}`
-          if (state.contract === undefined)
-            refuse('illegal-transition', `${where} arrived before task "${envelope.subject}" carried a contract`)
-          const payload = field(envelope.payload)
-          const runId = text(payload, 'runId', where)
-          if (state.runs[runId] !== undefined)
-            refuse('illegal-transition', `${where} starts run "${runId}" again; one run id is one attempt`)
-          const revision = revisionOf(payload['revision'], `${where} revision`)
+          requireContractOf(state, where, envelope.subject)
+          if (state.runs[payload.runId] !== undefined)
+            refuse('illegal-transition', `${where} starts run "${payload.runId}" again; one run id is one attempt`)
           return {
             ...state,
             runs: {
               ...state.runs,
-              [runId]: {
-                runId,
+              [payload.runId]: {
+                runId: payload.runId,
+                emitter: envelope.emitter,
                 actor: envelope.actor,
-                revision,
+                revision: payload.revision,
                 startedAt: envelope.at,
-                status: 'running' as const,
+                status: 'running',
                 evidence: [],
               },
             },
           }
         },
-      },
+      }),
 
-      [TASK_KINDS.evidenceProduced]: {
-        guarantee: 'G1',
-        reduce: (state, envelope) => {
+      [TASK_KINDS.evidenceProduced]: defineKind<
+        TaskState,
+        {
+          runId: string
+          criterionId: string
+          verdict: 'pass' | 'fail'
+          verifierRef: string
+          verifierVersion: string
+          artifactDigest: string
+          detail?: string
+        }
+      >({
+        guarantees: APPENDED,
+        // The role *is* the implementation: a deployment must hold that verifier's identity to
+        // emit its verdicts, and the log refuses the fact when it does not.
+        emitter: payload => verifierRoleOf(payload),
+        parse: raw => {
+          const where = `${TASK_KINDS.evidenceProduced} payload`
+          const source = record(raw, where)
+          assertClosedKeys(source, ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'artifactDigest', 'detail'], where)
+          const verdict = source['verdict']
+          if (verdict !== 'pass' && verdict !== 'fail')
+            refuse('malformed-payload', `${where}.verdict must be "pass" or "fail", got ${JSON.stringify(verdict ?? null)}`)
+          const detail = maybeText(source, 'detail', where)
+          return {
+            runId: text(source, 'runId', where),
+            criterionId: text(source, 'criterionId', where),
+            verdict,
+            verifierRef: text(source, 'verifierRef', where),
+            verifierVersion: text(source, 'verifierVersion', where),
+            artifactDigest: digest(source, 'artifactDigest', where),
+            ...(detail === undefined ? {} : { detail }),
+          }
+        },
+        reduce: (state, envelope, payload) => {
           const where = `${TASK_KINDS.evidenceProduced} #${envelope.seq}`
-          if (state.contract === undefined)
-            refuse('illegal-transition', `${where} arrived before task "${envelope.subject}" carried a contract`)
-          const payload = field(envelope.payload)
-          const runId = text(payload, 'runId', where)
-          const criterionId = text(payload, 'criterionId', where)
-          const run = requireRun(state, runId, where)
+          const contract = requireContractOf(state, where, envelope.subject)
+          const run = requireRun(state, payload.runId, where)
           if (run.status !== 'running')
-            refuse('illegal-transition', `${where} judges run "${runId}", which already settled ${run.status}`)
+            refuse('illegal-transition', `${where} judges run "${payload.runId}", which already settled ${run.status}`)
 
-          const criterion = state.contract.criteria.find(candidate => candidate.criterionId === criterionId)
+          const criterion = contract.criteria.find(candidate => candidate.criterionId === payload.criterionId)
           if (criterion === undefined)
-            refuse('unknown-criterion', `${where} names criterion "${criterionId}", which task "${state.taskId}" does not declare`)
+            refuse('unknown-criterion', `${where} names criterion "${payload.criterionId}", which task "${envelope.subject}" does not declare`)
 
-          // Invariant 1: the named verifier decides, and nobody else.
-          if (envelope.actor !== criterion.verifierRef)
+          // Invariant 1: the executor never judges its own run — by role, and by identity, so a
+          // deployment that binds one identity to both roles is refused rather than trusted.
+          if (envelope.emitter === run.emitter || envelope.actor === run.actor)
             refuse(
               'self-reported-evidence',
-              `${where} decides criterion "${criterionId}" as "${envelope.actor}", but that criterion names verifier "${criterion.verifierRef}"`,
+              `${where}: "${envelope.actor}" (role ${envelope.emitter}) started run "${payload.runId}" and cannot also judge its criterion "${payload.criterionId}"`,
             )
-          // Invariant 2: an executor never judges its own run, even when it is a registered verifier.
-          if (envelope.actor === run.actor)
+          // Invariant 2: the verdict belongs to the implementation the criterion names.
+          if (criterion.verifierRef !== payload.verifierRef || criterion.verifierVersion !== payload.verifierVersion)
             refuse(
-              'self-reported-evidence',
-              `${where}: actor "${envelope.actor}" executed run "${runId}" and cannot also decide its criterion "${criterionId}"`,
+              'wrong-verifier',
+              `${where} decides criterion "${payload.criterionId}" as ${payload.verifierRef}@${payload.verifierVersion}, but that criterion names ${criterion.verifierRef}@${criterion.verifierVersion}`,
             )
 
-          if (run.evidence.some(entry => entry.criterionId === criterionId))
+          if (run.evidence.some(entry => entry.criterionId === payload.criterionId))
             refuse(
               'evidence-conflict',
-              `${where}: criterion "${criterionId}" of run "${runId}" already carries a verdict from ${run.evidence.find(entry => entry.criterionId === criterionId)?.actor ?? 'a verifier'}; one criterion has one verdict`,
+              `${where}: criterion "${payload.criterionId}" of run "${payload.runId}" already carries a verdict from ${run.evidence.find(entry => entry.criterionId === payload.criterionId)?.actor ?? 'a verifier'}; one criterion has one verdict`,
             )
-
-          const verdict = payload['verdict']
-          if (verdict !== 'pass' && verdict !== 'fail')
-            refuse('malformed-envelope', `${where} needs verdict "pass" or "fail", got ${JSON.stringify(verdict ?? null)}`)
 
           return {
             ...state,
             runs: {
               ...state.runs,
-              [runId]: {
+              [payload.runId]: {
                 ...run,
                 evidence: [
                   ...run.evidence,
                   {
-                    criterionId,
-                    verdict,
+                    criterionId: payload.criterionId,
+                    verdict: payload.verdict,
+                    verifierRef: payload.verifierRef,
+                    verifierVersion: payload.verifierVersion,
+                    artifactDigest: payload.artifactDigest,
+                    emitter: envelope.emitter,
                     actor: envelope.actor,
-                    detail: optionalText(payload, 'detail') ?? '',
+                    ...(payload.detail === undefined ? {} : { detail: payload.detail }),
                     at: envelope.at,
                   },
                 ],
@@ -218,51 +300,66 @@ export function declareTaskProtocol(registry: ProtocolRegistry, verifiers: Verif
             },
           }
         },
-      },
+      }),
 
-      [TASK_KINDS.runVerified]: {
-        guarantee: 'G1',
-        reduce: (state, envelope) => {
+      [TASK_KINDS.runVerified]: defineKind<TaskState, { runId: string }>({
+        guarantees: APPENDED,
+        emitter: SCHEDULER_ROLE,
+        parse: raw => {
+          const where = `${TASK_KINDS.runVerified} payload`
+          const source = record(raw, where)
+          assertClosedKeys(source, ['runId'], where)
+          return { runId: text(source, 'runId', where) }
+        },
+        reduce: (state, envelope, payload) => {
           const where = `${TASK_KINDS.runVerified} #${envelope.seq}`
-          if (state.contract === undefined)
-            refuse('illegal-transition', `${where} arrived before task "${envelope.subject}" carried a contract`)
-          const runId = text(field(envelope.payload), 'runId', where)
-          const run = requireRun(state, runId, where)
+          const contract = requireContractOf(state, where, envelope.subject)
+          const run = requireRun(state, payload.runId, where)
           if (run.status !== 'running')
-            refuse('illegal-transition', `${where} settles run "${runId}" again; it is already ${run.status}`)
+            refuse('illegal-transition', `${where} settles run "${payload.runId}" again; it is already ${run.status}`)
 
-          // Invariant 3: every criterion needs a passing verdict. No partial acceptance.
-          const unanswered = state.contract.criteria.filter(
-            criterion => !run.evidence.some(entry => entry.criterionId === criterion.criterionId && entry.verdict === 'pass'),
+          // Invariant 3: every criterion needs a passing verdict from its own implementation.
+          const unanswered = contract.criteria.filter(
+            criterion =>
+              !run.evidence.some(
+                entry =>
+                  entry.criterionId === criterion.criterionId &&
+                  entry.verdict === 'pass' &&
+                  entry.verifierRef === criterion.verifierRef &&
+                  entry.verifierVersion === criterion.verifierVersion,
+              ),
           )
           if (unanswered.length > 0)
             refuse(
               'unadjudicated-criterion',
-              `${where} cannot settle run "${runId}" verified: ${unanswered
-                .map(criterion => `"${criterion.criterionId}" has no passing verdict from ${criterion.verifierRef}`)
+              `${where} cannot settle run "${payload.runId}" verified: ${unanswered
+                .map(criterion => `"${criterion.criterionId}" has no passing verdict from ${criterion.verifierRef}@${criterion.verifierVersion}`)
                 .join('; ')}`,
             )
 
-          return { ...state, runs: { ...state.runs, [runId]: { ...run, status: 'verified' as const, finishedAt: envelope.at } } }
+          return { ...state, runs: { ...state.runs, [payload.runId]: settled(run, 'verified', envelope.at) } }
         },
-      },
+      }),
 
-      [TASK_KINDS.runFailed]: {
-        guarantee: 'G1',
-        reduce: (state, envelope) => {
-          const where = `${TASK_KINDS.runFailed} #${envelope.seq}`
-          const payload = field(envelope.payload)
-          const runId = text(payload, 'runId', where)
-          const run = requireRun(state, runId, where)
-          if (run.status !== 'running')
-            refuse('illegal-transition', `${where} settles run "${runId}" again; it is already ${run.status}`)
-          const reason = optionalText(payload, 'reason') ?? 'no reason recorded'
-          return {
-            ...state,
-            runs: { ...state.runs, [runId]: { ...run, status: 'failed' as const, finishedAt: envelope.at, failureReason: reason } },
-          }
+      [TASK_KINDS.runFailed]: defineKind<TaskState, { runId: string; reason?: string }>({
+        guarantees: APPENDED,
+        emitter: SCHEDULER_ROLE,
+        parse: raw => {
+          const where = `${TASK_KINDS.runFailed} payload`
+          const source = record(raw, where)
+          assertClosedKeys(source, ['runId', 'reason'], where)
+          const reason = maybeText(source, 'reason', where)
+          return { runId: text(source, 'runId', where), ...(reason === undefined ? {} : { reason }) }
         },
-      },
+        reduce: (state, envelope, payload) => {
+          const where = `${TASK_KINDS.runFailed} #${envelope.seq}`
+          const run = requireRun(state, payload.runId, where)
+          if (run.status !== 'running')
+            refuse('illegal-transition', `${where} settles run "${payload.runId}" again; it is already ${run.status}`)
+          // A missing reason stays missing: the view reports "none recorded", it does not invent one.
+          return { ...state, runs: { ...state.runs, [payload.runId]: settled(run, 'failed', envelope.at, payload.reason) } }
+        },
+      }),
     },
   })
 }
