@@ -76,6 +76,12 @@ export interface RootRecoveryRequest {
   reuses?: readonly RootRecoveryReuse[]
   /** The bubble workspace this round's worker works in, when the caller materialized one; absent falls back to the session's own checkout. */
   workspacePath?: string
+  /**
+   * The unpublished candidate revision this attempt explicitly trials: the new Run consumes the candidate's bytes and
+   * records the trial identity, and the active pointer does not move. The candidate must exist as a frozen revision of
+   * this store's library and must not be the revision the attempt is admitted against.
+   */
+  trialCandidateRef?: string
 }
 
 /** The fields one request may carry: anything else is refused by name rather than ignored. */
@@ -88,6 +94,7 @@ const REQUEST_FIELDS: readonly string[] = [
   'reuses',
   'proposalIds',
   'workspacePath',
+  'trialCandidateRef',
 ]
 /** The fields one reuse declaration may carry. */
 const REUSE_FIELDS: readonly string[] = [
@@ -121,6 +128,9 @@ export function recoveryRequestDefects(request: unknown): string[] {
   }
   if (request.workspacePath !== undefined && !nonBlank(request.workspacePath)) {
     defects.push('workspacePath, when given, must be a non-empty path')
+  }
+  if (request.trialCandidateRef !== undefined && !nonBlank(request.trialCandidateRef)) {
+    defects.push('trialCandidateRef, when given, must be a non-empty candidate revision id')
   }
   if (
     request.proposalIds !== undefined &&
@@ -206,12 +216,14 @@ export function inFlightRecoveryAttempt(
 export function recoveryAttemptDigest(
   recovery: Pick<RunRecovery, 'sourceRunId' | 'reusedMembers' | 'proposalIds'> & {
     readonly kind?: RunRecovery['kind']
+    readonly trialCandidateRef?: string
   },
 ): string {
   return sha256Hex(
     canonicalize({
       kind: recovery.kind ?? 'recovery',
       sourceRunId: recovery.sourceRunId ?? null,
+      ...(recovery.trialCandidateRef === undefined ? {} : { trialCandidateRef: recovery.trialCandidateRef }),
       ...(recovery.proposalIds?.length ? { proposalIds: [...recovery.proposalIds].sort() } : {}),
       reusedMembers: recovery.reusedMembers.map(member => ({
         childIndex: member.childIndex,
@@ -275,6 +287,7 @@ export function requestAttemptDigest(request: RootRecoveryRequest): string {
   return recoveryAttemptDigest({
     kind: recoveryKindOf(request.mode),
     proposalIds: request.proposalIds === undefined ? undefined : [...request.proposalIds],
+    ...(request.trialCandidateRef === undefined ? {} : { trialCandidateRef: request.trialCandidateRef }),
     ...(request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId }),
     reusedMembers: (request.reuses ?? []).map(declaration => ({
       childIndex: declaration.childIndex,

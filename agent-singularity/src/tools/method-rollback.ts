@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { readRevision } from '@dangosys/dsh-singularity-task-runtime'
 import { denialReason, message, sessionId, text, undeclaredParameters } from '../shared.ts'
-import { deciderFor, environmentPlaneOf, methodLedgerPlaneOf, methodModeFor } from './method-shared.ts'
+import { deciderFor, environmentPlaneOf, methodLedgerPlaneOf, methodModeFor, methodRsiStampFor } from './method-shared.ts'
 import { diffOfRevisions, renderDiff, renderPublishOutcome, renderRecoveredIntent, renderVersionSwitch } from './method-render.ts'
 
 const PARAMETERS = ['toRevisionId', 'expectedActiveRevision', 'expectedGeneration', 'reason'] as const
@@ -80,6 +80,7 @@ export function defineMethodRollbackTool(ctx: Context) {
         }
 
         const mode = await methodModeFor(ctx, caller)
+        const graphStamp = await methodRsiStampFor(ctx, caller)
         const decider = deciderFor(mode)
         const current = await env.activeRevisionFor(caller).catch(() => undefined)
         const diff = renderDiff(
@@ -144,15 +145,15 @@ export function defineMethodRollbackTool(ctx: Context) {
           return `method_rollback: no pointer moved — ${denialReason(outcome)}; nothing was written`
         }
 
-        const [recheck, recheckMode] = await Promise.all([env.activeEnvironmentView(caller), methodModeFor(ctx, caller)])
+        const [recheck, recheckStamp] = await Promise.all([env.activeEnvironmentView(caller), methodRsiStampFor(ctx, caller)])
         if (recheck.revisionId !== args.expectedActiveRevision || recheck.generation !== args.expectedGeneration) {
           return [
             `method_rollback: no pointer moved — the pointer is now ${recheck.revisionId} g${recheck.generation}, not the approved`,
             `${args.expectedActiveRevision} g${String(args.expectedGeneration)}; the approval is spent and no second one is requested.`,
           ].join(' ')
         }
-        if (recheckMode !== mode) {
-          return `method_rollback: no pointer moved — this graph's method mode changed from ${mode} to ${recheckMode} while the approval was open.`
+        if (recheckStamp !== graphStamp) {
+          return `method_rollback: no pointer moved — this graph's rsi configuration was cleared or replaced while the approval was open; the approval is spent and no second one is requested.`
         }
         const targetAgain = await readRevision(library, args.toRevisionId)
         if (targetAgain === undefined || targetAgain.manifest.contentDigest !== target.manifest.contentDigest) {

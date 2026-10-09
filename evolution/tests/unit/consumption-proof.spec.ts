@@ -123,39 +123,49 @@ describe('a capability gap', () => {
 })
 
 describe('a template candidate', () => {
+  // The candidate's own identity, not the draft id or the candidate revision id:
+  // a receipt batch names the template it instantiated, and only that template
+  // proves this candidate was consumed.
   const consumed = receipt({
-    templates: [{ templateRef: { id: 'd0001', version: 2, digest: 'c'.repeat(64) }, observation: 'observed', childTaskIds: ['child-1'] }],
+    templates: [{ templateRef: { id: 'split-work', version: 2, digest: 'c'.repeat(64) }, observation: 'observed', childTaskIds: ['child-1'] }],
     criteria: ['c1', 'c2'],
   })
+  const prove = (input: { receipt: ExecutionReceipt; parentCriteria: readonly string[] }) =>
+    proveTemplateConsumed({ plan: { ...samplePlan(), kind: 'task-template' }, identity: 'split-work', ...input, where: 'w' })
 
   it('is consumed when the runtime observed the instantiation and the parent acceptance is judged', () => {
-    const proof = proveTemplateConsumed({ plan: { ...samplePlan(), kind: 'task-template' }, receipt: consumed, parentCriteria: ['c1'], where: 'w' })
+    const proof = prove({ receipt: consumed, parentCriteria: ['c1'] })
     expect(proof.proven).toBe(true)
     expect(proof.detail).toMatch(/template instantiated/)
   })
 
+  it('is not proved by a batch that names another template, the draft id or the candidate revision', () => {
+    const other = receipt({
+      templates: [{ templateRef: { id: 'd0001', version: 2, digest: 'c'.repeat(64) }, observation: 'observed', childTaskIds: ['child-1'] }],
+      criteria: ['c1'],
+    })
+    expect(() => prove({ receipt: other, parentCriteria: ['c1'] })).toThrow(/consumed no task template/)
+    const revisionNamed = receipt({
+      templates: [{ templateRef: { id: 'c-d0001', version: 2, digest: 'c'.repeat(64) }, observation: 'observed', childTaskIds: ['child-1'] }],
+      criteria: ['c1'],
+    })
+    expect(() => prove({ receipt: revisionNamed, parentCriteria: ['c1'] })).toThrow(/consumed no task template/)
+  })
+
   it('refuses a template nobody called, an instantiation without children, and a lost parent acceptance', () => {
+    expect(() => prove({ receipt: receipt({}), parentCriteria: [] })).toThrow(/consumed no task template/)
     expect(() =>
-      proveTemplateConsumed({ plan: { ...samplePlan(), kind: 'task-template' }, receipt: receipt({}), parentCriteria: [], where: 'w' }),
-    ).toThrow(/consumed no task template/)
-    expect(() =>
-      proveTemplateConsumed({
-        plan: { ...samplePlan(), kind: 'task-template' },
-        receipt: receipt({ templates: [{ templateRef: { id: 'd0001', version: 2, digest: 'c'.repeat(64) }, observation: 'not-observed', childTaskIds: [] }] }),
+      prove({
+        receipt: receipt({ templates: [{ templateRef: { id: 'split-work', version: 2, digest: 'c'.repeat(64) }, observation: 'not-observed', childTaskIds: [] }] }),
         parentCriteria: [],
-        where: 'w',
       }),
     ).toThrow(/no confirmed instantiation/)
     expect(() =>
-      proveTemplateConsumed({
-        plan: { ...samplePlan(), kind: 'task-template' },
-        receipt: receipt({ templates: [{ templateRef: { id: 'd0001', version: 2, digest: 'c'.repeat(64) }, observation: 'observed', childTaskIds: [] }] }),
+      prove({
+        receipt: receipt({ templates: [{ templateRef: { id: 'split-work', version: 2, digest: 'c'.repeat(64) }, observation: 'observed', childTaskIds: [] }] }),
         parentCriteria: [],
-        where: 'w',
       }),
     ).toThrow(/decomposed no child task/)
-    expect(() =>
-      proveTemplateConsumed({ plan: { ...samplePlan(), kind: 'task-template' }, receipt: consumed, parentCriteria: ['c9'], where: 'w' }),
-    ).toThrow(/independent parent acceptance/)
+    expect(() => prove({ receipt: consumed, parentCriteria: ['c9'] })).toThrow(/independent parent acceptance/)
   })
 })

@@ -94,13 +94,14 @@ export function proveAdmissionRefusal(input: { plan: EvaluationPlan; candidate: 
  */
 export function proveTemplateConsumed(input: {
   plan: EvaluationPlan
+  /** The template id the draft proposes — the only reference the receipt's batches may name. */
+  identity: string
   receipt: ExecutionReceipt
   /** The parent acceptance criterion ids the template candidate must not replace. */
   parentCriteria: readonly string[]
   where: string
 }): ConsumptionProof {
-  const identity = input.plan.sides.candidate.revision.revisionId
-  const batches = input.receipt.templates.filter(use => use.templateRef.id === input.plan.draftId || use.templateRef.id === identity)
+  const batches = input.receipt.templates.filter(use => use.templateRef.id === input.identity)
   if (batches.length === 0) {
     throw new Error(
       `${input.where}: the candidate side's receipt consumed no task template (it holds ${input.receipt.templates.length} template ` +

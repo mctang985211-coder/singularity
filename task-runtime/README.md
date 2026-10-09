@@ -1164,7 +1164,7 @@ an identity that covers most of a directory is not an identity of it. A path
 the scan already refused for its shape is not counted again here.
 
 entry — config load, provider replacement, candidate promotion — calls this,
-so `evolution_apply` is not the only defence and no entry can be the one that
+so `method_publish` is not the only defence and no entry can be the one that
 skipped it.
 Rules, in the order they are checked:
 1. The directory exists, is a real directory, and is named after the skill.

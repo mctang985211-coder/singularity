@@ -429,6 +429,7 @@ export class CoordinationDriver {
       requestKey: request.requestKey,
       mode: request.mode,
       ...(request.mode === 'improve' ? { reuses: [] } : {}),
+      ...(request.trialCandidateRef === undefined ? {} : { trialCandidateRef: request.trialCandidateRef }),
       ...(workspacePath === undefined ? {} : { workspacePath }),
     }
     try {

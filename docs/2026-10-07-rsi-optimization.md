@@ -1,5 +1,7 @@
 # 当前 RSI 协议与本轮优化（2026-10-07）
 
+> **2026-10-08 RRSI 重构已取代本文的工具链部分**：九个 `evolution_*` 工具（propose→candidate→prepare→replay→gate→decide→apply→rollback→list）、`evolution` 开关、本文的 RsiLoopDriver 与 fenced-JSON 结案均已删除。现行主路径：不可变环境版本 + 六个 `method_*` 工具（`method_draft`/`method_evaluate`/`method_publish`/`method_discard`/`method_rollback`/`method_list`）+ 统一 coordination driver + 显式 `supervisor_complete`/`reviewer_complete` 结案；旧图封存只读。本文的 Task/模板/Skill 分工、审核层次、角色与委派、轮次语义仍描述现行行为；凡涉及演化工具链、`evolution_*` 入口、`task_recover` 与旧账本路径的段落均为历史记录。
+
 本说明描述当前源码中的协议；历史自动 review-scan、evolution-handoff、agent task_recover 已删除。平台 RsiLoopDriver 是图的唯一自动开轮者。此轮修改没有重启现场服务，也没有改已有图、原 Task 合同或生产 Skill。
 
 ## 最新现场推动的改进

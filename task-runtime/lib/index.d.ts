@@ -554,6 +554,158 @@ declare function precheckReplacedCapabilityRow(request: {
  */
 declare function providerRefusals(precheck: ProviderPrecheck, taskCapabilities?: readonly string[]): string[];
 //#endregion
+//#region src/environment/revision.d.ts
+/** The one id shape a revision directory, a pointer and a run record all agree on. */
+declare const ENVIRONMENT_REVISION_ID: RegExp;
+/** The id shape of a draft directory; allocated monotonically per library. */
+declare const ENVIRONMENT_DRAFT_ID: RegExp;
+/** The id a draft's prospective revision carries: deterministic, so a killed publish replays onto the same name. */
+declare function candidateRevisionId(draftId: string): string;
+/** One skill as one revision holds it: the current entry of its name, with the lineage-local version and both digests. */
+interface EnvironmentSkillEntry {
+  readonly name: string;
+  /** Monotonic within the graph library's lineage; two drafts of the same base both get version+1 and the pointer CAS settles the conflict. */
+  readonly version: number;
+  /** sha256 of the exact `SKILL.md` bytes. */
+  readonly digest: string;
+  /** `skillContentDigest` of `SKILL.md` plus the declared resources. */
+  readonly contentDigest: string;
+  /** `skillContractDigest` of the declared sidecar, or `null` for a skill that declares none. */
+  readonly contractDigest: string | null;
+  readonly status: 'temporary' | 'retained' | 'retired';
+  readonly reason?: string;
+  readonly reviewedBy?: string;
+}
+/** One task template as one revision holds it. */
+interface EnvironmentTaskTemplateEntry {
+  readonly templateRef: TaskTemplateRef;
+  readonly status: 'temporary' | 'retained' | 'retired';
+  readonly skills: string[];
+  readonly reason?: string;
+  readonly reviewedBy?: string;
+}
+/** The graph-internal capability table of one revision: explicit rows (including candidate `method:*` rows) and the MCP templates they resolve against. */
+interface EnvironmentCapabilityEntry {
+  readonly rows: Readonly<Record<string, CapabilityConfig>>;
+  readonly mcpServers: Readonly<Record<string, McpServerTemplate>>;
+}
+/** The self-describing identity of one immutable revision directory; `contentDigest` covers every other field. */
+interface EnvironmentRevisionManifest {
+  readonly formatVersion: 1;
+  readonly revisionId: string;
+  readonly libraryId: string;
+  readonly kind: 'official' | 'candidate';
+  readonly basedOn: string | null;
+  readonly createdAt: string;
+  readonly skills: readonly EnvironmentSkillEntry[];
+  readonly taskTemplates: readonly EnvironmentTaskTemplateEntry[];
+  readonly capabilities: EnvironmentCapabilityEntry;
+  /** sha256 over `canonicalize` of this manifest without this field. */
+  readonly contentDigest: string;
+}
+/** A revision directory resolved to its roots. */
+interface EnvironmentRevision {
+  readonly manifest: EnvironmentRevisionManifest;
+  readonly root: string;
+  readonly skillRoot: string;
+  readonly taskTemplatesRoot: string;
+}
+/** The listing projection of one revision: identity plus sizes, never the full manifest. */
+interface EnvironmentRevisionRef {
+  readonly revisionId: string;
+  readonly kind: 'official' | 'candidate';
+  readonly basedOn: string | null;
+  readonly contentDigest: string;
+  readonly createdAt: string;
+  readonly skills: number;
+  readonly taskTemplates: number;
+}
+/** One skill edit staged into a draft: the complete new `SKILL.md` and the complete declared resource set. */
+interface SkillEdit {
+  readonly name: string;
+  readonly skillMd: string;
+  /** The complete resource set of the new version: `<dir>/<file>` per `isSupportedSkillResourcePath`, plus optionally `SKILL.contract.json`. */
+  readonly resources?: Record<string, string>;
+  /** Must equal the current entry's version (0 when the name is new); the same discipline as the old library's `expectedVersion`. */
+  readonly expectedVersion?: number;
+  readonly actor: string;
+}
+/** One task template edit staged into a draft. */
+interface TemplateEdit {
+  readonly template: TaskTemplate;
+  readonly actor: string;
+}
+/** One capability-row edit staged into a draft: `entry` null removes the row; an `mcpServers` value of null removes that template. */
+interface CapabilityRowEdit {
+  readonly name: string;
+  readonly entry: CapabilityConfig | null;
+  readonly mcpServers?: Readonly<Record<string, McpServerTemplate | null>>;
+  readonly actor: string;
+}
+/** One retention review staged into a draft (the shape the old library's `reviewTaskLibrary` accepted, plus the reviewer). */
+interface EnvironmentReview {
+  readonly kind: 'task' | 'skill';
+  readonly name: string;
+  readonly version: number;
+  readonly status: 'retained' | 'retired';
+  readonly reason: string;
+  readonly actor: string;
+}
+/** Every edit a draft accepts. */
+type EnvironmentEdit = {
+  readonly kind: 'skill';
+  readonly edit: SkillEdit;
+} | {
+  readonly kind: 'task';
+  readonly edit: TemplateEdit;
+} | {
+  readonly kind: 'review';
+  readonly review: EnvironmentReview;
+} | {
+  readonly kind: 'capability';
+  readonly edit: CapabilityRowEdit;
+};
+/**
+ * The content digest of a manifest: what the revision **holds** — its skill
+ * entries, its task templates and its capability table — plus the generation it
+ * belongs to, and nothing else. The identity it is filed under (`revisionId`,
+ * which for a candidate is derived from the draft id, the revision it was based
+ * on, and when it was staged) is identity, not content: two drafts carrying the
+ * same bytes therefore read the same content digest, and a client that keys a
+ * candidate by its content (the strategy's same-bytes refutation) matches on it.
+ * The identity members are pinned elsewhere — the revision id by the directory
+ * name it must equal, and the base and timestamp by the draft record.
+ */
+declare function manifestDigest(manifest: Omit<EnvironmentRevisionManifest, 'contentDigest'>): string;
+/** The manifest of a revision that holds nothing yet; `ensureInitialRevision` fills it, a draft copies and edits it. */
+declare function emptyRevisionManifest(input: {
+  libraryId: string;
+  revisionId: string;
+  kind: 'official' | 'candidate';
+  basedOn: string | null;
+  createdAt: string;
+}): EnvironmentRevisionManifest;
+/** Parse and fully validate one manifest, including its self-digest: a manifest whose bytes were edited is refused by name. */
+declare function parseRevisionManifest(raw: unknown, where: string): EnvironmentRevisionManifest;
+/** The current entry of one skill name in a revision. */
+declare function revisionSkillOf(manifest: EnvironmentRevisionManifest, name: string): EnvironmentSkillEntry | undefined;
+/** The newest entry of one template id in a revision. */
+declare function revisionTemplateOf(manifest: EnvironmentRevisionManifest, id: string): EnvironmentTaskTemplateEntry | undefined;
+/** The listing projection of one manifest. */
+declare function revisionRefOf(manifest: EnvironmentRevisionManifest): EnvironmentRevisionRef;
+/** The graph-internal capability rows of one revision; replaces the old index-derived `libraryCapabilities`. */
+declare function revisionCapabilityRows(manifest: EnvironmentRevisionManifest): Record<string, CapabilityConfig>;
+/** The hard rules any draft edit must pass, checked before any byte moves; the apply functions re-check them. */
+declare function assertDraftEditAllowed(manifest: EnvironmentRevisionManifest, edit: EnvironmentEdit): void;
+/** Apply one skill edit to a manifest, purely: the entry's digests come from the edit's declared bytes. */
+declare function applySkillEdit(manifest: EnvironmentRevisionManifest, edit: SkillEdit): EnvironmentRevisionManifest;
+/** Apply one task template edit to a manifest, purely: an identical repeat is a no-op, a conflicting version is refused. */
+declare function applyTemplateEdit(manifest: EnvironmentRevisionManifest, template: TaskTemplate, table?: Readonly<Record<string, CapabilityConfig>>): EnvironmentRevisionManifest;
+/** Apply one retention review to a manifest, purely: status is a field of the revision, never an in-place edit of a shared index. */
+declare function applyReviewEdit(manifest: EnvironmentRevisionManifest, review: EnvironmentReview, reviewedBy: string): EnvironmentRevisionManifest;
+/** Apply one capability-row edit to a manifest, purely: a null entry removes the row, a null MCP template removes it. */
+declare function applyCapabilityRowEdit(manifest: EnvironmentRevisionManifest, edit: CapabilityRowEdit): EnvironmentRevisionManifest;
+//#endregion
 //#region src/root-budget.d.ts
 /**
  * The root budget as configured (`Config.rootBudget`). Every member is optional:
@@ -724,6 +876,12 @@ interface RootRecoveryRequest {
   reuses?: readonly RootRecoveryReuse[];
   /** The bubble workspace this round's worker works in, when the caller materialized one; absent falls back to the session's own checkout. */
   workspacePath?: string;
+  /**
+   * The unpublished candidate revision this attempt explicitly trials: the new Run consumes the candidate's bytes and
+   * records the trial identity, and the active pointer does not move. The candidate must exist as a frozen revision of
+   * this store's library and must not be the revision the attempt is admitted against.
+   */
+  trialCandidateRef?: string;
 }
 /** The attempt one request key names on a source task, or `undefined`. */
 declare function recoveryAttemptWithKey(snapshot: TaskSnapshot, sourceTaskId: TaskId, requestKey: string): TaskRun | undefined;
@@ -752,158 +910,6 @@ declare class IterationCapRefusal extends Error {
   readonly code = "iteration-cap";
   constructor(message: string);
 }
-//#endregion
-//#region src/environment/revision.d.ts
-/** The one id shape a revision directory, a pointer and a run record all agree on. */
-declare const ENVIRONMENT_REVISION_ID: RegExp;
-/** The id shape of a draft directory; allocated monotonically per library. */
-declare const ENVIRONMENT_DRAFT_ID: RegExp;
-/** The id a draft's prospective revision carries: deterministic, so a killed publish replays onto the same name. */
-declare function candidateRevisionId(draftId: string): string;
-/** One skill as one revision holds it: the current entry of its name, with the lineage-local version and both digests. */
-interface EnvironmentSkillEntry {
-  readonly name: string;
-  /** Monotonic within the graph library's lineage; two drafts of the same base both get version+1 and the pointer CAS settles the conflict. */
-  readonly version: number;
-  /** sha256 of the exact `SKILL.md` bytes. */
-  readonly digest: string;
-  /** `skillContentDigest` of `SKILL.md` plus the declared resources. */
-  readonly contentDigest: string;
-  /** `skillContractDigest` of the declared sidecar, or `null` for a skill that declares none. */
-  readonly contractDigest: string | null;
-  readonly status: 'temporary' | 'retained' | 'retired';
-  readonly reason?: string;
-  readonly reviewedBy?: string;
-}
-/** One task template as one revision holds it. */
-interface EnvironmentTaskTemplateEntry {
-  readonly templateRef: TaskTemplateRef;
-  readonly status: 'temporary' | 'retained' | 'retired';
-  readonly skills: string[];
-  readonly reason?: string;
-  readonly reviewedBy?: string;
-}
-/** The graph-internal capability table of one revision: explicit rows (including candidate `method:*` rows) and the MCP templates they resolve against. */
-interface EnvironmentCapabilityEntry {
-  readonly rows: Readonly<Record<string, CapabilityConfig>>;
-  readonly mcpServers: Readonly<Record<string, McpServerTemplate>>;
-}
-/** The self-describing identity of one immutable revision directory; `contentDigest` covers every other field. */
-interface EnvironmentRevisionManifest {
-  readonly formatVersion: 1;
-  readonly revisionId: string;
-  readonly libraryId: string;
-  readonly kind: 'official' | 'candidate';
-  readonly basedOn: string | null;
-  readonly createdAt: string;
-  readonly skills: readonly EnvironmentSkillEntry[];
-  readonly taskTemplates: readonly EnvironmentTaskTemplateEntry[];
-  readonly capabilities: EnvironmentCapabilityEntry;
-  /** sha256 over `canonicalize` of this manifest without this field. */
-  readonly contentDigest: string;
-}
-/** A revision directory resolved to its roots. */
-interface EnvironmentRevision {
-  readonly manifest: EnvironmentRevisionManifest;
-  readonly root: string;
-  readonly skillRoot: string;
-  readonly taskTemplatesRoot: string;
-}
-/** The listing projection of one revision: identity plus sizes, never the full manifest. */
-interface EnvironmentRevisionRef {
-  readonly revisionId: string;
-  readonly kind: 'official' | 'candidate';
-  readonly basedOn: string | null;
-  readonly contentDigest: string;
-  readonly createdAt: string;
-  readonly skills: number;
-  readonly taskTemplates: number;
-}
-/** One skill edit staged into a draft: the complete new `SKILL.md` and the complete declared resource set. */
-interface SkillEdit {
-  readonly name: string;
-  readonly skillMd: string;
-  /** The complete resource set of the new version: `<dir>/<file>` per `isSupportedSkillResourcePath`, plus optionally `SKILL.contract.json`. */
-  readonly resources?: Record<string, string>;
-  /** Must equal the current entry's version (0 when the name is new); the same discipline as the old library's `expectedVersion`. */
-  readonly expectedVersion?: number;
-  readonly actor: string;
-}
-/** One task template edit staged into a draft. */
-interface TemplateEdit {
-  readonly template: TaskTemplate;
-  readonly actor: string;
-}
-/** One capability-row edit staged into a draft: `entry` null removes the row; an `mcpServers` value of null removes that template. */
-interface CapabilityRowEdit {
-  readonly name: string;
-  readonly entry: CapabilityConfig | null;
-  readonly mcpServers?: Readonly<Record<string, McpServerTemplate | null>>;
-  readonly actor: string;
-}
-/** One retention review staged into a draft (the shape the old library's `reviewTaskLibrary` accepted, plus the reviewer). */
-interface EnvironmentReview {
-  readonly kind: 'task' | 'skill';
-  readonly name: string;
-  readonly version: number;
-  readonly status: 'retained' | 'retired';
-  readonly reason: string;
-  readonly actor: string;
-}
-/** Every edit a draft accepts. */
-type EnvironmentEdit = {
-  readonly kind: 'skill';
-  readonly edit: SkillEdit;
-} | {
-  readonly kind: 'task';
-  readonly edit: TemplateEdit;
-} | {
-  readonly kind: 'review';
-  readonly review: EnvironmentReview;
-} | {
-  readonly kind: 'capability';
-  readonly edit: CapabilityRowEdit;
-};
-/**
- * The content digest of a manifest: what the revision **holds** — its skill
- * entries, its task templates and its capability table — plus the generation it
- * belongs to, and nothing else. The identity it is filed under (`revisionId`,
- * which for a candidate is derived from the draft id, the revision it was based
- * on, and when it was staged) is identity, not content: two drafts carrying the
- * same bytes therefore read the same content digest, and a client that keys a
- * candidate by its content (the strategy's same-bytes refutation) matches on it.
- * The identity members are pinned elsewhere — the revision id by the directory
- * name it must equal, and the base and timestamp by the draft record.
- */
-declare function manifestDigest(manifest: Omit<EnvironmentRevisionManifest, 'contentDigest'>): string;
-/** The manifest of a revision that holds nothing yet; `ensureInitialRevision` fills it, a draft copies and edits it. */
-declare function emptyRevisionManifest(input: {
-  libraryId: string;
-  revisionId: string;
-  kind: 'official' | 'candidate';
-  basedOn: string | null;
-  createdAt: string;
-}): EnvironmentRevisionManifest;
-/** Parse and fully validate one manifest, including its self-digest: a manifest whose bytes were edited is refused by name. */
-declare function parseRevisionManifest(raw: unknown, where: string): EnvironmentRevisionManifest;
-/** The current entry of one skill name in a revision. */
-declare function revisionSkillOf(manifest: EnvironmentRevisionManifest, name: string): EnvironmentSkillEntry | undefined;
-/** The newest entry of one template id in a revision. */
-declare function revisionTemplateOf(manifest: EnvironmentRevisionManifest, id: string): EnvironmentTaskTemplateEntry | undefined;
-/** The listing projection of one manifest. */
-declare function revisionRefOf(manifest: EnvironmentRevisionManifest): EnvironmentRevisionRef;
-/** The graph-internal capability rows of one revision; replaces the old index-derived `libraryCapabilities`. */
-declare function revisionCapabilityRows(manifest: EnvironmentRevisionManifest): Record<string, CapabilityConfig>;
-/** The hard rules any draft edit must pass, checked before any byte moves; the apply functions re-check them. */
-declare function assertDraftEditAllowed(manifest: EnvironmentRevisionManifest, edit: EnvironmentEdit): void;
-/** Apply one skill edit to a manifest, purely: the entry's digests come from the edit's declared bytes. */
-declare function applySkillEdit(manifest: EnvironmentRevisionManifest, edit: SkillEdit): EnvironmentRevisionManifest;
-/** Apply one task template edit to a manifest, purely: an identical repeat is a no-op, a conflicting version is refused. */
-declare function applyTemplateEdit(manifest: EnvironmentRevisionManifest, template: TaskTemplate, table?: Readonly<Record<string, CapabilityConfig>>): EnvironmentRevisionManifest;
-/** Apply one retention review to a manifest, purely: status is a field of the revision, never an in-place edit of a shared index. */
-declare function applyReviewEdit(manifest: EnvironmentRevisionManifest, review: EnvironmentReview, reviewedBy: string): EnvironmentRevisionManifest;
-/** Apply one capability-row edit to a manifest, purely: a null entry removes the row, a null MCP template removes it. */
-declare function applyCapabilityRowEdit(manifest: EnvironmentRevisionManifest, edit: CapabilityRowEdit): EnvironmentRevisionManifest;
 //#endregion
 //#region src/gate.d.ts
 /** A tool call that was let through and has not reported its result yet. */
@@ -2630,6 +2636,11 @@ declare class TaskRuntime extends Service {
   /** The immutable revision roots a session's graph library is served from; reading creates nothing. */
   libraryForRoot(rootSessionId: string): Promise<EnvironmentLibrary>;
   libraryForSession(sessionId: string): Promise<EnvironmentLibrary>;
+  /**
+   * The library roots a commit plane works against: the library's own root,
+   * never the active revision's directory {@link libraryForSession} serves readers.
+   */
+  libraryRootsForSession(sessionId: string): Promise<LibraryRoots>;
   /** The active revision view of this session's graph library — a pure read, and the one version read every method tool shares. */
   activeEnvironmentView(sessionId: string, options?: {
     readonly trialCandidateRef?: string;

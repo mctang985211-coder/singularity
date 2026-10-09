@@ -46,7 +46,8 @@ describe('one freeze for both sides', () => {
     const { plan } = await built()
     expect(plan.sides.baseline.skills.map(skill => skill.name)).toEqual(['task-coordination'])
     expect(plan.sides.candidate.skills.map(skill => skill.name)).toEqual(['repair-guidance', 'task-coordination'])
-    expect(plan.sides.candidate.capabilities).toEqual(plan.sides.baseline.capabilities)
+    expect(plan.sides.baseline.capabilities).toEqual(['execute-task'])
+    expect(plan.sides.candidate.capabilities).toEqual(['execute-task', 'method:repair-guidance'])
   })
 
   it('mirrors every sample’s acceptance into both sides unchanged', async () => {

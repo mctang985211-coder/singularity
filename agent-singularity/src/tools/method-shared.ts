@@ -22,6 +22,7 @@ import {
   calibrateNoise,
   cohortDigestOf,
   createDraft as createLedgerDraft,
+  digestOf,
   discardDraft as discardLedgerDraft,
   editBudget as strategyEditBudget,
   environmentHomeOf,
@@ -79,7 +80,6 @@ import { optionalService, readEnvironmentDraft, readRevision } from '@dangosys/d
 import type {
   EnvironmentDraft,
   EnvironmentEdit,
-  EnvironmentLibrary,
   EnvironmentPointerIntent,
   EnvironmentPointerReconcile,
   EnvironmentRevision,
@@ -146,8 +146,8 @@ export interface MethodGraphView {
 export interface EnvironmentPlane {
   activeEnvironmentView(sessionId: string, options?: { readonly trialCandidateRef?: string }): Promise<EnvironmentView>
   activeRevisionFor(sessionId: string): Promise<EnvironmentRevision>
-  /** The library a caller's own graph is served from: its identity and immutable root, without creating anything. */
-  libraryForSession(sessionId: string): Promise<EnvironmentLibrary>
+  /** The roots of the library a caller's own graph is served from — the library's own root, never the active revision's directory. */
+  libraryRootsForSession(sessionId: string): Promise<LibraryRoots>
   createDraft(sessionId: string, request: { readonly basedOn?: string; readonly purpose?: string }): Promise<EnvironmentDraft>
   stageDraftEdit(sessionId: string, draftId: string, edit: EnvironmentEdit): Promise<EnvironmentDraft>
   removeEnvironmentDraft(sessionId: string, draftId: string): Promise<void>
@@ -261,7 +261,7 @@ export interface StrategyPlane {
 
 /** The graph registry the method tools resolve their caller through. */
 interface GraphRegistry {
-  graphForSession(sessionId: SessionId): Promise<{ id: string; rootSessionId: SessionId; rsi?: { humanReview?: boolean } | null }>
+  graphForSession(sessionId: SessionId): Promise<{ id: string; rootSessionId: SessionId; rsi?: Record<string, unknown> | null }>
 }
 
 function graphRegistry(ctx: Context): GraphRegistry {
@@ -286,6 +286,16 @@ export async function methodGraphFor(ctx: Context, caller: string): Promise<Meth
     libraryId: rootSessionId,
     ...(graph.rsi == null ? {} : { rsi: { humanReview: graph.rsi.humanReview === true } }),
   }
+}
+
+/**
+ * The whole rsi configuration one method approval binds, digested: a graph
+ * whose rsi is cleared or replaced while the approval is open is not the
+ * configuration the approval was granted under, and the switch refuses.
+ */
+export async function methodRsiStampFor(ctx: Context, caller: string): Promise<string> {
+  const graph = await graphRegistry(ctx).graphForSession(SessionId(caller))
+  return digestOf({ rsi: graph.rsi ?? null })
 }
 
 /** The mode one graph's record puts method publication in. Mode is never an argument. */
@@ -319,7 +329,7 @@ export function environmentPlaneOf(ctx: Context): EnvironmentPlane {
   return {
     activeEnvironmentView: bind('activeEnvironmentView'),
     activeRevisionFor: bind('activeRevisionFor'),
-    libraryForSession: bind('libraryForSession'),
+    libraryRootsForSession: bind('libraryRootsForSession'),
     createDraft: bind('createDraft'),
     stageDraftEdit: bind('stageDraftEdit'),
     removeEnvironmentDraft: bind('removeEnvironmentDraft'),
@@ -355,9 +365,9 @@ export function decisionPathOf(root: string, draftId: string, evaluationId: stri
 }
 
 /**
- * The prospective candidate revision one draft holds, as the publish approval
- * reads it for its difference. It is the draft's own directory, not a frozen
- * revision: only the pointer transaction freezes it, by rename.
+ * The prospective candidate revision one draft holds, read from the draft's own
+ * directory. A draft the evaluation already measured was frozen instead — its
+ * candidate is read with `readRevision`, and this returns undefined for it.
  */
 export async function candidateRevisionOf(library: LibraryRoots, draftId: string): Promise<EnvironmentRevision | undefined> {
   const draft = await readEnvironmentDraft(library, draftId)
@@ -377,7 +387,7 @@ export async function candidateRevisionOf(library: LibraryRoots, draftId: string
  */
 export async function methodLedgerPlaneOf(ctx: Context, caller: string): Promise<MethodLedgerPlane> {
   const env = environmentPlaneOf(ctx)
-  const resolved = await env.libraryForSession(caller)
+  const resolved = await env.libraryRootsForSession(caller)
   const library: LibraryRoots = { id: resolved.id, root: resolved.root }
   const policy = DEFAULT_STRATEGY_POLICY
 
@@ -431,6 +441,13 @@ export async function methodLedgerPlaneOf(ctx: Context, caller: string): Promise
       return created
     },
     async evaluate(input, signal) {
+      // The pipeline reads both sides from frozen revision directories, so an
+      // unevaluated draft's candidate is frozen here, once, before the first
+      // trial: measurement never runs against a directory that can still move.
+      const view = await viewOf(input.draftId)
+      if (view.evaluation === undefined && (await readRevision(library, view.draft.candidateRevision.revisionId)) === undefined) {
+        await env.freezeDraft(caller, input.draftId)
+      }
       const { sources } = await open()
       const report = await evaluateDraft(sources, {
         draftId: input.draftId,

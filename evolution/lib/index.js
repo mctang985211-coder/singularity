@@ -819,8 +819,7 @@ function proveAdmissionRefusal(input) {
 * that are not the candidate's own.
 */
 function proveTemplateConsumed(input) {
-	const identity = input.plan.sides.candidate.revision.revisionId;
-	const batches = input.receipt.templates.filter((use) => use.templateRef.id === input.plan.draftId || use.templateRef.id === identity);
+	const batches = input.receipt.templates.filter((use) => use.templateRef.id === input.identity);
 	if (batches.length === 0) throw new Error(`${input.where}: the candidate side's receipt consumed no task template (it holds ${input.receipt.templates.length} template batch(es)), so the candidate was never instantiated — a template nobody called is not measured`);
 	const observed = batches.filter((batch) => batch.observation === "observed");
 	if (observed.length === 0) throw new Error(`${input.where}: the candidate side's receipt records no confirmed instantiation of the candidate template (observations: ${batches.map((batch) => batch.observation).join(", ")})`);
@@ -1326,410 +1325,6 @@ function tokenTotalOf(tokens) {
 }
 
 //#endregion
-//#region src/pipeline/plan.ts
-/** SHA-256 over a criterion's protected input identities, in path order — the acceptance input identity of one criterion. */
-function protectedInputsDigest(inputs) {
-	return sha256Hex(inputs.map((input) => `${input.path}\0${input.sha256}`).sort().join("\n"));
-}
-/** One criterion's frozen judge identity, read from the criterion's verifier ref and the live vocabulary. */
-function frozenCriterionOf(criterion, where, vocabulary) {
-	const inputs = criterion.protectedInputs ?? [];
-	for (const input of inputs) if (typeof input?.path !== "string" || input.path.length === 0 || !isHex64(input?.sha256)) throw new Error(`the sample's criterion "${criterion.criterionId}" carries a protected input that was never fixed to { path, sha256 } — an acceptance input nobody fixed is not a frozen input`);
-	const ref = criterion.verifierRef;
-	if (ref === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins no verifierRef — the judge a verdict belongs to is fixed before the first run, so a criterion that lets the registry choose by mode cannot be frozen; pin the registered, versioned verifier that decides it`);
-	if (vocabulary === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}" but this deployment cannot list its verifier registry (verifierIds()/verifierVersions() are unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody can name is refused before it runs`);
-	if (!vocabulary.ids.includes(ref)) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry does not hold (registered: ${vocabulary.ids.length === 0 ? "none" : vocabulary.ids.join(", ")}) — the criterion would be judged inconclusive by a judge that does not exist; name a registered verifier before freezing the experiment`);
-	const declared = vocabulary.versions[ref];
-	if (declared === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry holds but declares no version for — a verdict belongs to the instance that judged it, so a judge nobody can recall by version is refused before the experiment runs`);
-	return {
-		criterionId: criterion.criterionId,
-		verificationMode: criterion.verificationMode,
-		...criterion.command === void 0 ? {} : { command: criterion.command },
-		protectedInputsDigest: protectedInputsDigest(inputs),
-		verifierRef: ref,
-		verifierVersion: declared,
-		verifierAnchor: `registered verifier "${ref}" declares version "${declared}"`
-	};
-}
-/** One side's provider reading: the rows it resolves, the registry revision and every provider it loads. */
-function providerIdentityOf(input) {
-	const refused = refusedProviderLines(input.precheck);
-	if (refused.length > 0) throw new Error(`${input.where} resolves to providers the deployment cannot use:\n- ${refused.join("\n- ")}`);
-	const skills = input.precheck.capabilities.flatMap((row) => row.skills).filter((skill) => skill.valid).filter((skill, index, all) => all.findIndex((entry) => entry.name === skill.name) === index).map((skill) => {
-		const role = skill.role;
-		if (role !== "execution-provider" && role !== "knowledge" && role !== "guidance") throw new Error(`${input.where} resolved skill "${skill.name}" to an unknown role "${String(role)}"`);
-		if (typeof skill.contentDigest !== "string" || skill.contentDigest.length === 0) throw new Error(`${input.where} resolved skill "${skill.name}" without a content digest`);
-		return {
-			name: skill.name,
-			role,
-			contractDigest: skill.contractDigest ?? null,
-			contentDigest: skill.contentDigest
-		};
-	}).sort((left, right) => left.name < right.name ? -1 : 1);
-	const presets = new Set(input.rows.flatMap((row) => input.table[row]?.preset === void 0 ? [] : [input.table[row].preset]));
-	if (presets.size > 1) throw new Error(`${input.where}'s rows declare conflicting presets (${[...presets].sort().join(", ")}); one worker requires one preset`);
-	const mcpServers = [...new Set(input.rows.flatMap((row) => input.table[row]?.mcpServers ?? []))].sort().map((serverName) => {
-		const template = input.mcpRegistry[serverName];
-		if (template === void 0) throw new Error(`${input.where} grants MCP server "${serverName}", which this deployment defines no template for`);
-		return {
-			serverName,
-			templateDigest: digestOf(template)
-		};
-	});
-	return {
-		capabilities: [...input.rows],
-		registryRevision: input.precheck.revision,
-		mcpServers,
-		preset: presets.size === 0 ? null : [...presets][0],
-		skills
-	};
-}
-/** The one side freeze: the identity a side must bind, read from the runtime's own pre-check. */
-async function freezeSide(input) {
-	const rows = [...new Set(input.required)].sort();
-	const missing = rows.filter((row) => input.table[row] === void 0);
-	if (missing.length > 0 && input.allowRefusal !== true) throw new Error(`${input.where} requires ${missing.length > 1 ? "capabilities" : "capability"} ${missing.map((row) => JSON.stringify(row)).join(", ")}, which the side's table does not hold — the runtime would refuse a run under it`);
-	const precheck = input.precheck !== void 0 ? input.precheck : input.side === "baseline" ? await input.sources.runtime.capabilityProviderReport(input.sources.caller, rows) : await input.sources.runtime.precheckCapabilityTable({
-		capabilities: rows,
-		table: input.table,
-		extraRoots: [input.revision.skillRoot],
-		mcpRegistry: input.mcpRegistry
-	});
-	return {
-		side: input.side,
-		revision: input.revision.ref,
-		...providerIdentityOf({
-			precheck: input.allowRefusal === true ? {
-				...precheck,
-				capabilities: precheck.capabilities.map((row) => ({
-					...row,
-					refusals: []
-				}))
-			} : precheck,
-			table: input.table,
-			mcpRegistry: input.mcpRegistry,
-			rows,
-			where: input.where
-		}),
-		model: input.model,
-		acceptance: [...input.acceptance]
-	};
-}
-/** The criteria a sample's own task carries, as the acceptance both sides are judged by. */
-function acceptanceOf(task, where) {
-	if (task.acceptanceCriteria.length === 0) throw new Error(`${where} carries no acceptance criteria; there is nothing for the two sides to be judged by`);
-	return task.acceptanceCriteria;
-}
-function requireTerminal(task, where) {
-	if (task.status !== "verified" && task.status !== "failed") throw new Error(`${where} is ${task.status}; only a terminal (verified or failed) sample can be evaluated`);
-	return task.status;
-}
-function assertSampleRole(role, taskId, review) {
-	const required = role === "observed-failure" ? "failed" : "verified";
-	if (review === void 0) throw new Error(`sample "${taskId}" has no review record on its latest run; there is no case to reproduce`);
-	if (review.outcome !== required) throw new Error(`sample "${taskId}" is an ${role} but its latest review record is "${review.outcome}", not "${required}"`);
-}
-/**
-* Freeze one evaluation plan. Both sides are read from frozen revision
-* directories, both go through the same `freezeSide`, and the sample's own
-* acceptance is mirrored into each side so a run cannot be judged by another
-* criterion set.
-*/
-async function buildEvaluationPlan(sources, input) {
-	const draft = input.draft;
-	const baseline = await sources.runtime.activeRevision(sources.caller);
-	if (baseline.ref.revisionId !== draft.baseRevision.revisionId) throw new Error(`evolution: draft "${draft.draftId}" was written against revision "${draft.baseRevision.revisionId}", but the library's active revision is "${baseline.ref.revisionId}" — a candidate is evaluated against the revision it was written against`);
-	if (baseline.ref.digest !== draft.baseRevision.digest) throw new Error(`evolution: draft "${draft.draftId}" freezes baseline digest ${draft.baseRevision.digest}, but revision "${baseline.ref.revisionId}" reads ${baseline.ref.digest}`);
-	const candidate = await sources.runtime.revision(sources.caller, draft.candidateRevision.revisionId);
-	if (candidate.ref.digest !== draft.candidateRevision.digest) throw new Error(`evolution: draft "${draft.draftId}" freezes candidate digest ${draft.candidateRevision.digest}, but revision "${candidate.ref.revisionId}" reads ${candidate.ref.digest} — the candidate moved since it was drafted`);
-	const storeId = await sources.runtime.storeOfSession(sources.caller);
-	const snapshot = await sources.tasks.openStore(storeId);
-	const vocabulary = await sources.verifierVocabulary();
-	const mcpRegistry = sources.runtime.mcpServers();
-	const activeTable = await sources.runtime.capabilitiesForSession(sources.caller);
-	const candidateTable = {
-		...activeTable,
-		...candidate.capabilityRows
-	};
-	const samples = [];
-	for (const sample of input.samples) {
-		const task = snapshot.tasks.find((item) => item.taskId === sample.taskId);
-		if (task === void 0) throw new Error(`sample "${sample.taskId}" is absent from this graph's task store`);
-		const where = `sample "${sample.taskId}"`;
-		requireTerminal(task, where);
-		const review = snapshot.reviews.filter((item) => item.taskId === task.taskId).at(-1);
-		assertSampleRole(sample.role, sample.taskId, review);
-		const criteria = acceptanceOf(task, where);
-		samples.push({
-			taskId: sample.taskId,
-			role: sample.role,
-			contractDigest: digestOf({
-				objective: task.objective,
-				acceptanceCriteria: task.acceptanceCriteria,
-				requiredCapabilities: task.requestedCapabilities
-			}),
-			criteria: criteria.map((criterion) => frozenCriterionOf(criterion, where, vocabulary)),
-			observed: {
-				outcome: requireTerminal(task, where),
-				...review?.runId === void 0 ? {} : { runId: review.runId }
-			}
-		});
-	}
-	const frozenInput = await freezeInput(input.input);
-	const required = [...new Set(snapshot.tasks.filter((task) => samples.some((sample) => sample.taskId === task.taskId)).flatMap((task) => task.requestedCapabilities))].sort();
-	const acceptance = samples.flatMap((sample) => sample.criteria);
-	const baselinePrecheck = await sources.runtime.capabilityProviderReport(sources.caller, required);
-	const missingRows = required.filter((row) => activeTable[row] === void 0);
-	const refused = refusedProviderLines(baselinePrecheck);
-	const admission = missingRows.length > 0 ? {
-		source: "capability-gap",
-		required,
-		missing: missingRows,
-		reason: `the active revision's capability table does not hold ${missingRows.map((row) => JSON.stringify(row)).join(", ")}, so the production configuration cannot admit this sample (the runtime's own resolution reports a closure gap)`
-	} : refused.length > 0 ? {
-		source: "provider-refused",
-		required,
-		missing: [],
-		reason: `the production configuration resolves providers this deployment cannot use:\n- ${refused.join("\n- ")}`
-	} : void 0;
-	const sides = {
-		baseline: await freezeSide({
-			side: "baseline",
-			revision: baseline,
-			required,
-			acceptance,
-			where: "the baseline side",
-			model: input.model,
-			sources,
-			mcpRegistry,
-			table: activeTable,
-			precheck: baselinePrecheck,
-			...admission === void 0 ? {} : { allowRefusal: true }
-		}),
-		candidate: await freezeSide({
-			side: "candidate",
-			revision: candidate,
-			required,
-			acceptance,
-			where: "the candidate side",
-			model: input.model,
-			sources,
-			mcpRegistry,
-			table: candidateTable
-		})
-	};
-	const plannedSamples = samples.map((sample) => admission === void 0 ? sample : {
-		...sample,
-		admission
-	});
-	return {
-		planId: digestOf({
-			draftId: draft.draftId,
-			candidate: candidate.ref,
-			input: frozenInput.digest,
-			samples: samples.map((sample) => sample.taskId)
-		}).slice(0, 16),
-		draftId: draft.draftId,
-		kind: draft.kind,
-		libraryId: input.libraryId,
-		sides,
-		samples: plannedSamples,
-		input: frozenInput,
-		rules: input.rules,
-		budget: { ...input.budget },
-		repetition: input.repetition,
-		...input.evaluation === void 0 ? {} : { evaluation: input.evaluation },
-		overlay: {
-			baseline: "none — the baseline runs under the active revision",
-			candidate: `trialCandidateRef: "${candidate.ref.revisionId}" — the candidate revision, loaded through the runtime's own binding`
-		},
-		...input.strategy === void 0 ? {} : { strategy: input.strategy },
-		schemaVersion: "evaluation-plan@1"
-	};
-}
-
-//#endregion
-//#region src/pipeline/run.ts
-/** The key one side of one sample is addressed by, inside one evaluation. */
-function sideKey(sampleTaskId, side) {
-	return `${sampleTaskId}\u0000${side}`;
-}
-/** A refused side's own receipt reference: nothing ran, and the reference says exactly that. */
-function refusedReceipt(input) {
-	return {
-		receiptId: `refused:${input.sampleTaskId}:${input.side}`,
-		digest: digestOf({
-			refused: input.sampleTaskId,
-			side: input.side,
-			admission: input.admission
-		}),
-		criteria: [],
-		evidenceRefs: [],
-		cost: {
-			status: "unknown",
-			reason: "no run exists for a side the runtime refused at admission"
-		},
-		boundRevision: input.revisionId,
-		boundModel: input.model,
-		workspace: input.workspace,
-		workspaceDigest: input.workspaceDigest,
-		complete: false,
-		incompleteness: [`admission-refusal: ${input.admission.reason}`]
-	};
-}
-/** The terminal run one replay outcome names, read back from the store. */
-function terminalRunOf(snapshot, outcome) {
-	const task = snapshot.tasks.find((item) => item.taskId === outcome.taskId);
-	if (task === void 0) throw new Error(`the replay created task "${outcome.taskId}", which the store does not hold`);
-	const run = snapshot.runs.filter((item) => item.taskId === task.taskId).at(-1);
-	if (run === void 0) throw new Error(`task "${task.taskId}" holds no run after its replay`);
-	return {
-		runId: run.runId,
-		taskId: task.taskId
-	};
-}
-function outcomeOf(status) {
-	if (status === "verified") return "verified";
-	if (status === "failed") return "failed";
-	if (status === "cancelled") return "cancelled";
-	return "interrupted";
-}
-/** One side of one sample, run to its terminal state and normalized into the one trial schema. */
-async function runSide(input) {
-	const { plan, sample, side } = input;
-	const sidePlan = plan.sides[side];
-	const workspace = await materializeSideWorkspace({
-		planInput: plan.input,
-		root: `${input.sources.root}/workspaces/${plan.draftId}/${plan.planId}`,
-		sampleTaskId: sample.taskId,
-		side
-	});
-	const model = sidePlan.model;
-	if (side === "baseline" && sample.admission !== void 0) return { trial: {
-		sampleTaskId: sample.taskId,
-		side,
-		role: sample.role,
-		outcome: "not-admitted",
-		receipt: refusedReceipt({
-			sampleTaskId: sample.taskId,
-			side,
-			workspace: workspace.path,
-			workspaceDigest: workspace.digest,
-			model: `${model.provider}/${model.model}`,
-			revisionId: sidePlan.revision.revisionId,
-			admission: sample.admission
-		}),
-		admission: sample.admission,
-		reason: sample.admission.reason,
-		actor: input.sources.caller,
-		at: (/* @__PURE__ */ new Date()).toISOString()
-	} };
-	const options = {
-		lineage: `evolution-eval:${plan.draftId}:${sample.taskId}:${side}`,
-		workspace: {
-			path: workspace.path,
-			...plan.input.rebaseFrom === void 0 ? {} : { rebaseFrom: plan.input.rebaseFrom }
-		},
-		agentOptions: agentOptionsOf(model),
-		...side === "candidate" ? { trialCandidateRef: sidePlan.revision.revisionId } : {},
-		...input.signal === void 0 ? {} : { signal: input.signal }
-	};
-	const outcome = await input.sources.runtime.replayTask(input.storeId, sample.taskId, options, input.sources.caller);
-	if (outcome.workspace !== void 0 && outcome.workspace !== workspace.path) throw new Error(`the replay of "${sample.taskId}" reported workspace "${outcome.workspace}" but was given "${workspace.path}"; a side's frozen input and the directory its run went through must be the same directory`);
-	const snapshot = await input.sources.tasks.openStore(input.storeId);
-	const { runId, taskId } = terminalRunOf(snapshot, outcome);
-	const run = snapshot.runs.find((item) => item.runId === runId);
-	let receipt = await input.sources.tasks.receiptFor(input.storeId, runId);
-	if (receipt === void 0 && input.sources.tasks.sealReceipt !== void 0) {
-		await input.sources.tasks.sealReceipt(input.storeId, taskId, runId);
-		receipt = await input.sources.tasks.receiptFor(input.storeId, runId);
-	}
-	const at = (/* @__PURE__ */ new Date()).toISOString();
-	if (receipt === void 0) throw new Error(`evolution: run "${runId}" of sample "${sample.taskId}" (${side} side) settled without a sealed execution receipt, so the side's own facts cannot be read — a side is measured by the runtime's receipt, never by a second reading of its logs`);
-	return {
-		trial: {
-			sampleTaskId: sample.taskId,
-			side,
-			role: sample.role,
-			outcome: TERMINAL_RUN_STATUSES.has(run.status) ? outcomeOf(run.status) : "interrupted",
-			receipt: receiptRefOf({
-				snapshot,
-				receipt,
-				workspace: workspace.path,
-				workspaceDigest: workspace.digest,
-				model,
-				revisionId: sidePlan.revision.revisionId
-			}),
-			...TERMINAL_RUN_STATUSES.has(run.status) ? {} : { reason: `run "${runId}" had not reached a terminal state when the side was read` },
-			actor: input.sources.caller,
-			at
-		},
-		receipt
-	};
-}
-/**
-* Run every sample side of one frozen plan, bounded by the runtime's own worker
-* limit. A cancelled side stops the further sides of the plan; every side that
-* settled stays recorded.
-*/
-async function runEvaluation(sources, input) {
-	const plan = input.plan;
-	const storeId = await sources.runtime.storeOfSession(sources.caller);
-	const pending = plan.samples.flatMap((sample) => ["baseline", "candidate"].map((side) => ({
-		sample,
-		side
-	})));
-	const limit = input.maxParallel ?? sources.runtime.maxActiveWorkers();
-	if (!Number.isInteger(limit) || limit < 1) throw new Error("evolution: maxParallel must be a positive integer");
-	const trials = [];
-	const receipts = /* @__PURE__ */ new Map();
-	let next = 0;
-	let stopped = false;
-	let failure;
-	const worker = async () => {
-		while (!stopped && next < pending.length) {
-			const { sample, side } = pending[next++];
-			if (input.signal?.aborted) return;
-			const { trial, receipt } = await runSide({
-				sources,
-				plan,
-				sample,
-				side,
-				storeId,
-				...input.signal === void 0 ? {} : { signal: input.signal }
-			});
-			trials.push(trial);
-			if (receipt !== void 0) receipts.set(sideKey(sample.taskId, side), receipt);
-			if (trial.outcome === "cancelled") stopped = true;
-		}
-	};
-	await Promise.all(Array.from({ length: Math.min(limit, pending.length) }, async () => {
-		try {
-			await worker();
-		} catch (error) {
-			stopped = true;
-			failure ??= error;
-		}
-	}));
-	if (failure !== void 0) throw failure instanceof Error ? failure : new Error(String(failure));
-	trials.sort((left, right) => left.sampleTaskId === right.sampleTaskId ? left.side < right.side ? -1 : 1 : left.sampleTaskId < right.sampleTaskId ? -1 : 1);
-	return {
-		storeId,
-		trials,
-		receipts
-	};
-}
-/** The agent options one plan's model travels as, as the runtime's own shape. */
-function agentOptionsForModel(provider, model) {
-	const selection = modelSelectionOf({
-		provider,
-		model
-	});
-	if (selection === void 0) throw new Error("evolution: a plan side carries no usable model selection");
-	return agentOptionsOf(selection);
-}
-
-//#endregion
 //#region src/capability-candidate.ts
 /** The keys a capability row may declare — the whole vocabulary `CapabilityConfig` has. */
 const ROW_KEYS = [
@@ -1952,9 +1547,10 @@ const taskTemplateAdapter = {
 			note: `template "${draft.identity}" ${before === void 0 ? "is added" : `moves from @${before.version}`} to @${entry.version}; only new child contracts use it`
 		};
 	},
-	assertConsumed({ plan, candidateReceipt }) {
+	assertConsumed({ plan, identity, candidateReceipt }) {
 		return proveTemplateConsumed({
 			plan,
+			identity,
 			receipt: candidateReceipt,
 			parentCriteria: plan.samples.flatMap((sample) => sample.criteria.map((criterion) => criterion.criterionId)),
 			where: `sample of draft "${plan.draftId}"`
@@ -1980,6 +1576,427 @@ function adapterFor(kind) {
 	const adapter = ADAPTERS[kind];
 	if (adapter === void 0) throw new Error(`evolution: no candidate adapter for asset kind ${JSON.stringify(kind)}`);
 	return adapter;
+}
+
+//#endregion
+//#region src/pipeline/plan.ts
+/** SHA-256 over a criterion's protected input identities, in path order — the acceptance input identity of one criterion. */
+function protectedInputsDigest(inputs) {
+	return sha256Hex(inputs.map((input) => `${input.path}\0${input.sha256}`).sort().join("\n"));
+}
+/** One criterion's frozen judge identity, read from the criterion's verifier ref and the live vocabulary. */
+function frozenCriterionOf(criterion, where, vocabulary) {
+	const inputs = criterion.protectedInputs ?? [];
+	for (const input of inputs) if (typeof input?.path !== "string" || input.path.length === 0 || !isHex64(input?.sha256)) throw new Error(`the sample's criterion "${criterion.criterionId}" carries a protected input that was never fixed to { path, sha256 } — an acceptance input nobody fixed is not a frozen input`);
+	const ref = criterion.verifierRef;
+	if (ref === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins no verifierRef — the judge a verdict belongs to is fixed before the first run, so a criterion that lets the registry choose by mode cannot be frozen; pin the registered, versioned verifier that decides it`);
+	if (vocabulary === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}" but this deployment cannot list its verifier registry (verifierIds()/verifierVersions() are unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody can name is refused before it runs`);
+	if (!vocabulary.ids.includes(ref)) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry does not hold (registered: ${vocabulary.ids.length === 0 ? "none" : vocabulary.ids.join(", ")}) — the criterion would be judged inconclusive by a judge that does not exist; name a registered verifier before freezing the experiment`);
+	const declared = vocabulary.versions[ref];
+	if (declared === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry holds but declares no version for — a verdict belongs to the instance that judged it, so a judge nobody can recall by version is refused before the experiment runs`);
+	return {
+		criterionId: criterion.criterionId,
+		verificationMode: criterion.verificationMode,
+		...criterion.command === void 0 ? {} : { command: criterion.command },
+		protectedInputsDigest: protectedInputsDigest(inputs),
+		verifierRef: ref,
+		verifierVersion: declared,
+		verifierAnchor: `registered verifier "${ref}" declares version "${declared}"`
+	};
+}
+/** One side's provider reading: the rows it resolves, the registry revision and every provider it loads. */
+function providerIdentityOf(input) {
+	const refused = refusedProviderLines(input.precheck);
+	if (refused.length > 0) throw new Error(`${input.where} resolves to providers the deployment cannot use:\n- ${refused.join("\n- ")}`);
+	const skills = input.precheck.capabilities.flatMap((row) => row.skills).filter((skill) => skill.valid).filter((skill, index, all) => all.findIndex((entry) => entry.name === skill.name) === index).map((skill) => {
+		const role = skill.role;
+		if (role !== "execution-provider" && role !== "knowledge" && role !== "guidance") throw new Error(`${input.where} resolved skill "${skill.name}" to an unknown role "${String(role)}"`);
+		if (typeof skill.contentDigest !== "string" || skill.contentDigest.length === 0) throw new Error(`${input.where} resolved skill "${skill.name}" without a content digest`);
+		return {
+			name: skill.name,
+			role,
+			contractDigest: skill.contractDigest ?? null,
+			contentDigest: skill.contentDigest
+		};
+	}).sort((left, right) => left.name < right.name ? -1 : 1);
+	const presets = new Set(input.rows.flatMap((row) => input.table[row]?.preset === void 0 ? [] : [input.table[row].preset]));
+	if (presets.size > 1) throw new Error(`${input.where}'s rows declare conflicting presets (${[...presets].sort().join(", ")}); one worker requires one preset`);
+	const mcpServers = [...new Set(input.rows.flatMap((row) => input.table[row]?.mcpServers ?? []))].sort().map((serverName) => {
+		const template = input.mcpRegistry[serverName];
+		if (template === void 0) throw new Error(`${input.where} grants MCP server "${serverName}", which this deployment defines no template for`);
+		return {
+			serverName,
+			templateDigest: digestOf(template)
+		};
+	});
+	return {
+		capabilities: [...input.rows],
+		registryRevision: input.precheck.revision,
+		mcpServers,
+		preset: presets.size === 0 ? null : [...presets][0],
+		skills
+	};
+}
+/** The one side freeze: the identity a side must bind, read from the runtime's own pre-check. */
+async function freezeSide(input) {
+	const rows = [...new Set(input.required)].sort();
+	const missing = rows.filter((row) => input.table[row] === void 0);
+	if (missing.length > 0 && input.allowRefusal !== true) throw new Error(`${input.where} requires ${missing.length > 1 ? "capabilities" : "capability"} ${missing.map((row) => JSON.stringify(row)).join(", ")}, which the side's table does not hold — the runtime would refuse a run under it`);
+	const precheck = input.precheck !== void 0 ? input.precheck : input.side === "baseline" ? await input.sources.runtime.capabilityProviderReport(input.sources.caller, rows) : await input.sources.runtime.precheckCapabilityTable({
+		capabilities: rows,
+		table: input.table,
+		extraRoots: [input.revision.skillRoot],
+		mcpRegistry: input.mcpRegistry
+	});
+	return {
+		side: input.side,
+		revision: input.revision.ref,
+		...providerIdentityOf({
+			precheck: input.allowRefusal === true ? {
+				...precheck,
+				capabilities: precheck.capabilities.map((row) => ({
+					...row,
+					refusals: []
+				}))
+			} : precheck,
+			table: input.table,
+			mcpRegistry: input.mcpRegistry,
+			rows,
+			where: input.where
+		}),
+		model: input.model,
+		acceptance: [...input.acceptance]
+	};
+}
+/** The criteria a sample's own task carries, as the acceptance both sides are judged by. */
+function acceptanceOf(task, where) {
+	if (task.acceptanceCriteria.length === 0) throw new Error(`${where} carries no acceptance criteria; there is nothing for the two sides to be judged by`);
+	return task.acceptanceCriteria;
+}
+function requireTerminal(task, where) {
+	if (task.status !== "verified" && task.status !== "failed") throw new Error(`${where} is ${task.status}; only a terminal (verified or failed) sample can be evaluated`);
+	return task.status;
+}
+function assertSampleRole(role, taskId, review) {
+	const required = role === "observed-failure" ? "failed" : "verified";
+	if (review === void 0) throw new Error(`sample "${taskId}" has no review record on its latest run; there is no case to reproduce`);
+	if (review.outcome !== required) throw new Error(`sample "${taskId}" is an ${role} but its latest review record is "${review.outcome}", not "${required}"`);
+}
+/**
+* Freeze one evaluation plan. Both sides are read from frozen revision
+* directories, both go through the same `freezeSide`, and the sample's own
+* acceptance is mirrored into each side so a run cannot be judged by another
+* criterion set.
+*/
+async function buildEvaluationPlan(sources, input) {
+	const draft = input.draft;
+	const baseline = await sources.runtime.activeRevision(sources.caller);
+	if (baseline.ref.revisionId !== draft.baseRevision.revisionId) throw new Error(`evolution: draft "${draft.draftId}" was written against revision "${draft.baseRevision.revisionId}", but the library's active revision is "${baseline.ref.revisionId}" — a candidate is evaluated against the revision it was written against`);
+	if (baseline.ref.digest !== draft.baseRevision.digest) throw new Error(`evolution: draft "${draft.draftId}" freezes baseline digest ${draft.baseRevision.digest}, but revision "${baseline.ref.revisionId}" reads ${baseline.ref.digest}`);
+	const candidate = await sources.runtime.revision(sources.caller, draft.candidateRevision.revisionId);
+	if (candidate.ref.digest !== draft.candidateRevision.digest) throw new Error(`evolution: draft "${draft.draftId}" freezes candidate digest ${draft.candidateRevision.digest}, but revision "${candidate.ref.revisionId}" reads ${candidate.ref.digest} — the candidate moved since it was drafted`);
+	const storeId = await sources.runtime.storeOfSession(sources.caller);
+	const snapshot = await sources.tasks.openStore(storeId);
+	const vocabulary = await sources.verifierVocabulary();
+	const mcpRegistry = sources.runtime.mcpServers();
+	const activeTable = await sources.runtime.capabilitiesForSession(sources.caller);
+	const candidateTable = {
+		...activeTable,
+		...candidate.capabilityRows
+	};
+	const samples = [];
+	for (const sample of input.samples) {
+		const task = snapshot.tasks.find((item) => item.taskId === sample.taskId);
+		if (task === void 0) throw new Error(`sample "${sample.taskId}" is absent from this graph's task store`);
+		const where = `sample "${sample.taskId}"`;
+		requireTerminal(task, where);
+		const review = snapshot.reviews.filter((item) => item.taskId === task.taskId).at(-1);
+		assertSampleRole(sample.role, sample.taskId, review);
+		const criteria = acceptanceOf(task, where);
+		samples.push({
+			taskId: sample.taskId,
+			role: sample.role,
+			contractDigest: digestOf({
+				objective: task.objective,
+				acceptanceCriteria: task.acceptanceCriteria,
+				requiredCapabilities: task.requestedCapabilities
+			}),
+			criteria: criteria.map((criterion) => frozenCriterionOf(criterion, where, vocabulary)),
+			observed: {
+				outcome: requireTerminal(task, where),
+				...review?.runId === void 0 ? {} : { runId: review.runId }
+			}
+		});
+	}
+	const frozenInput = await freezeInput(input.input);
+	const required = [...new Set(snapshot.tasks.filter((task) => samples.some((sample) => sample.taskId === task.taskId)).flatMap((task) => task.requestedCapabilities))].sort();
+	const acceptance = samples.flatMap((sample) => sample.criteria);
+	const baselinePrecheck = await sources.runtime.capabilityProviderReport(sources.caller, required);
+	const missingRows = required.filter((row) => activeTable[row] === void 0);
+	const refused = refusedProviderLines(baselinePrecheck);
+	const admission = missingRows.length > 0 ? {
+		source: "capability-gap",
+		required,
+		missing: missingRows,
+		reason: `the active revision's capability table does not hold ${missingRows.map((row) => JSON.stringify(row)).join(", ")}, so the production configuration cannot admit this sample (the runtime's own resolution reports a closure gap)`
+	} : refused.length > 0 ? {
+		source: "provider-refused",
+		required,
+		missing: [],
+		reason: `the production configuration resolves providers this deployment cannot use:\n- ${refused.join("\n- ")}`
+	} : void 0;
+	const sides = {
+		baseline: await freezeSide({
+			side: "baseline",
+			revision: baseline,
+			required,
+			acceptance,
+			where: "the baseline side",
+			model: input.model,
+			sources,
+			mcpRegistry,
+			table: activeTable,
+			precheck: baselinePrecheck,
+			...admission === void 0 ? {} : { allowRefusal: true }
+		}),
+		candidate: await freezeSide({
+			side: "candidate",
+			revision: candidate,
+			required: [...new Set([...required, ...adapterFor(draft.kind).sideDelta({
+				draft,
+				baseline,
+				candidate,
+				required
+			}).capabilities])].sort(),
+			acceptance,
+			where: "the candidate side",
+			model: input.model,
+			sources,
+			mcpRegistry,
+			table: candidateTable
+		})
+	};
+	const plannedSamples = samples.map((sample) => admission === void 0 ? sample : {
+		...sample,
+		admission
+	});
+	return {
+		planId: digestOf({
+			draftId: draft.draftId,
+			candidate: candidate.ref,
+			input: frozenInput.digest,
+			samples: samples.map((sample) => sample.taskId)
+		}).slice(0, 16),
+		draftId: draft.draftId,
+		kind: draft.kind,
+		libraryId: input.libraryId,
+		sides,
+		samples: plannedSamples,
+		input: frozenInput,
+		rules: input.rules,
+		budget: { ...input.budget },
+		repetition: input.repetition,
+		...input.evaluation === void 0 ? {} : { evaluation: input.evaluation },
+		overlay: {
+			baseline: "none — the baseline runs under the active revision",
+			candidate: `trialCandidateRef: "${candidate.ref.revisionId}" — the candidate revision, loaded through the runtime's own binding`
+		},
+		...input.strategy === void 0 ? {} : { strategy: input.strategy },
+		schemaVersion: "evaluation-plan@1"
+	};
+}
+
+//#endregion
+//#region src/pipeline/run.ts
+/** The key one side of one sample is addressed by, inside one evaluation. */
+function sideKey(sampleTaskId, side) {
+	return `${sampleTaskId}\u0000${side}`;
+}
+/** A refused side's own receipt reference: nothing ran, and the reference says exactly that. */
+function refusedReceipt(input) {
+	return {
+		receiptId: `refused:${input.sampleTaskId}:${input.side}`,
+		digest: digestOf({
+			refused: input.sampleTaskId,
+			side: input.side,
+			admission: input.admission
+		}),
+		criteria: [],
+		evidenceRefs: [],
+		cost: {
+			status: "unknown",
+			reason: "no run exists for a side the runtime refused at admission"
+		},
+		boundRevision: input.revisionId,
+		boundModel: input.model,
+		workspace: input.workspace,
+		workspaceDigest: input.workspaceDigest,
+		complete: false,
+		incompleteness: [`admission-refusal: ${input.admission.reason}`]
+	};
+}
+/** The terminal run one replay outcome names, read back from the store. */
+function terminalRunOf(snapshot, outcome) {
+	const task = snapshot.tasks.find((item) => item.taskId === outcome.taskId);
+	if (task === void 0) throw new Error(`the replay created task "${outcome.taskId}", which the store does not hold`);
+	const run = snapshot.runs.filter((item) => item.taskId === task.taskId).at(-1);
+	if (run === void 0) throw new Error(`task "${task.taskId}" holds no run after its replay`);
+	return {
+		runId: run.runId,
+		taskId: task.taskId
+	};
+}
+function outcomeOf(status) {
+	if (status === "verified") return "verified";
+	if (status === "failed") return "failed";
+	if (status === "cancelled") return "cancelled";
+	return "interrupted";
+}
+/** One side of one sample, run to its terminal state and normalized into the one trial schema. */
+async function runSide(input) {
+	const { plan, sample, side } = input;
+	const sidePlan = plan.sides[side];
+	const workspace = await materializeSideWorkspace({
+		planInput: plan.input,
+		root: `${input.sources.root}/workspaces/${plan.draftId}/${plan.planId}`,
+		sampleTaskId: sample.taskId,
+		side
+	});
+	const model = sidePlan.model;
+	if (side === "baseline" && sample.admission !== void 0) return { trial: {
+		sampleTaskId: sample.taskId,
+		side,
+		role: sample.role,
+		outcome: "not-admitted",
+		receipt: refusedReceipt({
+			sampleTaskId: sample.taskId,
+			side,
+			workspace: workspace.path,
+			workspaceDigest: workspace.digest,
+			model: `${model.provider}/${model.model}`,
+			revisionId: sidePlan.revision.revisionId,
+			admission: sample.admission
+		}),
+		admission: sample.admission,
+		reason: sample.admission.reason,
+		actor: input.sources.caller,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	} };
+	const options = {
+		lineage: `evolution-eval:${plan.draftId}:${sample.taskId}:${side}`,
+		workspace: {
+			path: workspace.path,
+			...plan.input.rebaseFrom === void 0 ? {} : { rebaseFrom: plan.input.rebaseFrom }
+		},
+		agentOptions: agentOptionsOf(model),
+		...side === "candidate" ? { trialCandidateRef: sidePlan.revision.revisionId } : {},
+		...input.signal === void 0 ? {} : { signal: input.signal }
+	};
+	if (side === "candidate") {
+		const addedRows = plan.sides.candidate.capabilities.filter((row) => !plan.sides.baseline.capabilities.includes(row));
+		const champion = (await input.sources.tasks.openStore(input.storeId)).tasks.find((item) => item.taskId === sample.taskId);
+		if (champion === void 0) throw new Error(`sample "${sample.taskId}" is absent from this graph's task store`);
+		const candidateRevision = await input.sources.runtime.revision(input.sources.caller, sidePlan.revision.revisionId);
+		options.contract = {
+			objective: champion.objective,
+			acceptanceCriteria: champion.acceptanceCriteria,
+			requiredCapabilities: [...new Set([...champion.requestedCapabilities, ...addedRows])].sort()
+		};
+		options.overlay = { capabilityOverrides: { ...candidateRevision.capabilityRows } };
+	}
+	const outcome = await input.sources.runtime.replayTask(input.storeId, sample.taskId, options, input.sources.caller);
+	if (outcome.workspace !== void 0 && outcome.workspace !== workspace.path) throw new Error(`the replay of "${sample.taskId}" reported workspace "${outcome.workspace}" but was given "${workspace.path}"; a side's frozen input and the directory its run went through must be the same directory`);
+	const snapshot = await input.sources.tasks.openStore(input.storeId);
+	const { runId, taskId } = terminalRunOf(snapshot, outcome);
+	const run = snapshot.runs.find((item) => item.runId === runId);
+	let receipt = await input.sources.tasks.receiptFor(input.storeId, runId);
+	if (receipt === void 0 && input.sources.tasks.sealReceipt !== void 0) {
+		await input.sources.tasks.sealReceipt(input.storeId, taskId, runId);
+		receipt = await input.sources.tasks.receiptFor(input.storeId, runId);
+	}
+	const at = (/* @__PURE__ */ new Date()).toISOString();
+	if (receipt === void 0) throw new Error(`evolution: run "${runId}" of sample "${sample.taskId}" (${side} side) settled without a sealed execution receipt, so the side's own facts cannot be read — a side is measured by the runtime's receipt, never by a second reading of its logs`);
+	return {
+		trial: {
+			sampleTaskId: sample.taskId,
+			side,
+			role: sample.role,
+			outcome: TERMINAL_RUN_STATUSES.has(run.status) ? outcomeOf(run.status) : "interrupted",
+			receipt: receiptRefOf({
+				snapshot,
+				receipt,
+				workspace: workspace.path,
+				workspaceDigest: workspace.digest,
+				model,
+				revisionId: sidePlan.revision.revisionId
+			}),
+			...TERMINAL_RUN_STATUSES.has(run.status) ? {} : { reason: `run "${runId}" had not reached a terminal state when the side was read` },
+			actor: input.sources.caller,
+			at
+		},
+		receipt
+	};
+}
+/**
+* Run every sample side of one frozen plan, bounded by the runtime's own worker
+* limit. A cancelled side stops the further sides of the plan; every side that
+* settled stays recorded.
+*/
+async function runEvaluation(sources, input) {
+	const plan = input.plan;
+	const storeId = await sources.runtime.storeOfSession(sources.caller);
+	const pending = plan.samples.flatMap((sample) => ["baseline", "candidate"].map((side) => ({
+		sample,
+		side
+	})));
+	const limit = input.maxParallel ?? sources.runtime.maxActiveWorkers();
+	if (!Number.isInteger(limit) || limit < 1) throw new Error("evolution: maxParallel must be a positive integer");
+	const trials = [];
+	const receipts = /* @__PURE__ */ new Map();
+	let next = 0;
+	let stopped = false;
+	let failure;
+	const worker = async () => {
+		while (!stopped && next < pending.length) {
+			const { sample, side } = pending[next++];
+			if (input.signal?.aborted) return;
+			const { trial, receipt } = await runSide({
+				sources,
+				plan,
+				sample,
+				side,
+				storeId,
+				...input.signal === void 0 ? {} : { signal: input.signal }
+			});
+			trials.push(trial);
+			if (receipt !== void 0) receipts.set(sideKey(sample.taskId, side), receipt);
+			if (trial.outcome === "cancelled") stopped = true;
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(limit, pending.length) }, async () => {
+		try {
+			await worker();
+		} catch (error) {
+			stopped = true;
+			failure ??= error;
+		}
+	}));
+	if (failure !== void 0) throw failure instanceof Error ? failure : new Error(String(failure));
+	trials.sort((left, right) => left.sampleTaskId === right.sampleTaskId ? left.side < right.side ? -1 : 1 : left.sampleTaskId < right.sampleTaskId ? -1 : 1);
+	return {
+		storeId,
+		trials,
+		receipts
+	};
+}
+/** The agent options one plan's model travels as, as the runtime's own shape. */
+function agentOptionsForModel(provider, model) {
+	const selection = modelSelectionOf({
+		provider,
+		model
+	});
+	if (selection === void 0) throw new Error("evolution: a plan side carries no usable model selection");
+	return agentOptionsOf(selection);
 }
 
 //#endregion
@@ -2891,6 +2908,7 @@ async function validateEvaluation(input) {
 	const storeId = await sources.runtime.storeOfSession(sources.caller);
 	const snapshot = await sources.tasks.openStore(storeId);
 	const adapter = adapterFor(plan.kind);
+	const identity = draftView(sources.ledger, report.draftId).draft.identity;
 	const guards = [];
 	if (mode === "pre-publish") {
 		const active = await sources.runtime.activeRevision(sources.caller);
@@ -2924,6 +2942,7 @@ async function validateEvaluation(input) {
 		if (receipts.has("candidate")) {
 			const proof = adapter.assertConsumed({
 				plan,
+				identity,
 				comparison,
 				candidateReceipt: receipts.get("candidate"),
 				...receipts.has("baseline") ? { baselineReceipt: receipts.get("baseline") } : {}

@@ -62,15 +62,15 @@ curl -b /tmp/dsh.cookies -H 'content-type: application/json' \
 
 ## 5. 平台驱动的迭代（RSI loop）
 
-只有带 `rsi` 设置的图才有迭代；驱动在平台侧（`agent-singularity` 的 RSI loop driver），不需要开关或手动调用：
+只有带 `rsi` 设置的图才有迭代；驱动在平台侧（`agent-singularity` 的统一 coordination driver），不需要开关或手动调用：
 
 - **每一轮 = 根任务的一次终态 run**：verified 或 failed 都算一轮，图上的 `rsi.iterationRounds` 决定跑几轮。
-- **终态即受监督**：驱动为该轮记录一条 diagnosis 并 spawn 一个 supervisor（读工具 + `evolution_*`，没有 `task_recover`），由它分析并发布方法变更。
-- **下一轮由驱动打开**：verified 轮之后用 `mode:'improve'` 打开下一轮，failed 轮之后用 `mode:'recovery'`；`task_recover` 工具已不存在，round 调度只属于驱动。
-- **supervisor 明确说停就停**：supervisor 以 `{"outcome":"closed"/"blocked"}` 结束（合约级缺陷不可重试）时，驱动把该 loop 标为 `failed` 并停止，不再开新一轮。
+- **终态即受监督**：驱动为该轮写入一条 assignment 并 spawn 一个 supervisor（读工具 + 六个 `method_*` 工具），由它调查、起草候选（`method_draft`）、评估（`method_evaluate`）并决定发布、试用或弃置。
+- **显式完成**：supervisor 以 `supervisor_complete({businessAction, reason, evidenceRefs})` 结案——`continue`（verified 轮用改进后的方法再跑一次）、`recover`（failed 轮修复重试）、`finish`（业务不再继续）；正常结束却没调用完成工具记为协议失败，不再催问，要重来只能显式提升图的 `rsi.epoch`。
+- **下一轮由驱动打开**：driver 等会话收尾落盘后才开下一轮 Run；round 调度只属于驱动。
 - **非 RSI 图没有 supervisor**：没有 `rsi` 的图，失败就是失败，没有自动迭代，也没有自动复盘 reviewer。
 - **每一轮都是根任务下的一次新 run**：Tasks 页签里，带 recovery 记录的 run 行显示 ↻ 徽标——`↻ recovery · round N` 或 `↻ improve · round N`，N 是该 run 在 `task.runIds` 里的 1 基序号。每个 run 有自己的一条 review（逐条判据、退出码、证据），展开 run 行即可核对。
-- **supervisor 拿到上一轮的 review 事实**：上一轮的判据 verdict、metrics 与派生的 passed/total 随交接提供；supervisor 也可以判定 `closed`，结束这一来源的迭代。
+- **supervisor 拿到上一轮的 review 事实**：上一轮的判据 verdict、metrics 与派生的 passed/total 随交接提供；supervisor 可以用 `finish` 结束这一来源的迭代。
 - **ReviewRecord 没有 score 字段**：轮次得分是派生读数——按 `task.runIds` 顺序取每个 run 的终态 review，数 criterion verdict 的 passed/total。
 
 轮次与得分表的三个读取入口（同一份事实，任选）：
@@ -79,18 +79,18 @@ curl -b /tmp/dsh.cookies -H 'content-type: application/json' \
 | --- | --- |
 | Tasks 页签 | 每个 run 的 ↻ 徽标与轮次号；展开看该轮 review 的逐条判据表 |
 | `GET /singularity/task?storeId=sg-t-<rootSessionId>` | 同一个 store 的 tasks/runs/reviews 原始投影，每个 run 一条 review |
-| `$DSH_HOME/review-agents/agents.jsonl` | reviewer/supervisor 的 claim/started/settled 行：每轮谁被启动、协调预算消耗到哪 |
+| `$DSH_HOME/coordination/assignments.jsonl` | 协调的 assignment/completion 行：每轮谁被指派、以什么 businessAction 结案、协调预算消耗到哪 |
 
-**迭代一定会停**：每来源的 recovery/improvement 轮到硬上限即不再开新轮；协调预算（reviewer+supervisor 的启动计数，默认 8，`SINGULARITY_REVIEW_AGENT_BUDGET` 覆盖）用尽后也不再有新协调 agent；supervisor 判定 `closed` 同样终止来源。三者先到先停，每轮通常消耗 2 次（reviewer + supervisor），默认 8 大约够 4 轮；想一次看满 3+2 的上限可把预算调到 16。
+**迭代一定会停**：每来源的 recovery/improvement 轮到硬上限即不再开新轮；协调预算（reviewer+supervisor 的启动计数，默认 8，`SINGULARITY_COORDINATION_BUDGET` 或配置 `supervision.coordinationBudget` 覆盖）用尽后也不再有新协调 agent；supervisor 判定 `finish` 同样终止来源。三者先到先停，每轮通常消耗 2 次（reviewer + supervisor），默认 8 大约够 4 轮；想一次看满 3+2 的上限可把预算调到 16。
 
 ## 6. 观察指南（六个页签）
 
 | 页签 | 看什么 |
 | --- | --- |
 | Canvas | 拓扑：根→子节点的连线、层级深度、节点状态（每个子节点应有自己的目标）。 |
+| View | 统一读模型：访问模式、当前生效的环境版本（active revision）、最近一次评估与派生进度；与工具面读的是同一份事实。 |
+| Methods | 方法库状态：生效版本指针、每个 draft 的状态与判定、正在试用的候选；方法变更只经 draft → 评估 → 发布发生，页签是只读视图。 |
 | Tasks | 任务树与运行：子任务目标、依赖、状态；迭代开始后根任务下持续新增 run，带 `↻ recovery · round N` / `↻ improve · round N` 徽标；展开每个 run 核对那一轮的 review 判据与退出码。 |
-| Proposals | 提案与 HITL：如有节点请求人工确认，会出现在这里；迭代 v2 的正常轮次不需要在这里点任何东西。 |
-| Evolution | 诊断已直接交给 supervisor，迭代不再要求先有 Evolution 候选；页签仍可能为空，本教程不需要操作。 |
 | Recovery | store 屏障/接管状态（reconcile），不是轮次列表；轮次看 Tasks 的 ↻ run。一切顺利时为空。 |
 | Verifier | 验收判据与证据（EvidenceBundle）：每个 run（含每一轮）的判据、命令、退出码、结论都在这里核对；定位某轮失败在哪条 criterion。 |
 
@@ -102,15 +102,15 @@ curl -b /tmp/dsh.cookies -H 'content-type: application/json' \
 2. **UI 建图**：图谱切换器 → New → Name 任意 → Environment 选 `tutorial-kanban (1 components)` → Create。等根节点 setup 完成（组件已 present，直接 ready）；Tasks 页显示"未激活"是正常的。
 3. **粘贴 root prompt**：把 `tutorial/root-prompt.md` 全文以**真人消息**发送（原因见 §4）。根节点 `task_intake` 收下根任务后开始分解。
 4. **盯 Tasks**：第一批子任务出现并运行；根提交后进入验收，然后迭代开始——根任务下持续新增 run 行，读徽标：`↻ recovery · round N`（失败来源重试）或 `↻ improve · round N`（通过来源改进）。点开某轮的 run，复核该轮 review 的判据表（criterion → verdict → exit）与起止时间。
-5. **盯 Proposals**：只有真正的 HITL 请求才需要动作（例如打开生成任务审核或 Evolution 人审）。默认迭代不会在这里产生必须点掉的卡片。
+5. **盯 HITL**：只有真正的 HITL 请求才需要动作（例如生成任务审核或方法发布审批）。默认迭代不会产生必须点掉的卡片。
 6. **盯 Verifier**：按 run 看判据与 logTail；用它读每一轮失败/通过在哪条 criterion、退出码多少。
 7. **（可选）盯 Recovery**：看 store 屏障与 reconcile 状态；轮次本身不在这里。
 8. **旋钮**（在部署配置里给 id 为 `singularity-agent` 的条目加 `config.supervision`；条目按 id 覆盖整段 config，仓库根 `config.yml` 当前还没有这一行）：
-   - `supervision.coordinationBudget`：协调预算次数，默认 8；环境变量 `SINGULARITY_REVIEW_AGENT_BUDGET` 优先于它；
+   - `supervision.coordinationBudget`：协调预算次数，默认 8；环境变量 `SINGULARITY_COORDINATION_BUDGET` 优先于它；
    - 每图轮数由图的 `rsi.iterationRounds` 决定（前端 GraphSwitcher 里可设），不再有 `autoReview` / `maxRecoveryRounds` / `maxImprovementRounds` 这些键；
    - `verifyTimeoutMs: 600000`（task-runtime 行）：本教程的验证是秒级测试，10 分钟绰绰有余，不需要调。
    默认值即上述取值，不改也能跑；改完配置重启部署（部署读取的是 `.dsh/profiles/web/cordis.patch.yml`，由仓库根 `config.yml` 拷贝）；未知键会被 schema 拒绝，以部署实际接受为准。
-9. **终止预期**：迭代在 recovery ≤3、improvement ≤2、协调预算用尽、或 supervisor `closed` 中先到者处停止，一定会停。停止后 Tasks 页不再新增 ↻ run；若最后一轮仍是 failed，那是本轮的最终结果，如实记录 review 与 evidence，不要等它"再试一次"。
+9. **终止预期**：迭代在 recovery ≤3、improvement ≤2、协调预算用尽、或 supervisor 以 `finish` 结案（协议失败同样停轮）中先到者处停止，一定会停。停止后 Tasks 页不再新增 ↻ run；若最后一轮仍是 failed，那是本轮的最终结果，如实记录 review 与 evidence，不要等它"再试一次"。
 10. **人工复核**：按 §9 直接在环境里跑 `pnpm test` / `pnpm build`，不采信智能体转述。
 
 ## 8. 预期形态
@@ -145,8 +145,8 @@ pnpm build    # 期望退出码 0
 - **重复部署**：默认再跑会建 `project2`；想复用原有环境就带 `--id project1`（幂等补齐）。
 - **端口**：本部署 web 在 `127.0.0.1:3080`，以启动日志为准；换端口时 API 示例同步改。
 - **超时**：本教程的验证是秒级测试，默认 `verifyTimeoutMs: 600000`（10 分钟）远远够用，不需要为教程调大。
-- **迭代只跑了一两轮就停**：先看图上的 `rsi.iterationRounds`（轮数上限）与协调预算。预算默认 8 次，每轮通常 supervisor 一次；用尽后不再开新轮，`$DSH_HOME/review-agents/agents.jsonl` 的 settled 行能看到消耗。要跑更多轮就调大 `SINGULARITY_REVIEW_AGENT_BUDGET`。
-- **迭代没触发**：只有带 `rsi` 设置的图才迭代；在 GraphSwitcher 里确认该图的 RSI 设置已写入，且改动后已重启部署。supervisor 以 `{"outcome":"blocked"}` 结束也会让 loop 停下，`rsiProgress.note` 里有原因。
+- **迭代只跑了一两轮就停**：先看图上的 `rsi.iterationRounds`（轮数上限）与协调预算。预算默认 8 次，每轮通常 supervisor 一次；用尽后不再开新轮，`$DSH_HOME/coordination/assignments.jsonl` 的 assignment/completion 行能看到消耗。要跑更多轮就调大 `SINGULARITY_COORDINATION_BUDGET`（或配置 `supervision.coordinationBudget`）。
+- **迭代没触发**：只有带 `rsi` 设置的图才迭代；在 GraphSwitcher 里确认该图的 RSI 设置已写入，且改动后已重启部署。supervisor 以 `businessAction: 'finish'` 结案、或一轮正常结束却没有调用完成工具（记为协议失败）也会让 loop 停下；原因在 View 页签的派生进度与 completion 记录里。
 - **run 行没有 ↻ 徽标**：徽标来自该 run 的 `recovery` 记录（`TaskRun.recovery`）；没有该记录的普通 run 不显示，历史 run 按原样读取。
 - **轮次得分在哪**：`ReviewRecord` 没有 score 字段；轮次得分是派生值，按 `task.runIds` 顺序统计该轮 review 的 criterion verdict（passed/total）与 outcome、metrics。
 - **别改测试**：测试是规格；删测试、跳过或用 mock 绕过都会让验收失去意义。

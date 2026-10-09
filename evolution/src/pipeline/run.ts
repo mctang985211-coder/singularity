@@ -125,6 +125,26 @@ async function runSide(input: {
     ...(side === 'candidate' ? { trialCandidateRef: sidePlan.revision.revisionId } : {}),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }
+  if (side === 'candidate') {
+    // The candidate side runs under its own revision's table in every case: the
+    // replayed contract requests the rows the candidate adds over the baseline
+    // and the overlay's overrides resolve them against the candidate revision's
+    // own rows, so the run's receipt shows the asset bound and loaded rather
+    // than the plan merely claiming it. A capability draft whose row the
+    // contract already required adds no *new* row — the overlay is still what
+    // lets the side resolve it from the candidate revision at all.
+    const addedRows = plan.sides.candidate.capabilities.filter(row => !plan.sides.baseline.capabilities.includes(row))
+    const championSnapshot = await input.sources.tasks.openStore(input.storeId)
+    const champion = championSnapshot.tasks.find(item => item.taskId === sample.taskId)
+    if (champion === undefined) throw new Error(`sample "${sample.taskId}" is absent from this graph's task store`)
+    const candidateRevision = await input.sources.runtime.revision(input.sources.caller, sidePlan.revision.revisionId)
+    options.contract = {
+      objective: champion.objective,
+      acceptanceCriteria: champion.acceptanceCriteria,
+      requiredCapabilities: [...new Set([...champion.requestedCapabilities, ...addedRows])].sort(),
+    }
+    options.overlay = { capabilityOverrides: { ...candidateRevision.capabilityRows } }
+  }
   const outcome = await input.sources.runtime.replayTask(input.storeId, sample.taskId, options, input.sources.caller)
   if (outcome.workspace !== undefined && outcome.workspace !== workspace.path) {
     throw new Error(

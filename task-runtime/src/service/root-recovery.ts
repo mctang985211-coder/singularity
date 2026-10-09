@@ -18,6 +18,7 @@ import type {
 } from '@dangosys/dsh-singularity-task'
 import { canonicalize, rootTaskStoreId, runMemberSlots } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, capabilitySnapshot, resolvePreset } from '../capability.ts'
+import type { EnvironmentRevision } from '../environment/revision.ts'
 import { providerRefusals } from '../provider-precheck.ts'
 import { checkRunStart, hasRootLimits, resolveRootBudget } from '../root-budget.ts'
 import { bindRunProviders } from '../run-binding.ts'
@@ -225,6 +226,29 @@ export async function recoverRootTaskOnce(
   }
   const unbound: RunMemberReuseRefusal[] = derived?.unbound ?? []
   const rootSessionId = sourceRun?.sessionId ?? self.recoverySessionFor(snapshot, storeId)
+  /**
+   * The candidate an explicit trial binds, resolved before the pre-check: the
+   * provider verdicts this attempt is bound from must be judged against the
+   * candidate's own bytes, or the binding's content identity would be the active
+   * revision's while the record names the candidate.
+   */
+  let trialRevision: EnvironmentRevision | undefined
+  if (request.trialCandidateRef !== undefined) {
+    const library = await svcEnvironment.environmentLibraryForSession(self, rootSessionId)
+    if (library.revision === undefined) {
+      throw new Error(
+        `task-runtime: library "${library.id}" holds no active environment revision, so there is nothing to trial ` +
+          `"${request.trialCandidateRef}" against; nothing was written`,
+      )
+    }
+    if (library.revision.manifest.revisionId === request.trialCandidateRef) {
+      throw new Error(
+        `task-runtime: trial candidate "${request.trialCandidateRef}" is the library's effective revision; ` +
+          'a trial binds an unpublished candidate, and nothing was written',
+      )
+    }
+    trialRevision = await svcEnvironment.revisionForManifest(self, library.id, request.trialCandidateRef)
+  }
   const manifest = resolveCapabilities(source.requestedCapabilities, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers)
   if (manifest.missing.length > 0) {
     throw new Error(
@@ -236,7 +260,10 @@ export async function recoverRootTaskOnce(
   const envPath = await self.envPathForSession(rootSessionId)
   const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
     ...(envPath === undefined ? {} : { cwd: envPath }),
-    extraRoots: (await self.skillViewForSession(rootSessionId)).extraRoots,
+    extraRoots: (await self.skillViewForSession(
+      rootSessionId,
+      trialRevision === undefined ? [] : [trialRevision.skillRoot],
+    )).extraRoots,
   }, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers ?? {}, rootSessionId)
   const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities))
   if (refusals.length > 0) {
@@ -270,6 +297,7 @@ export async function recoverRootTaskOnce(
     manifest,
     precheck,
     rootSessionId,
+    ...(trialRevision === undefined ? {} : { trialRevision }),
     actor: caller.sessionId,
     ...(caller.signal === undefined ? {} : { signal: caller.signal }),
   })
@@ -430,6 +458,35 @@ export async function startRecoveryAttempt(
    * so a resume rebuilds the same composition rather than the deployment's
    */
   const preset = resolvePreset(manifest, self.config.defaultPreset)
+  let binding: RunProviderBinding | undefined
+  /**
+   * A recovery attempt keeps the source run's pinned environment version: an
+   * attempt re-earns the same criteria under the same content. An attempt whose
+   * source run predates revisions (or that has none) reads the active revision.
+   * An explicit trial — this request's, or the one the source run itself was
+   * opened under — overlays the candidate's bytes on that admission without
+   * moving the pointer: the Run pins the admitted revision and names the
+   * candidate it trials, exactly as a replay's trial side does.
+   */
+  const pinned = input.sourceRun?.environmentRevisionId
+  const libraryId = await svcEnvironment.rootSessionIdFor(self, rootSessionId)
+  const admitted = pinned === undefined
+    ? await svcEnvironment.activeRevisionOrUndefined(self, rootSessionId)
+    : await svcEnvironment.revisionForManifest(self, libraryId, pinned)
+  const trialRef = request.trialCandidateRef ?? input.sourceRun?.trialCandidateRef
+  const trial =
+    trialRef === undefined
+      ? undefined
+      : input.trialRevision !== undefined && input.trialRevision.manifest.revisionId === trialRef
+        ? input.trialRevision
+        : await svcEnvironment.revisionForManifest(self, libraryId, trialRef)
+  if (trial !== undefined && admitted !== undefined && trial.manifest.revisionId === admitted.manifest.revisionId) {
+    throw new Error(
+      `task-runtime: trial candidate "${trialRef}" is the revision this attempt is admitted against; ` +
+        'a trial binds an unpublished candidate, and nothing is written',
+    )
+  }
+  const revision = trial ?? admitted
   // The round's bubble, when the caller materialized one, is the worker's own
   // checkout: it is claimed and resumed exactly like the session's own.
   const workspacePath = request.workspacePath === undefined
@@ -440,14 +497,6 @@ export async function startRecoveryAttempt(
     await self.workspaces.claim(workspacePath, { kind: 'run', storeId, taskId: source.taskId, runId, since: now() })
     claimed = self.workspaces.ownerOf(workspacePath)
   }
-  let binding: RunProviderBinding | undefined
-  /**
-   * A recovery attempt keeps the source run's frozen environment version: an
-   * attempt re-earns the same criteria under the same content. An attempt with
-   * no source run (a first attempt the runtime opened) reads the active revision.
-   */
-  const inherited = input.sourceRun === undefined ? undefined : await self.environmentRevisionForRun(input.sourceRun)
-  const revision = inherited ?? (await svcEnvironment.activeRevisionOrUndefined(self, rootSessionId))
   try {
     binding = await bindRunProviders({
       mcpRegistry: self.config.mcpServers,
@@ -458,15 +507,16 @@ export async function startRecoveryAttempt(
       table: await self.capabilitiesForSession(rootSessionId),
       root: self.config.runBindingRoot,
       ...(revision === undefined ? {} : { revision }),
+      ...(trial === undefined ? {} : { trialCandidateRef: trial.manifest.revisionId }),
     })
     const run: TaskRun = {
       runId,
       taskId: source.taskId,
       sessionId,
       capabilitySnapshot: capabilitySnapshot(manifest),
-      taskTemplatesRoot: input.sourceRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(rootSessionId),
-      ...(revision === undefined ? {} : { environmentRevisionId: revision.manifest.revisionId }),
-      ...(input.sourceRun?.trialCandidateRef === undefined ? {} : { trialCandidateRef: input.sourceRun.trialCandidateRef }),
+      taskTemplatesRoot: trial?.taskTemplatesRoot ?? input.sourceRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(rootSessionId),
+      ...(admitted === undefined ? {} : { environmentRevisionId: admitted.manifest.revisionId }),
+      ...(trial === undefined ? {} : { trialCandidateRef: trial.manifest.revisionId }),
       ...(preset === undefined ? {} : { agentPreset: preset }),
       ...(binding === undefined ? {} : { providerBinding: binding }),
       // Born active, exactly as a first attempt is (§1.1): the new attempt

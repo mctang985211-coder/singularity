@@ -9,6 +9,7 @@ import type { AcceptanceCriterion, ReviewRecord, TaskInstance } from '@dangosys/
 import { sha256Hex } from '@dangosys/dsh-singularity-task'
 import type { CapabilityConfig, McpServerTemplate } from '@dangosys/dsh-singularity-task-runtime'
 import { digestOf, isHex64 } from '../shared.ts'
+import { adapterFor } from '../draft/adapters.ts'
 import { freezeInput } from '../evidence/snapshot.ts'
 import type { InputSnapshot } from '../evidence/snapshot.ts'
 import { refusedProviderLines } from './sources.ts'
@@ -335,7 +336,10 @@ export async function buildEvaluationPlan(sources: EvaluationSources, input: Pla
   const candidateSide = await freezeSide({
     side: 'candidate',
     revision: candidate,
-    required,
+    // The candidate's own asset enters its side through the rows the adapter
+    // names: a first skill comes in through its synthesized `method:` row, a
+    // capability candidate through the row it installs.
+    required: [...new Set([...required, ...adapterFor(draft.kind).sideDelta({ draft, baseline, candidate, required }).capabilities])].sort(),
     acceptance,
     where: 'the candidate side',
     model: input.model,

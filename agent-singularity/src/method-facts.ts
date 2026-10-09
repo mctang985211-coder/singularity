@@ -17,8 +17,8 @@ import type { GraphEvaluationWire, GraphRevisionWire } from '@dangosys/dsh-singu
 import { evaluationSourcesOf, methodList, openMethodLedger } from '@dangosys/dsh-singularity-evolution'
 import type { DraftView } from '@dangosys/dsh-singularity-evolution'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { listPointerCompletions, optionalService, readPointer } from '@dangosys/dsh-singularity-task-runtime'
-import type { EnvironmentLibrary, EnvironmentPointerCompletion, LibraryRoots } from '@dangosys/dsh-singularity-task-runtime'
+import { hasLegacyLayout, listPointerCompletions, optionalService, readPointer } from '@dangosys/dsh-singularity-task-runtime'
+import type { EnvironmentPointerCompletion, LibraryRoots } from '@dangosys/dsh-singularity-task-runtime'
 
 /** The graph registry this reader resolves a store key back to its root session through. */
 interface GraphRegistry {
@@ -33,14 +33,14 @@ interface GraphRecordLike {
 
 /** The environment plane entry this reader resolves a caller's library through. */
 interface MethodEnvironment {
-  libraryForSession(sessionId: string): Promise<EnvironmentLibrary>
+  libraryRootsForSession(sessionId: string): Promise<LibraryRoots>
 }
 
 /** One library the reader resolved, with the graph's own decision mode and protocol. */
 interface Resolved {
   readonly caller: string
   readonly library: LibraryRoots
-  readonly protocol: EnvironmentLibrary['protocol']
+  readonly protocol: 'environment-revision' | 'legacy' | 'uninitialized'
   readonly humanReview: boolean
 }
 
@@ -57,11 +57,11 @@ async function resolve(ctx: Context, graphKey: string): Promise<Resolved | undef
   const graph = (await graphs.list()).find(entry => rootTaskStoreId(String(entry.rootSessionId)) === graphKey)
   if (graph === undefined) return undefined
   const caller = String(graph.rootSessionId)
-  const library = await runtime.libraryForSession(caller)
+  const library = await runtime.libraryRootsForSession(caller)
   return {
     caller,
-    library: { id: library.id, root: library.root },
-    protocol: library.protocol,
+    library,
+    protocol: (await hasLegacyLayout(library)) ? 'legacy' : 'environment-revision',
     // An unmanned graph resolves its own approvals as the platform policy's; the
     // console shows that source rather than attributing it to a person.
     humanReview: graph.rsi?.humanReview !== false,

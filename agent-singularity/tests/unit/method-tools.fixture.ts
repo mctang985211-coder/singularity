@@ -74,6 +74,8 @@ export interface MethodWorld {
   readonly approvals: { toolName?: string; callId?: string; reason?: string }[]
   /** Every event this world's context emitted, in order, as `emit(name, frame)` recorded it. */
   readonly frames: { readonly name: string; readonly frame: unknown }[]
+  /** The sealed receipts this world's task store serves; a spec pushes the ones its forged trials cite. */
+  readonly storeReceipts: unknown[]
   /** The graph's own rsi settings, as `methodModeFor` reads them. */
   readonly rsi: { humanReview: boolean }
   revision: (revisionId: string) => Promise<EnvironmentRevision | undefined>
@@ -88,6 +90,8 @@ export async function methodWorld(
   options: {
     /** The answer every approval request receives. */
     readonly answer?: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+    /** Runs inside the approval window, before the answer is returned — the one place a third party can still move the pointer. */
+    readonly duringApproval?: () => Promise<void> | void
     readonly humanReview?: boolean
     readonly trialCandidateRef?: string
     /** Serve the library as read-only (a legacy layout, or a sealed graph). */
@@ -106,8 +110,9 @@ export async function methodWorld(
   const approvals: { toolName?: string; callId?: string; reason?: string }[] = []
 
   const host: EnvironmentCommitHost = { library }
+  const storeReceipts: unknown[] = []
   const runtime = {
-    config: {},
+    config: { environmentRevisionRoot: home },
     activeEnvironmentView: async (sessionId: string, viewOptions: { trialCandidateRef?: string } = {}) => {
       count('activeEnvironmentView')
       void sessionId
@@ -124,6 +129,12 @@ export async function methodWorld(
       if (revision === undefined) throw new Error('environment: no active revision')
       return revision
     },
+    libraryRootsForSession: async () => {
+      count('libraryRootsForSession')
+      return { id: library.id, root: library.root }
+    },
+    // The runtime carries both read entries: the roots pair the method tools
+    // resolve against, and the library view the graph-web console binds.
     libraryForSession: async () => {
       count('libraryForSession')
       return { id: library.id, root: library.root, protocol: 'environment-revision', taskTemplatesRoot: join(library.root, 'task-templates'), skillRoot: join(library.root, 'skills') }
@@ -170,13 +181,14 @@ export async function methodWorld(
   const frames: { name: string; frame: unknown }[] = []
   const ctx: Record<string, unknown> = {
     taskRuntime: runtime,
-    task: { openStore: async () => ({ tasks: [], runs: options.runs ?? [], reviews: [], diagnoses: [], evidence: [], obligations: [], capabilities: {}, receipts: [] }) },
+    task: { openStore: async () => ({ tasks: [], runs: options.runs ?? [], reviews: [], diagnoses: [], evidence: [], obligations: [], capabilities: {}, receipts: storeReceipts }) },
     graphs: { graphForSession: async () => ({ id: GRAPH, rootSessionId: SessionId(GRAPH), rsi }) },
     agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
     llm: undefined,
     approval: {
       request: vi.fn(async (request: { toolName?: string; callId?: string; reason?: string }) => {
         approvals.push({ toolName: request.toolName, callId: request.callId, reason: request.reason })
+        await options.duringApproval?.()
         return options.answer ?? 'allowed-once'
       }),
     },
@@ -197,6 +209,7 @@ export async function methodWorld(
     approvals,
     frames,
     rsi,
+    storeReceipts,
     revision: (revisionId: string) => readRevision(library, revisionId),
     draft: (draftId: string) => readEnvironmentDraft(library, draftId),
     pointer: async () => {
@@ -242,7 +255,7 @@ function revisionRef(revisionId: string, digest: string): { revisionId: string; 
  */
 export async function forgeEvaluation(
   world: MethodWorld,
-  options: { readonly cost?: 'reported' | 'unknown'; readonly candidateBody?: string } = {},
+  options: { readonly cost?: 'reported' | 'unknown'; readonly candidateBody?: string; readonly publishable?: boolean } = {},
 ): Promise<{ draftId: string; evaluationId: string; reportDigest: string }> {
   const { defineMethodDraftTool } = await import('../../src/tools/method-draft.ts')
   const { digestOf, evaluationReportDigest, foldMethods, openMethodLedger, reportPathOf } = await import('@dangosys/dsh-singularity-evolution')
@@ -285,12 +298,43 @@ export async function forgeEvaluation(
       boundRevision: side === 'baseline' ? baseline.revisionId : candidate.revisionId,
       boundModel: 'p/m',
       workspace: `/tmp/${side}`,
-      workspaceDigest: 'e'.repeat(64),
+      workspaceDigest: options.publishable === true ? 'f'.repeat(64) : 'e'.repeat(64),
       complete: true,
     },
     actor: CALLER,
     at: '2026-10-08T00:00:00.000Z',
   })
+  const candidateSkill =
+    options.publishable === true
+      ? await (async () => {
+          // The candidate revision directory materializes only at publish, so the entry's digests
+          // are recomputed here exactly as `applySkillEdit` computes them from the staged bytes.
+          const { sha256Hex } = await import('@dangosys/dsh-singularity-task')
+          const { skillContentDigest } = await import('../../../task-runtime/src/skill-contract.ts')
+          const skillMd = skillText(options.candidateBody ?? '# candidate: check the acceptance')
+          return {
+            name: 'verify',
+            role: 'execution-provider' as const,
+            contractDigest: null,
+            contentDigest: skillContentDigest({ skillMdSha256: sha256Hex(skillMd), resources: [] }),
+          }
+        })()
+      : undefined
+  if (options.publishable === true) {
+    // The receipts the validator re-reads from the store: the digests the trials cite, the facts
+    // the proofs require (the candidate side granted and really loaded the first-version skill).
+    world.storeReceipts.push(
+      { runId: 'run-baseline', taskId: 't1', digest: 'c'.repeat(64), completeness: { missing: [] }, skills: [], templates: [] },
+      {
+        runId: 'run-candidate',
+        taskId: 't1',
+        digest: 'd'.repeat(64),
+        completeness: { missing: [] },
+        skills: [{ runId: 'run-candidate', bound: [{ name: 'verify' }], loaded: ['verify'], loadedOutsideGrant: [] }],
+        templates: [],
+      },
+    )
+  }
   const model = { provider: 'p', model: 'm', label: 'p/m' }
   const sidePlan = (side: 'baseline' | 'candidate', revisionId: string, digest: string) => ({
     side,
@@ -299,7 +343,10 @@ export async function forgeEvaluation(
     registryRevision: side === 'baseline' ? 'reg-1' : 'reg-2',
     mcpServers: [],
     preset: null,
-    skills: [],
+    skills:
+      side === 'candidate' && candidateSkill !== undefined
+        ? [{ name: 'verify', role: 'execution-provider' as const, contractDigest: candidateSkill.contractDigest, contentDigest: candidateSkill.contentDigest }]
+        : [],
     model,
     acceptance: [],
   })
@@ -321,6 +368,22 @@ export async function forgeEvaluation(
     schemaVersion: 'evaluation-plan@1' as const,
   }
   const evaluationId = 'eval-1'
+  const trials = [{ sampleTaskId: 't1', role: 'observed-failure' as const, baseline: trial('baseline'), candidate: trial('candidate'), verdict: 'fixed' as const }]
+  const score =
+    options.publishable === true
+      ? // The publishable report's score is the one the pipeline itself recomputes from these trials.
+        (
+          await import('@dangosys/dsh-singularity-evolution')
+        ).scoreEvaluation({ plan: plan as never, trials: trials as never, repeats: 3, noiseBand: 0.02 })
+      : {
+          quality: { baseline: 0, candidate: 1, delta: 1, unit: 'acceptance-success-rate' },
+          cost:
+            options.cost === 'unknown'
+              ? ({ status: 'unknown', reason: 'no sealed receipt reports tokens' } as const)
+              : ({ status: 'reported', baselineTokens: 150, candidateTokens: 140, relativeDelta: -0.0667 } as const),
+          uncertainty: { basis: 'repeated-trials' as const, repeats: 3, noiseBand: 0.02 },
+          inconclusive: options.cost === 'unknown',
+        }
   const report = {
     formatVersion: 5 as const,
     draftId,
@@ -331,16 +394,8 @@ export async function forgeEvaluation(
     at: '2026-10-08T00:00:00.000Z',
     plan,
     planDigest: digestOf(plan),
-    trials: [{ sampleTaskId: 't1', role: 'observed-failure' as const, baseline: trial('baseline'), candidate: trial('candidate'), verdict: 'fixed' as const }],
-    score: {
-      quality: { baseline: 0, candidate: 1, delta: 1, unit: 'acceptance-success-rate' },
-      cost:
-        options.cost === 'unknown'
-          ? ({ status: 'unknown', reason: 'no sealed receipt reports tokens' } as const)
-          : ({ status: 'reported', baselineTokens: 150, candidateTokens: 140, relativeDelta: -0.0667 } as const),
-      uncertainty: { basis: 'repeated-trials' as const, repeats: 3, noiseBand: 0.02 },
-      inconclusive: options.cost === 'unknown',
-    },
+    trials,
+    score,
     guards: [],
     verdict: 'fixed' as const,
   }

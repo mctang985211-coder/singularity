@@ -739,6 +739,8 @@ declare function proveAdmissionRefusal(input: {
  */
 declare function proveTemplateConsumed(input: {
   plan: EvaluationPlan;
+  /** The template id the draft proposes — the only reference the receipt's batches may name. */
+  identity: string;
   receipt: ExecutionReceipt;
   /** The parent acceptance criterion ids the template candidate must not replace. */
   parentCriteria: readonly string[];
@@ -1248,6 +1250,8 @@ interface AssetSideDelta {
 }
 interface ConsumedInput {
   readonly plan: EvaluationPlan;
+  /** The draft's asset identity (skill name / template id / capability row), read back from the ledger's own draft record. */
+  readonly identity: string;
   readonly comparison: TrialComparison;
   readonly candidateReceipt: _dangosys_dsh_singularity_task0.ExecutionReceipt;
   readonly baselineReceipt?: _dangosys_dsh_singularity_task0.ExecutionReceipt;

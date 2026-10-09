@@ -57,6 +57,7 @@ import type { ContentBlock, GenerateOptions, Message, StreamChunk } from '../../
 import SessionStore, { SessionId, SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { SessionEvent, SessionHeader } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SessionProjectionRegistry from '../../../../thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
+import TokenMeter from '../../../../thirdparty/deepseek-harness/packages/llm/token-meter/lib/index.js'
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import SystemPrompt from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
@@ -797,6 +798,10 @@ class ScriptedLoopImpl implements ScriptedLoop {
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
+    // The deployment's token meter: every session's tokenUsage projection is
+    // real, so a sealed receipt reports the token buckets an evaluation's cost
+    // reading is made of rather than none.
+    await ctx.plugin(TokenMeter)
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)

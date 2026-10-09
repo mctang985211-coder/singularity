@@ -8,6 +8,7 @@
 
 import type { ExecutionReceipt } from '@dangosys/dsh-singularity-task'
 import { adapterFor } from '../draft/adapters.ts'
+import { draftView } from '../draft/draft.ts'
 import { assertReceiptMatchesSide, assertSidesIsolated, requireEstablished } from '../evidence/receipt.ts'
 import { assertOutcomeEvidence } from '../evidence/judge.ts'
 import { costRefusal } from './guards.ts'
@@ -119,6 +120,9 @@ export async function validateEvaluation(input: ValidateInput): Promise<Validati
   const storeId = await sources.runtime.storeOfSession(sources.caller)
   const snapshot = await sources.tasks.openStore(storeId)
   const adapter = adapterFor(plan.kind)
+  // The asset identity the consumption proof must name comes from the ledger's
+  // own draft record — the plan freezes revisions and samples, never the name.
+  const identity = draftView(sources.ledger, report.draftId).draft.identity
   const guards: GuardOutcome[] = []
 
   if (mode === 'pre-publish') {
@@ -166,6 +170,7 @@ export async function validateEvaluation(input: ValidateInput): Promise<Validati
     if (receipts.has('candidate')) {
       const proof = adapter.assertConsumed({
         plan,
+        identity,
         comparison,
         candidateReceipt: receipts.get('candidate')!,
         ...(receipts.has('baseline') ? { baselineReceipt: receipts.get('baseline')! } : {}),

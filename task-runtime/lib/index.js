@@ -8467,7 +8467,8 @@ const REQUEST_FIELDS = [
 	"mode",
 	"reuses",
 	"proposalIds",
-	"workspacePath"
+	"workspacePath",
+	"trialCandidateRef"
 ];
 /** The fields one reuse declaration may carry. */
 const REUSE_FIELDS = [
@@ -8493,6 +8494,7 @@ function recoveryRequestDefects(request) {
 	if (!nonBlank(request.requestKey)) defects.push("requestKey must be a non-empty string");
 	if (request.mode !== void 0 && request.mode !== "recovery" && request.mode !== "improve") defects.push("mode must be \"recovery\" (the default) or \"improve\"");
 	if (request.workspacePath !== void 0 && !nonBlank(request.workspacePath)) defects.push("workspacePath, when given, must be a non-empty path");
+	if (request.trialCandidateRef !== void 0 && !nonBlank(request.trialCandidateRef)) defects.push("trialCandidateRef, when given, must be a non-empty candidate revision id");
 	if (request.proposalIds !== void 0 && (!Array.isArray(request.proposalIds) || request.proposalIds.some((id) => !nonBlank(id)) || new Set(request.proposalIds).size !== request.proposalIds.length)) defects.push("proposalIds must be an array of unique non-empty proposal ids");
 	if (request.reuses !== void 0) if (!Array.isArray(request.reuses)) defects.push("reuses must be an array of declarations");
 	else {
@@ -8545,6 +8547,7 @@ function recoveryAttemptDigest(recovery) {
 	return sha256Hex(canonicalize({
 		kind: recovery.kind ?? "recovery",
 		sourceRunId: recovery.sourceRunId ?? null,
+		...recovery.trialCandidateRef === void 0 ? {} : { trialCandidateRef: recovery.trialCandidateRef },
 		...recovery.proposalIds?.length ? { proposalIds: [...recovery.proposalIds].sort() } : {},
 		reusedMembers: recovery.reusedMembers.map((member) => ({
 			childIndex: member.childIndex,
@@ -8582,6 +8585,7 @@ function requestAttemptDigest(request) {
 	return recoveryAttemptDigest({
 		kind: recoveryKindOf(request.mode),
 		proposalIds: request.proposalIds === void 0 ? void 0 : [...request.proposalIds],
+		...request.trialCandidateRef === void 0 ? {} : { trialCandidateRef: request.trialCandidateRef },
 		...request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId },
 		reusedMembers: (request.reuses ?? []).map((declaration) => ({
 			childIndex: declaration.childIndex,
@@ -8834,12 +8838,25 @@ async function recoverRootTaskOnce(self, storeId, request, caller) {
 	if (reuseReasons.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused; the declared reuse does not resolve:\n- ${reuseReasons.join("\n- ")}`);
 	const unbound = derived?.unbound ?? [];
 	const rootSessionId = sourceRun?.sessionId ?? self.recoverySessionFor(snapshot, storeId);
+	/**
+	* The candidate an explicit trial binds, resolved before the pre-check: the
+	* provider verdicts this attempt is bound from must be judged against the
+	* candidate's own bytes, or the binding's content identity would be the active
+	* revision's while the record names the candidate.
+	*/
+	let trialRevision;
+	if (request.trialCandidateRef !== void 0) {
+		const library = await environmentLibraryForSession(self, rootSessionId);
+		if (library.revision === void 0) throw new Error(`task-runtime: library "${library.id}" holds no active environment revision, so there is nothing to trial "${request.trialCandidateRef}" against; nothing was written`);
+		if (library.revision.manifest.revisionId === request.trialCandidateRef) throw new Error(`task-runtime: trial candidate "${request.trialCandidateRef}" is the library's effective revision; a trial binds an unpublished candidate, and nothing was written`);
+		trialRevision = await revisionForManifest(self, library.id, request.trialCandidateRef);
+	}
 	const manifest = resolveCapabilities(source.requestedCapabilities, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers);
 	if (manifest.missing.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused: the capability gap this attempt is for is still open ([${manifest.missing.join(", ")}] resolve to no row in this deployment's table); apply the row that closes it, and the recovery re-reads what the deployment holds then — nothing was written`);
 	const envPath = await self.envPathForSession(rootSessionId);
 	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
 		...envPath === void 0 ? {} : { cwd: envPath },
-		extraRoots: (await self.skillViewForSession(rootSessionId)).extraRoots
+		extraRoots: (await self.skillViewForSession(rootSessionId, trialRevision === void 0 ? [] : [trialRevision.skillRoot])).extraRoots
 	}, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers ?? {}, rootSessionId);
 	const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities));
 	if (refusals.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused by the provider pre-check:\n- ${refusals.join("\n- ")}`);
@@ -8860,6 +8877,7 @@ async function recoverRootTaskOnce(self, storeId, request, caller) {
 		manifest,
 		precheck,
 		rootSessionId,
+		...trialRevision === void 0 ? {} : { trialRevision },
 		actor: caller.sessionId,
 		...caller.signal === void 0 ? {} : { signal: caller.signal }
 	});
@@ -8964,6 +8982,23 @@ async function startRecoveryAttempt(self, input) {
 	* so a resume rebuilds the same composition rather than the deployment's
 	*/
 	const preset = resolvePreset(manifest, self.config.defaultPreset);
+	let binding;
+	/**
+	* A recovery attempt keeps the source run's pinned environment version: an
+	* attempt re-earns the same criteria under the same content. An attempt whose
+	* source run predates revisions (or that has none) reads the active revision.
+	* An explicit trial — this request's, or the one the source run itself was
+	* opened under — overlays the candidate's bytes on that admission without
+	* moving the pointer: the Run pins the admitted revision and names the
+	* candidate it trials, exactly as a replay's trial side does.
+	*/
+	const pinned = input.sourceRun?.environmentRevisionId;
+	const libraryId = await rootSessionIdFor(self, rootSessionId);
+	const admitted = pinned === void 0 ? await activeRevisionOrUndefined(self, rootSessionId) : await revisionForManifest(self, libraryId, pinned);
+	const trialRef = request.trialCandidateRef ?? input.sourceRun?.trialCandidateRef;
+	const trial = trialRef === void 0 ? void 0 : input.trialRevision !== void 0 && input.trialRevision.manifest.revisionId === trialRef ? input.trialRevision : await revisionForManifest(self, libraryId, trialRef);
+	if (trial !== void 0 && admitted !== void 0 && trial.manifest.revisionId === admitted.manifest.revisionId) throw new Error(`task-runtime: trial candidate "${trialRef}" is the revision this attempt is admitted against; a trial binds an unpublished candidate, and nothing is written`);
+	const revision = trial ?? admitted;
 	const workspacePath = request.workspacePath === void 0 ? await self.workspacePathForSession(rootSessionId) : await normalizeWorkspacePath(request.workspacePath);
 	let claimed;
 	if (workspacePath !== void 0 && self.workspaces !== void 0) {
@@ -8976,8 +9011,6 @@ async function startRecoveryAttempt(self, input) {
 		});
 		claimed = self.workspaces.ownerOf(workspacePath);
 	}
-	let binding;
-	const revision = (input.sourceRun === void 0 ? void 0 : await self.environmentRevisionForRun(input.sourceRun)) ?? await activeRevisionOrUndefined(self, rootSessionId);
 	try {
 		binding = await bindRunProviders({
 			mcpRegistry: self.config.mcpServers,
@@ -8987,16 +9020,17 @@ async function startRecoveryAttempt(self, input) {
 			providers: input.precheck,
 			table: await self.capabilitiesForSession(rootSessionId),
 			root: self.config.runBindingRoot,
-			...revision === void 0 ? {} : { revision }
+			...revision === void 0 ? {} : { revision },
+			...trial === void 0 ? {} : { trialCandidateRef: trial.manifest.revisionId }
 		});
 		const run = {
 			runId,
 			taskId: source.taskId,
 			sessionId,
 			capabilitySnapshot: capabilitySnapshot(manifest),
-			taskTemplatesRoot: input.sourceRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(rootSessionId),
-			...revision === void 0 ? {} : { environmentRevisionId: revision.manifest.revisionId },
-			...input.sourceRun?.trialCandidateRef === void 0 ? {} : { trialCandidateRef: input.sourceRun.trialCandidateRef },
+			taskTemplatesRoot: trial?.taskTemplatesRoot ?? input.sourceRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(rootSessionId),
+			...admitted === void 0 ? {} : { environmentRevisionId: admitted.manifest.revisionId },
+			...trial === void 0 ? {} : { trialCandidateRef: trial.manifest.revisionId },
 			...preset === void 0 ? {} : { agentPreset: preset },
 			...binding === void 0 ? {} : { providerBinding: binding },
 			executionPhase: "active",
@@ -12894,6 +12928,13 @@ var TaskRuntime = class extends Service {
 	}
 	async libraryForSession(sessionId) {
 		return await environmentLibraryForSession(this, sessionId);
+	}
+	/**
+	* The library roots a commit plane works against: the library's own root,
+	* never the active revision's directory {@link libraryForSession} serves readers.
+	*/
+	async libraryRootsForSession(sessionId) {
+		return await libraryRootsForSession(this, sessionId);
 	}
 	/** The active revision view of this session's graph library — a pure read, and the one version read every method tool shares. */
 	async activeEnvironmentView(sessionId, options = {}) {

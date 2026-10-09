@@ -1,5 +1,7 @@
 # Singularity Agent Prompt 合同
 
+> 2026-10-08 RRSI 重构：本文中「Evolution 由部署开关决定工具注册」一段已失效——`evolution` 开关与九个 `evolution_*` 工具已删除，方法搜索由六个 `method_*` 工具（`methodTools` 开关，默认 on）与显式完成工具（`supervisor_complete`/`reviewer_complete`）承担；角色职责与文本分工的其余原则不变。
+
 本文件只规定角色职责与文本分工。实际状态、参数和拒绝原因以工具 schema、运行时结果及 [唯一计划](2026-09-20-vrtc-code-change-plan.md)为准，不在 prompt 再维护一套状态机。K1～K4、A5、A6 已按各自合同验收；模型分解与诊断效果仍需真实工程实跑验证。
 
 ## 1. 装配原则

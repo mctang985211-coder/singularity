@@ -29,13 +29,7 @@ function deployment(world: MethodWorld): GraphViewService {
   ctx.provide('task', { openStore: async () => ({ tasks: [], runs: [], reviews: [], diagnoses: [], evidence: [], obligations: [], capabilities: {}, receipts: [] }), receiptFor: async () => undefined } as never)
   ctx.provide('taskRuntime', {
     config: {},
-    libraryForSession: async () => ({
-      id: world.library.id,
-      root: world.library.root,
-      protocol: 'environment-revision',
-      taskTemplatesRoot: `${world.library.root}/task-templates`,
-      skillRoot: `${world.library.root}/skills`,
-    }),
+    libraryRootsForSession: async () => ({ id: world.library.id, root: world.library.root }),
   } as never)
   const service = new GraphViewService(ctx)
   service.registerCoordinationFacts({ assignments: async () => [] })

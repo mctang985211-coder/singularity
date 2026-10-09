@@ -131,7 +131,7 @@ import type {
   LibraryReview,
   LibraryWrite,
 } from './environment.ts'
-import type { EnvironmentCommitHost, PublishOutcome, PublishRequest } from '../environment/index.ts'
+import type { EnvironmentCommitHost, LibraryRoots, PublishOutcome, PublishRequest } from '../environment/index.ts'
 
 export class TaskRuntime extends Service {
   static inject = ['task', 'agentRuntime', 'graphs', 'sessionQuery']
@@ -238,6 +238,14 @@ export class TaskRuntime extends Service {
 
   async libraryForSession(sessionId: string): Promise<EnvironmentLibrary> {
     return await svcEnvironment.environmentLibraryForSession(this, sessionId)
+  }
+
+  /**
+   * The library roots a commit plane works against: the library's own root,
+   * never the active revision's directory {@link libraryForSession} serves readers.
+   */
+  async libraryRootsForSession(sessionId: string): Promise<LibraryRoots> {
+    return await svcEnvironment.libraryRootsForSession(this, sessionId)
   }
 
   /** The active revision view of this session's graph library — a pure read, and the one version read every method tool shares. */

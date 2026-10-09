@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-当前协议（2026-10-07）：平台 RSI driver 统一开轮，Task/TaskTemplate/Skill 分工、轮次结案、方法消费、角色权限和图控制见[当前 RSI 协议与优化](2026-10-07-rsi-optimization.md)。无 rsi 设置的图没有旧自动复盘链；以下各日期验收记录保留其历史范围。
+当前协议（2026-10-08 RRSI 重构）：新图只有一条主路径——业务执行 → supervisor 调查 → 候选环境版本（`method_draft`）→ 筛查/双侧评估/RRSI 选择（`method_evaluate`）→ 保留/显式试用/审批发布（`method_publish`/`method_discard`/`method_rollback`，环境版本指针 CAS 切换）→ supervisor 显式 `supervisor_complete` 结案 → 下一轮。九个 `evolution_*` 工具、`evolution` 配置开关、旧 RSI loop driver、文本 gate 与 `task_recover` 已删除；没有协议标记的旧图封存只读。角色、轮次结案与迁移见[当前 RSI 协议与优化](2026-10-07-rsi-optimization.md)（其正文描述 2026-10-07 协议，轮次与角色事实仍有效，工具链以本段为准）；方法账本与 RRSI 策略见 `evolution/README.md`。以下各日期验收记录保留其历史范围。
 
 历史施工状态（2026-10-03）：Task 模板、Skill、capability 与新增 MCP server 定义共用候选、对照实验、人审、提交、回滚和恢复路径；当时默认复盘失败，普通 child 诊断回真实父 Run，共享变更交 supervisor。实现和验证范围见[施工记录](2026-10-03-task-skill-implementation.md)。
 
@@ -610,6 +610,8 @@ K2 独立审核：[验收记录](history/2026-09-27-k2-review.md)。
 
 ### 5.27 当前协调与改进协议（2026-10-03）
 
+> 2026-10-08 RRSI 重构：本节 3/4 条描述的 `evolution_decide`/`evolution_apply` 人审链与 `task_recover` 已删除——方法发布由 `method_publish` 的一次审批与指针 CAS 承担，下一轮业务由 supervisor 的 `supervisor_complete({businessAction})` 显式驱动；协调账本为 `$DSH_HOME/coordination/assignments.jsonl`（assignment/completion 两种行），旧 review-agents 账本不再读写。角色预设、审批纪律、Run recovery 记录与预算/轮数上限的事实不变。
+>
 > 2026-10-07 重构：自动复盘 reviewer（`supervision.autoReview`）与 agent 侧 supervisor 交接链已删除；supervisor 只存在于平台 RSI loop（图的 `rsi` 设置）里，由驱动在每轮终态后 spawn，并自己打开下一轮（verified→`improve`，failed→`recovery`）。`task_recover` 工具已不存在。下面 1/2/4/5 条描述的触发与轮数旋钮由该重构取代，其余事实（角色预设、审批、Run recovery 记录、改进比较规则）不变。
 
 1. **默认失败复盘**：`supervision.autoReview` 默认 `failed`；可显式选择 `all` 或 `off`。终态与 graph 激活扫描共用已有受理、去重和持久账本。成功优化按需执行，不要求每个成功 child 启动协调代理。

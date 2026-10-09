@@ -2,7 +2,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, executionUsage, listPointerCompletions, materializeBubble, optionalService, readEnvironmentDraft, readPointer, readRevision, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
+import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, executionUsage, hasLegacyLayout, listPointerCompletions, materializeBubble, optionalService, readEnvironmentDraft, readPointer, readRevision, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
 import { DEFAULT_STRATEGY_POLICY, EvolutionService, OUTCOME_JUDGE_PROMPT, adapterFor, admit, aggregateEvaluation, assertOutcomePlan, calibrateNoise, canonicalJson, cohortDigestOf, createDraft, digestOf, discardDraft, editBudget, evaluate, evaluationOf, evaluationSourcesOf, exploration, foldHistory, foldMethods, markPublished, markRolledback, methodList, modelSelectionOf, openMethodLedger, refutationFor, renderHistory, revisionViewOf, scaleOf, screenBeforeMeasurement, sideMeasurementOf, stallFlag, strategyDecisionOf, validateEvaluation } from "@dangosys/dsh-singularity-evolution";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
@@ -2003,6 +2003,14 @@ async function methodGraphFor(ctx, caller) {
 		...graph.rsi == null ? {} : { rsi: { humanReview: graph.rsi.humanReview === true } }
 	};
 }
+/**
+* The whole rsi configuration one method approval binds, digested: a graph
+* whose rsi is cleared or replaced while the approval is open is not the
+* configuration the approval was granted under, and the switch refuses.
+*/
+async function methodRsiStampFor(ctx, caller) {
+	return digestOf({ rsi: (await graphRegistry(ctx).graphForSession(SessionId(caller))).rsi ?? null });
+}
 /** The mode one graph's record puts method publication in. Mode is never an argument. */
 async function methodModeFor(ctx, caller) {
 	return (await methodGraphFor(ctx, caller)).rsi?.humanReview === false ? "auto" : "manual";
@@ -2023,7 +2031,7 @@ function environmentPlaneOf(ctx) {
 	return {
 		activeEnvironmentView: bind("activeEnvironmentView"),
 		activeRevisionFor: bind("activeRevisionFor"),
-		libraryForSession: bind("libraryForSession"),
+		libraryRootsForSession: bind("libraryRootsForSession"),
 		createDraft: bind("createDraft"),
 		stageDraftEdit: bind("stageDraftEdit"),
 		removeEnvironmentDraft: bind("removeEnvironmentDraft"),
@@ -2059,9 +2067,9 @@ function decisionPathOf(root, draftId, evaluationId) {
 	return join(root, "evaluations", draftId, evaluationId, "strategy-decision.json");
 }
 /**
-* The prospective candidate revision one draft holds, as the publish approval
-* reads it for its difference. It is the draft's own directory, not a frozen
-* revision: only the pointer transaction freezes it, by rename.
+* The prospective candidate revision one draft holds, read from the draft's own
+* directory. A draft the evaluation already measured was frozen instead — its
+* candidate is read with `readRevision`, and this returns undefined for it.
 */
 async function candidateRevisionOf(library, draftId) {
 	const draft = await readEnvironmentDraft(library, draftId);
@@ -2079,7 +2087,8 @@ async function candidateRevisionOf(library, draftId) {
 * two calls is read rather than cached past.
 */
 async function methodLedgerPlaneOf(ctx, caller) {
-	const resolved = await environmentPlaneOf(ctx).libraryForSession(caller);
+	const env = environmentPlaneOf(ctx);
+	const resolved = await env.libraryRootsForSession(caller);
 	const library = {
 		id: resolved.id,
 		root: resolved.root
@@ -2145,6 +2154,8 @@ async function methodLedgerPlaneOf(ctx, caller) {
 			return created;
 		},
 		async evaluate(input, signal) {
+			const view = await viewOf(input.draftId);
+			if (view.evaluation === void 0 && await readRevision(library, view.draft.candidateRevision.revisionId) === void 0) await env.freezeDraft(caller, input.draftId);
 			const { sources } = await open$1();
 			const report = await evaluate(sources, {
 				draftId: input.draftId,
@@ -2845,6 +2856,7 @@ var CoordinationDriver = class {
 			requestKey: request.requestKey,
 			mode: request.mode,
 			...request.mode === "improve" ? { reuses: [] } : {},
+			...request.trialCandidateRef === void 0 ? {} : { trialCandidateRef: request.trialCandidateRef },
 			...workspacePath === void 0 ? {} : { workspacePath }
 		};
 		try {
@@ -2984,14 +2996,11 @@ async function resolve$1(ctx, graphKey) {
 	const graph = (await graphs.list()).find((entry) => rootTaskStoreId(String(entry.rootSessionId)) === graphKey);
 	if (graph === void 0) return void 0;
 	const caller = String(graph.rootSessionId);
-	const library = await runtime.libraryForSession(caller);
+	const library = await runtime.libraryRootsForSession(caller);
 	return {
 		caller,
-		library: {
-			id: library.id,
-			root: library.root
-		},
-		protocol: library.protocol,
+		library,
+		protocol: await hasLegacyLayout(library) ? "legacy" : "environment-revision",
 		humanReview: graph.rsi?.humanReview !== false
 	};
 }
@@ -4975,9 +4984,10 @@ function defineMethodPublishTool(ctx) {
 					`${args.expectedActiveRevision} g${String(args.expectedGeneration)} — a third party moved it (or the approval displayed a stale pointer).`,
 					"nothing was written; re-read the library and approve the switch that is actually in front of you."
 				].join(" ");
+				const draft = await ledger.view(args.draftId);
 				const intent = await env.openPointerIntent(caller);
 				if (intent !== null) {
-					if (!(intent.direction === "publish" && intent.draftId === args.draftId && intent.expected?.revisionId === args.expectedActiveRevision)) return [`method_publish rejected: pointer intent ${intent.intentId} (${intent.direction} → ${intent.next.revisionId}) is open,`, "so this library is mid-switch for another candidate; nothing was written. Settle it (restart, or a retry of the tool that opened it) first."].join(" ");
+					if (!(intent.direction === "publish" && (intent.draftId === args.draftId || intent.next.revisionId === draft.draft.candidateRevision.revisionId) && intent.expected?.revisionId === args.expectedActiveRevision)) return [`method_publish rejected: pointer intent ${intent.intentId} (${intent.direction} → ${intent.next.revisionId}) is open,`, "so this library is mid-switch for another candidate; nothing was written. Settle it (restart, or a retry of the tool that opened it) first."].join(" ");
 					const settled = (await env.reconcilePointer(caller)).find((entry) => entry.intentId === intent.intentId);
 					if (settled === void 0) return `method_publish: no pointer moved — the open intent ${intent.intentId} reported no outcome; nothing was written`;
 					if (settled.result !== "blocked") await ledger.markPublished({
@@ -5002,16 +5012,17 @@ function defineMethodPublishTool(ctx) {
 				} catch (error) {
 					return [`method_publish rejected: the pre-publish re-check of report ${report.evaluationId} refused this candidate — ${message(error)};`, "nothing was written and no approval was requested."].join(" ");
 				}
-				const draft = await ledger.view(args.draftId);
 				const mode = await methodModeFor(ctx, caller);
+				const graphStamp = await methodRsiStampFor(ctx, caller);
 				const decider = deciderFor(mode);
 				const library = {
 					id: ledger.libraryId,
 					root: ledger.root
 				};
 				const baselineRevision = await env.activeRevisionFor(caller).catch(() => void 0);
-				const candidateRevision = await candidateRevisionOf(library, args.draftId);
-				if (candidateRevision === void 0) return `method_publish rejected: draft "${args.draftId}" has no draft directory; nothing was written.`;
+				const frozenCandidate = await readRevision(library, draft.draft.candidateRevision.revisionId);
+				const candidateRevision = frozenCandidate ?? await candidateRevisionOf(library, args.draftId);
+				if (candidateRevision === void 0) return `method_publish rejected: draft "${args.draftId}" has neither a frozen candidate revision nor a draft directory; nothing was written.`;
 				const diff = renderDiff(await diffOfRevisions(baselineRevision ?? null, candidateRevision).catch(() => ({
 					from: baselineRevision?.manifest.revisionId ?? null,
 					to: candidateRevision.manifest.revisionId,
@@ -5050,9 +5061,9 @@ function defineMethodPublishTool(ctx) {
 					});
 					if (outcome !== "allowed-once") return `method_publish: no pointer moved — ${denialReason(outcome)}; draft ${args.draftId} stays evaluated and nothing was written`;
 				}
-				const [recheck, recheckMode] = await Promise.all([env.activeEnvironmentView(caller), methodModeFor(ctx, caller)]);
+				const [recheck, recheckStamp] = await Promise.all([env.activeEnvironmentView(caller), methodRsiStampFor(ctx, caller)]);
 				if (recheck.revisionId !== args.expectedActiveRevision || recheck.generation !== args.expectedGeneration) return [`method_publish: no pointer moved — the pointer is now ${recheck.revisionId} g${recheck.generation}, not the approved`, `${args.expectedActiveRevision} g${String(args.expectedGeneration)}; the approval is spent and no second one is requested.`].join(" ");
-				if (recheckMode !== mode) return `method_publish: no pointer moved — this graph's method mode changed from ${mode} to ${recheckMode} while the approval was open.`;
+				if (recheckStamp !== graphStamp) return `method_publish: no pointer moved — this graph's rsi configuration was cleared or replaced while the approval was open; the approval is spent and no second one is requested.`;
 				try {
 					await ledger.validatePrePublish(report);
 				} catch (error) {
@@ -5060,9 +5071,12 @@ function defineMethodPublishTool(ctx) {
 				}
 				const published = await env.publishRevision(caller, {
 					direction: "publish",
-					source: {
+					source: frozenCandidate === void 0 ? {
 						kind: "draft",
 						draftId: args.draftId
+					} : {
+						kind: "revision",
+						revisionId: frozenCandidate.manifest.revisionId
 					},
 					expected: {
 						revisionId: args.expectedActiveRevision,
@@ -5156,6 +5170,7 @@ function defineMethodRollbackTool(ctx) {
 				const target = await readRevision(library, args.toRevisionId);
 				if (target === void 0) return `method_rollback rejected: library "${ledger.libraryId}" holds no revision "${args.toRevisionId}"; nothing was written`;
 				const mode = await methodModeFor(ctx, caller);
+				const graphStamp = await methodRsiStampFor(ctx, caller);
 				const decider = deciderFor(mode);
 				const current$1 = await env.activeRevisionFor(caller).catch(() => void 0);
 				const diff = renderDiff(await diffOfRevisions(current$1 ?? null, target).catch(() => ({
@@ -5208,9 +5223,9 @@ function defineMethodRollbackTool(ctx) {
 					signal: exec.signal
 				});
 				if (outcome !== "allowed-once") return `method_rollback: no pointer moved — ${denialReason(outcome)}; nothing was written`;
-				const [recheck, recheckMode] = await Promise.all([env.activeEnvironmentView(caller), methodModeFor(ctx, caller)]);
+				const [recheck, recheckStamp] = await Promise.all([env.activeEnvironmentView(caller), methodRsiStampFor(ctx, caller)]);
 				if (recheck.revisionId !== args.expectedActiveRevision || recheck.generation !== args.expectedGeneration) return [`method_rollback: no pointer moved — the pointer is now ${recheck.revisionId} g${recheck.generation}, not the approved`, `${args.expectedActiveRevision} g${String(args.expectedGeneration)}; the approval is spent and no second one is requested.`].join(" ");
-				if (recheckMode !== mode) return `method_rollback: no pointer moved — this graph's method mode changed from ${mode} to ${recheckMode} while the approval was open.`;
+				if (recheckStamp !== graphStamp) return `method_rollback: no pointer moved — this graph's rsi configuration was cleared or replaced while the approval was open; the approval is spent and no second one is requested.`;
 				const targetAgain = await readRevision(library, args.toRevisionId);
 				if (targetAgain === void 0 || targetAgain.manifest.contentDigest !== target.manifest.contentDigest) return `method_rollback: no pointer moved — revision "${args.toRevisionId}" changed or vanished while the approval was open.`;
 				const rolledback = await env.rollbackRevision(caller, {

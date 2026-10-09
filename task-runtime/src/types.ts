@@ -27,6 +27,7 @@ import type {
   TaskRun,
 } from '@dangosys/dsh-singularity-task'
 import type { ProviderPrecheck } from './provider-precheck.ts'
+import type { EnvironmentRevision } from './environment/revision.ts'
 import type { RootBudgetCeilings } from './root-budget.ts'
 import type { DecompositionIdentityContext, NormalizedBatch } from './normalize.ts'
 import type { RootRecoveryRequest, RootRecoveryReuse } from './recovery.ts'
@@ -422,6 +423,8 @@ export interface StartRecoveryAttemptInput {
   readonly manifest: CapabilityManifest
   readonly precheck: ProviderPrecheck
   readonly rootSessionId: string
+  /** The frozen candidate revision one explicit trial binds, resolved and checked by the caller (`request.trialCandidateRef`). */
+  readonly trialRevision?: EnvironmentRevision
   /** The calling session, recorded as the actor of the attempt's own writes. */
   readonly actor: string
   readonly signal?: AbortSignal

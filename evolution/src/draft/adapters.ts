@@ -60,6 +60,8 @@ export interface AssetSideDelta {
 
 export interface ConsumedInput {
   readonly plan: EvaluationPlan
+  /** The draft's asset identity (skill name / template id / capability row), read back from the ledger's own draft record. */
+  readonly identity: string
   readonly comparison: TrialComparison
   readonly candidateReceipt: import('@dangosys/dsh-singularity-task').ExecutionReceipt
   readonly baselineReceipt?: import('@dangosys/dsh-singularity-task').ExecutionReceipt
@@ -286,9 +288,10 @@ export const taskTemplateAdapter: CandidateAdapter = {
       note: `template "${draft.identity}" ${before === undefined ? 'is added' : `moves from @${before.version}`} to @${entry.version}; only new child contracts use it`,
     }
   },
-  assertConsumed({ plan, candidateReceipt }) {
+  assertConsumed({ plan, identity, candidateReceipt }) {
     return proveTemplateConsumed({
       plan,
+      identity,
       receipt: candidateReceipt,
       parentCriteria: plan.samples.flatMap(sample => sample.criteria.map(criterion => criterion.criterionId)),
       where: `sample of draft "${plan.draftId}"`,

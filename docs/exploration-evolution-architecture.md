@@ -1,5 +1,7 @@
 # 有目标的自由探索与受控自进化：架构实施指导
 
+> 2026-10-08 RRSI 重构：本文涉及的演化工具链（九个 `evolution_*`）、`task_recover` 与候选沙箱流程已由不可变环境版本、六个 `method_*` 工具、统一 coordination driver 与显式完成工具取代；架构决定与分工原则的论述保留，机制描述以 `evolution/README.md` 与主 guide 文首的当前协议段为准。
+
 更新：2026-10-01。本文保留架构决定与接口分工；实现状态以[主 guide](singularity-harness-guide.md)和[唯一计划](2026-09-20-vrtc-code-change-plan.md)为准。K1～K4、A5、A6 已按各自合同验收，完整工程仍未完成；本轮实跑反馈修正见主 guide §5.24。源码接线通过不等于真实模型全链效果已证实。
 
 本文细化 [主指南](singularity-harness-guide.md)的上下文、协作与 supervisor 主线；Task 结构及可选契约审核见 [Task 自主构造指导](task-contract-construction-guide.md)，建设顺序见 [计划](2026-09-20-vrtc-code-change-plan.md)。外部事实及固定来源见 [开源调研](2026-09-21-open-source-agent-patterns.md)，角色提示词合同见 [Prompt 指导](agent-prompt-contracts.md)。

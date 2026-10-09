@@ -13,6 +13,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { Admission, StrategyDecisionRecord } from '@dangosys/dsh-singularity-evolution'
+import { readRevision } from '@dangosys/dsh-singularity-task-runtime'
 import { denialReason, message, sessionId, text, undeclaredParameters } from '../shared.ts'
 import {
   candidateRevisionOf,
@@ -20,6 +21,7 @@ import {
   environmentPlaneOf,
   methodLedgerPlaneOf,
   methodModeFor,
+  methodRsiStampFor,
 } from './method-shared.ts'
 import { diffOfRevisions, renderDiff, renderPublishOutcome, renderPublishReason, renderRecoveredIntent } from './method-render.ts'
 
@@ -86,11 +88,12 @@ export function defineMethodPublishTool(ctx: Context) {
           ].join(' ')
         }
 
+        const draft = await ledger.view(args.draftId)
         const intent = await env.openPointerIntent(caller)
         if (intent !== null) {
           const mine =
             intent.direction === 'publish' &&
-            intent.draftId === args.draftId &&
+            (intent.draftId === args.draftId || intent.next.revisionId === draft.draft.candidateRevision.revisionId) &&
             intent.expected?.revisionId === args.expectedActiveRevision
           if (!mine) {
             return [
@@ -139,14 +142,17 @@ export function defineMethodPublishTool(ctx: Context) {
           ].join(' ')
         }
 
-        const draft = await ledger.view(args.draftId)
         const mode = await methodModeFor(ctx, caller)
+        const graphStamp = await methodRsiStampFor(ctx, caller)
         const decider = deciderFor(mode)
         const library = { id: ledger.libraryId, root: ledger.root }
         const baselineRevision = await env.activeRevisionFor(caller).catch(() => undefined)
-        const candidateRevision = await candidateRevisionOf(library, args.draftId)
+        // The candidate the evaluation measured is a frozen revision; one the
+        // pipeline never ran is still its draft directory, frozen by the switch.
+        const frozenCandidate = await readRevision(library, draft.draft.candidateRevision.revisionId)
+        const candidateRevision = frozenCandidate ?? (await candidateRevisionOf(library, args.draftId))
         if (candidateRevision === undefined) {
-          return `method_publish rejected: draft "${args.draftId}" has no draft directory; nothing was written.`
+          return `method_publish rejected: draft "${args.draftId}" has neither a frozen candidate revision nor a draft directory; nothing was written.`
         }
         const diff = renderDiff(
           await diffOfRevisions(baselineRevision ?? null, candidateRevision).catch(() => ({
@@ -185,18 +191,18 @@ export function defineMethodPublishTool(ctx: Context) {
         }
 
         // The approval is the human's for the state they were shown. Re-read the
-        // graph's own mode, the pointer and the report before writing: a graph the
-        // approval window reconfigured, or a pointer that moved, refuses here
-        // rather than switching to something nobody approved.
-        const [recheck, recheckMode] = await Promise.all([env.activeEnvironmentView(caller), methodModeFor(ctx, caller)])
+        // graph's own configuration, the pointer and the report before writing: a
+        // graph the approval window reconfigured, or a pointer that moved, refuses
+        // here rather than switching to something nobody approved.
+        const [recheck, recheckStamp] = await Promise.all([env.activeEnvironmentView(caller), methodRsiStampFor(ctx, caller)])
         if (recheck.revisionId !== args.expectedActiveRevision || recheck.generation !== args.expectedGeneration) {
           return [
             `method_publish: no pointer moved — the pointer is now ${recheck.revisionId} g${recheck.generation}, not the approved`,
             `${args.expectedActiveRevision} g${String(args.expectedGeneration)}; the approval is spent and no second one is requested.`,
           ].join(' ')
         }
-        if (recheckMode !== mode) {
-          return `method_publish: no pointer moved — this graph's method mode changed from ${mode} to ${recheckMode} while the approval was open.`
+        if (recheckStamp !== graphStamp) {
+          return `method_publish: no pointer moved — this graph's rsi configuration was cleared or replaced while the approval was open; the approval is spent and no second one is requested.`
         }
         try {
           await ledger.validatePrePublish(report)
@@ -206,7 +212,10 @@ export function defineMethodPublishTool(ctx: Context) {
 
         const published = await env.publishRevision(caller, {
           direction: 'publish',
-          source: { kind: 'draft', draftId: args.draftId },
+          source:
+            frozenCandidate === undefined
+              ? { kind: 'draft', draftId: args.draftId }
+              : { kind: 'revision', revisionId: frozenCandidate.manifest.revisionId },
           expected: { revisionId: args.expectedActiveRevision, generation: args.expectedGeneration as number },
           approvalRef,
           actor: caller,
