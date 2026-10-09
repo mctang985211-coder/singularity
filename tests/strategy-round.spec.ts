@@ -81,19 +81,23 @@ const evaluation = (evaluationId: string, over: Partial<RoundEvaluation> = {}): 
   admissible: over.admissible ?? true, why: over.why === undefined ? null : over.why,
 })
 
-type MeasureTable = { evaluations: Map<string, RoundEvaluation>; aggregates: Map<string, { at: number; aggregate: FrozenAggregate }[]>; published: { at: number; assets: readonly string[] }[] }
-const tableOf = (): MeasureTable => ({ evaluations: new Map(), aggregates: new Map(), published: [] })
+type MeasureTable = { evaluations: Map<string, RoundEvaluation>; aggregates: Map<string, { at: number; aggregate: FrozenAggregate }[]> }
+const tableOf = (): MeasureTable => ({ evaluations: new Map(), aggregates: new Map() })
 const measuredAt = (table: MeasureTable, revision: RevisionRef, at: number, quality: number, cost: number | null = 10): void => {
   table.aggregates.set(revision.revisionId, [...(table.aggregates.get(revision.revisionId) ?? []), { at, aggregate: { quality, cost } }])
 }
-/** The slice the round reads: both historical reads honour the round's own cutoff. */
-const sliceOf = (table: MeasureTable): MeasureSlice => ({
+/**
+ * The slice the round reads: the historical aggregate honours the round's own cutoff, and the
+ * accepted asset classes are no longer a convention here — they are folded out of `entries` by
+ * `publishedAssetsBelow`, which has one owner (E1).
+ */
+const sliceOf = (table: MeasureTable, entries: readonly Envelope[]): MeasureSlice => ({
+  entries,
   evaluationOf: id => table.evaluations.get(id),
   incumbentBelow: (revision, cutoff) => {
     const below = (table.aggregates.get(revision.revisionId) ?? []).filter(entry => entry.at < cutoff).sort((left, right) => right.at - left.at)
     return below[0]?.aggregate ?? null
   },
-  acceptedAssetsBelow: cutoff => [...new Set(table.published.filter(entry => entry.at < cutoff).flatMap(entry => entry.assets))].sort(),
 })
 
 type Live = { readonly store: ControlSessionStore; readonly commands: StrategyCommands; readonly table: MeasureTable; readonly calibration: Calibration }
@@ -113,7 +117,7 @@ async function deployment(over: { rounds?: number; firstBudget?: number; minimum
   })
   const table = tableOf()
   const calibration = over.calibration ?? FLOOR
-  const commands = createStrategyCommands({ store, rounds: over.rounds ?? 3, firstBudget: over.firstBudget ?? 4, minimumBudget: over.minimumBudget ?? 1, calibration, measuresAt: () => sliceOf(table) })
+  const commands = createStrategyCommands({ store, rounds: over.rounds ?? 3, firstBudget: over.firstBudget ?? 4, minimumBudget: over.minimumBudget ?? 1, calibration, measuresAt: cut => sliceOf(table, cut.entries()) })
   return { store, commands, table, calibration }
 }
 async function openThrough(live: Live, over: Partial<OpenRoundInput> = {}): Promise<string> {
@@ -135,7 +139,7 @@ const decideThrough = (live: Live, roundId: string): Promise<Envelope> => live.c
 const stateOf = (live: Live, roundId: string): RoundState | undefined => live.store.load().stateOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, roundId)
 const winnerOf = (envelope: Envelope): number | null => (envelope.payload as { winner: number | null }).winner
 const project = (live: Live, roundId: string): ReturnType<typeof projectRound> =>
-  projectRound(stateOf(live, roundId) as RoundState, sliceOf(live.table), live.calibration)
+  projectRound(stateOf(live, roundId) as RoundState, sliceOf(live.table, live.store.load().entries()), live.calibration)
 
 /** A round with two measured candidates, one per slot, and a frozen incumbent aggregate. */
 async function twoCandidateRound(
@@ -290,12 +294,12 @@ describe('the projection decides admissibility before any argmax', async () => {
 
   it('computes the gain and the novelty below the round\u2019s own cutoff, and breaks a tie by slot number', async () => {
     const live = await deployment()
-    // The incumbent was measured at 0.6 below the cutoff and 0.8 above it; `skill` is published
-    // below the cutoff and `tool` above it. So the frozen gain is +0.2 and novelty is 1 (R03, R05).
+    // The incumbent was measured at 0.6 below the cutoff and 0.8 above it, so the frozen gain is
+    // +0.2 (R03). This log's history publishes no environment head below the cutoff, so nothing is
+    // accepted and the slot's one declared class is novel: novelty 1 (R05).
     const roundId = await twoCandidateRound(live, { e0: { quality: 0.8 }, e1: { quality: 0.8 }, edits0: [{ asset: 'tool', target: 'tokenizer' }] })
     measuredAt(live.table, INCUMBENT, 1, 0.6)
     measuredAt(live.table, INCUMBENT, 9, 0.8)
-    live.table.published.push({ at: 1, assets: ['skill'] }, { at: 9, assets: ['tool'] })
     const decision = project(live, roundId)
     expect([decision.slots[0]?.gain, decision.slots[0]?.novelty]).toEqual([expect.closeTo(0.2, 10), 1])
     expect(winnerOf(await decideThrough(live, roundId))).toBe(0)
@@ -346,11 +350,11 @@ describe('the projection decides admissibility before any argmax', async () => {
     expect([decision.slots[0]?.gain, decision.slots[0]?.admissible, decision.slots[0]?.reason, decision.winner]).toEqual([null, false, expect.stringContaining('no aggregate below the round'), null])
 
     const basis = stateOf(live, roundId) as RoundState
-    await expectRefusal(() => projectRound(basis, sliceOf(live.table), { floor: -1, source: 'measured' }), 'malformed-payload', 'finite number')
-    await expectRefusal(() => projectRound(basis, sliceOf(live.table), { floor: 0.1, source: 'guessed' } as unknown as Calibration), 'malformed-payload', 'measured')
+    await expectRefusal(() => projectRound(basis, sliceOf(live.table, live.store.load().entries()), { floor: -1, source: 'measured' }), 'malformed-payload', 'finite number')
+    await expectRefusal(() => projectRound(basis, sliceOf(live.table, live.store.load().entries()), { floor: 0.1, source: 'guessed' } as unknown as Calibration), 'malformed-payload', 'measured')
   })
 
   it('refuses an annealing policy that anneals upward', async () => {
-    expect(() => createStrategyCommands({ store: {} as ControlSessionStore, rounds: 3, firstBudget: 1, minimumBudget: 4, calibration: FLOOR, measuresAt: () => sliceOf(tableOf()) })).toThrow(/anneal downward/)
+    expect(() => createStrategyCommands({ store: {} as ControlSessionStore, rounds: 3, firstBudget: 1, minimumBudget: 4, calibration: FLOOR, measuresAt: () => sliceOf(tableOf(), []) })).toThrow(/anneal downward/)
   })
 })

@@ -39,6 +39,7 @@
  */
 
 import type { EvaluationView } from '../measure/view.ts'
+import type { Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { RevisionRef } from '../task/protocol.ts'
 import {
@@ -52,6 +53,7 @@ import {
 } from './decision.ts'
 import { requirePlan, type RoundPlan } from './plan.ts'
 import { readCalibration, sameRevision, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
+import { publishedAssetsBelow } from './published-assets.ts'
 
 /**
  * One evaluation as `src/measure/**` projects it (`docs/phase-cd-design.md` §5.4), plus the members
@@ -76,18 +78,22 @@ export interface RoundEvaluation extends EvaluationView {
 }
 
 /**
- * The measure slice as one round reads it.
+ * The measure slice as one round reads it: the evaluations, the incumbent's own aggregate below a
+ * cutoff, and the log both were read from.
  *
- * The three reads are functions, and the two historical ones take the round's own `historyCutoff` as
- * an argument: `projectRound` passes the cutoff out of the round's opening fact, so substituting
- * today's head for the frozen position means changing this file, not a caller's habit.
+ * The two reads are functions of the round's own `historyCutoff`: `projectRound` passes the cutoff
+ * out of the round's opening fact, so substituting today's head for the frozen position means
+ * changing this file, not a caller's habit. `entries` is that same fixed log, and what counts as
+ * *accepted* in it is derived from it by `publishedAssetsBelow` — one owner of the definition —
+ * rather than injected here as a second one (E1: two wirings had invented two conventions, and
+ * novelty feeds selection, so two conventions can produce two winners from one log).
  */
 export interface MeasureSlice {
+  /** Every fact at the cut this slice was taken at. The round's cutoff is what narrows it. */
+  readonly entries: readonly Envelope[]
   readonly evaluationOf: (evaluationId: string) => RoundEvaluation | undefined
   /** The incumbent's own frozen aggregate from facts below `cutoff`; `null` = never measured there. */
   readonly incumbentBelow: (revision: RevisionRef, cutoff: number) => FrozenAggregate | null
-  /** Asset classes actually published below `cutoff`; novelty is counted against these (R05). */
-  readonly acceptedAssetsBelow: (cutoff: number) => readonly string[]
 }
 
 /** What a previously measured candidate left behind: the other side of a frozen gain. */
@@ -286,7 +292,8 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
  *
  * `history.acceptedAssets` and the incumbent's aggregate come from **below the round's cutoff**, and
  * the cutoff is the round's own; the only way to read a later fact here would be to change this
- * function.
+ * function. The environment the accepted classes belong to is the incumbent's, out of the same
+ * frozen plan.
  */
 export function projectRound(state: RoundState, slice: MeasureSlice, calibration: Calibration): RoundDecision {
   const plan = requirePlan(state, `project round "${state.roundId}"`)
@@ -294,7 +301,7 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
   readCalibration(calibration, 'the noise basis')
 
   const incumbentAggregate = slice.incumbentBelow(plan.incumbent, plan.historyCutoff)
-  const acceptedAssets = slice.acceptedAssetsBelow(plan.historyCutoff)
+  const acceptedAssets = publishedAssetsBelow(slice.entries, plan.incumbent.environmentId, plan.historyCutoff)
   const submissions = [...state.submissions].sort((left, right) => left.slot - right.slot)
 
   // Comparability first: two calibers in one pool would be two questions averaged into one ranking.
