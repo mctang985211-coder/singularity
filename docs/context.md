@@ -104,6 +104,15 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 - **两个运行时解析文件**（brief 未点名，但 vitest 与裸 node **不读 tsconfig `paths`**）：`vitest.config.ts`（把 4 个包 alias 到已装 build）与 `scripts/dsh-control-runtime.mjs`（`module.register` 的 resolve hook）。tsconfig 的 `paths` 指向 **`<pkg>/lib/types/index.d.ts`**——0.2.0-rc.2 里**没有 `lib/index.d.ts`**。
 - **依赖形态**：4 个 `@deepseek-ai/*` 是 **peerDependencies**（宿主提供），不是 devDependencies。
 
+**A 的退出条件逐条状态**（诚实标注，不把未证明的算作已证明）：
+
+| 退出条件 | 状态 |
+|---|---|
+| 双进程互斥 | ✅ 探针第 2 节观测：第二写者拿 `SessionAlreadyOwnedError`；read 句柄不受影响 |
+| 并发命令正确 | ✅ 提交队列串行化 + `gate.spec.ts` 回归 |
+| 提交后/答复前崩溃可识别原结果 | ✅ **本轮修好**：`commandId` 进信封，`adopt` 重建命令表；探针 4b 由 GAP 变 `ok`，`failures: 0, gaps: 0` |
+| **屏障失败不返回成功** | ⚠️ **代码正确但尚未观测证明**。更正一处我自己的措辞：`SessionHandle.flush()` 的签名是 `Promise<void>`（`dsh-session-persistence/lib/types/handle.d.ts:99`），**没有 `false` 可查**；我说的"`false` 即失败"指的是 `ctx.sessions.flush(session)` 那条**我们不用的活跃缝**。store 的做法是捕获 flush **抛出** 并拒绝（`write-not-durable`），随后重读并比对摘要——比信任返回值更强。**但缺一个"屏障确实失败"的用例**：`tests/control-store.spec.ts` 现有 6 测覆盖了往返、外来事件、未知内层形状、不可序列化载荷、丢失答复恢复、以及关闭后的写入拒绝，**没有一条让 flush 拒绝**。修法是注入一个 `flush` 抛出的假 `SessionPersistence`（`ControlSessionStore.open` 只用 handle 的 `read/append/flush/close`，假件很小）。**这是下一轮的第一件事。** |
+
 ### 4.2 RRSI：**我现在亲自读过上游源码**（此前只读 README）
 
 **完整对照件：[`docs/rrsi-upstream-reference.md`](rrsi-upstream-reference.md)**（逐条带行号，覆盖范围见其 §0）。
