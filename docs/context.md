@@ -208,9 +208,41 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 **陷阱**：registry 的 `latest` 是 `0.0.1-rc.1`。照 `latest` "升级"会是**大幅降级**。这也是"永不从 registry 装"这条规则的实质原因，而不是洁癖。
 
-## 7. 下一轮的第一批动作
+## 8. 旧仓行为参照（证据 A，本轮到齐）
 
-1. ~~补屏障失败那一测~~ —— **本轮完成**：`tests/control-barrier.spec.ts`，并用变异证明它真的能失败（§4.1 末尾表）。**阶段 A 收口。**
-2. **阶段 B 进行中**（真实执行纵切）：设计已落在 [`docs/phase-b-design.md`](phase-b-design.md)。其中**已定**的是 §1 约束（9 条，含"不建 group/router""不建通用沙箱平台""不引入第二个条件更新""已冻结格式加必填字段即升版本且不写兼容层"）、§2 架构决定、§5 明确不做、§6 K1 12 场景归属、§7 待裁决问题。**§2 是本阶段的要点**：现有引擎一个 fact 只被它自己 subject 的 reducer 检查（`memory-log.ts` 的 `stateKey`），而 `foldSubjects`/`foldSubject` 已给出全日志与隔离两个读作用域（`fold.ts:56,70`）；分解天然跨 subject，所以——**分解的边是父 subject 的事实；子的执行只在子 subject；父的"完成"不落盘，它是投影**。于是"父任务不会提前完成"不存在可违反的事实（不是被门禁禁止），与 receipt 的做法一致。代价逐条记账：跨 subject 的**存在性**判定（run 钉的 revision 是否真被创建）只能是全日志投影，且必须**拒绝**而非报告。
-3. **§3 事实面不动手写**：等两份证据——（a）旧仓**行为**参照（只抄行为，丢掉形状繁殖）；（b）已装 DSH 里 E3/E6/审批/跨进程恢复/受信身份的缝**到底存在什么**（F01 的教训：不能假定上游会替我们保证语义）。§3 写明了每份证据各自裁决哪几个决定。**在证据到齐前不动手写 `src/`。**
-4. **K1 检查点在 B 完成后**（review §6 的 12 个验收场景；其中 1–5 已由阶段 A/S2 观测满足，6–12 归 B，逐条见设计 §6）。
+**交付物**：[`docs/legacy-behaviour-reference.md`](legacy-behaviour-reference.md)（266 行，每条带 `path:line`；只读、未跑构建、旧仓未改动）。
+
+**我自己复核过的五处承重结论**（不转述）：
+
+1. **分解门是机构不是提示词**：`task-runtime/src/orchestration/child.ts:576-582` 要求每个 `dependsOn` 都在 `verified` 集合里；`:658-663` 对 terminal-but-unverified 的依赖**阻塞并带具名理由**。只有 `verified` 满足依赖。回归：`tests/integration/a3-coordination-loop.spec.ts:450-453`、`a6-recovery.spec.ts:333-340`。
+2. **责任转移不变量不存在**：搜 `cannot continue|no longer continue|不可继续|责任转移`，仅三处命中且全无关（run 继续 `observe.ts:254`/`drivers.ts:567`、proposal 归属 `proposals.ts:407`）；`task-runtime/src/handoff.ts:20-21` **自认**"只持久化 handoff 的数据"。→ **B 的责任不变量是新建，不是移植。**
+3. **二维 CAS**：`pointer.ts:371-376`（`revisionId` + `generation`）与**中途重检** `:415-422`（第三方移动了指针则拒绝、不覆盖）。
+4. **verifier 版本是手写字面量**：`command-verifier.ts:181` `'1'`（`review-`/`composite-` 同）；`verifier/src/index.ts:374-380` 的 `stampVersion` **覆盖** verifier 自报的版本。`index.ts:432` `artifactRefs: []` **恒空**——判决不绑定任何具体产物。
+5. **group 是只写不读**：`group/add`/`member/add` 只出现在 reducer（`graph/src/service/state.ts:32,35`）与类型联合（`graph/src/types.ts:43-44`），**无生产生产者**；`groups` 不在消费者投影里（`map/src/types.ts:30-36`）。
+
+**净结果**：**COPY** = 分解 DAG + verified-only 门 + 阻塞带理由、节点状态规则、二维 CAS、bubble 的 clone-per-round + 冻结方法卷绑定、verdict 行为 + **verifier selftest 门（必须既有 pass 样本又有 fail 样本）**、receipt 的"固定来源"目标。**REUSE-DSH** = 会话 create/resume、`$DSH_HOME` 掩蔽、工作区租约。**DROP** = `GroupNode`/`group/add`/`member/add`/`routerFor`/"router 是唯一对外端点"、`artifactRefs: []` 与 `id@version` 字符串绑定、`BubbleManifest`、整棵 `$DSH_HOME/singularity/environments/…` 目录形状 + `intent.json` + `completions.jsonl`。
+
+**三处"注释描述了义务、代码没实现"**（旧仓的复发模式，必须防）：
+
+1. `bubble.ts:4-8` 声称 bubble 隐藏 checkout 与 `$DSH_HOME`；bubble **无任何隐藏代码**（无 env scrub、无 read-deny），方法卷只是**多加**一个 skill root（`spawn.ts:99-104`）。掩蔽在 DSH sandbox（`docs/bubble-mcp-requirements.md:7`）。
+2. `bubble.ts:246-248` 声称 clone"自包含"，但本地 `git clone` **硬链接**对象库到母港，母港 `gc`/prune 会改共享 inode。
+3. RRSI 的 `CandidateFact.edits` **被读**（`selection.ts:117-118`、`history.ts:110,129`、`screen.ts:51-54`）而**两个生产生产者恒为 `[]`**（`method-shared.ts:554-563`、`methods.ts:296-302`）→ **机制新颖度/机制产出/简化信号静默恒空**。这比"字段没填"更坏：恒 0 会被发现，**被读的恒空不会**。
+
+**三处 RRSI 死字段独立复核确认**（无一处被证伪）：`incumbentMechanismCounts`（`selection.ts:111,118` 只读；唯一生产调用方 `observe.ts:177-184` 不传；`selectRound` 无生产调用方）；`edits`（见上）；`consumption`（`history.ts:20,30`；`foldHistory` **从不引用** → 连读者都没有，**可直接删**）。
+
+**"graph 在 bubble 里"在旧仓不是真的**：bubble 目录下没有任何 graph store/service/`TaskSnapshot`；`graphId` 只出现在分支名与一个 manifest 字符串里。`round-N` 只是目录嵌套，graph 留在自己的 store。review R08 说"目录嵌套本身不能定义'graph 在 bubble 里'"——已证实。
+
+## 9. B 的直接后果（由证据 A 推出，不待证据 B）
+
+- 责任不变量**新建**（旧仓没有），门牙咬在 `run/started` 只接受当前责任人身份 → 新增具名拒绝码 `not-responsible`（`REFUSAL_CODES` 26 → 27，必须配反例测试）。
+- 分解用**一条完整事实**（`task/decomposed` 携带全部子与边），不是 N 条 `DependencyAdded` + 一条 `TaskDecomposed`——依据 context §4.3 第 9 条（DSH 的 `append([a,b])` 不是崩溃原子事务）。
+- revision 不可变用 **reducer 自校验**（同 id 异内容拒 + 内容摘要重算），**不是**旧仓的 path-exists（`store.ts:222-223`，且无 chmod）。
+- receipt **派生 + 内容寻址 + 含实现摘要**；**不采用**旧仓"完全不提 verifier"换来的固定来源（那与 `artifactRefs: []` 是同一种病）。
+- `task` 协议升 **v2**（`evidence/produced` 与 criterion 各增必填 `implementationDigest`），**v1 按 `version-mismatch` 具名拒绝，不写兼容层**。
+
+## 10. 下一轮的第一批动作
+
+1. **阶段 A 收口（已完成）**：`tests/control-barrier.spec.ts`，并用变异证明它真能失败（§4.1 末尾表）。
+2. **等证据 B（已装 DSH 缝实测）到齐**，它只裁决三件事：E3 是**引用** DSH 的 session/agent 运行时对象还是自建模；agent 身份绑定是否要从 `Record<role, identity>` 扩为 per-agent（会不会破坏 E03 的双重校验回归）；verifier 的 selftest 门与 `implementationDigest` 放装载期还是命令期（**倾向命令期**，依 `contract.ts` 已确立的 shape/availability 拆分）。
+3. 证据 B 到齐后：填 `docs/phase-b-design.md` §3 的 E3 行 → 提交 → **按 §3 的 kind 表派 B 实现子代理**（brief 直接引设计文档，写明"哪个事实、哪条不变量、哪个强制点、哪个消费者"，避免它们自己发挥）。**在此之前不动手写 `src/`。**
+4. **K1 检查点在 B 完成后**（review §6 的 12 个验收场景；**1–5 已由阶段 A/S2 观测满足，6–12 归 B**，逐条见设计 §6）。

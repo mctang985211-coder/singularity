@@ -54,31 +54,41 @@
 
 **代价（诚实记账）**：跨 subject 的**存在性**判定（"run 钉住的 revision 真的被创建过吗"）**不是 reducer 不变量**，只能是全日志投影。投影必须**拒绝**（具名），不是仅仅报告。凡属这一类，本文逐条标出，不假装它在 reducer 里。
 
-## 3. 事实面（**待两份证据**）
+## 3. 事实面（**证据 A 已到并复核；E3 一行仍等证据 B**）
 
-每一行最终必须填满：`种类 / subject / 不变量 / 强制点（reducer｜投影｜命令期）/ 消费者 / 门禁`。**空白处不填猜测。**
+证据 A = [`legacy-behaviour-reference.md`](legacy-behaviour-reference.md)。其中的承重结论我**自己复核过原文**：分解门（`child.ts:576-582,658-663`）、责任不变量（搜不到，三处命中都是无关的 run 继续/proposal 归属拒绝；`handoff.ts:20-21` 自认"只持久化数据"）、二维 CAS（`pointer.ts:371-376,415-422`）、verifier 版本是字面量 `'1'` 且 `stampVersion` 覆盖（`command-verifier.ts:181`、`index.ts:374-380`）、`artifactRefs: []`（`index.ts:432`）、group 无生产者。
 
-| 领域 | 需要的种类（暂定） | 强制点 | 消费者 |
+| 领域 | 种类（定） | subject | 不变量 | 强制点 | 消费者 |
+|---|---|---|---|---|---|
+| **R3 责任** | `task/assigned{agentId, agentIdentity}`、`task/reassigned{from, agentId, agentIdentity}` | task | 指派一次；转移的 `from` 必须**等于当前责任人**；**`run/started` 只接受当前责任人的身份** | **reducer** | K1 §6 |
+| **分解** | `task/decomposed{children:[{taskId, dependsOn:[…]}]}`——**一条完整事实** | 父 task | 一次性（不可改）；子 id 非空、唯一、≠父；`dependsOn` 必须在声明内；**无环** | **reducer**（纯，形状+无环） | 投影的就绪判定 |
+| **初始 Revision** | `revision/created{revisionId, manifest}` | 环境 | 内容摘要由 reducer **重算并自校验**（篡改即拒）；同 id 同内容 = 幂等；同 id 异内容 = 具名拒绝；**没有任何 kind 能改已创建的 revision** | **reducer** | `run/started` 的钉住 + 投影的存在性 |
+| **最小 Bubble** | `bubble/opened{runId, inputs:[{name,digest}], workspace:{kind,ref}}` | task | 一次 run 一个 bubble；只对 running 的 run；**每条 verdict 的输入摘要必须等于该 run 的 bubble 所声明的输入** | **reducer**（同 subject，所以是纯判） | K1 §7 的输入绑定 |
+| **真实 verifier** | `evidence/produced` 增必填 `implementationDigest`；criterion 增 `implementationDigest`；verifier 实现须带 `selftest` 样本 | task | 实现摘要与 criterion 声明不一致即拒；**selftest 必须既有 pass 样本又有 fail 样本** | **reducer** + 部署期 selftest | K1 §7 / §11 |
+| **E3 agent node** | **待证据 B**：引用 DSH 的 session/agent 对象，还是自建模 | — | — | — | 责任（只有活着的 agent 可被指派） |
+
+**两处关键：为什么 bubble 的输入绑定**能**在 reducer 里**。bubble 与 evidence 都以 task 为 subject，所以"verdict 的输入摘要 = run 的 bubble 声明的输入摘要"是**单 subject 纯判**——不需要 §2 那条"跨 subject 只能靠投影"的代价条款。跨 subject 的只剩 revision 的存在性一条。
+
+**E3 的"可见节点必有活会话"：按旧仓事实降级为 ordering，不伪装成不变量。** 旧仓是靠"先 `agents.create` 解析、后提交 `agent/add`"的顺序（`agent-runtime/src/index.ts:243`→`:277`）做到的，reducer 只校验非空字符串 id、且不持会话句柄（`graph/src/service/state.ts:47-48`、`graph/src/index.ts:80-82`）。**我们的日志同样判不了 DSH 会话的存活**（那是运行期事实，不是日志事实）。所以这一条要么如实写成 ordering + 由投影把 session id 露出来供消费者查，要么不做；**绝不写一个判不了它的 reducer 来假装有保证**。
+
+## 3.5 有意与旧仓不同（每条给理由，不是"我们做得更好"）
+
+| # | 旧仓 | 我们 | 理由 |
 |---|---|---|---|
-| E3 agent node | 待定（证据 B 决定是**引用** DSH 的 session/agent 对象还是自建模） | 待定 | 责任（只有活着的 agent 可被指派） |
-| R3 责任 | `task/assigned`、`task/reassigned` | reducer：只有当前责任人的身份可 `run/started` | K1 §6 |
-| 分解 | `task/decomposed`（父 subject） | reducer：一次性、子 id 唯一非空、依赖须在声明内、无环 | 投影 §4 |
-| 初始 Revision | `revision/created`（环境 subject） | reducer：同 id 同内容幂等、同 id 异内容拒绝 | `run/started` 的钉住 |
-| 最小 Bubble | 待定（证据 A 决定"最小"的边界） | 待定 | receipt 的输入身份 |
-| 真实 verifier | `evidence/produced` 增必填 `implementationDigest` | reducer：实现不一致即拒 | K1 §7 |
+| 1 | N 条 `DependencyAdded` + 一条 `TaskDecomposed`（`task/src/index.ts:258-273`） | **一条** `task/decomposed` 携带全部子与边 | `docs/context.md` §4.3 第 9 条：DSH 的 `append([a,b])` **不是**多记录崩溃原子事务，有业务原子性的操作应表达成**一条完整事实** |
+| 2 | "immutable" = 目标路径已存在就抛（`store.ts:222-223`），无 chmod/只读模式 | **reducer 不变量**：同 id 异内容拒 + 内容摘要自校验 | path-exists 不是不可变；自校验摘要是纯函数，且顺带得到篡改拒绝（旧仓 `revision.ts:233-240` 的同一行为，但那是重读文件） |
+| 3 | receipt **存储**、且**完全不提 verifier**（`task-runtime/src/receipt.ts` 全文件无 verifier，`receipts.ts:145`） | receipt **派生**、内容寻址、含 artifact 与实现摘要 | 旧仓的"固定来源"是靠**省略** verifier 得到的——那与 `artifactRefs: []` 是同一种病（verdict 不绑定任何具体物）。我们用"在判决时刻冻结摘要"得到固定来源，且历史仍可读 |
+| 4 | 责任只持久化数据，**转移不变量 NOT FOUND** | 责任有门牙，咬在 `run/started` | review 把这条列为 B 的退出条件；旧仓 `handoff.ts:20-21` 自认只存数据 |
+| 5 | bubble docstring 声称隐藏 checkout 与 `$DSH_HOME`（`bubble.ts:4-8`），代码**没有**实现 | 掩蔽 **REUSE-DSH**，我们不实现、也不声称 | 实测：掩蔽在 DSH sandbox（`docs/bubble-mcp-requirements.md:7`），bubble 只是多加了一个 skill root（`spawn.ts:99-104`）。这是"注释描述了义务、代码没实现"的又一例 |
+| 6 | `GroupNode`/`group/add`/`member/add`/`routerFor` | **不做** | 无生产生产者、无消费者；"router 是唯一对外端点"只有散文（`state.ts:115-118` 的 `edge/add` 没有 router 操作数） |
 
-**两份证据各自裁决什么**（这是本轮派出的两个子代理）：
+## 4. 派生投影（定）
 
-- **证据 A（旧仓行为参照，只读）**：E3 在旧仓是什么形状、责任转移怎么记录、分解与依赖怎么推进、bubble 到底隔离了什么、verifier 与 receipt 怎么绑定实现版本。→ 决定我们复用哪些**行为**、丢弃哪些**形状**。
-- **证据 B（已装 DSH 缝实测）**：create/resume 的运行时对象到底是什么、spawn/嵌套/router 是否存在、原生审批缝、跨进程 SIGKILL 恢复、受信身份是否已有。→ 决定 E3 是**引用** DSH 的对象还是自己建模（review §5：E3 复用 DSH 生命周期与已有行为，只重建必要的领域边界）。
+现有读层是**单 subject** 的（`projectTask` / `projectReceipt`）。B 新增的**全日志**投影在本仓是第一次，边界写死：
 
-## 4. 派生投影（形状已定，字段待 §3）
-
-现有读层是**单 subject** 的（`projectTask` / `projectReceipt`，`view.ts`）。B 新增的是**全日志**投影，这在本仓是第一次，所以它的边界要写死：
-
-- `projectTree(states)`：输入 `foldSubjects(...)` 的结果（全日志，fail-closed）。派生：分解树、每个子的依赖就绪、父的汇总（**点名**失败的子）。
-- `projectBinding(...)`：判定 run 钉住的 revision（以及 bubble，若 B 落成事实）**确实在日志里被创建过**；不存在即**具名拒绝**（§2 的代价条款）。
-- receipt 已存在且已派生。B 追加的证明是 K1 §11 的那条：**换掉/卸载验证器实现后，历史 receipt 的摘要不变**，而**新**执行的缺实现拒绝——两者必须分开（这正是 `contract.ts` 的 shape/availability 拆分）。
+- `projectTree(states)`：输入 `foldSubjects(...)`（全日志，fail-closed）。派生分解树、每个子的依赖就绪、父的汇总（**点名**失败的子）。**就绪规则照抄旧仓的承重行为**：只有 `verified` 满足依赖，terminal-but-unverified 视为阻塞并带具名理由（`child.ts:576-582,658-663`；回归见 `tests/integration/a3-coordination-loop.spec.ts:450-453`、`a6-recovery.spec.ts:333-340`）。
+- `projectBinding(taskState, environmentStates)`：判定 run 钉住的 revision **确实被创建过**，且 `contentDigest` 与创建事实一致；不符即**具名拒绝**（§2 的代价条款，唯一一处）。
+- receipt 已存在且已派生；B 追加 K1 §11 的证明：**卸载验证器实现后历史 receipt 摘要不变**，而**新**执行缺实现则具名拒绝——两者必须分开（`contract.ts` 的 shape/availability 拆分）。
 
 ## 5. B 明确不做（写下来，防止它自己长回来）
 
@@ -107,11 +117,17 @@
 | 11 | 完成后追加消息、卸载验证器 | **B** | 派生 receipt 摘要不变；历史重放与"缺实现拒绝"分开 |
 | 12 | agent / UI 读同一已提交截止范围 | **B** | 唯一投影；未启动的 task 是 `awaiting-run` 不是 `failed`；读路径不追加（既有） |
 
-## 7. 待裁决问题（证据到齐后一次答完，不中途改）
+## 7. 待裁决问题（证据 A 到后已收敛到三个，都属证据 B）
 
-1. **E3 的形态**：引用 DSH 的 session/agent 对象，还是我们自己的事实？（证据 B）
-2. **agent 身份绑定**：现有 `subjects: Record<role, identity>` 是否要扩为 per-agent？扩了会不会破坏"执行者不自判"的双重校验回归（E03）？
-3. **责任的门牙咬在哪**：本设计选"`run/started` 只接受当前责任人的身份"，需要**新增一个具名拒绝码**（如 `not-responsible`）。这是协议变更，要记账。
-4. **`task` 协议是否升 v2**：取决于是否给 `evidence/produced` 加必填 `implementationDigest`。按约束 8，升版本且拒绝 v1 logs，不写兼容层。
-5. **分解的"子任务真的存在"**：§2 结论是投影**拒绝**；确认没有更单侧的做法。
-6. **bubble 的最小事实面**：输入快照与工具实现版本的粒度到哪一层，才够让 receipt 的输入身份是"固定来源"而不至于变成通用沙箱平台。
+**已裁决（证据 A）**：
+
+- **责任的门牙**：钉在 `run/started`——只接受**当前责任人的身份**。需要**新增一个具名拒绝码**（`not-responsible`）。这是协议变更，按规矩记账：`REFUSAL_CODES` 从 26 条变 27 条，且必须有反例测试（旧责任人转移后启动 → 具名拒绝）。
+- **`task` 协议升 v2**：升。`evidence/produced` 增必填 `implementationDigest`、criterion 增必填 `implementationDigest`，属"已冻结格式增加必填字段"（约束 8）→ `TASK_VERSION = 2`，**v1 日志按 `version-mismatch` 具名拒绝，不写兼容层**（review §5 末："无旧数据可以直接拒绝旧格式，无须因此引入兼容层"）。现有 fixture 随之升级，不留 v1 路径。
+- **分解的"子任务真的存在"**：投影**拒绝**（§2 的代价条款）。子任务自身的"存在"= 它以**自己的 subject** 有一份 `task/admitted` 契约；这正是"子 id 出现在父的分解里"不足以证明的东西。
+- **bubble 输入快照的粒度（B 的边界）**：bubble 记 `inputs[]`（名字 + 内容摘要）与 `workspace{kind, ref}`；**工具/工具链版本不放进 bubble**，它们由 verifier 的 `implementationDigest` 覆盖。理由：R08 说"只固定 Skill 文本或 MCP 定义，不能保证背后的 Tool 实现没有变化"——而在 B 里**会做出判决的工具就是验证器**，它已经被实现摘要钉住了；工作区工具链的测量属于 C，B 不假装测过。
+
+**仍待证据 B**：
+
+1. **E3 的形态**：引用 DSH 的 session/agent 运行时对象，还是我们自己的事实？
+2. **agent 身份绑定**：现有 `subjects: Record<role, identity>` 是否要扩为 per-agent？扩了会不会破坏"执行者不自判自己的 run"的**双重校验**回归（E03 的两条用例）？
+3. **verifier 的 selftest 门放在装载期还是命令期**，以及 `implementationDigest` 由谁算（部署方提供 vs 我们算）。旧的裁决是 `contract.ts` 已确立的 shape/availability 拆分：**形状在 fold 期、可运行性在命令期**。按此 selftest 属**命令期**（"今天能不能跑"），装载期只校验摘要存在且形状闭合。
