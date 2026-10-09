@@ -121,13 +121,41 @@
 
 **已裁决（证据 A）**：
 
-- **责任的门牙**：钉在 `run/started`——只接受**当前责任人的身份**。需要**新增一个具名拒绝码**（`not-responsible`）。这是协议变更，按规矩记账：`REFUSAL_CODES` 从 26 条变 27 条，且必须有反例测试（旧责任人转移后启动 → 具名拒绝）。
-- **`task` 协议升 v2**：升。`evidence/produced` 增必填 `implementationDigest`、criterion 增必填 `implementationDigest`，属"已冻结格式增加必填字段"（约束 8）→ `TASK_VERSION = 2`，**v1 日志按 `version-mismatch` 具名拒绝，不写兼容层**（review §5 末："无旧数据可以直接拒绝旧格式，无须因此引入兼容层"）。现有 fixture 随之升级，不留 v1 路径。
+- **责任的门牙**：钉在 `run/started`——只接受**当前责任人的身份**。新增具名拒绝码 `not-responsible`（记账见 §8）。
+- **`task` 协议升 v2**：升。`evidence/produced` 增必填 `implementationDigest`、criterion 增必填 `implementationDigest`，属"已冻结格式增加必填字段"（约束 8）→ `TASK_VERSION = 2`，**v1 日志按 `version-mismatch` 具名拒绝，不写兼容层**（review §5 末）。现有 fixture 随之升级，不留 v1 路径。
 - **分解的"子任务真的存在"**：投影**拒绝**（§2 的代价条款）。子任务自身的"存在"= 它以**自己的 subject** 有一份 `task/admitted` 契约；这正是"子 id 出现在父的分解里"不足以证明的东西。
-- **bubble 输入快照的粒度（B 的边界）**：bubble 记 `inputs[]`（名字 + 内容摘要）与 `workspace{kind, ref}`；**工具/工具链版本不放进 bubble**，它们由 verifier 的 `implementationDigest` 覆盖。理由：R08 说"只固定 Skill 文本或 MCP 定义，不能保证背后的 Tool 实现没有变化"——而在 B 里**会做出判决的工具就是验证器**，它已经被实现摘要钉住了；工作区工具链的测量属于 C，B 不假装测过。
+- **bubble 输入快照的粒度（B 的边界）**：bubble 记 `inputs[]`（名字 + 内容摘要）与 `workspace{kind, ref}`；**工具/工具链版本不放进 bubble**，由 verifier 的 `implementationDigest` 覆盖。理由：R08 说"只固定 Skill 文本或 MCP 定义，不能保证背后的 Tool 实现没有变化"——而 B 里**会做出判决的工具就是验证器**，它已被实现摘要钉住；工作区工具链的测量属 C，B 不假装测过。
 
 **仍待证据 B**：
 
 1. **E3 的形态**：引用 DSH 的 session/agent 运行时对象，还是我们自己的事实？
 2. **agent 身份绑定**：现有 `subjects: Record<role, identity>` 是否要扩为 per-agent？扩了会不会破坏"执行者不自判自己的 run"的**双重校验**回归（E03 的两条用例）？
-3. **verifier 的 selftest 门放在装载期还是命令期**，以及 `implementationDigest` 由谁算（部署方提供 vs 我们算）。旧的裁决是 `contract.ts` 已确立的 shape/availability 拆分：**形状在 fold 期、可运行性在命令期**。按此 selftest 属**命令期**（"今天能不能跑"），装载期只校验摘要存在且形状闭合。
+3. **verifier 的 selftest 门放在装载期还是命令期**，以及 `implementationDigest` 由谁算（部署方提供 vs 我们算）。**倾向已定**：依 `contract.ts` 已确立的 shape/availability 拆分——**形状在 fold 期、可运行性在命令期**——selftest 属**命令期**（"今天能不能跑"），装载期只校验摘要存在且形状闭合。待证据 B 只为确认没有上游缝与之冲突。
+
+## 8. 实现切片与记账（证据 B 一到齐就可按此派发，不再临场设计）
+
+**顺序与依赖**：S1 与 S2 都动任务协议 → **必须同一次 `TASK_VERSION = 2` 变更落地**，不能分两次改版本。S3/S4 在同一 v2 内追加 kind 与必填字段。**S5 等证据 B。** 每片都必须：门禁全绿、新增回归、且**用变异证明新回归真能失败**。
+
+| 片 | 内容 | 退出条件（可机械判定） |
+|---|---|---|
+| **S1** | `environment` 协议 v1：`revision/created{revisionId, manifest}`；`projectBinding`；`run/started` 的消费者 | 同 id 同内容**幂等**；同 id 异内容**具名拒绝**；manifest 摘要被篡改即拒（reducer 自校验）；run 钉住**未创建**的 revision 或无投影时摘要不符 → 投影**具名拒绝** |
+| **S2** | 任务协议 v2：`task/decomposed` **一条完整事实**；`projectTree` | 依赖非 `verified` 时子**不就绪**；terminal-but-unverified 依赖→阻塞**带具名理由**；`dependsOn` 越界/重复/自指/环各具名拒绝；父**没有**完成态事实，只有汇总 |
+| **S3** | v2 必填字段：`evidence/produced` 与 criterion 各增 `implementationDigest`；verifier **selftest 门（命令期）** | 判决的实现摘要 ≠ criterion 声明的 → 具名拒绝（复用 `wrong-verifier`）；verifier **缺 fail 样本即不可运行**（"门禁必须能失败"用在验证器上）；**卸载实现后历史 receipt 摘要不变**，而新执行缺实现具名拒绝 |
+| **S4** | `bubble/opened{runId, inputs[], workspace}`；verdict 的**输入绑定** | 判决的输入摘要 ≠ 该 run 的 bubble 所声明 → 具名拒绝；对已结算的 run 开 bubble / 同 run 开第二个 → `illegal-transition` |
+| **S5**（等证据 B） | E3 + `task/assigned`/`task/reassigned` + `run/started` 的**责任门** | 转移后**旧责任人**启动 run → **具名拒绝**；转移的 `from` ≠ 当前责任人 → 拒绝；只有活着的 agent 可被指派 |
+| **S6** | K1 探针（12 场景；含真实 SIGKILL、真实 verifier 的小任务冒烟） | 设计 §6 的表逐条有观测 |
+
+**新增具名拒绝码的记账**（`REFUSAL_CODES` 26 → 31，每条都必须配反例测试）：
+
+| 新码 | 为什么不能复用现有的 |
+|---|---|
+| `not-responsible` | 与 `self-reported-evidence` 不同：后者是"执行者自判自己的 run"，前者是"我已被免去这项责任" |
+| `cyclic-dependency` | `malformed-payload` 说的是形状坏；环是**形状合法但语义坏**，消费者要能分开处理 |
+| `revision-conflict` | 与 `evidence-conflict`（一条判据只能一份判决）不同：这是**同 id 异内容**的内容寻址冲突 |
+| `unknown-revision` | run 钉住一个没有被创建过的 revision；与 `unknown-run`/`unknown-criterion` 同族但不同物 |
+| `evidence-input-mismatch` | 判决绑定的输入与 run 的 bubble 声明不符；`wrong-verifier` 管的是**谁**判的，这条管的是**在什么输入上**判的 |
+
+**复用、不新增**：判决实现不符 → `wrong-verifier`；分解两次 → `illegal-transition`；子 id 重复/自指/越界 → `malformed-payload`；同 run 第二个 bubble / 对已结算 run 开 bubble → `illegal-transition`。
+
+**派发子代理时的硬要求**（防止"想偏"）：brief 必须逐字给出该片的 kind 名、payload 字段、不变量、**强制点**、**消费者**与退出条件，并写明"**不得**添加本片之外的事实种类、不得新增扩展点、不得把不变量放进注释或提示词、`src/` 内 `conditional: true` 不得出现"。
+
