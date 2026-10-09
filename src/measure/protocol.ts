@@ -31,7 +31,9 @@
  * **Why hard constraints are a separate kind.** `constraint/checked` never touches `weights`.
  * Whether a constraint holds is decided by that criterion's own implementation, once per criterion,
  * and no score compensates for it — which is what makes "high score, out of bounds, rejected"
- * expressible at all.
+ * expressible at all. The check is also bound to the artifact the numbers were formed on: a
+ * constraint cleared on different bytes describes a different measurement, and the report would be
+ * reading as one acceptance two things that never happened together.
  *
  * @module singularity-core/measure/protocol
  */
@@ -369,6 +371,10 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
           const criterion = plan.judgement.find(entry => entry.criterionId === payload.criterionId)
           if (criterion === undefined)
             refuse('unknown-criterion', `${where} checks hard constraint "${payload.criterionId}", which this evaluation's judgement does not declare (declared: ${plan.judgement.map(entry => entry.criterionId).join(', ') || 'none'})`)
+          // Bound to the bytes the numbers came from: a report that measures one artifact and clears
+          // its constraints on another is two reports, and neither of them is this evaluation's.
+          if (!state.observed.some(entry => entry.artifactDigest === payload.artifactDigest))
+            refuse('evidence-input-mismatch', `${where} checks hard constraint "${payload.criterionId}" on artifact ${payload.artifactDigest.slice(0, 12)}…, which no observation of this evaluation was formed on (observed: ${state.observed.map(entry => `${entry.artifactDigest.slice(0, 12)}…`).join(', ') || 'nothing yet'}); check the constraint on the bytes the measurement was formed on`)
           if (state.checks.some(entry => entry.criterionId === payload.criterionId))
             refuse('evidence-conflict', `${where} checks hard constraint "${payload.criterionId}" again; one constraint is checked once, and a re-check is a new evaluation id`)
           const subject = `hard constraint "${criterion.criterionId}"`

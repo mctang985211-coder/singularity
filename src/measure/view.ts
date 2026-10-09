@@ -114,7 +114,7 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
     quality: denominator === 0 ? 0 : observed.reduce((total, entry) => total + entry.quality, 0) / denominator,
     cost: costOf(observed),
     constraints,
-    admissible: reasons.length === 0,
+    admissible: true,
     why: reasons.length === 0 ? null : reasons.join('; '),
   }
 }

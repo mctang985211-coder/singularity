@@ -196,7 +196,7 @@ export {
   type RoundState,
   type StructuralEdit,
 } from './strategy/protocol.ts'
-export { projectRound, type RoundDecision } from './strategy/view.ts'
+export { projectRound, type RoundDecision, type SlotView } from './strategy/view.ts'
 export {
   createStrategyCommands,
   type DecideRoundInput,

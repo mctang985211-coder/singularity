@@ -50,7 +50,8 @@ import {
   type Measurement,
   type Outcome,
 } from './decision.ts'
-import { requirePlan, sameRevision, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
+import { requirePlan, type RoundPlan } from './plan.ts'
+import { readCalibration, sameRevision, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
 
 /**
  * One evaluation as `src/measure/**` projects it (`docs/phase-cd-design.md` §5.4), plus the members
@@ -128,9 +129,9 @@ export interface RoundDecision {
   readonly editBudget: number
   readonly historyCutoff: number
   /** The noise basis the selection was made against, with its source (`measured` / `declared`). */
-  readonly noise: Calibration
-  /** The one caliber every measured slot shares; `null` when nothing is measured yet. */
-  readonly caliberDigest: string | null
+  readonly calibration: Calibration
+  /** The round's frozen caliber: the measurement settings every pooled candidate answers (§5.4). */
+  readonly caliber: string
   readonly slots: readonly SlotView[]
   readonly winner: number | null
   readonly outcomes: readonly Outcome[]
@@ -155,38 +156,28 @@ function describeRevision(revision: RevisionRef): string {
   return `${revision.environmentId}/${revision.revisionId}@${revision.digest.slice(0, 12)}…`
 }
 
-/** A noise basis is a number and its provenance; either half being wrong makes the band fiction. */
-function assertCalibration(calibration: Calibration): void {
-  if (!Number.isFinite(calibration.floor) || calibration.floor < 0)
-    refuse('malformed-payload', `the noise floor must be a finite number >= 0, got ${JSON.stringify(calibration.floor)}`)
-  if (calibration.source !== 'measured' && calibration.source !== 'declared')
-    refuse(
-      'malformed-payload',
-      `the noise floor's source must be "measured" or "declared", got ${JSON.stringify(calibration.source)}; a band whose provenance is unknown cannot be told from a declared floor (R06)`,
-    )
-}
-
 /**
  * Why one measured slot is not admissible, or `null` when it is.
  *
  * The order is the order of the questions a reader asks: is this measurement even about this
- * candidate (the two anchors), did a hard constraint fail, is the measurement complete, is there a
- * frozen baseline to make its gain a gain at all, does its quality clear the incumbent's floor, and —
- * last, because it is the least specific — does the measure slice refuse it for a reason only it can
- * see.
+ * candidate (the two anchors), does it answer the question this round froze (its caliber), did a hard
+ * constraint fail, is the measurement complete, is there a frozen baseline to make its gain a gain at
+ * all, does its quality clear the incumbent's floor, and — last, because it is the least specific —
+ * does the measure slice refuse it for a reason only it can see.
  */
 function inadmissibleReason(
   evaluation: RoundEvaluation,
   submission: CandidateSubmission,
-  incumbent: RevisionRef,
+  plan: RoundPlan,
   incumbentAggregate: FrozenAggregate | null,
   calibration: Calibration,
-  round: number,
 ): string | null {
-  if (!sameRevision(evaluation.baseline, incumbent))
-    return `measured against ${describeRevision(evaluation.baseline)}, not round ${round}'s incumbent ${describeRevision(incumbent)}; its gain is not this round's gain — re-measure it against the incumbent, or propose it in a round whose incumbent it was measured against`
+  if (!sameRevision(evaluation.baseline, plan.incumbent))
+    return `measured against ${describeRevision(evaluation.baseline)}, not round ${plan.round}'s incumbent ${describeRevision(plan.incumbent)}; its gain is not this round's gain — re-measure it against the incumbent, or propose it in a round whose incumbent it was measured against`
   if (!sameRevision(evaluation.candidate, submission.revision))
     return `measured on ${describeRevision(evaluation.candidate)}, but slot ${submission.slot} offers ${describeRevision(submission.revision)}; the observation is about a different candidate — submit the evaluation of the revision this slot offers`
+  if (evaluation.caliberDigest !== plan.caliber)
+    return `measured under caliber ${evaluation.caliberDigest.slice(0, 12)}… but round ${plan.round} pools only ${plan.caliber.slice(0, 12)}…; a score from another caliber answers a different question, so it is not this round's to rank — re-measure it under the round's caliber, or open a round that freezes this one`
   const violated = evaluation.constraints.filter(constraint => constraint.met === false)
   if (violated.length > 0)
     return `violates hard constraint${violated.length === 1 ? '' : 's'} ${violated
@@ -204,12 +195,12 @@ function inadmissibleReason(
         : `missing ${evaluation.missing.map(entry => `slot ${entry.slot} (${entry.reason})`).join(', ')}`
     }; the denominator keeps the plan's trials (R06), so this aggregate is not this candidate's score — finish the trials or record them as missed`
   if (incumbentAggregate === null)
-    return `the incumbent ${describeRevision(incumbent)} has no aggregate below the round's frozen history cutoff, so this candidate has no frozen gain to place against the noise floor; measure the incumbent first, or this round can only retain it`
+    return `the incumbent ${describeRevision(plan.incumbent)} has no aggregate below the round's frozen history cutoff, so this candidate has no frozen gain to place against the noise floor; measure the incumbent first, or this round can only retain it`
   // Upstream's floor, which `select` cannot apply because `S*` is not one of its inputs: a candidate
   // more than the band below the round's incumbent is not a candidate, however cheap it is.
   const floor = incumbentAggregate.quality - calibration.floor
   if (evaluation.quality < floor)
-    return `quality ${evaluation.quality.toFixed(4)} sits ${(floor - evaluation.quality).toFixed(4)} below the admissible floor ${floor.toFixed(4)} (round ${round}'s incumbent ${incumbentAggregate.quality.toFixed(4)} less the ${calibration.source} noise band ${calibration.floor.toFixed(4)}); a cost saving below the floor is not a gain, so this candidate does not enter the comparison — improve it, or propose it in a round whose incumbent it can clear`
+    return `quality ${evaluation.quality.toFixed(4)} sits ${(floor - evaluation.quality).toFixed(4)} below the admissible floor ${floor.toFixed(4)} (round ${plan.round}'s incumbent ${incumbentAggregate.quality.toFixed(4)} less the ${calibration.source} noise band ${calibration.floor.toFixed(4)}); a cost saving below the floor is not a gain, so this candidate does not enter the comparison — improve it, or propose it in a round whose incumbent it can clear`
   // Last, because it is the least specific: the round's own reading of the constraints, the trials
   // and the floor names what it can see itself, and this fallback carries a refusal only the measure
   // slice could know (a broken trial identity, an unbound input, a retired implementation).
@@ -221,7 +212,7 @@ function inadmissibleReason(
 function plannedOf(
   submission: CandidateSubmission,
   slice: MeasureSlice,
-  plan: { incumbent: RevisionRef; round: number; historyCutoff: number },
+  plan: RoundPlan,
   incumbentAggregate: FrozenAggregate | null,
   calibration: Calibration,
 ): PlannedSlot {
@@ -235,7 +226,7 @@ function plannedOf(
   return {
     submission,
     evaluation,
-    reason: inadmissibleReason(evaluation, submission, plan.incumbent, incumbentAggregate, calibration, plan.round),
+    reason: inadmissibleReason(evaluation, submission, plan, incumbentAggregate, calibration),
     gain: incumbentAggregate === null ? null : evaluation.quality - incumbentAggregate.quality,
     costGain: frozenCostGain,
     constraintsMet: evaluation.constraints.every(constraint => constraint.met === true),
@@ -294,7 +285,8 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
  */
 export function projectRound(state: RoundState, slice: MeasureSlice, calibration: Calibration): RoundDecision {
   const plan = requirePlan(state, `project round "${state.roundId}"`)
-  assertCalibration(calibration)
+  // One definition of "a band must name its provenance", shared with the payload that records it.
+  readCalibration(calibration, 'the noise basis')
 
   const incumbentAggregate = slice.incumbentBelow(plan.incumbent, plan.historyCutoff)
   const acceptedAssets = slice.acceptedAssetsBelow(plan.historyCutoff)
@@ -348,8 +340,8 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
     explorationSlots: plan.explorationSlots,
     editBudget: plan.editBudget,
     historyCutoff: plan.historyCutoff,
-    noise: calibration,
-    caliberDigest: pooled.length === 1 ? (pooled[0] as string) : null,
+    calibration,
+    caliber: plan.caliber,
     slots,
     winner: selection.winner,
     outcomes: selection.outcomes,

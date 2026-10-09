@@ -1,13 +1,10 @@
 /**
  * The measurement slice, driven through its own command boundary over a real control store.
  *
- * The subject is what the facts mean: the denominator comes from the plan and not from the
- * observations, an unknown cost stays unknown, a hard constraint is not a number, and every
- * cross-subject precondition — the run exists, the inputs are the bubble's, the executor does not
- * report its own numbers, the implementation is one this deployment holds — refuses by name. The
- * task facts are emitted straight into the log: a run and its declared bubble are the *context* of a
- * measurement, and the task protocol's own preconditions are tested where they belong. The execution
- * path (a real program, a real process, real bytes) is `measure-execution.spec.ts`.
+ * The subject is what the facts mean: the denominator is the plan's, an unknown cost stays unknown, a
+ * hard constraint is not a number, and every cross-subject precondition refuses by name. Facts only a
+ * reducer can refuse are emitted straight into the log — the fold is the authority. Real programs and
+ * real processes are `measure-execution.spec.ts`.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -59,11 +56,11 @@ const CONTRACT = {
 }
 
 /** The deployment's role table: the identity the log resolves each declared emitter role to. */
-function subjectsWith(meterIdentity: string): Readonly<Record<string, string>> {
+function subjectsWith(meterIdentity: string, boundsIdentity = BOUNDS_ACTOR): Readonly<Record<string, string>> {
   return {
     scheduler: SCHEDULER,
     [verifierRoleOf({ verifierRef: METER, verifierVersion: '1' })]: meterIdentity,
-    [verifierRoleOf({ verifierRef: BOUNDS, verifierVersion: '1' })]: BOUNDS_ACTOR,
+    [verifierRoleOf({ verifierRef: BOUNDS, verifierVersion: '1' })]: boundsIdentity,
   }
 }
 
@@ -81,7 +78,7 @@ interface Live {
 }
 
 /** One deployment: a task whose run declared a bubble, and the two implementations a plan may name. */
-async function openLive(meterIdentity = METER_ACTOR): Promise<Live> {
+async function openLive(meterIdentity = METER_ACTOR, boundsIdentity = BOUNDS_ACTOR): Promise<Live> {
   const root = await mkdtemp(join(tmpdir(), 'measure-slice-'))
   const context = new Context()
   await context.plugin(JsonlSessionPersistence, { root, compression: 'none' })
@@ -121,7 +118,7 @@ async function openLive(meterIdentity = METER_ACTOR): Promise<Live> {
       { ref: METER, version: '1', implementationDigest: METER_DIGEST },
       { ref: BOUNDS, version: '1', implementationDigest: BOUNDS_DIGEST },
     ],
-    subjects: subjectsWith(meterIdentity),
+    subjects: subjectsWith(meterIdentity, boundsIdentity),
   })
   return { store, measure }
 }
@@ -139,8 +136,6 @@ const bounds = (criterionId = 'limits'): AcceptanceCriterion => ({
   verifierVersion: '1',
   implementationDigest: BOUNDS_DIGEST,
 })
-
-const weights: EvaluationWeights = { quality: 1, cost: 0.5 }
 
 interface PlanOverrides {
   readonly commandId?: string
@@ -164,7 +159,7 @@ async function plan(instance: Live, overrides: PlanOverrides = {}): Promise<void
     candidate: overrides.candidate ?? OTHER_REVISION,
     run: overrides.run ?? { taskId: TASK, runId: RUN },
     metric: overrides.metric ?? metric(),
-    weights: overrides.weights ?? weights,
+    weights: overrides.weights ?? { quality: 1, cost: 0.5 },
     trials: overrides.trials ?? 2,
     judgement: overrides.judgement ?? [bounds()],
   })
@@ -185,28 +180,11 @@ const trial = (overrides: Partial<Parameters<MeasureCommands['recordTrial']>[0][
 const record = (instance: Live, overrides = {}, evaluationId = EVALUATION) =>
   instance.measure.recordTrial({ commandId: nextCommand(), evaluationId, trial: trial(overrides) })
 
-const check = (instance: Live, met: boolean, criterionId = 'limits') =>
-  instance.measure.checkConstraint({
-    commandId: nextCommand(),
-    evaluationId: EVALUATION,
-    criterionId,
-    met,
-    artifactDigest: ARTIFACT,
-    implementationDigest: BOUNDS_DIGEST,
-  })
+const check = (instance: Live, met: boolean, criterionId = 'limits', artifactDigest = ARTIFACT) =>
+  instance.measure.checkConstraint({ commandId: nextCommand(), evaluationId: EVALUATION, criterionId, met, artifactDigest, implementationDigest: BOUNDS_DIGEST })
 
-const miss = (instance: Live, slot: number, reason: string) =>
-  instance.measure.missTrial({ commandId: nextCommand(), evaluationId: EVALUATION, slot, reason })
-
-const directEmit = (instance: Live, payload: unknown) =>
-  instance.store.emit({
-    commandId: nextCommand(),
-    protocol: MEASURE_PROTOCOL,
-    version: MEASURE_VERSION,
-    kind: MEASURE_KINDS.trialRecorded,
-    subject: EVALUATION,
-    payload,
-  })
+const directEmit = (instance: Live, kind: string, payload: unknown) =>
+  instance.store.emit({ commandId: nextCommand(), protocol: MEASURE_PROTOCOL, version: MEASURE_VERSION, kind, subject: EVALUATION, payload })
 
 function stateOf(instance: Live, evaluationId = EVALUATION): EvaluationState {
   const state = instance.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
@@ -224,8 +202,7 @@ describe('the measurement slice', () => {
     expect(view.denominator).toBe(2)
     expect(view.observed).toBe(1)
     expect(view.quality).toBe(0.5)
-    expect(view.missing).toHaveLength(1)
-    expect(view.missing[0]?.slot).toBe(1)
+    expect(view.missing.map(entry => entry.slot)).toEqual([1])
     expect(view.admissible).toBe(false)
     expect(view.why).toContain('slot 1')
     expect(view.why).toContain('hard constraint "limits"')
@@ -264,7 +241,7 @@ describe('the measurement slice', () => {
     const instance = await openLive()
     await plan(instance)
     await record(instance, { slot: 0, quality: 0.5, cost: 3 })
-    await miss(instance, 1, 'the program timed out twice')
+    await instance.measure.missTrial({ commandId: nextCommand(), evaluationId: EVALUATION, slot: 1, reason: 'the program timed out twice' })
     await check(instance, true)
     // A declared miss is still a slot without an observation, and it carries its own reason.
     const incomplete = projectEvaluation(stateOf(instance))
@@ -288,7 +265,7 @@ describe('the measurement slice', () => {
     const twice = await asyncRefusalOf(() => record(instance, { slot: 0, quality: 0.1 }))
     expect(twice.code).toBe('evidence-conflict')
     expect(twice.detail).toContain('one slot carries one observation')
-    await miss(instance, 1, 'no number was produced')
+    await instance.measure.missTrial({ commandId: nextCommand(), evaluationId: EVALUATION, slot: 1, reason: 'no number was produced' })
     const afterMiss = await asyncRefusalOf(() => record(instance, { slot: 1, quality: 0.9 }))
     expect(afterMiss.code).toBe('evidence-conflict')
     expect(afterMiss.detail).toContain('already declared missed')
@@ -299,9 +276,14 @@ describe('the measurement slice', () => {
     await plan(instance)
     // Emitted straight through the log under the other held implementation's role: the command
     // fills the role from the plan, so only a caller talking around it can produce this.
-    const role = await asyncRefusalOf(() => directEmit(instance, { ...trial(), verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST }))
+    // Only the role differs here — the digest is still the metric's — so this pins the emitter rule.
+    const role = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: BOUNDS, verifierVersion: '1' }))
     expect(role.code).toBe('wrong-verifier')
-    expect(role.detail).toContain('the metric "quality"')
+    expect(role.detail).toContain('was emitted by verifier:bounds@1')
+    // The metric's own role, but not the bytes the metric names: the fold refuses that too.
+    const content = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST }))
+    expect(content.code).toBe('wrong-verifier')
+    expect(content.detail).toContain(BOUNDS_DIGEST.slice(0, 12))
     const digest = await asyncRefusalOf(() => record(instance, { implementationDigest: BOUNDS_DIGEST }))
     expect(digest.code).toBe('wrong-verifier')
     expect(digest.detail).toContain(BOUNDS_DIGEST.slice(0, 12))
@@ -325,6 +307,14 @@ describe('the measurement slice', () => {
     const refusal = await asyncRefusalOf(() => record(selfReporting))
     expect(refusal.code).toBe('self-reported-evidence')
     expect(refusal.detail).toContain(SCHEDULER)
+    const missByExecutor = await asyncRefusalOf(() => selfReporting.measure.missTrial({ commandId: nextCommand(), evaluationId: EVALUATION, slot: 0, reason: 'the executor says so' }))
+    expect(missByExecutor.code).toBe('self-reported-evidence')
+    // The fact that decides admissibility carries the same rule: a candidate that ran the work may
+    // not certify its own constraints, or "out of bounds is refused" becomes "…unless it checks".
+    const certifying = await openLive(METER_ACTOR, SCHEDULER)
+    await plan(certifying)
+    const ownConstraint = await asyncRefusalOf(() => check(certifying, true))
+    expect(ownConstraint.code).toBe('self-reported-evidence')
   })
 
   it('refuses a plan whose run does not exist, a trial before a plan, a second plan, an undeclared member', async () => {
@@ -334,17 +324,21 @@ describe('the measurement slice', () => {
     const beforePlan = await asyncRefusalOf(() => record(instance))
     expect(beforePlan.code).toBe('illegal-transition')
     expect(beforePlan.detail).toContain('no measurement plan is open')
+    // Straight through the log, the fold is the authority: no plan is open for this evaluation.
+    const unplanned = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1' }))
+    expect(unplanned.code).toBe('illegal-transition')
+    expect(unplanned.detail).toContain('carried a measurement plan')
     await plan(instance)
     const twice = await asyncRefusalOf(() => plan(instance, { commandId: 'open-again' }))
     expect(twice.code).toBe('illegal-transition')
     expect(twice.detail).toContain('second measurement plan')
-    const extra = await asyncRefusalOf(() => directEmit(instance, { ...trial(), verifierRef: METER, verifierVersion: '1', confidence: 0.9 }))
+    const extra = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', confidence: 0.9 }))
     expect(extra.code).toBe('malformed-payload')
     expect(extra.detail).toContain('confidence')
 
-    const wrongType = await asyncRefusalOf(() => directEmit(instance, { ...trial(), verifierRef: METER, verifierVersion: '1', quality: '1' }))
+    const wrongType = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', quality: '1' }))
     expect(wrongType.code).toBe('malformed-payload')
-    const shortDigest = await asyncRefusalOf(() => directEmit(instance, { ...trial(), verifierRef: METER, verifierVersion: '1', artifactDigest: 'short' }))
+    const shortDigest = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', artifactDigest: 'short' }))
     expect(shortDigest.code).toBe('malformed-payload')
   })
 
@@ -369,7 +363,17 @@ describe('the measurement slice', () => {
     await plan(instance, { trials: 1 })
     const unknown = await asyncRefusalOf(() => check(instance, true, 'not-judged'))
     expect(unknown.code).toBe('unknown-criterion')
-    expect(unknown.detail).toContain('limits')
+    expect(unknown.detail).toContain('cannot check hard constraint')
+    // Straight through the log: the fold refuses a constraint the plan does not judge, and a
+    // decision that is not a boolean.
+    const undeclared = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.constraintChecked, { criterionId: 'not-judged', met: true, artifactDigest: ARTIFACT, verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST }))
+    expect(undeclared.code).toBe('unknown-criterion')
+    const unboolean = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.constraintChecked, { criterionId: 'limits', met: 'yes', artifactDigest: ARTIFACT, verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST }))
+    expect(unboolean.code).toBe('malformed-payload')
+    const foreignArtifact = await asyncRefusalOf(() => check(instance, true, 'limits', '9'.repeat(64)))
+    expect(foreignArtifact.code).toBe('evidence-input-mismatch')
+    expect(foreignArtifact.detail).toContain('no observation of this evaluation was formed on')
+    await record(instance)
     await check(instance, true)
     const twice = await asyncRefusalOf(() => check(instance, true))
     expect(twice.code).toBe('evidence-conflict')
@@ -379,14 +383,9 @@ describe('the measurement slice', () => {
   it('fills the implementation identity from the frozen plan, and compares evaluations by settings', async () => {
     const instance = await openLive()
     await plan(instance, { trials: 1 })
-    await check(instance, true)
     const envelope = await record(instance)
-    expect(envelope.payload).toMatchObject({
-      verifierRef: METER,
-      verifierVersion: '1',
-      implementationDigest: METER_DIGEST,
-      inputDigests: BUBBLE_INPUTS,
-    })
+    await check(instance, true)
+    expect(envelope.payload).toMatchObject({ verifierRef: METER, verifierVersion: '1', implementationDigest: METER_DIGEST, inputDigests: BUBBLE_INPUTS })
     expect(stateOf(instance).checks[0]).toMatchObject({ verifierRef: BOUNDS, implementationDigest: BOUNDS_DIGEST })
     const first = caliberDigestOf(stateOf(instance))
     await plan(instance, { commandId: 'open-second', evaluationId: OTHER, trials: 1, baseline: OTHER_REVISION, candidate: REVISION })

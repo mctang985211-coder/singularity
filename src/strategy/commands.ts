@@ -12,7 +12,8 @@
  *    round (`review.md` R01) — made the budget move whenever a candidate was re-measured.
  * 2. **The decision itself is recomputed against the facts it will be appended to.** A decision is
  *    composed from a projection at call time and then re-projected inside the region; if the two
- *    disagree the append is refused and the caller is told to recompute. Without that check a
+ *    disagree the append is refused and the caller is told to recompute. The band it carries is the
+ *    one the projection was given, so the fact and the arithmetic that produced it cannot disagree. Without that check a
  *    decision computed before a late submission, a late trial or a late evaluation would close the
  *    round out over facts it never saw — and the reducer, which sees only the round's own subject,
  *    cannot notice a measurement that arrived after the decision was composed.
@@ -51,6 +52,8 @@ export interface OpenRoundInput {
   readonly candidates: number
   readonly explorationSlots: number
   readonly historyCutoff: number
+  /** The digest of the measurement settings every pooled candidate must have been measured under. */
+  readonly caliber: string
   readonly metric: { readonly unit: string; readonly direction: 'higher' | 'lower' }
   readonly weights: { readonly quality: number; readonly cost: number }
 }
@@ -116,6 +119,7 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
           explorationSlots: input.explorationSlots,
           editBudget: editBudgetFor(input.round, options.rounds, options.firstBudget, options.minimumBudget),
           historyCutoff: input.historyCutoff,
+          caliber: input.caliber,
           metric: input.metric,
           weights: input.weights,
         },
@@ -192,9 +196,12 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
   }
 }
 
-/** The frozen member set of `round/decided`: a slot number and a reason per candidate. */
-function decisionPayload(decision: RoundDecision): { winner: number | null; outcomes: RoundDecision['outcomes'] } {
-  return { winner: decision.winner, outcomes: decision.outcomes }
+/**
+ * The frozen member set of `round/decided`: a slot number and a reason per candidate, plus the noise
+ * basis the selection was made against — the band that was actually used, not one looked up again.
+ */
+function decisionPayload(decision: RoundDecision): { winner: number | null; outcomes: RoundDecision['outcomes']; calibration: RoundDecision['calibration'] } {
+  return { winner: decision.winner, outcomes: decision.outcomes, calibration: decision.calibration }
 }
 
 function describeWinner(winner: number | null): string {

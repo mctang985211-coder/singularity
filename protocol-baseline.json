@@ -48,15 +48,15 @@
     },
     {
       "protocol": "strategy",
-      "version": 1,
+      "version": 2,
       "subject": "the round id",
       "kinds": [
         "candidate/submitted",
         "round/decided",
         "round/opened"
       ],
-      "producedBy": "src/strategy/commands.ts createStrategyCommands (the submission gate is a precondition of candidate/submitted)",
-      "readBy": "src/strategy/view.ts projectRound (each slot's aggregate, gain and admissibility, then the selection)"
+      "producedBy": "src/strategy/commands.ts createStrategyCommands (the submission gate is a precondition of candidate/submitted; the annealed budget is derived, never supplied)",
+      "readBy": "src/strategy/view.ts projectRound (each slot's aggregate, frozen gain and admissibility, then the selection), src/strategy/plan.ts (the round's frozen plan)"
     },
     {
       "protocol": "task",

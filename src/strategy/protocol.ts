@@ -1,6 +1,6 @@
 /**
- * `strategy@1` — the explicit round: a plan frozen in one fact, and a submission gate that is a
- * refusal rather than a sentence in a prompt.
+ * `strategy@2` — the explicit round: a plan frozen in one fact, a submission gate that is a refusal
+ * rather than a sentence in a prompt, and a decision that carries the basis it was made on.
  *
  * The previous system derived the round from the number of history entries and the candidate index
  * (`review.md` R01: `historyFactsOf` used the candidate index as the round; `decision` used the
@@ -8,29 +8,44 @@
  * candidate was re-measured, and two candidates of one round could be drafted against different
  * incumbents and still be compared. A round here **carries its own number**, its common incumbent,
  * its slot count, its reserved exploration slots, its annealed budget, the log position its history
- * is frozen at, and the metric and weights it is measured under. `round/opened` is one-shot: a round
- * that later needs a different cutoff is a different round, and it gets a different subject.
+ * is frozen at, the caliber it pools under, and the metric and weights it is measured under.
  *
  * What the reducer decides, on the round's own subject, and therefore inside the serial region that
  * produces the fact:
  *
  * 1. **A submission after the close is refused.** A candidate that arrives after the decision was
  *    otherwise measured against an incumbent nobody re-elected.
- * 2. **A slot outside `[0, candidates)` is refused**, and a slot that already holds a submission is
- *    refused with `evidence-conflict` — one slot holds one candidate.
- * 3. **The annealed budget is real.** More structural edits than `editBudget` is `budget-exhausted`.
+ * 2. **A slot outside `[0, candidates)` is refused**, and a slot that already holds one is refused
+ *    with `evidence-conflict`: one slot, one candidate.
+ * 3. **The annealed budget is real**: more structural edits than `editBudget` is `budget-exhausted`.
  * 4. **A reserved exploration slot is a slot, not advice.** The last `explorationSlots` slots are
  *    reserved, and a submission that does not declare `exploratory: true` may not occupy one. RRSI
  *    re-checks this against the diff after the critic (`loop.py:523-530`); the previous port kept the
  *    prompt sentence and dropped the check.
- * 5. **A decision covers every submitted slot with a named reason.** An outcome for a slot nobody
- *    submitted is refused too: otherwise a hand-made decision could elect a candidate that does not
- *    exist. `winner` is an admitted slot or `null`, and `null` means the incumbent stands.
+ * 5. **A decision covers every submitted slot with a named reason**, and carries the **noise basis**
+ *    it was made against. An outcome for a slot nobody submitted is refused too: otherwise a
+ *    hand-made decision could elect a candidate that does not exist. `winner` is an admitted slot or
+ *    `null`, and `null` means the incumbent stands.
  *
  * `edits` are the identity of the structural change (`asset` + `target`), not a line count: they are
  * what novelty counts and what a duplicate check can decide. A repeated `(asset, target)` inside one
- * submission is refused rather than de-duplicated, so a caller cannot pad a budget check with the
- * same edit twice.
+ * submission is refused rather than de-duplicated, so a caller cannot pad a budget check.
+ *
+ * **Version 2** adds two required members in one bump, because both close a way a fact could not be
+ * replayed from:
+ *
+ * - `round/opened.caliber`: the digest of the measurement settings the round pools under. Without
+ *   it, comparability could only be checked *between* the submissions at hand, so one submission
+ *   measured under other weights was pooled with whatever else arrived and nothing exposed it until
+ *   a second candidate happened to differ.
+ * - `round/decided.calibration`: the noise floor and its source (`measured` / `declared`), which
+ *   `review.md` R07 requires the selection fact to retain. Until now the band survived only as prose
+ *   inside the outcome reasons — a guarantee dressed as a sentence, which is the thing this rebuild
+ *   exists to remove.
+ *
+ * Version 1 facts are refused by name with no compatibility layer, as every other bump in this stack
+ * is: there is nothing to migrate, and inventing a default caliber or a default band would be
+ * inventing the very facts the members exist to record.
  *
  * @module singularity-core/strategy/protocol
  */
@@ -39,11 +54,19 @@ import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
 import type { RevisionRef } from '../task/protocol.ts'
-import { digest, record, text } from '../task/shape.ts'
-import type { Outcome } from './decision.ts'
+import { record, text } from '../task/shape.ts'
+import type { Calibration, Outcome } from './decision.ts'
+import { count, openedKind, requirePlan, revisionRef, type RoundPlan } from './plan.ts'
+
+/**
+ * The plan's shape is declared in `plan.ts` beside the reader that enforces it, and published here
+ * because `RoundState.plan` is this module's member: one definition, two import paths.
+ */
+export type { RoundPlan } from './plan.ts'
 
 export const STRATEGY_PROTOCOL = 'strategy'
-export const STRATEGY_VERSION = 1
+/** 2: `round/opened` gained a required `caliber`, and `round/decided` a required `calibration`. */
+export const STRATEGY_VERSION = 2
 
 /** The trusted role that freezes a round, receives its candidates and closes it. */
 export const STRATEGY_ROLE = 'strategy'
@@ -74,29 +97,12 @@ export interface CandidateSubmission {
 export interface RoundDecisionRecord {
   readonly winner: number | null
   readonly outcomes: readonly Outcome[]
+  /** The noise basis the selection was made against, so a replay can reconstruct the band (R07). */
+  readonly calibration: Calibration
   readonly decidedBy: string
   readonly at: string
 }
 
-/**
- * What `round/opened` froze. Present exactly when the opening fact was recorded, so a reader that
- * has a plan has a round number, a cutoff and a budget that no later fact can move.
- */
-export interface RoundPlan {
-  readonly round: number
-  /** The one comparison the whole round is drafted against. */
-  readonly incumbent: RevisionRef
-  /** m slots, `0..m-1`. */
-  readonly candidates: number
-  /** How many of the last slots are reserved for exploration. */
-  readonly explorationSlots: number
-  /** Structural edits a candidate may declare, annealed from `round`. */
-  readonly editBudget: number
-  /** The frozen log position: this round reads only facts below it (R03). */
-  readonly historyCutoff: number
-  readonly metric: { readonly unit: string; readonly direction: 'higher' | 'lower' }
-  readonly weights: { readonly quality: number; readonly cost: number }
-}
 /** The folded state of one round. `subject` in every envelope is this round's id. */
 export interface RoundState {
   readonly roundId: string
@@ -114,28 +120,35 @@ export const STRATEGY_KINDS = {
 } as const
 
 const APPENDED = { appended: true } as const
-const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as const
-const METRIC_MEMBERS = ['unit', 'direction'] as const
-const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
 const EDIT_MEMBERS = ['asset', 'target'] as const
 const OUTCOME_MEMBERS = ['slot', 'admitted', 'reason'] as const
+const CALIBRATION_MEMBERS = ['floor', 'source'] as const
 
-/** A non-negative integer. Absent, fractional, negative and non-numeric are all refusals. */
-function count(source: Record<string, unknown>, key: string, where: string): number {
-  const value = source[key]
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0)
-    refuse('malformed-payload', `${where}.${key} must be an integer >= 0, got ${value === undefined ? 'nothing' : JSON.stringify(value)}`)
-  return value
+/** Two revision references name the same content. An id alone is not enough: it can be re-pointed. */
+export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
+  return left.environmentId === right.environmentId && left.revisionId === right.revisionId && left.digest === right.digest
 }
 
-function revisionRef(raw: unknown, where: string): RevisionRef {
+/**
+ * A noise basis, read from where it is written: `round/decided.calibration`.
+ *
+ * Exported because the projection reads the same value from a caller as well as from a fact, and the
+ * rule that a band cannot be anonymous — `measured` and `declared` floors are different claims (R06)
+ * — has one definition rather than two.
+ */
+export function readCalibration(raw: unknown, where: string): Calibration {
   const source = record(raw, where)
-  assertClosedKeys(source, REVISION_MEMBERS, where)
-  return {
-    environmentId: text(source, 'environmentId', where),
-    revisionId: text(source, 'revisionId', where),
-    digest: digest(source, 'digest', where),
-  }
+  assertClosedKeys(source, CALIBRATION_MEMBERS, where)
+  const floor = source['floor']
+  if (typeof floor !== 'number' || !Number.isFinite(floor) || floor < 0)
+    refuse('malformed-payload', `${where}.floor must be a finite number >= 0, got ${JSON.stringify(floor ?? null)}`)
+  const origin = source['source']
+  if (origin !== 'measured' && origin !== 'declared')
+    refuse(
+      'malformed-payload',
+      `${where}.source must be "measured" or "declared", got ${JSON.stringify(origin ?? null)}; a band whose provenance is unknown cannot be told from a declared floor (R06)`,
+    )
+  return { floor, source: origin }
 }
 
 /**
@@ -163,68 +176,6 @@ function editList(raw: unknown, where: string): readonly StructuralEdit[] {
   })
 }
 
-/** Two revision references name the same content. An id alone is not enough: it can be re-pointed. */
-export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
-  return left.environmentId === right.environmentId && left.revisionId === right.revisionId && left.digest === right.digest
-}
-
-/** The plan a round must have to accept a submission or a decision, or a refusal naming why not. */
-export function requirePlan(state: RoundState, where: string): RoundPlan {
-  const plan = state.plan
-  if (plan === undefined)
-    refuse('illegal-transition', `${where} reached round "${state.roundId}", which has no opening fact: a slot count, a budget and a frozen cutoff cannot be inferred after the fact`)
-  return plan
-}
-
-function openedPayload(raw: unknown, where: string): RoundPlan {
-  const source = record(raw, where)
-  assertClosedKeys(
-    source,
-    ['round', 'incumbent', 'candidates', 'explorationSlots', 'editBudget', 'historyCutoff', 'metric', 'weights'],
-    where,
-  )
-  const round = count(source, 'round', where)
-  if (round < 1) refuse('malformed-payload', `${where}.round must be an integer >= 1, got ${round}; round numbering is explicit, never a count of history entries`)
-  const candidates = count(source, 'candidates', where)
-  if (candidates < 1) refuse('malformed-payload', `${where}.candidates must be at least 1, got ${candidates}: a round with no slot has no candidate to decide`)
-  const explorationSlots = count(source, 'explorationSlots', where)
-  if (explorationSlots > candidates)
-    refuse(
-      'malformed-payload',
-      `${where}.explorationSlots is ${explorationSlots} of ${candidates} slots; a reservation cannot exceed the plan it reserves from`,
-    )
-  const editBudget = count(source, 'editBudget', where)
-  const historyCutoff = count(source, 'historyCutoff', where)
-
-  const metric = record(source['metric'], `${where}.metric`)
-  assertClosedKeys(metric, METRIC_MEMBERS, `${where}.metric`)
-  const direction = metric['direction']
-  if (direction !== 'higher' && direction !== 'lower')
-    refuse('malformed-payload', `${where}.metric.direction must be "higher" or "lower", got ${JSON.stringify(direction ?? null)}`)
-
-  const weights = record(source['weights'], `${where}.weights`)
-  assertClosedKeys(weights, WEIGHTS_MEMBERS, `${where}.weights`)
-  const quality = weights['quality']
-  const cost = weights['cost']
-  for (const [key, value] of [['quality', quality], ['cost', cost]] as const) {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0)
-      refuse('malformed-payload', `${where}.weights.${key} must be a finite number >= 0, got ${JSON.stringify(value ?? null)}`)
-  }
-  if (quality === 0)
-    refuse('malformed-payload', `${where}.weights.quality is 0: a round weighting quality at nothing cannot prefer a better candidate to a worse one`)
-
-  return {
-    round,
-    incumbent: revisionRef(source['incumbent'], `${where}.incumbent`),
-    candidates,
-    explorationSlots,
-    editBudget,
-    historyCutoff,
-    metric: { unit: text(metric, 'unit', `${where}.metric`), direction },
-    weights: { quality: quality as number, cost: cost as number },
-  }
-}
-
 /** The submission payload, before the log stamps who submitted it. */
 type Submission = Omit<CandidateSubmission, 'actor' | 'at'>
 
@@ -243,9 +194,11 @@ function submissionPayload(raw: unknown, where: string): Submission {
   }
 }
 
-function decidedPayload(raw: unknown, where: string): { winner: number | null; outcomes: readonly Outcome[] } {
+type Decided = { winner: number | null; outcomes: readonly Outcome[]; calibration: Calibration }
+
+function decidedPayload(raw: unknown, where: string): Decided {
   const source = record(raw, where)
-  assertClosedKeys(source, ['winner', 'outcomes'], where)
+  assertClosedKeys(source, ['winner', 'outcomes', 'calibration'], where)
   const winner = source['winner']
   if (winner !== null && (typeof winner !== 'number' || !Number.isInteger(winner) || winner < 0))
     refuse('malformed-payload', `${where}.winner must be a slot number or null, got ${winner === undefined ? 'nothing' : JSON.stringify(winner)}`)
@@ -263,36 +216,20 @@ function decidedPayload(raw: unknown, where: string): { winner: number | null; o
     // unaccounted for in the previous system.
     return { slot: count(outcome, 'slot', at), admitted, reason: text(outcome, 'reason', at) }
   })
-  return { winner, outcomes }
+  // The band is required, not optional: a decision whose basis has to be inferred from the reasons
+  // is the sentence-instead-of-a-guarantee this member exists to remove.
+  return { winner, outcomes, calibration: readCalibration(source['calibration'], `${where}.calibration`) }
 }
 
 /**
- * Declare `strategy@1`. Call once at load. Nothing here reads another slice: the measure views and
+ * Declare `strategy@2`. Call once at load. Nothing here reads another slice: the measure views and
  * the frozen history arrive as inputs to the projection and to the command boundary.
  */
 export function declareStrategyProtocol(registry: ProtocolRegistry): void {
   registry.declare<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, {
     initialState: { roundId: '', submissions: [] },
     kinds: {
-      [STRATEGY_KINDS.roundOpened]: defineKind<RoundState, RoundPlan>({
-        guarantees: APPENDED,
-        emitter: STRATEGY_ROLE,
-        parse: (raw, where) => openedPayload(raw, where),
-        reduce: (state, envelope, payload) => {
-          if (state.plan !== undefined)
-            refuse(
-              'illegal-transition',
-              `${STRATEGY_KINDS.roundOpened} #${envelope.seq} opens round ${payload.round} on "${envelope.subject}", which already opened round ${state.plan.round} at ${state.openedAt ?? 'an unrecorded time'}; a different incumbent, cutoff or budget is a different round, and it gets a different subject`,
-            )
-          return {
-            roundId: envelope.subject,
-            plan: payload,
-            openedBy: envelope.actor,
-            openedAt: envelope.at,
-            submissions: [],
-          }
-        },
-      }),
+      [STRATEGY_KINDS.roundOpened]: openedKind(STRATEGY_KINDS.roundOpened, STRATEGY_ROLE),
 
       [STRATEGY_KINDS.candidateSubmitted]: defineKind<RoundState, Submission>({
         guarantees: APPENDED,
@@ -315,7 +252,7 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
           if (occupied !== undefined)
             refuse(
               'evidence-conflict',
-              `${where} offers slot ${payload.slot} again: ${occupied.actor} already submitted revision "${occupied.revision.revisionId}" there at ${occupied.at}; one slot holds one candidate`,
+              `${where} offers slot ${payload.slot} again: ${occupied.actor} submitted revision "${occupied.revision.revisionId}" there at ${occupied.at}; one slot holds one candidate`,
             )
           if (payload.edits.length > plan.editBudget)
             refuse(
@@ -346,7 +283,7 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
         },
       }),
 
-      [STRATEGY_KINDS.roundDecided]: defineKind<RoundState, { winner: number | null; outcomes: readonly Outcome[] }>({
+      [STRATEGY_KINDS.roundDecided]: defineKind<RoundState, Decided>({
         guarantees: APPENDED,
         emitter: STRATEGY_ROLE,
         parse: (raw, where) => decidedPayload(raw, where),
@@ -363,10 +300,7 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
           const named = payload.outcomes.map(outcome => outcome.slot)
           const repeated = named.filter((slot, index) => named.indexOf(slot) !== index)
           if (repeated.length > 0)
-            refuse(
-              'illegal-transition',
-              `${where} closes slot ${repeated[0]} out twice; each submitted slot has one disposition`,
-            )
+            refuse('illegal-transition', `${where} closes slot ${repeated[0]} out twice; each submitted slot has one disposition`)
           const missing = submitted.filter(slot => !named.includes(slot))
           if (missing.length > 0)
             refuse(
@@ -391,7 +325,13 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
 
           return {
             ...state,
-            decision: { winner: payload.winner, outcomes: payload.outcomes, decidedBy: envelope.actor, at: envelope.at },
+            decision: {
+              winner: payload.winner,
+              outcomes: payload.outcomes,
+              calibration: payload.calibration,
+              decidedBy: envelope.actor,
+              at: envelope.at,
+            },
           }
         },
       }),

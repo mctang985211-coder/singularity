@@ -3,18 +3,20 @@
  * is produced, and the one place its cross-entity preconditions are decided.
  *
  * A measure reducer sees one subject — the evaluation — and that is correct. But a trial's inputs
- * must be the ones the *run's* bubble declared, the executor of that run must not report the
- * numbers, and the implementation that produced them must be one this deployment holds: the first
- * two live in another subject and the third in the deployment. Deciding them afterwards in a
+ * must be the ones the *run's* bubble declared, the executor of that run must not report the numbers
+ * — nor certify the hard constraints that decide admissibility, on facts it authored itself — and
+ * the implementation that produced them must be one this deployment holds: the first two live in
+ * another subject and the third in the deployment. Deciding them afterwards in a
  * projection is a diagnosis, not a check — by then the number is already in the log. So they run
  * here, as the `require` step handed to the append that produces the fact, which means they read
  * the store's committed cut at the moment they decide rather than a cut taken earlier.
  *
- * The command fills the parts a caller must not. `verifierRef` and `verifierVersion` are copied
- * from the metric the plan froze, and the implementation digest the producer reports is checked
- * against it — the same discipline `recordVerdict` uses for a criterion. A caller supplies what it
- * observed; it does not supply who observed it, and it cannot point a trial at a different run than
- * the plan's own.
+ * The command fills the parts a caller must not. `verifierRef` and `verifierVersion` are copied from
+ * the metric the plan froze — the same discipline `recordVerdict` uses for a criterion — and the
+ * digest a producer reports is checked here only for *availability*: whether this deployment holds
+ * that implementation at all, which is a question about now and not about the fact. Whether it is
+ * the implementation the plan names is the reducer's rule. A caller supplies what it observed; it
+ * does not supply who observed it, and it cannot point a trial at a different run than the plan's.
  *
  * What this module does not do is run anything. Measuring is `src/measure/execution.ts`, called by
  * the deployment *before* the fact is committed: a commit region that spawned a process would hold
@@ -152,7 +154,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
         },
         () => {
           const now = requireOpened(cutOf(options), input.evaluationId, action)
-          requireMeasuredBy(options, now.metric.measured, input.trial.implementationDigest, action)
+          requireHeldImplementation(options, input.trial.implementationDigest, action)
           const run = requireRun(cutOf(options), now.run, action)
           // Reuse, never a second copy: the binding between a trial and the run's declared inputs
           // is the bubble owner's rule, and it is decided here because the bubble is another
@@ -204,10 +206,14 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
         },
         () => {
           const now = requireOpened(cutOf(options), input.evaluationId, action)
+          requireHeldImplementation(options, input.implementationDigest, action)
+          // The same rule as a trial's numbers, on the fact that decides admissibility: a candidate
+          // that measured its own run may not also certify that run's constraints. Without this the
+          // non-compensating rule degrades to "…unless the candidate checks itself".
           const judged = now.judgement.find(entry => entry.criterionId === input.criterionId)
-          // Whether this plan judges that criterion at all is the reducer's rule: the lookup here
-          // exists only to reach the implementation this deployment must be holding.
-          if (judged !== undefined) requireMeasuredBy(options, judged, input.implementationDigest, action)
+          // Whether the plan judges that criterion at all is the reducer's rule; this lookup is only
+          // to reach the implementation whose identity must not be the run's executor.
+          if (judged !== undefined) requireNotExecutor(options, judged, requireRun(cutOf(options), now.run, action), action)
         },
       )
     },
@@ -253,13 +259,14 @@ function requireJudged(plan: OpenPlan, evaluationId: string, criterionId: string
   return criterion
 }
 
-/** The implementation the numbers must belong to: named by the plan, held by this deployment. */
-function requireMeasuredBy(options: MeasureCommandOptions, criterion: AcceptanceCriterion, implementationDigest: string, action: string): void {
-  if (implementationDigest !== criterion.implementationDigest)
-    refuse(
-      'wrong-verifier',
-      `cannot ${action}: criterion "${criterion.criterionId}" names the implementation ${criterion.implementationDigest.slice(0, 12)}…, but the measurement came from ${implementationDigest.slice(0, 12)}…`,
-    )
+/**
+ * Availability, which only the deployment can decide: is this implementation one it is holding?
+ *
+ * Whether the digest is the one the plan names is a comparison between the payload and the
+ * evaluation's own frozen state, so the reducer owns it; this check is about *now*, and a fold
+ * replaying last month's facts cannot answer it.
+ */
+function requireHeldImplementation(options: MeasureCommandOptions, implementationDigest: string, action: string): void {
   if (!options.implementations.some(entry => entry.implementationDigest === implementationDigest))
     refuse('unregistered-verifier', `cannot ${action}: this deployment holds no implementation with digest ${implementationDigest.slice(0, 12)}…, so it cannot have produced this measurement`)
 }

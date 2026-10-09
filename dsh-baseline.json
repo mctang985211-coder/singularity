@@ -3,12 +3,34 @@
   "dshVersion": "0.2.0-rc.2",
   "installRoot": "/home/ROXY/.local/node-v22.23.3-linux-x64/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai",
   "packages": [
-    { "name": "@deepseek-ai/cordis", "version": "4.0.4" },
-    { "name": "@deepseek-ai/dsh-session", "version": "0.2.0-rc.2" },
-    { "name": "@deepseek-ai/dsh-session-persistence", "version": "0.2.0-rc.2" },
-    { "name": "@deepseek-ai/dsh-session-persistence-jsonl", "version": "0.2.0-rc.2" },
-    { "name": "@deepseek-ai/dsh-agent", "version": "0.2.0-rc.2" },
-    { "name": "@deepseek-ai/dsh-agent-loop", "version": "0.2.0-rc.2" }
+    {
+      "name": "@deepseek-ai/cordis",
+      "version": "4.0.4"
+    },
+    {
+      "name": "@deepseek-ai/dsh-agent",
+      "version": "0.2.0-rc.2"
+    },
+    {
+      "name": "@deepseek-ai/dsh-agent-loop",
+      "version": "0.2.0-rc.2"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session",
+      "version": "0.2.0-rc.2"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-persistence",
+      "version": "0.2.0-rc.2"
+    },
+    {
+      "name": "@deepseek-ai/dsh-session-persistence-jsonl",
+      "version": "0.2.0-rc.2"
+    },
+    {
+      "name": "@deepseek-ai/dsh-user-approval",
+      "version": "0.2.0-rc.2"
+    }
   ],
   "checkout": {
     "path": "/home/ROXY/code/bb_work/harness/thirdparty/deepseek-harness",

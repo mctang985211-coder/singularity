@@ -1,41 +1,41 @@
 /**
- * The release protocol: the record that one revision's **content** was drafted and authorised.
+ * The release protocol: the record that one environment's next revision was **drafted and
+ * authorised**, content and all.
  *
- * **What the native approval seam gives us, and what it cannot.** DSH's approval binds to a
+ * **The subject is the environment; the revision is a member.** A release is one head transition of
+ * one environment, and a revision id is unique only *within* an environment — two environments may
+ * both hold an `r0001`, for different content. Keying this protocol by the bare revision id made one
+ * environment's approval answer for another environment's content; keying it by the environment
+ * makes "one draft on the table at a time" the rule, and forces every fact to say which revision it
+ * is about.
+ *
+ * **What the native approval seam contributes, and what it cannot.** DSH's approval binds to a
  * `ToolCallId` and an agent, carries no payload digest, copies no arguments, and its `allowed-once`
  * grant is not persisted (`docs/context.md` §10). So the seam can only ever establish *that a human
- * authorised this act*; it cannot establish *what* was authorised. The missing half is ours:
- * `release/drafted` binds the content digest the log holds for the revision, and `release/approved`
- * carries the digest the approver actually saw — the reducer refuses it with `stale-approval` when
- * it is not the draft's. Approval therefore binds a specific difference, not an id and not a
- * promise that somebody looked. (The previous system set `guards.bound` true without binding
- * anything: `review.md` R07.)
+ * authorised this act*; it cannot establish *what* was authorised. The missing half is ours, and
+ * three different mechanisms carry three different things:
+ *
+ * 1. the **role-stamped emitter** (`APPROVER_ROLE`, never the scheduler that drafts) is the
+ *    authority: an approval cannot come from the identity that proposed the content;
+ * 2. `approvalId` is the **audit identity** of the native act — the `approval/asked` id of the
+ *    question, whose answer had to be `'allowed-once'` before this fact existed at all;
+ * 3. `draftDigest` is the **binding**: the content digest the approver saw, which must be the digest
+ *    the draft holds, or the fact is refused with `stale-approval`.
+ *
+ * (`approvedBy` names which human, beside the stamped actor: the role is the authority, the member
+ * is the attribution.)
  *
  * **Approval is not publication.** There is no publish kind here on purpose: publishing is the
  * environment pointer switch (`environment@2`), so "the head never names an unapproved revision" is
  * one precondition on one conditional fact, rather than a state machine that can disagree with the
  * pointer it is supposed to gate.
  *
- * **Two roles, because one identity must not do both.** `release/drafted` is emitted by the
- * scheduler role and `release/approved` by {@link APPROVER_ROLE}; the deployment binds them to
- * different identities. A role the deployment holds no identity for cannot emit at all, so a
- * deployment without an approver records no approvals — the human step is a binding, not a promise.
- * `approvedBy` stays in the payload beside the stamped actor because the two answer different
- * questions: the role is the *authority* an approval must come from, `approvedBy` is the
- * *attribution* of which human exercised it.
- *
- * **The subject is the revision id**, as frozen in the design (§7). One consequence is deliberate
- * and worth stating: a revision id names exactly one content *within one environment*, and
- * `environment@2` refuses only the same id in the same environment, so two environments may hold
- * the same id for different content. A release fact is keyed by the id, so the environment that
- * holds it is re-resolved by the command layer — `publish` refuses a revision whose approved content
- * is not what the target environment holds. Releasing colliding ids in two environments at once
- * therefore needs a different subject shape, which is a version bump, not something a reducer can
- * decide.
- *
- * Every payload here is closed, and neither kind accepts a member the log cannot check: the draft's
- * digest is checked against the created revision at the command boundary, and the approval's digest
- * against the draft in the reducer.
+ * **What `stale-approval` can actually catch.** A draft is one-shot and `environment@2` refuses the
+ * same revision id at different content, so the drafted *content* cannot move under one id. The
+ * reachable mistake is therefore the one this refusal names: the approval carries content **other
+ * than what is on the table** — the human approved something else, or an older revision's digest
+ * arrived under a newer revision's name. The approval is refused rather than trimmed to fit, because
+ * an approval the log adjusts authorises nothing a human saw.
  *
  * @module singularity-core/release/protocol
  */
@@ -60,7 +60,7 @@ export const RELEASE_VERSION = 1
  * could also authorise it, the log would record a self-approval and the human step would be
  * decoration. A deployment that holds no identity for this role cannot record an approval at all —
  * `unknown-emitter-role` — which is what makes "a human authorised this" mechanical rather than
- * promised. What the native approval seam contributes is the human behind this role.
+ * promised.
  */
 export const APPROVER_ROLE = 'approver'
 
@@ -70,17 +70,22 @@ export const RELEASE_KINDS = {
 } as const
 
 /**
- * The folded state of one release. The subject is the revision id, so the state does not repeat it.
+ * The folded state of one environment's release: the draft on the table, and its approval.
  *
- * `draftDigest` is empty exactly when nothing was drafted — a digest is never empty, so the
- * sentinel cannot be confused with content. `approvedBy` is present exactly when the release is
- * approved. A boolean beside either would be a second copy of the same truth, free to disagree.
+ * The empty string in `revisionId` and `draftDigest` means **nothing is drafted** — neither a
+ * revision id nor a digest is ever empty, so the sentinel cannot be confused with content. A new
+ * draft replaces both and clears the approval; a boolean beside them would be a second copy of the
+ * same truth, free to disagree.
  */
 export interface ReleaseState {
+  /** The revision this environment's draft is about. Empty exactly when nothing is drafted. */
+  readonly revisionId: string
   /** The content digest the draft bound. Equal to the created revision's digest, checked at draft. */
   readonly draftDigest: string
-  /** The human identity the approval seam supplied. Present exactly when this release is approved. */
+  /** The human identity the approval seam supplied. Present exactly when the draft is approved. */
   readonly approvedBy?: string
+  /** The `approval/asked` id the approval rests on. Present exactly when `approvedBy` is. */
+  readonly approvalId?: string
 }
 
 const APPENDED = { appended: true } as const
@@ -125,41 +130,52 @@ function digest(source: Record<string, unknown>, key: string, where: string): st
  */
 export function declareReleaseProtocol(registry: ProtocolRegistry): void {
   registry.declare<ReleaseState>(RELEASE_PROTOCOL, RELEASE_VERSION, {
-    initialState: { draftDigest: '' },
+    initialState: { revisionId: '', draftDigest: '' },
     kinds: {
-      [RELEASE_KINDS.drafted]: defineKind<ReleaseState, { draftDigest: string }>({
+      [RELEASE_KINDS.drafted]: defineKind<ReleaseState, { revisionId: string; draftDigest: string }>({
         guarantees: APPENDED,
         emitter: SCHEDULER_ROLE,
         parse: raw => {
           const where = `${RELEASE_KINDS.drafted} payload`
           const source = record(raw, where)
-          assertClosedKeys(source, ['draftDigest'], where)
-          return { draftDigest: digest(source, 'draftDigest', where) }
+          assertClosedKeys(source, ['revisionId', 'draftDigest'], where)
+          return { revisionId: text(source, 'revisionId', where), draftDigest: digest(source, 'draftDigest', where) }
         },
         reduce: (state, envelope, payload) => {
-          // One draft per revision. A second draft cannot be "a correction": the content it would
-          // bind is either the same content (the first draft already said so, so nothing moved) or
-          // different content under one id, which `environment@2` refuses. Either way the honest
-          // answer is a new revision id, so this refusal names that replacement.
-          if (state.draftDigest !== '')
+          const where = `${RELEASE_KINDS.drafted} #${envelope.seq}`
+          // A draft that changes nothing is a mistake, not a confirmation: the content on the table
+          // is already this, and re-recording it would drop an approval for no reason.
+          if (state.revisionId === payload.revisionId && state.draftDigest === payload.draftDigest)
             refuse(
               'illegal-transition',
-              `${RELEASE_KINDS.drafted} #${envelope.seq} drafts revision "${envelope.subject}" twice (already drafted with content ${state.draftDigest.slice(
+              `${where} drafts revision "${payload.revisionId}" of environment "${envelope.subject}" with the content already on the table (${payload.draftDigest.slice(
                 0,
                 12,
-              )}…); a changed draft is a new revision, not a second draft of this one`,
+              )}…); a draft that changes nothing adds nothing`,
             )
-          return { draftDigest: payload.draftDigest }
+          // A new draft supersedes the standing one and **clears its approval**: an approval binds
+          // the content a human saw, and that content is no longer what is on the table. Both facts
+          // stay in the log — a reader can still fold the earlier cut — but no later publish may rest
+          // on the superseded grant.
+          return { revisionId: payload.revisionId, draftDigest: payload.draftDigest }
         },
       }),
-      [RELEASE_KINDS.approved]: defineKind<ReleaseState, { draftDigest: string; approvedBy: string }>({
+      [RELEASE_KINDS.approved]: defineKind<
+        ReleaseState,
+        { revisionId: string; draftDigest: string; approvedBy: string; approvalId: string }
+      >({
         guarantees: APPENDED,
         emitter: APPROVER_ROLE,
         parse: raw => {
           const where = `${RELEASE_KINDS.approved} payload`
           const source = record(raw, where)
-          assertClosedKeys(source, ['draftDigest', 'approvedBy'], where)
-          return { draftDigest: digest(source, 'draftDigest', where), approvedBy: text(source, 'approvedBy', where) }
+          assertClosedKeys(source, ['revisionId', 'draftDigest', 'approvedBy', 'approvalId'], where)
+          return {
+            revisionId: text(source, 'revisionId', where),
+            draftDigest: digest(source, 'draftDigest', where),
+            approvedBy: text(source, 'approvedBy', where),
+            approvalId: text(source, 'approvalId', where),
+          }
         },
         reduce: (state, envelope, payload) => {
           const where = `${RELEASE_KINDS.approved} #${envelope.seq}`
@@ -168,29 +184,41 @@ export function declareReleaseProtocol(registry: ProtocolRegistry): void {
           if (state.draftDigest === '')
             refuse(
               'illegal-transition',
-              `${where} approves revision "${envelope.subject}", which has no draft; approval authorises a drafted difference, and this release has none`,
+              `${where} approves a revision of environment "${envelope.subject}", which has no draft; approval authorises a drafted difference, and this environment has none on the table`,
             )
-          // The binding itself. The digest is what the approver saw; when it is not the draft's, the
-          // content under consideration moved between the approval and this fact, and the approval
-          // is refused rather than trimmed to fit whatever the log now holds.
+          // ... and about **the** draft. Without this, an approval naming another revision whose
+          // content happens to digest the same would be recorded as authorising a revision no human
+          // was shown, because a digest alone cannot tell two identical contents apart.
+          if (payload.revisionId !== state.revisionId)
+            refuse(
+              'illegal-transition',
+              `${where} approves revision "${payload.revisionId}" but environment "${envelope.subject}" has revision "${state.revisionId}" on the table; an approval answers the draft it is about, so approve "${state.revisionId}" or draft "${payload.revisionId}" first`,
+            )
+          // The binding itself. When the digest is not the draft's, the human approved content other
+          // than what is on the table, and the approval is refused rather than trimmed to fit.
           if (payload.draftDigest !== state.draftDigest)
             refuse(
               'stale-approval',
               `${where} approves content ${payload.draftDigest.slice(0, 12)}… but the draft of revision "${
-                envelope.subject
-              }" is ${state.draftDigest.slice(
+                state.revisionId
+              }" in environment "${envelope.subject}" is ${state.draftDigest.slice(
                 0,
                 12,
-              )}…; an approval binds the content a human saw, so changed content needs a new approval rather than this one`,
+              )}…; an approval binds the content a human saw, so approve what is on the table rather than something else`,
             )
-          // One approval per release. A second approval cannot be a stronger authorisation of the
-          // same content, and accepting it would leave two humans' names on one act of authorising.
+          // One approval per draft. A second approval cannot be a stronger authorisation of the same
+          // content, and accepting it would leave two humans' names on one act of authorising.
           if (state.approvedBy !== undefined)
             refuse(
               'illegal-transition',
-              `${where} approves revision "${envelope.subject}" again (already approved by "${state.approvedBy}"); a second approval is a different act, not a repetition of this one`,
+              `${where} approves revision "${state.revisionId}" of environment "${envelope.subject}" again (already approved by "${state.approvedBy}"); a second approval is a different act, not a repetition of this one`,
             )
-          return { draftDigest: state.draftDigest, approvedBy: payload.approvedBy }
+          return {
+            revisionId: state.revisionId,
+            draftDigest: state.draftDigest,
+            approvedBy: payload.approvedBy,
+            approvalId: payload.approvalId,
+          }
         },
       }),
     },
