@@ -11,170 +11,39 @@
  * start, and whether the deployment holds the implementation that produced a verdict.
  */
 
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-
-import { Context } from '@deepseek-ai/cordis'
-import { SESSION_FORMAT_VERSION, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
-  AGENT_KINDS,
-  AGENT_PROTOCOL,
-  AGENT_ROLE,
-  AGENT_VERSION,
   createTaskCommands,
-  declareAgentProtocol,
-  declareEnvironmentProtocol,
-  declareTaskProtocol,
+  type EnvironmentState,
   ENVIRONMENT_KINDS,
   ENVIRONMENT_PROTOCOL,
-  ENVIRONMENT_ROLE,
   ENVIRONMENT_VERSION,
-  type ProtocolRegistry,
-  ProtocolRegistry as Registry,
-  refuse,
   type RefusalCode,
+  refuse,
   TASK_KINDS,
   TASK_PROTOCOL,
   TASK_VERSION,
-  verifierRoleOf,
-  type AgentState,
-  type EnvironmentState,
   type TaskState,
 } from '../src/index.ts'
 import { ControlSessionStore } from '../src/control/session-store.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
+import {
+  AGENT,
+  CHILD,
+  commandsFor,
+  createRevision,
+  deployment,
+  ENVIRONMENT,
+  openAgent,
+  PARENT,
+  pin,
+  planned,
+  registry,
+  REVISION,
+  RUN,
+} from './command-fixtures.ts'
 import { BUBBLE_INPUTS, contract as parentContract, INTEGRATION_VERIFIER, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER } from './task-fixtures.ts'
-
-const PARENT = 'task-parent'
-const CHILD = 'task-child'
-const RUN = 'run-1'
-const AGENT = 'agent-1'
-const ENVIRONMENT = 'library-1'
-const REVISION = 'r0001'
-const MANIFEST = { skills: ['count'] }
-
-const SUBJECTS: Readonly<Record<string, string>> = {
-  scheduler: SCHEDULER,
-  [ENVIRONMENT_ROLE]: 'environment-service',
-  [AGENT_ROLE]: 'runtime-service',
-  [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'unit-verifier-service',
-}
-
-function registry(): ProtocolRegistry {
-  const made = new Registry()
-  declareTaskProtocol(made)
-  declareEnvironmentProtocol(made)
-  declareAgentProtocol(made)
-  return made
-}
-
-interface Deployment {
-  readonly store: ControlSessionStore
-  readonly persistence: SessionPersistence
-  readonly root: string
-  readonly context: Context
-  readonly registry: ProtocolRegistry
-}
-
-const deployments: { context: Context; root: string }[] = []
-afterEach(async () => {
-  for (const live of deployments.splice(0)) {
-    await live.context.fiber.dispose()
-    await rm(live.root, { recursive: true, force: true })
-  }
-})
-
-/** One live control store over a real JSONL session, with its three protocols declared. */
-async function deployment(): Promise<Deployment> {
-  const root = await mkdtemp(join(tmpdir(), 'singularity-commands-'))
-  const context = new Context()
-  await context.plugin(JsonlSessionPersistence, { root, compression: 'none' })
-  deployments.push({ context, root })
-  const made = registry()
-  const store = await ControlSessionStore.open({
-    persistence: context.sessionPersistence,
-    controlId: 'commands',
-    registry: made,
-    subjects: SUBJECTS,
-  })
-  return { store, persistence: context.sessionPersistence, root, context, registry: made }
-}
-
-/** The revision the run pins, created through the environment protocol's own fact. */
-async function createRevision(live: Deployment): Promise<void> {
-  await live.store.emit({
-    commandId: 'revision',
-    protocol: ENVIRONMENT_PROTOCOL,
-    version: ENVIRONMENT_VERSION,
-    kind: ENVIRONMENT_KINDS.revisionCreated,
-    subject: ENVIRONMENT,
-    payload: { revisionId: REVISION, manifest: MANIFEST },
-  })
-}
-
-/** The agent node the assignment needs, recorded by the runtime's own role. */
-async function openAgent(live: Deployment): Promise<void> {
-  await live.store.emit({
-    commandId: 'agent',
-    protocol: AGENT_PROTOCOL,
-    version: AGENT_VERSION,
-    kind: AGENT_KINDS.opened,
-    subject: AGENT,
-    payload: { agentId: AGENT, role: 'worker', sessionId: `singularity:agent:${AGENT}` },
-  })
-}
-
-function commandsFor(live: Deployment, agents = new Map([[AGENT, { identity: SCHEDULER }]])) {
-  return createTaskCommands({
-    store: live.store,
-    registry: live.registry,
-    agents,
-    implementations: [{ ref: UNIT_VERIFIER, version: '1', implementationDigest: UNIT_IMPLEMENTATION }],
-  })
-}
-
-/** The digest the created revision actually has, read back from the store rather than assumed. */
-function revisionDigest(live: Deployment): string {
-  const state = live.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT)
-  const digest = state?.revisions[REVISION]?.contentDigest
-  if (digest === undefined) throw new Error('the revision was not created')
-  return digest
-}
-
-const pin = (live: Deployment, overrides: Partial<{ environmentId: string; revisionId: string; digest: string }> = {}) => ({
-  environmentId: ENVIRONMENT,
-  revisionId: REVISION,
-  digest: revisionDigest(live),
-  ...overrides,
-})
-
-/** A parent with a plan whose only child is `CHILD`, admitted, assigned and ready to start. */
-async function planned(live: Deployment, maxRuns = 1) {
-  const commands = commandsFor(live)
-  await commands.admit({ commandId: 'admit-parent', taskId: PARENT, contract: parentContract() })
-  await commands.admit({
-    commandId: 'admit-child',
-    taskId: CHILD,
-    contract: {
-      goal: 'do the counting part',
-      inputs: ['fixture/words.txt'],
-      criteria: [{ criterionId: 'part', statement: 'the part counts', verifierRef: UNIT_VERIFIER, verifierVersion: '1', implementationDigest: UNIT_IMPLEMENTATION }],
-    },
-  })
-  await commands.decompose({
-    commandId: 'plan',
-    parentTaskId: PARENT,
-    children: [{ taskId: CHILD, dependsOn: [], supports: ['correctness'], maxRuns }],
-  })
-  await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
-  await commands.assign({ commandId: 'assign-child', taskId: CHILD, agentId: AGENT })
-  return commands
-}
 
 describe('a run starts only when every cross-entity condition holds', () => {
   it('refuses a run pinned to a revision this log never recorded, or to the wrong content', async () => {
@@ -359,8 +228,5 @@ describe('the command boundary against a store that refuses', () => {
     // The environment role must exist, or the command boundary's own facts cannot be produced.
     expect(refusalOf(() => registry().ruleFor(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, 'revision/nope')).code).toBe<RefusalCode>('unknown-kind')
     expect(() => refuse('malformed-payload', 'checked')).toThrowError(/malformed-payload/)
-    void SESSION_FORMAT_VERSION
-    void SessionSeq
-    void INTEGRATION_VERIFIER
   })
 })

@@ -16,6 +16,7 @@ import {
   receiptDigest,
   renderTaskForAgent,
   type RefusalCode,
+  TASK_KINDS,
   TASK_PROTOCOL,
   TASK_VERSION,
   type ReceiptView,
@@ -30,6 +31,7 @@ import {
   assigned,
   BUBBLE_INPUTS,
   bubbleOpened,
+  contract,
   failed,
   INTEGRATION_VERIFIER,
   judged,
@@ -128,6 +130,29 @@ describe('the task slice', () => {
     expect(receiptDigest(projectReceipt(state, RUN_ID, log.entries().length - 1))).not.toBe(atCutoff)
     // A cutoff that is not a committed bound is refused rather than rounded to one.
     expect(refusalOf(() => projectReceipt(state, RUN_ID, 0)).code).toBe<RefusalCode>('malformed-payload')
+  })
+
+  it('does not move a receipt at a cutoff because unrelated facts arrived later', async () => {
+    const { log, state } = await slice()
+    const cutoff = log.entries().length
+    const before = receiptDigest(projectReceipt(state, RUN_ID, cutoff))
+
+    // A fact about another task, committed after the cutoff, is outside what this receipt accounts
+    // for - so the receipt for the same cutoff is unchanged, and a reader can rely on that.
+    await log.emit({
+      commandId: 'other-task',
+      protocol: TASK_PROTOCOL,
+      version: TASK_VERSION,
+      kind: TASK_KINDS.admitted,
+      subject: 'task-elsewhere',
+      payload: { contract: contract() },
+    })
+
+    const refolded = foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
+    if (refolded === undefined) throw new Error('expected the task to still fold')
+    expect(receiptDigest(projectReceipt(refolded, RUN_ID, cutoff))).toBe(before)
+    // Reading it again at the new cutoff is a different accounting, which is the point of naming one.
+    expect(receiptDigest(projectReceipt(refolded, RUN_ID, log.entries().length))).not.toBe(before)
   })
 
   it('reports a run that declared no execution context as having consumed nothing, not as unknown', async () => {
