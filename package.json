@@ -1,0 +1,21 @@
+{
+  "name": "singularity-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The one protocol stack: one envelope, one append path, one fold engine, one version gate, one refusal contract.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "gates": "node scripts/gates.mjs",
+    "verify": "pnpm build && pnpm test && pnpm gates"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
+  }
+}

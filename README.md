@@ -1,0 +1,64 @@
+# singularity-core
+
+The one protocol stack. Built from the spine in `singularity-s0-spine.md`, not by porting code.
+
+```sh
+pnpm install
+pnpm verify   # tsc --noEmit && vitest run && node scripts/gates.mjs
+```
+
+## What is here
+
+Five things, and only five. Every durable fact in the future system travels through them.
+
+| Module | The one thing it owns |
+|---|---|
+| `src/protocol/envelope.ts` | **The frame.** A closed shape: `protocol, version, kind, subject, actor, at, seq, prevDigest, payload, digest`. An unknown member is a refusal. The digest covers the body, so a tampered fact is named, never reinterpreted. |
+| `src/protocol/log.ts` | **The append path.** Write, fsync, read those exact bytes back, verify the seal. Loading verifies each line's framing, digest, chain link, contiguous `seq`, **and the version gate**. This is the only module allowed to write durably. |
+| `src/protocol/registry.ts` | **The version gate and the guarantee ladder.** One declaration per `(protocol, version)`: one initial state, one closed kind set. Unknown protocol / version / kind are three distinct refusals. `G4` kinds are refused at the log boundary; exactly one protocol may own `G3`. |
+| `src/protocol/fold.ts` | **The fold engine.** State is derived, never stored. Two scopes, deliberately: `foldSubjects` is the whole-store read and fails closed; `foldSubject` is the isolation boundary. Neither invents state for a subject with no facts. |
+| `src/protocol/refusal.ts` | **The refusal contract.** One shape, stable codes, one error type. Callers branch on `code`, never on message text. |
+
+Payloads stay typed per kind. **The frame never interprets a payload** — that is the discipline that keeps a unified stack from becoming a unified mess.
+
+## The guarantee ladder
+
+One fact has exactly one level. Nothing is "also atomic".
+
+| | Guarantee | Who needs it |
+|---|---|---|
+| `G1` | append + fold | the default |
+| `G2` | multi-record atomic | a batch: all-visible or all-invisible |
+| `G3` | compare-and-swap | **exactly one instance** — the environment-version pointer |
+| `G4` | derived | never persisted; folded from `G1` facts |
+
+## The gates are the first asset
+
+The previous system had good design documents and still grew twelve persisted shape owners and 197 unreferenced exports, because only two gates existed and neither constrained *shape proliferation*. So the gates live here from the first commit, and **each one has been observed to fail** (see below).
+
+| Gate | The mess it blocks |
+|---|---|
+| `no-export-star` | a barrel that hides what a module promises |
+| `single-durable-writer` | a second writer, which is how a stack grows a second format |
+| `no-unreferenced-export` | a public surface larger than what is used |
+| `no-duplicate-type-body` | one type declared twice, which is two places to keep in step |
+| `source-size` | 400 lines; a starting bound, not a target |
+| `single-g3-claim` | a second compare-and-swap instance |
+
+**Falsification is required, not assumed.** Every gate was proved to fire by injecting a probe file that violates all six, then deleting it. That exercise found a real bug in `no-unreferenced-export`: it had a shortcut that treated "the entry file exists" as a reference, so it could never fail. A gate that has never failed is not known to work — so add a probe case whenever a gate is added.
+
+## Decisions recorded here
+
+1. **Two fold scopes are deliberate.** `foldSubjects` fails closed on any subject's illegal sequence, because a store that cannot be replayed in full is not one whose full state you may trust. `foldSubject` narrows to one subject so a reader can answer for its own state without being poisoned by a stranger's broken sequence. Choose by what the caller answers for.
+2. **No optional durable field, ever.** A missing required fact is a named refusal. `payload` is required and reads `{}` when a fact truly carries nothing — the frame always has the member, so "absent" and "empty" never blur.
+3. **Version gate applies on load, not only on append.** A log written by a build that knew a kind this one does not is refused by name, never skipped.
+4. **One writer per log**, enforced by a size check on both sides of every append.
+5. **Digests are over canonical JSON** (keys sorted), so a fact's identity does not depend on member order.
+
+## What is deliberately absent
+
+No business payload. No second file format. No `export *`. No default-substitution. No compatibility shim. No repository abstraction over the log. Adding any of these is a change to the spine spec (`singularity-s0-spine.md`), not a local decision.
+
+## Next (S2)
+
+One vertical slice, the smallest that crosses every layer: **a Task contract → a Run pinned to a revision → an independent verifier verdict → the persisted facts, folded → read by an agent, and read by a UI.** Not the method/RSI chain: it spans seven shapes and would drag the whole complexity in before the frame is proven.
