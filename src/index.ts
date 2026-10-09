@@ -61,6 +61,14 @@ export {
   type TreeView,
 } from './task/tree.ts'
 export {
+  createTaskCommands,
+  type AgentCommands,
+  type HeldAgent,
+  type TaskCommandOptions,
+  type TaskCommands,
+  type VerdictInput,
+} from './task/commands.ts'
+export {
   assertInputsBound,
   bubbleOpenedKind,
   inputList,

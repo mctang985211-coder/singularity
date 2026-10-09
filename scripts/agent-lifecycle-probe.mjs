@@ -384,7 +384,7 @@ async function probe() {
     check(
       'the write lease was released by the kernel with the killed holder, so resume was granted rather than blocked',
       resumed?.resumed === true && resumed?.grantedMs < 5000,
-      `${resumed?.grantedMs ?? 'no'}ms`,
+      `${resumed?.grantedMs ?? 'no'}ms for openAgentSession(resume) — existence check, lease, repair closer and publication`,
     )
     check(
       'resume found the same history prefix the killed holder had written',

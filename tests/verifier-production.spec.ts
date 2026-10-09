@@ -303,6 +303,34 @@ describe('the production verdict', () => {
     expect(await markerLabels()).toContain('criterion')
   })
 
+  it('refuses an artifact that cannot be read after execution, by name', async () => {
+    // The command runs and its verdict is formed; the artifact is then taken away before the digest
+    // can be read, so there are no bytes this verdict could be bound to.
+    const vanishing: RealJudge = async (execution: ProductionExecution): Promise<JudgedVerdict> => {
+      const judged = await realJudge()(execution)
+      await rm(execution.artifactPath, { force: true })
+      return judged
+    }
+    const removed = await asyncRefusalOf(async () => runProductionVerdict(await request({ runJudge: vanishing })))
+
+    expect(removed.code).toBe('evidence-input-mismatch')
+    expect(removed.detail).toContain('artifact')
+    // The judged command really ran; only the binding to what it left behind is refused.
+    expect(await markerLabels()).toContain('criterion')
+
+    // An artifact that never existed is refused the same way, not as a bare read error. The judge
+    // here is a stub on purpose: this case is about this path's own read, not about the adapter,
+    // which hashes the artifact itself and would stop even earlier.
+    const absentJudge: RealJudge = async (): Promise<JudgedVerdict> => ({
+      verdict: 'pass',
+      implementationDigest: await programDigest(),
+    })
+    const absent = await asyncRefusalOf(async () =>
+      runProductionVerdict(await request({ artifactPath: 'out/never-written.txt', runJudge: absentJudge })),
+    )
+    expect(absent.code).toBe('evidence-input-mismatch')
+  })
+
   it('refuses a request that is not the frozen shape, by name', async () => {
     const badDigest = await request({ inputs: [{ name: INPUT_NAME, digest: 'not-a-digest' }] })
     expect((await asyncRefusalOf(() => runProductionVerdict(badDigest))).code).toBe('malformed-payload')

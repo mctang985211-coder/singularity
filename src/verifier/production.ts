@@ -21,7 +21,16 @@
  *    digest of the implementation that actually produced the verdict — the bytes that ran, not the
  *    name it was asked for. A different digest is `wrong-verifier`.
  * 5. **Hash the artifact after execution.** The digest must name what the verdict was formed on, so
- *    it is taken from the bytes left behind, never from the judge's own report.
+ *    it is taken from the bytes left behind, never from the judge's own report. An artifact that
+ *    cannot be read is refused by name like an input: a verdict cannot be bound to bytes that are
+ *    not there, and a missing file must not escape as a raw read error.
+ *
+ * What the digest inside `implementationDigest` covers, precisely: the bytes of the **judged
+ * program** — the thing whose exit code is the verdict, and the thing a rebuild would replace. It
+ * does not cover the deployment-side adapter that spawned it (`scripts/verifier-command.mjs`),
+ * because in this deployment that adapter is a generic runner and the program is what decides. A
+ * deployment whose runner is itself part of the judgement must fold the runner's own bytes into the
+ * digest it declares; this module can only check the digest it is given, and that is what it does.
  *
  * What this module deliberately does not do: it runs nothing and writes nothing. Process execution
  * is a port (`runJudge`) wired by the deployment, because a judgement that spawned a process could
@@ -329,12 +338,29 @@ async function acceptJudgedVerdict(runJudge: RealJudge, execution: ProductionExe
 }
 
 /**
+ * Step 5: the digest of the bytes the verdict is bound to, read after the run.
+ *
+ * An unreadable artifact is refused with the same code and the same discipline as an unreadable
+ * input: the verdict would name bytes that do not exist, which is a binding the evidence cannot
+ * carry. A bare read error escaping here would be the one path that fails outside the refusal
+ * contract.
+ */
+async function readArtifactDigest(artifactPath: string, criterionId: string): Promise<string> {
+  try {
+    return createHash('sha256').update(await readFile(artifactPath)).digest('hex')
+  } catch (error) {
+    refuse(
+      'evidence-input-mismatch',
+      `the artifact criterion "${criterionId}" would be bound to (${artifactPath}) could not be read (${messageOf(error)}); a verdict cannot name bytes that are not there`,
+    )
+  }
+}
+
+/**
  * Form one verdict, in the five steps, refusing by name at each one.
  *
  * A real judge that throws is not a refusal: there is no verdict to compare, so the error is the
- * only honest report of it and it propagates. The same holds for an artifact that cannot be read
- * after execution — the digest that would name what the verdict was formed on does not exist, and
- * none of the four refusal codes describes that absence.
+ * only honest report of it and it propagates.
  */
 export async function runProductionVerdict(request: ProductionVerdictRequest): Promise<ProductionVerdict> {
   const { runId, criterion, implementations, inputs, workspace, artifactPath, command, runJudge } = readRequestShape(request)
@@ -344,7 +370,7 @@ export async function runProductionVerdict(request: ProductionVerdictRequest): P
   const inputDigests = await readInputDigests(inputs)
   const judged = await acceptJudgedVerdict(runJudge, { workspace, artifactPath, command, inputs }, criterion)
   // After execution, not before: the digest names the bytes the verdict was formed on.
-  const artifactDigest = createHash('sha256').update(await readFile(artifactPath)).digest('hex')
+  const artifactDigest = await readArtifactDigest(artifactPath, criterion.criterionId)
 
   return {
     runId,
