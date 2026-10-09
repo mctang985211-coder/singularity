@@ -223,6 +223,10 @@ const DETECTORS = [
     },
   },
   {
+    name: 'protocol-inventory',
+    detect: () => inventoryFindingsWith(readLedger()),
+  },
+  {
     name: 'dsh-alignment',
     realTree: true,
     detect: () => alignmentFindingsWith(readBaseline()),
@@ -259,6 +263,103 @@ const DSH_BASELINE = 'dsh-baseline.json'
 function readBaseline() {
   return JSON.parse(readFileSync(join(ROOT, DSH_BASELINE), 'utf8'))
 }
+
+/** The protocol ledger: every declared kind, and who produces and reads it. */
+const PROTOCOL_LEDGER = 'protocol-baseline.json'
+
+function readLedger() {
+  return JSON.parse(readFileSync(join(ROOT, PROTOCOL_LEDGER), 'utf8'))
+}
+
+/**
+ * What the code actually declares, asked of the registries rather than read out of the source.
+ *
+ * A protocol is declared by an exported `declare*Protocol(registry)` in a slice's `protocol.ts`,
+ * which is the one convention every slice already follows. The `registry.declare` sweep below is
+ * what keeps that convention honest: a shape declared anywhere else is invisible to this function,
+ * so the gate says so instead of quietly under-reporting.
+ */
+async function declaredProtocols() {
+  const { ProtocolRegistry } = await import(new URL('../src/protocol/registry.ts', import.meta.url).href)
+  const found = []
+  for (const file of protocolModules()) {
+    const module = await import(new URL(`../${file}`, import.meta.url).href)
+    const registry = new ProtocolRegistry()
+    const declarers = Object.entries(module).filter(([name, value]) => /^declare[A-Z]\w*Protocol$/.test(name) && typeof value === 'function')
+    for (const [, declare] of declarers) declare(registry)
+    for (const protocol of registry.protocols()) {
+      for (const version of registry.versionsOf(protocol)) {
+        found.push({ protocol, version, kinds: [...registry.kindsOf(protocol, version)].sort() })
+      }
+    }
+  }
+  return found.sort((left, right) => (left.protocol < right.protocol ? -1 : left.protocol > right.protocol ? 1 : left.version - right.version))
+}
+
+/** Every slice's `protocol.ts`, which is where a declared shape lives. */
+function protocolModules() {
+  const found = []
+  const walk = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (entry.name === 'protocol.ts') found.push(relative(ROOT, path))
+    }
+  }
+  walk(join(ROOT, 'src'))
+  return found.sort()
+}
+
+/** Every file that declares a shape without being a slice's `protocol.ts`. */
+function declarationSitesOutsideProtocolModules() {
+  const allowed = new Set(protocolModules())
+  const findings = []
+  for (const file of sourceFiles()) {
+    if (!file.startsWith('src/') || allowed.has(file)) continue
+    const declares = /\.declare\s*[<(]/.exec(codeOnly(readFileSync(join(ROOT, file), 'utf8')))
+    if (declares !== null) findings.push(`${file} declares a protocol without being a slice's protocol.ts; the inventory can only check what it can find`)
+  }
+  return findings
+}
+
+/**
+ * Every declared kind must be in the ledger and every ledger row must be declared. Both directions
+ * matter: one catches a shape added without a stated consumer, the other a ledger that has drifted
+ * into fiction. Parameterised so the self-test can hand it a wrong ledger and watch it fire.
+ */
+function inventoryFindingsWith(ledger) {
+  const rows = Array.isArray(ledger?.protocols) ? ledger.protocols : []
+  const key = entry => `${entry.protocol}@${entry.version}`
+  const listed = new Map(rows.map(row => [key(row), row]))
+  const findings = []
+
+  for (const declared of DECLARED) {
+    const row = listed.get(key(declared))
+    const where = `${declared.protocol}@${declared.version}`
+    if (row === undefined) {
+      findings.push(`${where} is declared by the code but no ${PROTOCOL_LEDGER} row names it; adding a shape is a recorded act, so record who produces it and who reads it`)
+      continue
+    }
+    const named = [...(row.kinds ?? [])].sort()
+    const missing = declared.kinds.filter(kind => !named.includes(kind))
+    const extra = named.filter(kind => !declared.kinds.includes(kind))
+    if (missing.length > 0) findings.push(`${where} declares ${missing.join(', ')}, which its ledger row does not list`)
+    if (extra.length > 0) findings.push(`${where}'s ledger row lists ${extra.join(', ')}, which the code does not declare`)
+    for (const field of ['subject', 'producedBy', 'readBy'])
+      if (typeof row[field] !== 'string' || row[field].length === 0)
+        findings.push(`${where}'s ledger row has no ${field}; a shape with no named producer or reader is how the previous system grew 197 unreferenced exports`)
+  }
+
+  for (const row of rows) {
+    if (!DECLARED.some(declared => key(declared) === key(row)))
+      findings.push(`${PROTOCOL_LEDGER} names ${key(row)}, which no code declares`)
+  }
+  return findings
+}
+
+/** Filled by the gate before it scans; the inventory cannot be a one-way check without it. */
+let DECLARED = []
 
 /**
  * Everything must agree with one baseline: the file, the version the host actually installs, the
@@ -417,7 +518,7 @@ export const probeCommentAnchor = 1
 
 if (PROBE) {
   const { files, raw, code } = probeSet()
-  const scored = DETECTORS.filter(detector => detector.realTree !== true)
+  const scored = DETECTORS.filter(detector => detector.realTree !== true && detector.name !== 'protocol-inventory')
   const results = scored.map(({ name, detect }) => ({ name, findings: detect(files, { raw, code }) }))
   let missed = 0
   console.log('gate self-test: every detector must fire on one violating file\n')
@@ -430,6 +531,22 @@ if (PROBE) {
       console.log(`  ok    ${name} fired (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
     }
   }
+  // The inventory reads the real registries, so its probe hands the check a wrong ledger. Each of
+  // the three ways it can disagree must produce a finding, or the ledger protects nothing.
+  for (const [label, wrong] of [
+    ['a kind the code declares but the ledger omits', { ...readLedger(), protocols: readLedger().protocols.map(row => ({ ...row, kinds: row.kinds.filter((_, index) => index > 0) })) }],
+    ['a kind the ledger lists but the code does not declare', { ...readLedger(), protocols: readLedger().protocols.map(row => ({ ...row, kinds: [...row.kinds, 'never/declared'] })) }],
+    ['a protocol the ledger names and no code declares', { ...readLedger(), protocols: [...readLedger().protocols, { protocol: 'ghost', version: 1, kinds: [], subject: 's', producedBy: 'p', readBy: 'r' }] }],
+  ]) {
+    const findings = inventoryFindingsWith(wrong)
+    if (findings.length === 0) {
+      missed += 1
+      console.log(`  FAIL  protocol-inventory did not fire on ${label}`)
+    } else {
+      console.log(`  ok    protocol-inventory fired on ${label} (${findings.length} findings)`)
+    }
+  }
+
   // The alignment gate reads the real tree, so its probe hands the function a wrong baseline: if a
   // version nobody installed does not produce a finding, the gate protects nothing. Versions are
   // per package, so the probe overrides each entry rather than one top-level number.
@@ -470,7 +587,9 @@ if (PROBE) {
 } else {
   const files = sourceFiles()
   const raw = new Map(files.map(file => [file, readFileSync(join(ROOT, file), 'utf8')]))
+  DECLARED = await declaredProtocols()
   const results = scan(files, { raw, code: new Map([...raw].map(([file, text]) => [file, codeOnly(text)])) })
+  for (const finding of declarationSitesOutsideProtocolModules()) results.find(result => result.name === 'protocol-inventory')?.findings.push(finding)
   let failed = 0
   console.log(`gates: ${DETECTORS.length} gates over ${files.length} files\n`)
   for (const { name, findings } of results) {

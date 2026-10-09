@@ -179,7 +179,7 @@ export class ProtocolRegistry {
     if (versions === undefined)
       refuse(
         'unknown-protocol',
-        `no protocol named ${JSON.stringify(protocol)} is declared (declared: ${[...this.#versionsByProtocol.keys()].sort().join(', ') || 'none'})`,
+        `no protocol named ${JSON.stringify(protocol)} is declared (declared: ${this.protocols().join(', ') || 'none'})`,
       )
     refuse(
       'version-mismatch',
@@ -201,6 +201,15 @@ export class ProtocolRegistry {
     return spec.kinds[kind] as KindRule<State>
   }
 
+  /**
+   * Every protocol this registry holds, sorted. A registry can say what it declared, which is what
+   * an inventory of the declared surface has to ask it: reading the names out of the source would
+   * be a second copy of the truth that nothing keeps in step.
+   */
+  protocols(): readonly string[] {
+    return [...this.#versionsByProtocol.keys()].sort()
+  }
+
   /** The kind set one protocol version declares, sorted. */
   kindsOf(protocol: string, version: number): readonly string[] {
     return Object.keys(this.specFor(protocol, version).kinds).sort()
@@ -212,7 +221,7 @@ export class ProtocolRegistry {
     if (versions === undefined)
       refuse(
         'unknown-protocol',
-        `no protocol named ${JSON.stringify(protocol)} is declared (declared: ${[...this.#versionsByProtocol.keys()].sort().join(', ') || 'none'})`,
+        `no protocol named ${JSON.stringify(protocol)} is declared (declared: ${this.protocols().join(', ') || 'none'})`,
       )
     return [...versions].sort((a, b) => a - b)
   }

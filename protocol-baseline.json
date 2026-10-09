@@ -1,0 +1,39 @@
+{
+  "why": "Every protocol, version and kind this stack declares, with who produces each kind and who reads it. The `protocol-inventory` gate compares this file against the real registries in both directions, because a prose inventory in a document is not checked by anything: docs/context.md claimed 36 files, 140 tests and 9 gates at the commit where the truth was 44, 177 and 11, and nothing noticed. `producedBy` and `readBy` are not machine-checkable; they are here so that adding a shape is a recorded act with a named consumer, which is the one thing the previous system never had to do.",
+  "protocols": [
+    {
+      "protocol": "agent",
+      "version": 1,
+      "subject": "the agent id",
+      "kinds": ["agent/opened"],
+      "producedBy": "scripts/*.mjs deployments (a deployment opens the node before recording it)",
+      "readBy": "src/task/commands.ts requireOpenedNode"
+    },
+    {
+      "protocol": "environment",
+      "version": 1,
+      "subject": "the environment id",
+      "kinds": ["revision/created"],
+      "producedBy": "scripts/*.mjs deployments and tests",
+      "readBy": "src/environment/binding.ts assertPinnedRevision, src/task/commands.ts (the pin gate)"
+    },
+    {
+      "protocol": "task",
+      "version": 3,
+      "subject": "the task id",
+      "kinds": [
+        "bubble/opened",
+        "evidence/produced",
+        "run/failed",
+        "run/started",
+        "run/verified",
+        "task/admitted",
+        "task/assigned",
+        "task/decomposed",
+        "task/reassigned"
+      ],
+      "producedBy": "src/task/commands.ts createTaskCommands (the only surface that produces task facts)",
+      "readBy": "src/task/view.ts projectTask/projectReceipt, src/task/tree.ts projectTree"
+    }
+  ]
+}
