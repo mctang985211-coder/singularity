@@ -161,22 +161,54 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 5. 当前代码状态（`pnpm verify` 全绿）
 
-`src` 1721 行 / `tests` 1306 行 / 15 个源+测试文件；**55 测试**；**7 门禁 + 门禁自检**。
+`src`/`tests` 共 17 个文件；**62 测试**；**8 门禁 + 门禁自检**（新增 `dsh-alignment`）。
 
 - `src/protocol/{refusal,envelope,registry,fold,log}.ts` —— 一个拒绝契约、一个信封、一个版本闸+保证词表+发射者纪律、一个 fold 引擎、一条追加路径（提交队列 + 命令识别 + 提交前 dry-run）。
 - `src/task/{contract,protocol,view}.ts` —— 契约（shape 纯 / 可用性命令期）、5 种 kind、唯一读投影 + G4 派生 receipt。
-- `scripts/gates.mjs` —— 7 条门禁 + `--probe` 自检（每个静态检测器都必须能失败）。
-- `scripts/slice.mjs` —— 端到端冒烟（第 7 条门禁跑它）。
+- `scripts/gates.mjs` —— **8 条门禁** + `--probe` 自检（每个静态检测器都必须能失败；两条读真实树的门禁各有独立探针）。
+- `scripts/slice.mjs` —— 端到端冒烟（门禁 `vertical-slice-smoke` 跑它）。
+- `dsh-baseline.json` —— **DSH 基线的单一事实来源**；门禁 `dsh-alignment` 强制它。
+- `src/control/session-store.ts` + `scripts/control-probe.mjs` —— 控制 store 与双进程探针（见 §4.1）。
 
 **S2 的三条不变量（写在 reducer 里，必须保留）**：判据由它命名的验证器实现裁决；执行者不自判自己的 run（角色 + 身份双重校验）；每条判据都有 pass 才 verified（拒绝时点出缺哪条）。
 
 **门禁自检两次抓到真实缺陷**（这是它的价值）：`no-unreferenced-export` 曾有一条"入口文件存在即算引用"的捷径使它永不可能失败；剥离字符串后 `single-durable-writer` 失效（import 说明符是字符串），所以**说明符读原文、名字引用读剥离文本**。
 
-**判定要删/要换**：`ProtocolLog` 的文件存储实现（fsync/读回/size/摘要链）——按 §4.1 换成"已知 DSH 事件类型 + `append` + `flush`"；`ProtocolLog` 降为纯内存测试后端。门禁 `single-durable-writer` 届时应收紧为**零持久写者**。
+## 6. DSH 版本对齐（本轮的"对齐到最新"落成了机制）
 
-## 6. 下一轮的第一批动作
+**事实**（2026-10-09 实测）：
 
-1. **阶段 A 收尾**：按 §4.1 建 `SessionEventSink`——选一个**已知 log-only** DSH 事件类型，`data` 里承载 `{protocol, version, kind, payload}`；`append` + `await flush`（`false` 即失败）；`ProtocolLog` 降为内存后端；门禁收紧为"零持久写者"。
-2. **补一个我们自己的双进程控制 store 探针**（F02 的退出条件）：两个进程各以 `write` 打开同一 session，第二个拿 `SessionAlreadyOwnedError`；杀持有者后立即接管。
-3. 更新 `docs/blueprint.md`：阶段表换成 review §5 的 A–F，骨架数据更新，**不把未实现标为已完成**。
-4. 进阶段 B（真实执行纵切），K1 检查点在 B 完成后。
+| | 版本/提交 |
+|---|---|
+| **宿主（我们运行其中的 DSH CLI）** | **`0.2.0-rc.2`** |
+| 本地核心包（`dsh-session` / `-persistence` / `-persistence-jsonl`） | `0.2.0-rc.2` |
+| `@deepseek-ai/cordis` | **`4.0.4`**（**独立版本线**，不与 `dsh-*` 同号） |
+| checkout（`thirdparty/deepseek-harness`） | `639ed01539` = `v0.2.0-rc.2` 发布合并 |
+| 上游 HEAD | `d743267388641bc76f17c45ce8b4c231aed1d32c`（已前进） |
+| 上游最新 tag | **`v0.2.1-alpha.2`**（alpha） |
+| registry `latest` | **`0.0.1-rc.1`（陈旧，远落后于宿主）** |
+| registry `next` | `0.2.0-rc.2` |
+| registry `alpha` | `0.2.1-alpha.2` |
+
+**决定：对齐到宿主运行的版本（`0.2.0-rc.2`），不是对齐到最新发布的。**
+
+理由：这四个包是 **peerDependencies，由宿主 DSH profile 在运行时提供**。声明 `0.2.1-alpha.2` 就是声明一个**宿主不提供的版本**，运行时必然不成立。"最新"在这里有三个候选，而**只有宿主实际提供的那个是对齐目标**。
+
+**搬家条件（写进基线文件，不是写在这里就算）**：当宿主 CLI 被升级时——更新 `dsh-baseline.json` 的 `dshVersion` 与逐包条目，然后重跑 `pnpm verify` 与 `node scripts/control-probe.mjs`。在此之前**不升级**。
+
+**机制（这才是"对齐"的落地）**：`dsh-baseline.json` 是单一事实来源，门禁 **`dsh-alignment`** 强制四处不得漂移：
+
+1. 基线声明的每个包版本 == **宿主实际安装**的版本（逐包，因为 cordis 是独立版本线）；
+2. `package.json` 的 `peerDependencies` == 基线（漏声明就是"宿主无法提供我们没命名的东西"）；
+3. `tsconfig.json` 的每个 `paths` 目标都在基线 `installRoot` 之内（**tsconfig 无法计算，只能靠门禁**）；
+4. `vitest.config.ts` 与 `scripts/dsh-control-runtime.mjs` 里出现的每个安装路径都等于基线 `installRoot`。
+
+这条门禁第一次运行就抓到**我基线文件里的一个真实错误**（把 cordis 写成了 `0.2.0-rc.2`），自检第三次抓到探针自身的问题（探针还在覆盖一个已不存在的顶层 `version` 键——改成按包覆盖后才触发）。
+
+**陷阱**：registry 的 `latest` 是 `0.0.1-rc.1`。照 `latest` "升级"会是**大幅降级**。这也是"永不从 registry 装"这条规则的实质原因，而不是洁癖。
+
+## 7. 下一轮的第一批动作
+
+1. **补屏障失败那一测**（阶段 A 的最后一条退出条件）：注入一个 `flush` 抛出的假 `SessionPersistence`，断言 store 以 `write-not-durable` 拒绝且不报成功。`ControlSessionStore.open` 只用 handle 的 `read/append/flush/close`，假件很小。
+2. A 收口后进**阶段 B**（真实执行纵切：最小 E3 + Task 分解与责任 + 初始不可变 Revision + 最小 Bubble + 真实 verifier 与固定来源 receipt）。
+3. **K1 检查点在 B 完成后**（review §6 的 12 个验收场景，含真实 DSH session 与验证器、至少一条真实模型小任务冒烟）。

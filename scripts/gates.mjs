@@ -223,6 +223,10 @@ const DETECTORS = [
     },
   },
   {
+    name: 'dsh-alignment',
+    detect: () => alignmentFindingsWith(readBaseline()),
+  },
+  {
     name: 'vertical-slice-smoke',
     detect: () => {
       try {
@@ -238,6 +242,69 @@ const DETECTORS = [
     },
   },
 ]
+
+/** The one baseline file every other declaration must agree with. */
+const DSH_BASELINE = 'dsh-baseline.json'
+
+function readBaseline() {
+  return JSON.parse(readFileSync(join(ROOT, DSH_BASELINE), 'utf8'))
+}
+
+/**
+ * Everything must agree with one baseline: the file, the version the host actually installs, the
+ * declared peers, and every absolute path that points into the install. Three separate files had
+ * hardcoded that path with nothing checking them, which is how an alignment silently drifts.
+ *
+ * Parameterised so the self-test can hand it a wrong baseline and watch it fire.
+ */
+function alignmentFindingsWith(baseline) {
+  const findings = []
+  const declaredRoot = baseline.installRoot
+
+  // 1. The version the host actually provides must be the version we declare. Versions are per
+  //    package: cordis is versioned independently of the dsh-* packages.
+  for (const entry of baseline.packages) {
+    const short = entry.name.replace('@deepseek-ai/', '')
+    let installed
+    try {
+      installed = JSON.parse(readFileSync(join(declaredRoot, short, 'package.json'), 'utf8')).version
+    } catch {
+      findings.push(`cannot read ${entry.name} at ${declaredRoot}; the baseline names an install that is not there`)
+      continue
+    }
+    if (installed !== entry.version)
+      findings.push(`${entry.name} is installed at ${installed} but the baseline declares ${entry.version}`)
+  }
+
+  // 2. The declared peers must carry the baseline version.
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  for (const entry of baseline.packages) {
+    const declared = manifest.peerDependencies?.[entry.name]
+    if (declared === undefined) findings.push(`${entry.name} is not a declared peer; the host cannot provide what we do not name`)
+    else if (declared !== entry.version)
+      findings.push(`${entry.name} is declared as peer ${declared}, but the baseline is ${entry.version}`)
+  }
+
+  // 3. Every absolute path into the install must be the baseline root. tsconfig cannot compute it,
+  //    so the gate is what keeps it from drifting.
+  const config = JSON.parse(readFileSync(join(ROOT, 'tsconfig.json'), 'utf8'))
+  for (const [alias, targets] of Object.entries(config.compilerOptions?.paths ?? {})) {
+    for (const target of targets) {
+      if (!String(target).startsWith(declaredRoot))
+        findings.push(`tsconfig paths ${alias} → ${target} is outside the baseline install root`)
+    }
+  }
+  for (const file of ['vitest.config.ts', 'scripts/dsh-control-runtime.mjs']) {
+    const source = readFileSync(join(ROOT, file), 'utf8')
+    const paths = source.match(/\/[A-Za-z0-9_./-]*node_modules\/@deepseek-ai\/dsh\/node_modules\/@deepseek-ai/g) ?? []
+    if (paths.length === 0) findings.push(`${file} names no DSH install path; it cannot be aligned to ${baseline.dshVersion}`)
+    for (const path of new Set(paths)) {
+      if (path !== declaredRoot) findings.push(`${file} points at ${path}, not the baseline install root ${declaredRoot}`)
+    }
+  }
+
+  return findings
+}
 
 /** Run every detector over one file set and report per gate. */
 function scan(files, views) {
@@ -306,9 +373,9 @@ if (PROBE) {
   let missed = 0
   console.log('gate self-test: every detector must fire on one violating file\n')
   for (const { name, findings } of results) {
-    // The smoke gate needs a real tree, so the probe only proves the static detectors.
-    if (name === 'vertical-slice-smoke') {
-      console.log(`  skip  ${name} (needs the real tree; the normal run covers it)`)
+    // These two read the real tree rather than the synthetic file map, so each gets its own probe.
+    if (name === 'vertical-slice-smoke' || name === 'dsh-alignment') {
+      console.log(`  skip  ${name} (reads the real tree; probed separately below)`)
       continue
     }
     if (findings.length === 0) {
@@ -318,6 +385,20 @@ if (PROBE) {
       console.log(`  ok    ${name} fired (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
     }
   }
+  // The alignment gate reads the real tree, so its probe hands the function a wrong baseline: if a
+  // version nobody installed does not produce a finding, the gate protects nothing. Versions are
+  // per package, so the probe overrides each entry rather than one top-level number.
+  const misaligned = alignmentFindingsWith({
+    ...readBaseline(),
+    packages: readBaseline().packages.map(entry => ({ ...entry, version: '0.0.0-not-installed' })),
+  })
+  if (misaligned.length === 0) {
+    missed += 1
+    console.log('  FAIL  dsh-alignment did not fire on a version nobody installed')
+  } else {
+    console.log(`  ok    dsh-alignment fired (${misaligned.length} findings)`)
+  }
+
   console.log('')
   if (missed > 0) {
     console.log(`gate self-test: ${missed} detector(s) cannot fail`)

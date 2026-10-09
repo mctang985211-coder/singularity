@@ -1,0 +1,25 @@
+{
+  "note": "The one DSH baseline this repo targets. Nothing here is installed: the host DSH profile provides these packages at runtime. Alignment is enforced by the dsh-alignment gate; this comment enforces nothing.",
+  "dshVersion": "0.2.0-rc.2",
+  "installRoot": "/home/ROXY/.local/node-v22.23.3-linux-x64/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai",
+  "packages": [
+    { "name": "@deepseek-ai/cordis", "version": "4.0.4" },
+    { "name": "@deepseek-ai/dsh-session", "version": "0.2.0-rc.2" },
+    { "name": "@deepseek-ai/dsh-session-persistence", "version": "0.2.0-rc.2" },
+    { "name": "@deepseek-ai/dsh-session-persistence-jsonl", "version": "0.2.0-rc.2" }
+  ],
+  "checkout": {
+    "path": "/home/ROXY/code/bb_work/harness/thirdparty/deepseek-harness",
+    "commit": "639ed01539",
+    "tag": "v0.2.0-rc.2"
+  },
+  "drift": {
+    "upstreamHead": "d743267388641bc76f17c45ce8b4c231aed1d32c",
+    "upstreamNewestTag": "v0.2.1-alpha.2",
+    "registryLatestTag": "0.0.1-rc.1",
+    "registryNextTag": "0.2.0-rc.2",
+    "registryAlphaTag": "0.2.1-alpha.2",
+    "whyNotNewer": "We align to the version the HOST RUNS, not to the newest published. The DSH CLI on this machine is 0.2.0-rc.2 and provides these peers at runtime; declaring 0.2.1-alpha.2 would name a version the host does not supply. cordis is versioned independently at 4.0.4, which is why this file lists versions per package rather than one number. Move when the host CLI is upgraded: update dshVersion and the per-package entries here, then re-run pnpm verify and the control probe.",
+    "trap": "The registry's `latest` tag is 0.0.1-rc.1, far BEHIND the host. `next` is 0.2.0-rc.2 and `alpha` is 0.2.1-alpha.2. Reading `latest` looks like an upgrade and would be a large downgrade."
+  }
+}
