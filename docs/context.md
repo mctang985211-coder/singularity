@@ -1,8 +1,17 @@
 # context.md —— 跨轮工作记忆
 
 > **每轮结束更新此文件。** 只放"下一轮必须知道、丢了会走错路"的东西。
-> 长文档：`docs/blueprint.md`（蓝图）、`docs/review.md`（第一轮审核 + K1/K2 检查点）。
-> 上一轮更新：2026-10-09（第二轮：修完审查 §2 的全部反例；F01 承载实验与 RRSI 复核均已回）。
+> 长文档：`docs/blueprint.md`（蓝图）、`docs/review.md`（第一轮审核 + K1/K2 检查点）、
+> `docs/rrsi-upstream-reference.md`（上游逐行对照）、`docs/adr/`（已定决策）。
+> 上一轮更新：2026-10-09（第三轮：RRSI 算法面读全 + 蓝图 §2.3 按行号重写 + ADR-0001）。
+
+---
+
+## 0. 已定决策（不要重新讨论）
+
+| ADR | 决策 |
+|---|---|
+| [0001](adr/0001-rrsi-port-boundary.md) | **移植 RRSI 的决策层，绝不移植它的执行体。** 只移植纯决策/正则化函数 + 机械约束；不移植轮次编排（git worktree/branch/fast_forward/自有 JSONL）与 LLM agent 管线（proposer/critic/analyst/digester 的 agent loop）——因为 **bubble 就是候选 worktree，环境指针就是 fast_forward，agent runtime 就是那些 agent**。Python checkout 保留为**可执行规格**与向量来源。**五处有意收紧必须记账并各有反例测试**（`rounds−1` 退火、+25% 成本上界、删 `w_n·ν`、`ΔC` 未知拒绝、适配器核验替代 diff 分类）。 |
 
 ---
 

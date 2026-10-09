@@ -2,7 +2,8 @@
 
 > 单一入口。审查从这里开始。
 > 第一轮审核、补充遗漏与后续构建检查点：[review.md](review.md)。
-> 证据基础：旧仓 `packages/singularity` @ `6a0edde` 的只读审计、DSH 源码与已装 `0.2.0-rc.2` 的实测、新骨架 `singularity-core` 的 S1/S2。
+> 跨轮工作记忆（含已定决策）：[context.md](context.md)；已定决策：[adr/](adr/)；RRSI 上游逐行对照：[rrsi-upstream-reference.md](rrsi-upstream-reference.md)。
+> 证据基础：旧仓 `packages/singularity` @ `6a0edde` 的只读审计、DSH 源码与已装 `0.2.0-rc.2` 的实测、RRSI 上游 `be50316` 的逐行阅读、新骨架 `singularity-core`。
 > 历史工作件（按需查证）：`~/Documents/singularity-refactor-plan.md`（冗余总账）、`singularity-rrsi-diagnosis.md`（RSI 断点）、`singularity-s0-spine.md`（核心脉络）、`singularity-s0-correction.md`（对 DSH 的更正）、`singularity-probe-results.md`（实测）、`singularity-f1-design.md`。
 
 ---
@@ -428,11 +429,14 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 
 | 文档 | 内容 |
 |---|---|
+| [`docs/adr/0001-rrsi-port-boundary.md`](adr/0001-rrsi-port-boundary.md) | **已定决策**：移植 RRSI 的决策层而非执行体，以及五处有意收紧 |
+| [`docs/context.md`](context.md) | 跨轮工作记忆：阶段状态、每个反例的位置与回归、两组方向性更正 |
+| [`docs/rrsi-upstream-reference.md`](rrsi-upstream-reference.md) | RRSI 上游逐行对照（含未读范围的明确标注） |
 | `~/Documents/singularity-refactor-plan.md` | 五平面冗余总账（逐条 file:line）+ A/B/C/D 阶段 |
 | `~/Documents/singularity-rrsi-diagnosis.md` | RSI 三处断点的证明链 + F1 设计入口 |
 | `~/Documents/singularity-s0-spine.md` | 六实体/五关系/权威写入表/保证阶梯/53→38 收敛算术 |
 | `~/Documents/singularity-s0-correction.md` | `ignorable` 更正、`storageDomain` 遗漏、S1 重造对账 |
-| `~/Documents/singularity-probe-results.md` | 本次实测：storageDomain 丢失更新 vs session flock 租约 |
+| `~/Documents/singularity-probe-results.md` | 实测：storageDomain 丢失更新 vs session flock 租约 |
 | `~/Documents/singularity-f1-design.md` | F1 详细设计（改一个字段点亮五个 RRSI 输入） |
 | `~/Documents/singularity-dead-exports.tsv` | 197 个零引用导出清单 |
 
