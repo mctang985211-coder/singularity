@@ -76,7 +76,7 @@ function create(revisionId: string, manifest: unknown, subject = ENVIRONMENT_ID)
 }
 
 function folded(log: MemoryLog, subject = ENVIRONMENT_ID): EnvironmentState {
-  const state = log.stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, subject)
+  const state = log.stateAt<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, subject, log.count)
   if (state === undefined) throw new Error(`expected a folded environment for ${subject}`)
   return state
 }

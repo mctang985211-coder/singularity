@@ -15,8 +15,6 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createTaskCommands,
-  type EnvironmentState,
-  ENVIRONMENT_KINDS,
   ENVIRONMENT_PROTOCOL,
   ENVIRONMENT_VERSION,
   type RefusalCode,
@@ -26,7 +24,6 @@ import {
   TASK_VERSION,
   type TaskState,
 } from '../src/index.ts'
-import { ControlSessionStore } from '../src/control/session-store.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
 import {
   AGENT,
@@ -43,7 +40,7 @@ import {
   REVISION,
   RUN,
 } from './command-fixtures.ts'
-import { BUBBLE_INPUTS, contract as parentContract, INTEGRATION_VERIFIER, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER } from './task-fixtures.ts'
+import { BUBBLE_INPUTS, contract as parentContract, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER } from './task-fixtures.ts'
 
 describe('a run starts only when every cross-entity condition holds', () => {
   it('refuses a run pinned to a revision this log never recorded, or to the wrong content', async () => {

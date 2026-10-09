@@ -6,7 +6,7 @@
  */
 
 
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
   assertEnvelope,
@@ -27,7 +27,6 @@ import {
   type RefusalCode,
 } from '../src/index.ts'
 import {
-  asyncRefusalOf,
   AUDIT_V1,
   bumped,
   chainOf,
@@ -35,7 +34,6 @@ import {
   DEMO_SUBJECTS,
   DEMO_V1,
   demoRegistry,
-  newLogPath,
   noted,
   openDemoLog,
   opened,
@@ -43,12 +41,6 @@ import {
   type Gate,
   type Journal,
 } from './fixtures.ts'
-
-
-
-beforeEach(async () => {
-
-})
 
 /** One valid envelope body, shared by the envelope and kind-rule specs. */
 const body = (): EnvelopeBody => ({
@@ -105,7 +97,8 @@ describe('the one append path', () => {
     const log = openDemoLog()
 
     // The reviewer's counterexample: two concurrent emits both read seq 0, and the log could not
-    // be reopened. The commit queue is what makes this a total order.
+    // be reopened. Neither half of an emit awaits, so run-to-completion is already the total order;
+    // a caller that awaits between the halves owns the serialization itself.
     const results = await Promise.all([log.emit(opened()), log.emit(bumped()), log.emit(closed()), log.emit(opened('gate-b'))])
     expect(results.map(entry => entry.seq)).toEqual([0, 1, 2, 3])
     expect(new Set(results.map(entry => entry.seq)).size).toBe(4)
@@ -124,8 +117,85 @@ describe('the one append path', () => {
     // What this store owes is that the facts a medium hands back replay identically.
     const adopted = MemoryLog.adopt(first.entries(), registry, { subjects: DEMO_SUBJECTS })
     expect(adopted.entries()).toHaveLength(2)
-    expect(adopted.stateOf<Gate>('demo', 1, 'gate-a')).toEqual({ open: true, bumps: 1 })
+    expect(adopted.stateAt<Gate>('demo', 1, 'gate-a', adopted.count)).toEqual({ open: true, bumps: 1 })
     expect(adopted.entries()).toEqual(first.entries())
+  })
+
+  it('decides without recording, so a medium that never confirmed leaves no trace', async () => {
+    const log = openDemoLog()
+    await log.emit(opened())
+
+    const decision = log.decide(bumped())
+    expect(decision.fresh).toBe(true)
+    expect(decision.envelope.seq).toBe(1)
+    // Sealed and legal, and the log has not moved: a caller that owns the durability barrier is the
+    // only one who can make this fact real, and until it does, no reader can see it.
+    expect(log.entries()).toHaveLength(1)
+    expect(log.stateAt<Gate>('demo', 1, 'gate-a', log.count)).toEqual({ open: true, bumps: 0 })
+
+    log.record(decision)
+    expect(log.entries()).toHaveLength(2)
+    expect(log.stateAt<Gate>('demo', 1, 'gate-a', log.count)).toEqual({ open: true, bumps: 1 })
+  })
+
+  it('records only a decision this log made, and only once', async () => {
+    const first = openDemoLog()
+    await first.emit(opened())
+    const decision = first.decide(bumped())
+
+    // Another log is another chain. A refused record must also leave the decision intact, or a
+    // mistaken caller could consume the only handle to a fact it never recorded.
+    const other = openDemoLog()
+    expect(refusalOf(() => other.record(decision)).code).toBe<RefusalCode>('illegal-transition')
+    expect(refusalOf(() => other.record({ envelope: decision.envelope, fresh: true })).code).toBe<RefusalCode>('illegal-transition')
+
+    first.record(decision)
+    expect(refusalOf(() => first.record(decision)).code).toBe<RefusalCode>('illegal-transition')
+
+    // A decision taken before a fact that has since been recorded would leave a hole in the chain.
+    const stale = first.decide(closed())
+    await first.emit(opened('gate-b'))
+    const refusal = refusalOf(() => first.record(stale))
+    expect(refusal.code).toBe<RefusalCode>('chain-broken')
+    expect(refusal.detail).toContain('hole')
+  })
+
+  it('answers a redelivered command with the fact it committed, and says so', async () => {
+    const log = openDemoLog()
+    const request = opened()
+    const committed = log.emit(request)
+
+    // This is what a lost reply has to be told apart from a new command, and it is the answer
+    // itself rather than a sequence number a caller has to interpret.
+    const again = log.decide(request)
+    expect(again.fresh).toBe(false)
+    expect(again.envelope.digest).toBe(committed.digest)
+    expect(log.entries()).toHaveLength(1)
+
+    // And it is not a fact waiting to be recorded: `fresh: false` is the whole answer, and the
+    // second half of the emit must not append the fact a second time.
+    expect(refusalOf(() => log.record(again)).code).toBe<RefusalCode>('illegal-transition')
+    expect(log.entries()).toHaveLength(1)
+  })
+
+  it('reads a cut as of that cut, so a value read at a cut never moves', async () => {
+    const registry = demoRegistry()
+    const log = new MemoryLog(registry, { subjects: DEMO_SUBJECTS })
+    await log.emit(opened())
+    await log.emit(bumped())
+    const cut = log.count
+    await log.emit(closed())
+    await log.emit(opened('gate-b'))
+
+    // The facts below a cut never change, so the state at that cut is the state it always was.
+    // This is what a reader's fixed cut means, and it is why a read costs nothing at the head.
+    expect(log.stateAt<Gate>('demo', 1, 'gate-a', cut)).toEqual({ open: true, bumps: 1 })
+    expect(log.stateAt<Gate>('demo', 1, 'gate-a', cut)).toEqual(
+      foldSubject<Gate>(registry, log.entries().slice(0, cut), 'demo', 1, 'gate-a'),
+    )
+    expect(log.stateAt<Gate>('demo', 1, 'gate-a', log.count)).toEqual({ open: false, bumps: 0 })
+    expect(log.statesAt<Gate>('demo', 1, cut).get('gate-a')).toEqual({ open: true, bumps: 1 })
+    expect(log.statesAt<Gate>('demo', 1, cut).has('gate-b')).toBe(false)
   })
 
   it('truthfully reports no state for a subject the log never saw', async () => {
@@ -146,9 +216,9 @@ describe('the one append path', () => {
     await log.emit(opened('gate-b'))
 
     // The cursor is an optimization, never a second interpretation: it must equal the fold.
-    expect(log.stateOf<Gate>('demo', 1, 'gate-a')).toEqual(foldSubject<Gate>(registry, log.entries(), 'demo', 1, 'gate-a'))
-    expect(log.stateOf<Gate>('demo', 1, 'gate-b')).toEqual(foldSubject<Gate>(registry, log.entries(), 'demo', 1, 'gate-b'))
-    expect(log.stateOf<Gate>('demo', 1, 'never-seen')).toBeUndefined()
+    expect(log.stateAt<Gate>('demo', 1, 'gate-a', log.count)).toEqual(foldSubject<Gate>(registry, log.entries(), 'demo', 1, 'gate-a'))
+    expect(log.stateAt<Gate>('demo', 1, 'gate-b', log.count)).toEqual(foldSubject<Gate>(registry, log.entries(), 'demo', 1, 'gate-b'))
+    expect(log.stateAt<Gate>('demo', 1, 'never-seen', log.count)).toBeUndefined()
   })
 
   it('accepts an injected clock so a fold is reproducible', async () => {
@@ -171,7 +241,7 @@ describe('the one append path', () => {
     handed.push(sealEnvelope({ ...body(), kind: 'bumped', seq: 1, prevDigest: last.digest }) as Envelope)
 
     expect(log.entries()).toHaveLength(1)
-    expect(log.stateOf<Gate>('demo', 1, 'gate-a')).toEqual({ open: true, bumps: 0 })
+    expect(log.stateAt<Gate>('demo', 1, 'gate-a', log.count)).toEqual({ open: true, bumps: 0 })
   })
 
   it('refuses to adopt a sequence no append path could produce', () => {

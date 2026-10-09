@@ -366,7 +366,9 @@ describe('the production verdict', () => {
     })
     expect((await asyncRefusalOf(() => runProductionVerdict(duplicated))).code).toBe('malformed-payload')
 
+    // A criterion's shape is the contract's rule, so the refusal is the contract's own name for
+    // it: the production path reads that shape, it does not own a second copy of it.
     const badCriterion = await request({ criterion: await criterion({ implementationDigest: 'short' }) })
-    expect((await asyncRefusalOf(() => runProductionVerdict(badCriterion))).code).toBe('malformed-payload')
+    expect((await asyncRefusalOf(() => runProductionVerdict(badCriterion))).code).toBe('malformed-contract')
   })
 })

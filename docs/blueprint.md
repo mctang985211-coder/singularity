@@ -387,8 +387,7 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | `src/task/contract.ts` | 152 | 契约：**shape（纯）与可用性（命令期）分开**；闭合契约与判据 |
 | `src/task/protocol.ts` | 334 | 5 种 kind + **三条写在 reducer 里的不变量** + 按 kind 闭合载荷 |
 | `src/task/view.ts` | 265 | 唯一读投影（含 `awaiting-run`）+ 派生 receipt（含验证器实现与产物摘要）+ agent 渲染 |
-| `scripts/gates.mjs` | 470 | **9 条门禁 + 自检**（`--probe`：每个静态检测器都必须能失败；三条读真实树的门禁各有独立探针） |
-| `scripts/slice.mjs` | 154 | 端到端冒烟（第 7 条门禁跑它） |
+| `scripts/gates.mjs` | 492 | **10 条门禁 + 自检**（`--probe` 先筛掉读真实树的门禁再跑，四条各有独立探针） |
 
 **三条不变量**（写在 reducer 里，不在提示词里）：
 
@@ -408,7 +407,6 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | `no-duplicate-type-body` | 一个类型声明两次 | ✅ |
 | `source-size` | 400 行（起始上界，不是目标） | ✅ |
 | `single-conditional-owner` | 第二个条件更新（CAS）实例 | ✅ |
-| `vertical-slice-smoke` | 框架不再能折叠（跑真实纵切） | ✅ |
 | `control-store-probe` | 阶段 A 的退出条件悄悄失效（跑真实 DSH 会话与真实子进程） | ✅（v2 变更真的弄坏过它，它报了 `failures: 1`） |
 
 **门禁自检**：`node scripts/gates.mjs --probe` 让每个静态检测器面对一个同时违反全部六条的合成文件 + 一个"只在注释里提到别人导出"的文件，**每一个都必须触发**。它已经两次抓到真实缺陷：

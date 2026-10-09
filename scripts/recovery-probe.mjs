@@ -211,7 +211,7 @@ const factReport = store => ({
 async function hold(root, phase) {
   const live = await deployment(root)
   const started = Date.now()
-  await bootstrap(live)
+  const { pin, inputs } = await bootstrap(live)
   const verdict = await decide(live)
   if (phase === 'settlement')
     await live.commands.recordVerdict({ commandId: 'record-verdict', taskId: CHILD, verdict })
@@ -222,6 +222,10 @@ async function hold(root, phase) {
     pid: process.pid,
     sessionId: String(live.store.sessionId),
     startedIn: Date.now() - started,
+    // What the dead process bound its work to, so the successor's reading can be compared with it
+    // rather than merely inspected.
+    pin,
+    inputs,
     verdict,
     ...factReport(live.store),
   })
@@ -306,10 +310,20 @@ async function probe() {
       )
 
       // The bindings survived: same responsibility, same pin, same declared inputs.
-      const task = live.store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, CHILD)
+      const cut = live.store.load()
+      const task = cut.stateOf(TASK_PROTOCOL, TASK_VERSION, CHILD)
       check('the responsibility survived the kill', task?.responsibility?.agentId === AGENT && task?.responsibility?.agentIdentity === 'runtime-1')
-      check('the revision pin survived the kill', task?.runs?.[RUN]?.revision?.digest === reported.facts.find(fact => fact.kind === 'run/started')?.digest ? true : task?.runs?.[RUN] !== undefined)
-      check('the declared inputs survived the kill', JSON.stringify(task?.runs?.[RUN]?.bubble?.inputs) === JSON.stringify([{ name: 'words.txt', digest: sha256(WORDS) }]))
+      // Field for field against two independent readings: what the dead process pinned, and what the
+      // environment the successor adopted actually recorded. "a run exists" is not this check - a run
+      // whose pin was dropped, or re-pointed at other content, is exactly what it has to catch.
+      const recorded = cut.stateOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT)?.revisions?.[REVISION]
+      const revision = task?.runs?.[RUN]?.revision
+      check(
+        'the revision pin survived the kill, field for field',
+        JSON.stringify(revision) === JSON.stringify(reported.pin) && revision?.digest === recorded?.contentDigest,
+        `read ${JSON.stringify(revision ?? null)}; the dead process pinned ${JSON.stringify(reported.pin)}; the environment records ${JSON.stringify(recorded?.contentDigest ?? null)}`,
+      )
+      check('the declared inputs survived the kill', JSON.stringify(task?.runs?.[RUN]?.bubble?.inputs) === JSON.stringify(reported.inputs))
 
       // Re-driving the setup must replay, not repeat: the same command ids are already committed.
       const before = successor.facts.length

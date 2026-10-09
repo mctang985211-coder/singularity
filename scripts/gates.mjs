@@ -224,36 +224,34 @@ const DETECTORS = [
   },
   {
     name: 'dsh-alignment',
+    realTree: true,
     detect: () => alignmentFindingsWith(readBaseline()),
   },
   {
     name: 'control-store-probe',
+    realTree: true,
     detect: () => scriptFindings('the control store probe', ['failures: 0', 'gaps: 0'], runControlProbe),
   },
   {
     name: 'root-child-slice',
+    realTree: true,
     detect: () => scriptFindings('the root/child slice', ['slice-b: OK'], runRootChildSlice),
   },
   {
     name: 'recovery-probe',
+    realTree: true,
     detect: () => scriptFindings('the recovery probe', ['recovery-probe: OK'], runRecoveryProbe),
   },
-  {
-    name: 'vertical-slice-smoke',
-    detect: () => {
-      try {
-        const output = execFileSync(process.execPath, ['scripts/slice.mjs'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-        return output.includes('slice: OK') ? [] : ['the slice ran but never reported OK']
-      } catch (error) {
-        const lines = `${error.stdout ?? ''}${error.stderr ?? ''}`
-          .split('\n')
-          .filter(line => line.includes('FAIL') || line.includes('failed') || line.includes('Refusal'))
-          .slice(0, 4)
-        return [`the vertical slice did not run end to end: ${lines.join(' | ') || error.message}`]
-      }
-    },
-  },
 ]
+
+/**
+ * The gates the synthetic file set cannot reach: they spawn real processes and read the real tree.
+ *
+ * The self-test filters them out **before** it scores anything. Running them first and discarding
+ * the result afterwards is not the same thing: it ran three end-to-end scripts to completion, threw
+ * their verdicts away, and then `pnpm gates` ran them a second time for real.
+ */
+const REAL_TREE_GATES = new Set(DETECTORS.filter(detector => detector.realTree === true).map(detector => detector.name))
 
 /** The one baseline file every other declaration must agree with. */
 const DSH_BASELINE = 'dsh-baseline.json'
@@ -419,15 +417,12 @@ export const probeCommentAnchor = 1
 
 if (PROBE) {
   const { files, raw, code } = probeSet()
-  const results = scan(files, { raw, code })
+  const scored = DETECTORS.filter(detector => detector.realTree !== true)
+  const results = scored.map(({ name, detect }) => ({ name, findings: detect(files, { raw, code }) }))
   let missed = 0
   console.log('gate self-test: every detector must fire on one violating file\n')
+  console.log(`  (not run here: ${[...REAL_TREE_GATES].join(', ')}; synthetic failing runs below)\n`)
   for (const { name, findings } of results) {
-    // These two read the real tree rather than the synthetic file map, so each gets its own probe.
-    if (name === 'vertical-slice-smoke' || name === 'dsh-alignment' || name.startsWith('control-store-probe') || name === 'root-child-slice' || name === 'recovery-probe') {
-      console.log(`  skip  ${name} (reads the real tree; probed separately below)`)
-      continue
-    }
     if (findings.length === 0) {
       missed += 1
       console.log(`  FAIL  ${name} did not fire`)

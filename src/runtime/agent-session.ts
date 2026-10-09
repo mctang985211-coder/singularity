@@ -38,8 +38,6 @@ import { refuse } from '../protocol/refusal.ts'
 /** Every seam this module drives. Presence is checked by name; absence is loud, never `undefined`. */
 const SEAM_NAMES = ['sessionPersistence', 'sessions', 'agents', 'agentLoop'] as const
 
-type SeamName = (typeof SEAM_NAMES)[number]
-
 /**
  * The upstream services this module drives, declared optionally because that is how a cordis service
  * that is absent actually looks: the property is simply not there. `ctx.agentLoop` is checked for

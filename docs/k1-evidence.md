@@ -38,6 +38,10 @@
 
 **这个探针抓到了命令边界的一个真实缺陷**：前置条件原先在 store 解析命令身份**之前**求值，于是重送一条已提交的命令会被"状态已经变了"重新判定并拒绝——丢失答复因此**无法通过命令面恢复**。修法是把前置条件放进 append 路径（身份之后、reducer 之前）。变异证明：把顺序改回去，探针以那句拒绝失败。
 
+上面这段是 **K1 交回时（`c26c0be`）的观测值**，保持原样不改：证据文档里的数字是"当时看到
+的东西"，不是"现在应该成立的东西"。控制路径收敛（`docs/debugging.md` §1）之后重跑的值记在
+本文件末尾，**门禁从 11 条变成 10 条是合并删除，不是覆盖率下降**。
+
 ## `pnpm verify` 输出
 
 ```
@@ -60,3 +64,28 @@ $ node scripts/control-probe.mjs
 failures: 0
 gaps: 0
 ```
+
+---
+
+## 收敛之后的重跑（控制路径：一条决定/记录路径、一个队列、O(1) 提交）
+
+```
+$ npx tsc --noEmit                         # 且 noUnusedLocals / noUnusedParameters 已打开
+(no output, exit 0)
+$ npx vitest run
+ Test Files  18 passed (18)
+      Tests  181 passed (181)
+$ node scripts/gates.mjs
+gates: OK — 10 gates passed
+$ node scripts/gates.mjs --probe
+gate self-test: OK — every static detector can fail
+```
+
+- **门禁 11 → 10**：`vertical-slice-smoke` 与 `tests/task-slice.spec.ts` 的 11 个用例逐条重合
+  （9 条 check 全部已被覆盖），且 `slice-b`/`control-probe`/`recovery-probe` 三个真实进程探针
+  已经在跑同一个"经 `src/index.ts` 起的进程"。删掉的是**重复的那一条**，不是覆盖。
+- **提交的 reducer 调用数：50 条事实 2550 → 50（1 次/提交）**；被拒绝的命令 101 → 1。
+- **200 条事实的提交耗时 2250ms → 430ms**，且每条耗时不再随日志长度增长（介质自身在 200 条时
+  是 301ms，我们已贴在地板上）。
+- **`recovery-probe` 的"修订固定存活"断言**：先证明旧断言在*抹掉 `environmentId`* 的变异下
+  仍然报 `ok`（三元式第一分支恒假），再换成逐字段比较；同一变异下新断言 `FAIL` 并打出三方读数。

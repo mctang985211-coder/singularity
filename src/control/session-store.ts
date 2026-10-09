@@ -22,13 +22,19 @@
  * time, sequence, chain link, digest) is exactly what must survive — a frame cannot be
  * reconstructed from four fields, and a digest is verified, never re-minted.
  *
- * **Per-emit ordering.** Parse and rule-check (in `src/protocol/`), then DSH's own
- * `materializeAppendBatch` as the serializability gate — a value DSH cannot carry is refused by
- * name *before* a byte is written — then `append` (sequence contiguous from the stored cursor),
- * then `await flush()`, then read the record back and check the digest that came back is the
- * digest that was sealed. Only then is the prepared state published. A storage failure leaves
- * the previous committed snapshot readable and disables writes until close and a new open
- * complete a successful durability barrier; a visible prefix alone is not a committed prefix.
+ * **Per-emit ordering.** `decide` (in `src/protocol/`) applies every rule and seals the fact
+ * without recording it, then DSH's own `materializeAppendBatch` is the serializability gate — a
+ * value DSH cannot carry is refused by name *before* a byte is written — then `append` (sequence
+ * contiguous from the stored cursor), then `await flush()`, then the record is read back and its
+ * digest checked against the one that was sealed. Only then is the fact **recorded**, and the log
+ * is what a reader reads. So the log holds exactly the durable prefix at every instant, and the
+ * cut a reader gets is the cut a reader gets: no copy of a hopeful state, and no replay of a log
+ * that has not moved. A storage failure leaves the previous committed cut readable and disables
+ * writes until close and a new open complete a successful durability barrier; a visible prefix
+ * alone is not a committed prefix.
+ *
+ * This queue is the stack's only one. `MemoryLog` needs none, because neither half of an emit
+ * awaits; a commit here spans a real write, so it is the one place a serial region is needed.
  *
  * @module singularity-core/control/session-store
  */
@@ -42,7 +48,7 @@ import {
 } from '@deepseek-ai/dsh-session-persistence'
 
 import { assertClosedKeys, assertEnvelope, type Envelope } from '../protocol/envelope.ts'
-import { MemoryLog, type EmitInput, type LogOptions } from '../protocol/memory-log.ts'
+import { MemoryLog, type Decision, type EmitInput, type LogOptions } from '../protocol/memory-log.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 
@@ -99,39 +105,44 @@ export function controlSessionIdOf(controlId: string): SessionId {
 }
 
 /**
+ * A fixed committed read cut.
+ *
+ * The cut is taken when this view is made, and the facts below a cut never change, so the view
+ * keeps reading the same values however much the store commits afterwards. There is no writer here
+ * and no mutable value behind it: what a committed fact and a committed state are, they are frozen.
+ */
+export interface ControlReadCut {
+  entries(): readonly Envelope[]
+  entriesOf(protocol: string, version: number): readonly Envelope[]
+  stateOf<State>(protocol: string, version: number, subject: string): State | undefined
+  /** Every subject of one protocol version. The whole-log read, as of the same cut. */
+  statesOf<State>(protocol: string, version: number): ReadonlyMap<string, State>
+}
+
+/**
  * One control session, open for writing.
  *
  * One instance is one writer, because the medium's write handle is the one lease. This store's
- * queue serializes preparation, append, barrier and publication, so concurrent commands cannot
- * interleave their sequence numbers or observe one another's uncommitted state.
+ * queue serializes decision, append, barrier and record, so concurrent commands cannot interleave
+ * their sequence numbers or observe one another's unrecorded state.
  */
 export class ControlSessionStore {
   readonly #handle: SessionHandle
   readonly #sessionId: SessionId
-  readonly #options: ControlStoreOptions
-  /** Only facts whose durability and readback have been confirmed are published here. */
+  /** Exactly the facts whose durability and readback have been confirmed. */
   #log: MemoryLog
   /** The medium's next event sequence. The medium refuses a batch that does not continue it. */
   #nextSeq: number
-  /**
-   * The next sequence of **our** chain, which is the count of adopted records, not the medium's
-   * event count. The two coincide while the session holds only our records; keeping them apart
-   * means an event another producer left in this session can neither shift our chain nor make us
-   * mistake a recorded command for a new one.
-   */
-  #ownSeq: number
   #queue: Promise<unknown> = Promise.resolve()
   #closed = false
   #uncertain = false
   #closing: Promise<void> | undefined
 
-  private constructor(handle: SessionHandle, log: MemoryLog, options: ControlStoreOptions, sessionId: SessionId, nextSeq: number, ownSeq: number) {
+  private constructor(handle: SessionHandle, log: MemoryLog, sessionId: SessionId, nextSeq: number) {
     this.#handle = handle
     this.#log = log
-    this.#options = options
     this.#sessionId = sessionId
     this.#nextSeq = nextSeq
-    this.#ownSeq = ownSeq
   }
 
   /**
@@ -167,10 +178,11 @@ export class ControlSessionStore {
       }
       const stored = await handle.read()
       // Select our records by type, then decide meaning entirely ourselves: framing, digest, chain
-      // link, sequence, declared kind and payload shape are all re-checked by the calls below.
+      // link, sequence, declared kind and payload shape are all re-checked by the calls below. This
+      // is the one place the whole log is replayed and copied; every later commit adds to it.
       const entries = structuredClone(stored.events.filter(isControlEvent).map(decodeControlEvent))
       const log = MemoryLog.adopt(entries, options.registry, logOptionsOf(options))
-      return new ControlSessionStore(handle, log, options, sessionId, stored.events.length, entries.length)
+      return new ControlSessionStore(handle, log, sessionId, stored.events.length)
     } catch (error) {
       try {
         await handle.close()
@@ -187,20 +199,25 @@ export class ControlSessionStore {
   }
 
   /** A fixed committed read cut. The view has no writer and shares no mutable values with it. */
-  load(): Readonly<Pick<MemoryLog, 'entries' | 'entriesOf' | 'stateOf'>> {
+  load(): ControlReadCut {
     const log = this.#log
+    const cut = log.count
     return Object.freeze({
-      entries: (): readonly Envelope[] => structuredClone(log.entries()),
-      entriesOf: (protocol: string, version: number): readonly Envelope[] => structuredClone(log.entriesOf(protocol, version)),
+      entries: (): readonly Envelope[] => log.entries().slice(0, cut),
+      entriesOf: (protocol: string, version: number): readonly Envelope[] =>
+        log.entriesOf(protocol, version).filter(entry => entry.seq < cut),
       stateOf: <State>(protocol: string, version: number, subject: string): State | undefined =>
-        structuredClone(log.stateOf<State>(protocol, version, subject)),
+        log.stateAt<State>(protocol, version, subject, cut),
+      statesOf: <State>(protocol: string, version: number): ReadonlyMap<string, State> =>
+        log.statesAt<State>(protocol, version, cut),
     })
   }
 
   /**
-   * Record one fact: rules and digest in memory, durable bytes in the session, then the same
-   * digest read back. A re-delivered command returns the fact it already committed and appends
-   * nothing — the record is already durable, so a second append would be a second fact.
+   * Record one fact: rules and digest in memory, durable bytes in the session, then the same digest
+   * read back, and only then part of the log. A re-delivered command returns the fact it already
+   * committed and writes nothing — the record is already durable, so a second append would be a
+   * second fact.
    */
   async emit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
     const run = this.#queue.then(
@@ -219,12 +236,12 @@ export class ControlSessionStore {
     if (this.#uncertain)
       refuse('write-not-durable', `control store ${this.#sessionId} has an uncertain storage result; close and reopen it with a successful durability barrier before retrying`)
 
-    // Prepare privately. A reducer or append must never advance the state ordinary readers see.
-    const prepared = MemoryLog.adopt(structuredClone(this.#log.entries()), this.#options.registry, logOptionsOf(this.#options))
-    const envelope = await prepared.emit(input, require)
-    // Command identity: the same command id with the same request returned the fact it committed,
-    // whose sequence is below our own cursor because that fact is already a record in this session.
-    if (envelope.seq < this.#ownSeq) return structuredClone(envelope)
+    // Decide without recording: a reducer or a refusal must never advance the state ordinary
+    // readers see, and neither does. `fresh: false` is the whole of "the reply was lost": the fact
+    // is already durable, so this returns it and writes nothing.
+    const decision: Decision<Payload> = this.#log.decide(input, require)
+    const envelope = decision.envelope
+    if (!decision.fresh) return envelope
 
     const event: SessionEvent<typeof CONTROL_EVENT_TYPE> = {
       type: CONTROL_EVENT_TYPE,
@@ -265,11 +282,11 @@ export class ControlSessionStore {
       if (durable.digest !== envelope.digest)
         refuse('write-not-durable', `${label} sealed digest ${envelope.digest} but ${this.#sessionId} reads back ${durable.digest}`)
 
-      // Publish from the confirmed stored value, with no references to a caller or a DSH handle.
-      this.#log = MemoryLog.adopt(structuredClone([...this.#log.entries(), durable]), this.#options.registry, logOptionsOf(this.#options))
+      // The barrier held, so the fact is durable: record it, and only now is it part of the log.
+      // `record` froze the same object it was handed, so this is the stored value.
+      this.#log.record(decision)
       this.#nextSeq += 1
-      this.#ownSeq += 1
-      return structuredClone(durable) as Envelope<Payload>
+      return envelope
     } catch (error) {
       this.#uncertain = true
       refuse('write-not-durable', `${label} ${phase} failed in ${this.#sessionId}; storage result is uncertain: ${error instanceof Error ? error.message : String(error)}`)

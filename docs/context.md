@@ -3,7 +3,10 @@
 > **每轮结束更新此文件。** 只放"下一轮必须知道、丢了会走错路"的东西。
 > 长文档：`docs/blueprint.md`（蓝图）、`docs/review.md`（第一轮审核 + K1/K2 检查点）、
 > `docs/rrsi-upstream-reference.md`（上游逐行对照）、`docs/adr/`（已定决策）。
+> **`docs/debugging.md`（写代码前先读）**：六类缺陷的根因、"量不变量而不是量耗时"、
+> 变异证明配方、以及"不可能触发的规则要删掉而不是补测试"这条纪律。
 > 上一轮更新：2026-10-09（A 提交边界纠正；B 部分实现，剩余动作见 §11/§12）。
+> 本轮更新：控制路径收敛（一条决定/记录路径、一个队列、O(1) 提交），六处报告的缺陷逐条确认并修掉。
 
 ---
 
@@ -161,12 +164,13 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 5. 当前代码状态（`pnpm verify` 全绿）
 
-`src`/`tests` 共 36 个文件；**140 测试**；**9 门禁 + 门禁自检**（含 `dsh-alignment` 与 `control-store-probe`）。
+`src`/`tests` 共 44 个文件；**181 测试**；**10 门禁 + 门禁自检**（含 `dsh-alignment` 与三条跑真实进程的行为门禁）。
+
+**一条事实只有一条路径**（本轮收敛，`docs/debugging.md` 记了根因）：`MemoryLog.decide` 判全部规则并封信封但**不记录**，`record` 才让它进入日志。控制 store 的提交区是**全栈唯一队列**——它是唯一跨越真实写入的地方；命令层与 `MemoryLog` 自己的队列都已删除。读侧：`load()` 是一个真正的 **cut**（`stateAt(p,v,s,cut)`），头部读 O(1)，写侧提交的 reducer 调用数从 51 降到 **1**。
 
 - `src/protocol/{refusal,envelope,registry,fold,log}.ts` —— 一个拒绝契约、一个信封、一个版本闸+保证词表+发射者纪律、一个 fold 引擎、一条追加路径（提交队列 + 命令识别 + 提交前 dry-run）。
 - `src/task/{contract,protocol,view}.ts` —— 契约（shape 纯 / 可用性命令期）、5 种 kind、唯一读投影 + G4 派生 receipt。
 - `scripts/gates.mjs` —— **9 条门禁** + `--probe` 自检（每个静态检测器都必须能失败；三条读真实树的门禁各有独立探针）。新增的第 9 条 `control-store-probe` 跑 `scripts/control-probe.mjs`，它是阶段 A 四条退出条件**唯一**的端到端证据。**为什么要加它**：v2 版本变更把那个探针弄坏时，没有任何自动路径会报警，直到我手动跑它——「证据必须在每次提交上被机械检查」这条，我此前漏在了 `pnpm verify` 之外。
-- `scripts/slice.mjs` —— 端到端冒烟（门禁 `vertical-slice-smoke` 跑它）。
 - `dsh-baseline.json` —— **DSH 基线的单一事实来源**；门禁 `dsh-alignment` 强制它。
 - `src/control/session-store.ts` + `scripts/control-probe.mjs` —— 控制 store 与双进程探针（见 §4.1）。
 - `tests/control-barrier.spec.ts` —— **屏障失败可失败性**（假介质：接受 append、屏障拒绝）+ 该用例自身的变异证明（见 §4.1 末尾表）。

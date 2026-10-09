@@ -6,7 +6,7 @@
  * command discipline, the fold, the projection, both renderings, and the derived receipt.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
   foldSubject,
@@ -24,7 +24,7 @@ import {
   type TaskState,
   type TaskView,
 } from '../src/index.ts'
-import { newLogPath, refusalOf } from './fixtures.ts'
+import { refusalOf } from './fixtures.ts'
 import {
   admitted,
   ARTIFACT,
@@ -45,14 +45,7 @@ import {
   taskRegistry,
   UNIT_IMPLEMENTATION,
   UNIT_VERIFIER,
-  verified,
 } from './task-fixtures.ts'
-
-let logPath: string
-
-beforeEach(async () => {
-  logPath = await newLogPath()
-})
 
 /** Run the whole slice and fold it. */
 async function slice(): Promise<{ log: MemoryLog; state: TaskState }> {
@@ -205,9 +198,10 @@ describe('the task slice', () => {
     await log.emit(started())
 
     // The only way to store a receipt would be a kind for it, and the protocol declares none.
-    await expect(
+    const refusal = refusalOf(() =>
       log.emit({ commandId: 'receipt', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'receipt/sealed', subject: TASK_ID, payload: {} }),
-    ).rejects.toMatchObject({ refusal: { code: 'unknown-kind' } })
+    )
+    expect(refusal.code).toBe<RefusalCode>('unknown-kind')
   })
 
   it('keeps a failure with no recorded reason reported as none, not as an invented sentence', async () => {

@@ -48,10 +48,9 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
-import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { inputList, type BubbleInput } from '../task/bubble.ts'
-import { CRITERION_MEMBERS, type AcceptanceCriterion } from '../task/contract.ts'
+import { assertCriterionShape, type AcceptanceCriterion } from '../task/contract.ts'
 import {
   assertVerifierRunnable,
   runVerifierSelftest,
@@ -181,20 +180,6 @@ function workspacePath(workspace: string, name: string, field: string): string {
   return path
 }
 
-/** Read the frozen criterion shape this request must belong to, refusing anything else by name. */
-function readCriterion(raw: unknown): AcceptanceCriterion {
-  const where = 'request.criterion'
-  const record = requireRecord(raw, where)
-  assertClosedKeys(record, CRITERION_MEMBERS, where)
-  return {
-    criterionId: requireText(record['criterionId'], `${where}.criterionId`),
-    statement: requireText(record['statement'], `${where}.statement`),
-    verifierRef: requireText(record['verifierRef'], `${where}.verifierRef`),
-    verifierVersion: requireText(record['verifierVersion'], `${where}.verifierVersion`),
-    implementationDigest: requireDigest(record['implementationDigest'], `${where}.implementationDigest`),
-  }
-}
-
 /** The implementations this deployment holds, read as declarations before any of them is run. */
 function readImplementations(raw: unknown): readonly VerifierImplementation[] {
   if (!Array.isArray(raw))
@@ -243,7 +228,10 @@ function readRequestShape(request: ProductionVerdictRequest): ResolvedRequest {
     refuse('malformed-payload', 'request.runJudge must be a function; execution is a port, and a missing one is not a judgement')
   return {
     runId: requireText(source['runId'], 'request.runId'),
-    criterion: readCriterion(source['criterion']),
+    // The criterion's shape is the contract owner's rule, read here by the same function the
+    // contract's own admission uses. A second reader of the same shape is a second place for the
+    // two to drift apart, and the drift is invisible until a log disagrees with itself.
+    criterion: assertCriterionShape(source['criterion'], 'request.criterion'),
     implementations: readImplementations(source['implementations']),
     inputs: readInputs(source['inputs'], workspace),
     workspace,

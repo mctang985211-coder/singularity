@@ -1,5 +1,5 @@
 /**
- * The fact pipeline: serialized commits, declared emitters, command identity, replay verification.
+ * The fact pipeline: declared emitters, command identity, one serial region, replay verification.
  *
  * **This holds facts in memory. It does not write them.** Durability belongs to DSH session
  * persistence, which owns the crash barrier, the cross-process write lease, replay, compaction and
@@ -8,25 +8,39 @@
  *
  * Four rules live here, each because a counterexample showed the cost of leaving it out:
  *
- * 1. **Commits are serialized.** Two concurrent `emit` calls must not both read the same cursor:
- *    that produced two facts at `seq = 0` and a log that could not be replayed. The queue makes
- *    "read the state, decide, append" one critical section.
+ * 1. **A decision is not a record.** `decide` applies every rule and seals the fact; `record` is
+ *    what makes it part of the log. A caller that owns a durability barrier decides, asks the
+ *    medium, and records only what the medium confirmed — so no reader can ever see a fact that
+ *    exists because somebody hoped a write would succeed. `emit` is the two together, for a caller
+ *    with no medium of its own.
  * 2. **The emitter is declared, not supplied.** A caller passes no author. The fact's role comes
  *    from its kind's declaration and its identity from the subjects this store was opened with, so
  *    no caller can claim to be a verifier.
  * 3. **A command is identified by its result.** The same `commandId` carrying the same request
  *    returns the recorded fact — the answer a caller may have lost — while the same id carrying a
- *    different request is refused. That distinguishes "committed but the reply never arrived" from
- *    "not committed".
+ *    different request is refused. `decide` says which of the two happened, so a caller never has
+ *    to infer "already committed" from a sequence number.
  * 4. **Adopted facts are re-verified.** `adopt` is how a durable medium hands facts back: it checks
  *    framing, digest, chain link, sequence and kind before any reducer sees them, so a log written
  *    by a buggier build or edited outside this path is refused rather than half-understood.
+ *
+ * **Where the serial region is.** Neither half awaits, so JavaScript's run-to-completion is already
+ * the critical section: two concurrent `emit` calls cannot interleave their read of the cursor. A
+ * caller that awaits between `decide` and `record` owns the serialization itself, and the control
+ * store's queue is exactly that — the one queue in the stack, because it is the one place a commit
+ * spans a real write.
+ *
+ * **What a committed value is.** Every fact and every folded state this log publishes is deeply
+ * frozen as it is recorded. A read therefore hands out the value itself rather than a copy of it,
+ * and "a reader cannot corrupt the log through a read" is a property of the value instead of a
+ * promise about every caller. Copying on read was the other half of the cost this module used to
+ * pay: a whole-log clone per read, on every read.
  *
  * @module singularity-core/protocol/memory-log
  */
 
 import { assertEnvelope, digestOf, sealEnvelope, type Envelope, type EnvelopeBody } from './envelope.ts'
-import { foldSubjects } from './fold.ts'
+import { foldSubject, foldSubjects } from './fold.ts'
 import { refuse } from './refusal.ts'
 import type { ProtocolRegistry } from './registry.ts'
 
@@ -49,6 +63,26 @@ export interface LogOptions {
 }
 
 /**
+ * One fact that passed every rule, and the answer to "was it already committed?".
+ *
+ * `fresh` is the whole of command identity's outcome: `false` means the reply to this command was
+ * lost and the envelope below is the fact it already committed, so there is nothing to write.
+ */
+export interface Decision<Payload = unknown> {
+  readonly envelope: Envelope<Payload>
+  readonly fresh: boolean
+}
+
+/**
+ * The folded state a decision's fact would produce, keyed by the decision object itself.
+ *
+ * Module-private on purpose. The state a fact advances is computed by that fact's own reducer, so
+ * the only way to obtain one is to have `decide` return it — a caller cannot hand `record` a state
+ * of its own making, and cannot re-record a decision twice.
+ */
+const DECIDED = new WeakMap<Decision, { readonly log: MemoryLog; readonly payload: unknown; readonly state: unknown }>()
+
+/**
  * A sequence of facts in memory, with the commit rules applied.
  *
  * One instance is one writer. The durable system gives it either a freshly created store or the
@@ -59,28 +93,25 @@ export class MemoryLog {
   readonly #registry: ProtocolRegistry
   readonly #subjects: Readonly<Record<string, string>>
   readonly #now: () => string
-  readonly #entries: Envelope[]
-  /**
-   * The folded state of every subject, used as an append-time cursor. It is not a second
-   * interpreter: every transition goes through the kind's own reducer, the same one `foldSubjects`
-   * replays. A spec asserts the two agree.
-   */
-  readonly #states = new Map<string, unknown>()
+  readonly #entries: Envelope[] = []
+  /** The folded state of every subject, by protocol version then subject. The append-time cursor. */
+  readonly #states = new Map<string, Map<string, unknown>>()
   /** One command id maps to the fact it committed and the request that produced it. */
   readonly #commands = new Map<string, { requestDigest: string; envelope: Envelope }>()
-  #queue: Promise<unknown> = Promise.resolve()
 
   constructor(registry: ProtocolRegistry, options: LogOptions) {
     this.#registry = registry
     this.#subjects = options.subjects
     this.#now = options.now ?? ((): string => new Date().toISOString())
-    this.#entries = []
   }
 
   /**
    * Adopt facts a durable medium read back, verifying everything a reader must not have to
    * re-derive: each one frames, each digest matches its body, the chain links, sequence numbers are
    * contiguous from 0, every kind is declared, and every subject's sequence is legal.
+   *
+   * The full replay, and the only one: a fact that arrives any other way — through `decide` — was
+   * sealed by this same code a moment ago and is applied without re-reading the log behind it.
    */
   static adopt(entries: readonly Envelope[], registry: ProtocolRegistry, options: LogOptions): MemoryLog {
     const log = new MemoryLog(registry, options)
@@ -104,56 +135,27 @@ export class MemoryLog {
         )
       // The kind gate applies to adopting too: a log written by a build that knew a kind this one
       // does not is refused by name, never skipped and never reinterpreted.
-      registry.ruleFor(checked.protocol, checked.version, checked.kind)
-      log.#entries.push(checked)
-      // Rebuild command identity from the facts. Without this, a successor could not recognize a
-      // command whose reply was lost, and would refuse the redelivery as an illegal transition —
-      // "committed but unanswered" would be indistinguishable from "never seen".
-      log.#commands.set(checked.commandId, {
-        requestDigest: digestOf({
-          protocol: checked.protocol,
-          version: checked.version,
-          kind: checked.kind,
-          subject: checked.subject,
-          payload: checked.payload,
-        }),
-        envelope: checked,
-      })
-    }
-
-    // Adopting also replays every subject through its reducers, so a sequence that is illegal is
-    // refused when it is adopted rather than when a reader happens to ask.
-    for (const pair of new Set(log.#entries.map(entry => `${entry.protocol}@${entry.version}`))) {
-      const separator = pair.lastIndexOf('@')
-      const protocol = pair.slice(0, separator)
-      const version = Number(pair.slice(separator + 1))
-      for (const [subject, state] of foldSubjects(registry, log.#entries, protocol, version)) {
-        log.#states.set(stateKey(protocol, version, subject), state)
-      }
+      const rule = registry.ruleFor(checked.protocol, checked.version, checked.kind)
+      const payload = rule.parse(checked.payload, `${checked.protocol}@${checked.version} ${checked.kind} #${checked.seq}`)
+      log.#apply(checked, payload, log.#advance(checked, payload))
     }
 
     return log
   }
 
-  /**
-   * Record one fact, returning the sealed envelope.
-   *
-   * Serialized: the gate, the cursor read, the reducer check and the append happen as one critical
-   * section, so two concurrent commands cannot both claim `seq` 0.
-   */
-  async emit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
-    const run = this.#queue.then(
-      () => this.#commit(input, require),
-      () => this.#commit(input, require),
-    )
-    this.#queue = run.then(
-      () => undefined,
-      () => undefined,
-    )
-    return run
+  /** How many facts this log holds. Also the cut a reader's view is taken at. */
+  get count(): number {
+    return this.#entries.length
   }
 
-  async #commit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
+  /**
+   * Decide one fact: every rule, sealed, and **not** part of the log yet.
+   *
+   * A caller that owns a durability barrier hands the decision to `record` once the medium has
+   * confirmed it, and drops it otherwise. The refusals all happen here, before anything is written,
+   * so a fact the rules reject never reaches a medium at all.
+   */
+  decide<Payload>(input: EmitInput<Payload>, require?: () => void): Decision<Payload> {
     const rule = this.#registry.ruleFor(input.protocol, input.version, input.kind)
     if (rule.guarantees.derived === true)
       refuse(
@@ -184,7 +186,7 @@ export class MemoryLog {
     })
     const recorded = this.#commands.get(input.commandId)
     if (recorded !== undefined) {
-      if (recorded.requestDigest === requestDigest) return recorded.envelope as Envelope<Payload>
+      if (recorded.requestDigest === requestDigest) return { envelope: recorded.envelope as Envelope<Payload>, fresh: false }
       refuse(
         'command-conflict',
         `command ${JSON.stringify(input.commandId)} already committed ${recorded.envelope.protocol}/${recorded.envelope.kind} #${recorded.envelope.seq} for a different request`,
@@ -212,25 +214,58 @@ export class MemoryLog {
       prevDigest: this.#entries.at(-1)?.digest ?? null,
       payload,
     }
-    const envelope = sealEnvelope(body)
+    // The reducer is the single authority on legality, and it answers before the medium is asked.
+    const envelope = sealEnvelope(body) as Envelope<Payload>
+    const decision: Decision<Payload> = { envelope, fresh: true }
+    DECIDED.set(decision, { log: this, payload, state: this.#advance(envelope, payload) })
+    return decision
+  }
 
-    // The reducer is the single authority on legality. Ask it first, then record.
-    const key = stateKey(input.protocol, input.version, input.subject)
-    const before = this.#states.get(key)
-    const spec = this.#registry.specFor(input.protocol, input.version)
-    const after = rule.reduce(before === undefined ? spec.initialState : before, envelope, payload)
+  /**
+   * Make a decision part of the log. Its caller has confirmed whatever it had to confirm.
+   *
+   * One rule decides every way this can be wrong, because they are one mistake: this log is not
+   * holding that fact as decided-and-not-yet-recorded. A decision already recorded has been
+   * consumed; a command that was already committed never produced one, so there is nothing left to
+   * record; and another log's decision is not this chain's. A guard on `fresh` would be a second
+   * rule for a condition the first one already covers, and a rule that can never fire is not a rule.
+   *
+   * The chain check is a different mistake: a fact recorded after this decision was taken would
+   * leave a hole in the sequence, and a hole is not something a log repairs.
+   */
+  record(decision: Decision): void {
+    const envelope = decision.envelope
+    const pending = DECIDED.get(decision)
+    if (pending === undefined || pending.log !== this)
+      refuse(
+        'illegal-transition',
+        `${envelope.protocol}/${envelope.kind} #${envelope.seq} is not a fact this log decided and has yet to record; record consumes what decide returned, exactly once, and command ${JSON.stringify(envelope.commandId)} has nothing left to record`,
+      )
+    if (envelope.seq !== this.#entries.length)
+      refuse(
+        'chain-broken',
+        `${envelope.protocol}/${envelope.kind} was decided at seq ${envelope.seq} but this log now holds ${this.#entries.length} facts; a fact recorded in between would leave a hole`,
+      )
+    DECIDED.delete(decision)
+    this.#apply(envelope, pending.payload, pending.state)
+  }
 
-    this.#entries.push(envelope)
-    this.#states.set(key, after)
-    this.#commands.set(input.commandId, { requestDigest, envelope })
-    return envelope as Envelope<Payload>
+  /**
+   * Record one fact, returning the sealed envelope. `decide` then `record`, for a caller with no
+   * medium of its own: nothing here awaits, so this is one indivisible step.
+   */
+  emit<Payload>(input: EmitInput<Payload>, require?: () => void): Envelope<Payload> {
+    const decision = this.decide<Payload>(input, require)
+    if (decision.fresh) this.record(decision)
+    return decision.envelope
   }
 
   /**
    * Every fact this store holds, oldest first. The durable medium's payload, and the fold's input.
    *
-   * A copy: the store's own sequence and its chain are invariants, and handing out the live array
-   * would let a caller push a fact that no reducer ever accepted and no digest ever sealed.
+   * A copy of the array, whose members are frozen: the store's own sequence and its chain are
+   * invariants, and handing out the live array would let a caller push a fact that no reducer ever
+   * accepted and no digest ever sealed.
    */
   entries(): readonly Envelope[] {
     return [...this.#entries]
@@ -242,15 +277,76 @@ export class MemoryLog {
   }
 
   /**
-   * The folded state of one subject as of everything recorded so far, or `undefined` when this
-   * store holds none of its facts. Equal by construction to folding `entries()` afresh.
+   * One subject's folded state as of the first `cut` facts, or `undefined` when the log holds none
+   * of its facts by then.
+   *
+   * A cut at the head is the cursor this log already keeps, and costs nothing. An earlier cut is
+   * replayed from the facts below it — which is what makes a reader's cut *fixed*: the facts below
+   * a cut never change, so the value read at that cut is the value it will always read.
    */
-  stateOf<State>(protocol: string, version: number, subject: string): State | undefined {
-    return this.#states.get(stateKey(protocol, version, subject)) as State | undefined
+  stateAt<State>(protocol: string, version: number, subject: string, cut: number): State | undefined {
+    if (cut >= this.#entries.length) return this.#states.get(stateKey(protocol, version))?.get(subject) as State | undefined
+    return foldSubject<State>(this.#registry, this.#entries.slice(0, cut), protocol, version, subject)
+  }
+
+  /** Every subject of one protocol version as of the first `cut` facts. The whole-log read. */
+  statesAt<State>(protocol: string, version: number, cut: number): ReadonlyMap<string, State> {
+    if (cut >= this.#entries.length)
+      return new Map(this.#states.get(stateKey(protocol, version)) ?? []) as ReadonlyMap<string, State>
+    return foldSubjects<State>(this.#registry, this.#entries.slice(0, cut), protocol, version)
+  }
+
+  /** One fact's payload, reduced against the state this log holds for its subject. */
+  #advance<State>(envelope: Envelope, payload: unknown): State {
+    const rule = this.#registry.ruleFor<State>(envelope.protocol, envelope.version, envelope.kind)
+    const spec = this.#registry.specFor<State>(envelope.protocol, envelope.version)
+    const before = this.#states.get(stateKey(envelope.protocol, envelope.version))?.get(envelope.subject)
+    // A reducer is pure and sees one subject, which is why cross-subject conditions live at the
+    // command boundary and not here.
+    return rule.reduce(before === undefined ? spec.initialState : (before as State), envelope, payload)
+  }
+
+  /**
+   * The one place a fact enters the log. Its caller has already verified the frame and run the
+   * reducer, so this is only the recording: frozen, chained, and indexed by command.
+   */
+  #apply(envelope: Envelope, payload: unknown, state: unknown): void {
+    const key = stateKey(envelope.protocol, envelope.version)
+    const states = this.#states.get(key) ?? new Map<string, unknown>()
+    states.set(envelope.subject, frozen(state))
+    this.#states.set(key, states)
+    const fact = frozen(envelope)
+    this.#entries.push(fact)
+    // Command identity is rebuilt from the facts, so a successor can recognize a command whose
+    // reply was lost: "committed but unanswered" is otherwise indistinguishable from "never seen".
+    this.#commands.set(fact.commandId, {
+      requestDigest: digestOf({
+        protocol: fact.protocol,
+        version: fact.version,
+        kind: fact.kind,
+        subject: fact.subject,
+        payload,
+      }),
+      envelope: fact,
+    })
   }
 }
 
-/** One subject's cursor key. The separator cannot appear in a protocol or version, so keys are unambiguous. */
-function stateKey(protocol: string, version: number, subject: string): string {
-  return `${protocol}@${version}\u0000${subject}`
+/**
+ * Freeze a value and everything reachable from it.
+ *
+ * Committed values are published by reference, so an unfrozen one would let any reader rewrite the
+ * log through a value it was handed. Idempotent, and it stops at anything already frozen, so a
+ * state that shares structure with its predecessor is walked once.
+ */
+function frozen<Value>(value: Value): Value {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
+  Object.freeze(value)
+  for (const member of Object.values(value)) frozen(member)
+  return value
+}
+
+/** One protocol version's state map. The separator cannot appear in a protocol, so keys are unambiguous. */
+function stateKey(protocol: string, version: number): string {
+  return `${protocol}@${version}`
 }

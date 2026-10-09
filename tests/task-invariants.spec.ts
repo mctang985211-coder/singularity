@@ -4,7 +4,7 @@
  * fact never depends on what this deployment can run today.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
   assertContract,
@@ -22,10 +22,9 @@ import {
   type RefusalCode,
   type TaskState,
 } from '../src/index.ts'
-import { asyncRefusalOf, newLogPath, refusalOf } from './fixtures.ts'
+import { asyncRefusalOf, refusalOf } from './fixtures.ts'
 import {
   admitted,
-  ARTIFACT,
   assigned,
   bubbleOpened,
   contract,
@@ -40,17 +39,10 @@ import {
   SUBJECTS,
   TASK_ID,
   taskRegistry,
-  UNIT_IMPLEMENTATION,
   UNIT_VERIFIER,
   VERIFIERS,
   verified,
 } from './task-fixtures.ts'
-
-let logPath: string
-
-beforeEach(async () => {
-  logPath = await newLogPath()
-})
 
 /** A log that already carries an admitted, assigned, running task with its execution context. */
 async function running(): Promise<MemoryLog> {

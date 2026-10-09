@@ -10,13 +10,18 @@
  *
  * Two properties make the region real:
  *
- * 1. **Every command goes through this service's queue**, and the committed read cut is taken
- *    inside that queued step, immediately before the emit. A check performed outside the queue, or
- *    against a cut read earlier, is a check against a state that may already be gone.
+ * 1. **Every check runs inside the store's commit region**, handed to the append path as the
+ *    `require` step. It reads the store's committed cut at the moment it runs, so the state it
+ *    decides against is the state the fact will be appended to. A check performed earlier, against
+ *    a cut read earlier, is a check against a state that may already be gone.
  * 2. **A command decides the parts a caller must not.** `assignTask` fills the responsible identity
  *    from the deployment's own table rather than from its argument, and `recordVerdict` fills the
  *    verifier's ref and version from the frozen criterion. A caller supplies what it did; it does
  *    not supply who it is.
+ *
+ * There is no second queue here. A queue in this service would serialize reads that the store's own
+ * region already serializes, and every command that did not need a cut would still pay for one —
+ * which is how a service ends up folding the whole log three times per fact and reading none of it.
  *
  * The agent-facing view is narrower than this service on purpose: `forAgent` omits
  * `recordVerdict`, so the path that produces a verdict is not reachable from the path an agent
@@ -26,14 +31,13 @@
  * @module singularity-core/task/commands
  */
 
-import type { ControlSessionStore } from '../control/session-store.ts'
+import type { ControlReadCut, ControlSessionStore } from '../control/session-store.ts'
 import type { Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../agent/protocol.ts'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../environment/protocol.ts'
 import { assertPinnedRevision } from '../environment/binding.ts'
-import { foldSubjects } from '../protocol/fold.ts'
 import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from './protocol.ts'
 import { projectTree } from './tree.ts'
 import type { BubbleInput } from './bubble.ts'
@@ -104,147 +108,123 @@ export interface TaskCommands extends AgentCommands {
   forAgent(agentId: string): AgentCommands
 }
 
-/** Everything one command reads, taken from the committed cut inside the queued step. */
+/**
+ * Everything one command reads, taken from the committed cut at the moment its check runs.
+ *
+ * The two maps are functions, not values. A command that decides against one subject's state has no
+ * business paying for a map of every task in the log, and most of them never look at one; the two
+ * that do — the plan gate and the revision pin — ask for it inside the region that needs it.
+ */
 interface Cut {
   readonly task: (taskId: string) => TaskState | undefined
   readonly agent: (agentId: string) => AgentState | undefined
-  readonly tasks: ReadonlyMap<string, TaskState>
-  /** Every environment the log holds, for the pin check that must tell "absent" from "mismatched". */
-  readonly environments: ReadonlyMap<string, EnvironmentState>
+  readonly tasks: () => ReadonlyMap<string, TaskState>
+  readonly environments: () => ReadonlyMap<string, EnvironmentState>
 }
 
 export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
-  let queue: Promise<unknown> = Promise.resolve()
-
-  /** Run one command inside the serial region: read the cut, decide, then produce the fact. */
-  function command<Result>(step: (cut: Cut) => Promise<Result>): Promise<Result> {
-    const run = async (): Promise<Result> => step(cutOf(options))
-    const queued = queue.then(run, run)
-    queue = queued.then(
-      () => undefined,
-      () => undefined,
-    )
-    return queued
-  }
-
   const commands: TaskCommands = {
-    admit: input => command(() => emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract })),
+    admit: input => emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract }),
 
     decompose: input =>
-      command(() => emitRaw(options, input.commandId, TASK_KINDS.decomposed, input.parentTaskId, { children: input.children })),
+      emitRaw(options, input.commandId, TASK_KINDS.decomposed, input.parentTaskId, { children: input.children }),
 
-    assign: input =>
-      command(() => {
-        // The identity is filled from the deployment's table, so a caller supplies what it did and
-        // never who it is. Holding it is a deployment fact; the node is a log fact.
-        const identity = requireHeldIdentity(options, input.agentId, `assign task "${input.taskId}"`)
-        return emitRaw(options, input.commandId, TASK_KINDS.assigned, input.taskId, { agentId: input.agentId, agentIdentity: identity }, () =>
-          requireOpenedNode(cutOf(options), input.agentId, `assign task "${input.taskId}"`),
-        )
-      }),
+    assign: input => {
+      // The identity is filled from the deployment's table, so a caller supplies what it did and
+      // never who it is. Holding it is a deployment fact; the node is a log fact.
+      const identity = requireHeldIdentity(options, input.agentId, `assign task "${input.taskId}"`)
+      return emitRaw(options, input.commandId, TASK_KINDS.assigned, input.taskId, { agentId: input.agentId, agentIdentity: identity }, () =>
+        requireOpenedNode(cutOf(options), input.agentId, `assign task "${input.taskId}"`),
+      )
+    },
 
-    reassign: input =>
-      command(() => {
-        const identity = requireHeldIdentity(options, input.agentId, `transfer task "${input.taskId}"`)
-        return emitRaw(
-          options,
-          input.commandId,
-          TASK_KINDS.reassigned,
-          input.taskId,
-          { from: input.from, agentId: input.agentId, agentIdentity: identity },
-          () => requireOpenedNode(cutOf(options), input.agentId, `transfer task "${input.taskId}"`),
-        )
-      }),
+    reassign: input => {
+      const identity = requireHeldIdentity(options, input.agentId, `transfer task "${input.taskId}"`)
+      return emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.reassigned,
+        input.taskId,
+        { from: input.from, agentId: input.agentId, agentIdentity: identity },
+        () => requireOpenedNode(cutOf(options), input.agentId, `transfer task "${input.taskId}"`),
+      )
+    },
 
     startRun: input =>
-      command(() =>
-        emitRaw(
-          options,
-          input.commandId,
-          TASK_KINDS.runStarted,
-          input.taskId,
-          { runId: input.runId, revision: input.revision },
-          () => {
-            const cut = cutOf(options)
-            const task = cut.task(input.taskId)
-            if (task === undefined || task.contract === undefined)
-              refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`)
-            // Cross-entity 1: the revision must exist, in the named environment, with the content
-            // the pin claims. This reuses the environment slice's own check, not a second one.
-            assertPinnedRevision(input.revision, cut.environments, `run "${input.runId}" of task "${input.taskId}"`)
-            // Cross-entity 2: someone must be answerable, and it must be an agent this deployment
-            // holds with an opened node. The identity comparison itself is the reducer's.
-            if (task.responsibility === undefined)
-              refuse(
-                'not-responsible',
-                `cannot start a run for task "${input.taskId}": no agent is responsible for it, so no attempt is answerable`,
-              )
-            requireOpenedNode(cut, task.responsibility.agentId, `start a run for task "${input.taskId}"`)
-            // Cross-entity 3: if a plan declares this task, the plan's gate decides. Readiness
-            // already subsumes dependencies, budget and admission, and carries its own reason.
-            requirePlanAllows(cut, input.taskId)
-          },
-        ),
-      ),
+      emitRaw(options, input.commandId, TASK_KINDS.runStarted, input.taskId, { runId: input.runId, revision: input.revision }, () => {
+        const cut = cutOf(options)
+        const task = cut.task(input.taskId)
+        if (task === undefined || task.contract === undefined)
+          refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`)
+        // Cross-entity 1: the revision must exist, in the named environment, with the content
+        // the pin claims. This reuses the environment slice's own check, not a second one.
+        assertPinnedRevision(input.revision, cut.environments(), `run "${input.runId}" of task "${input.taskId}"`)
+        // Cross-entity 2: someone must be answerable, and it must be an agent this deployment
+        // holds with an opened node. The identity comparison itself is the reducer's.
+        if (task.responsibility === undefined)
+          refuse(
+            'not-responsible',
+            `cannot start a run for task "${input.taskId}": no agent is responsible for it, so no attempt is answerable`,
+          )
+        requireOpenedNode(cut, task.responsibility.agentId, `start a run for task "${input.taskId}"`)
+        // Cross-entity 3: if a plan declares this task, the plan's gate decides. Readiness
+        // already subsumes dependencies, budget and admission, and carries its own reason.
+        requirePlanAllows(cut, input.taskId)
+      }),
 
     openBubble: input =>
-      command(() =>
-        emitRaw(options, input.commandId, TASK_KINDS.bubbleOpened, input.taskId, {
-          runId: input.runId,
-          inputs: input.inputs,
-          workspace: input.workspace,
-        }),
-      ),
+      emitRaw(options, input.commandId, TASK_KINDS.bubbleOpened, input.taskId, {
+        runId: input.runId,
+        inputs: input.inputs,
+        workspace: input.workspace,
+      }),
 
     failRun: input =>
-      command(() =>
-        emitRaw(
-          options,
-          input.commandId,
-          TASK_KINDS.runFailed,
-          input.taskId,
-          input.reason === undefined ? { runId: input.runId } : { runId: input.runId, reason: input.reason },
-        ),
+      emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.runFailed,
+        input.taskId,
+        input.reason === undefined ? { runId: input.runId } : { runId: input.runId, reason: input.reason },
       ),
 
-    recordVerdict: input =>
-      command(() => {
-        // The payload has to be final before it is parsed, so the criterion is read here to fill
-        // the verifier's ref and version - a read, inside the serial region, not a decision. The
-        // decisions all live in the preconditions below, which run only when a fact is appended.
-        const cut = cutOf(options)
-        const criterion = requireCriterion(cut, input.taskId, input.verdict.criterionId)
-        return emitRaw(
-          options,
-          input.commandId,
-          TASK_KINDS.evidenceProduced,
-          input.taskId,
-          {
-            runId: input.verdict.runId,
-            criterionId: input.verdict.criterionId,
-            verdict: input.verdict.verdict,
-            verifierRef: criterion.verifierRef,
-            verifierVersion: criterion.verifierVersion,
-            implementationDigest: input.verdict.implementationDigest,
-            artifactDigest: input.verdict.artifactDigest,
-            inputDigests: input.verdict.inputDigests,
-            ...(input.verdict.detail === undefined ? {} : { detail: input.verdict.detail }),
-          },
-          () => {
-            const now = requireCriterion(cutOf(options), input.taskId, input.verdict.criterionId)
-            if (input.verdict.implementationDigest !== now.implementationDigest)
-              refuse(
-                'wrong-verifier',
-                `criterion "${input.verdict.criterionId}" names the implementation ${now.implementationDigest.slice(0, 12)}…, but the verdict came from ${input.verdict.implementationDigest.slice(0, 12)}…`,
-              )
-            if (!options.implementations.some(entry => entry.implementationDigest === input.verdict.implementationDigest))
-              refuse(
-                'unregistered-verifier',
-                `this deployment holds no implementation with digest ${input.verdict.implementationDigest.slice(0, 12)}…, so it cannot have produced this verdict`,
-              )
-          },
-        )
-      }),
+    recordVerdict: input => {
+      // Who judged is filled from the criterion rather than passed in. The criterion cannot change
+      // after admission - a second `task/admitted` is refused by the reducer, and the record is the
+      // reducer's - so this fill cannot disagree with the check handed to the append path below,
+      // and that check is what refuses a verdict this deployment cannot have produced.
+      const criterion = requireCriterion(cutOf(options), input.taskId, input.verdict.criterionId)
+      return emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.evidenceProduced,
+        input.taskId,
+        {
+          runId: input.verdict.runId,
+          criterionId: input.verdict.criterionId,
+          verdict: input.verdict.verdict,
+          verifierRef: criterion.verifierRef,
+          verifierVersion: criterion.verifierVersion,
+          implementationDigest: input.verdict.implementationDigest,
+          artifactDigest: input.verdict.artifactDigest,
+          inputDigests: input.verdict.inputDigests,
+          ...(input.verdict.detail === undefined ? {} : { detail: input.verdict.detail }),
+        },
+        () => {
+          const now = requireCriterion(cutOf(options), input.taskId, input.verdict.criterionId)
+          if (input.verdict.implementationDigest !== now.implementationDigest)
+            refuse(
+              'wrong-verifier',
+              `criterion "${input.verdict.criterionId}" names the implementation ${now.implementationDigest.slice(0, 12)}…, but the verdict came from ${input.verdict.implementationDigest.slice(0, 12)}…`,
+            )
+          if (!options.implementations.some(entry => entry.implementationDigest === input.verdict.implementationDigest))
+            refuse(
+              'unregistered-verifier',
+              `this deployment holds no implementation with digest ${input.verdict.implementationDigest.slice(0, 12)}…, so it cannot have produced this verdict`,
+            )
+        },
+      )
+    },
 
     forAgent: agentId => {
       // The narrow view does not hand back a judging method at all: the boundary is the absence of
@@ -269,20 +249,19 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
   return commands
 }
 
-/** The committed cut: folded from the store's fixed read, never from a live mutable view. */
+/**
+ * The committed cut, as one command's check reads it.
+ *
+ * Every member reads through the store's fixed cut, so all of them agree with one another, and the
+ * cut is taken once here rather than once per lookup.
+ */
 function cutOf(options: TaskCommandOptions): Cut {
-  const log = options.store.load()
-  const tasks = foldSubjects<TaskState>(options.registry, log.entries(), TASK_PROTOCOL, TASK_VERSION)
-  const environments = new Map<string, EnvironmentState>()
-  for (const subject of new Set(log.entriesOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION).map(entry => entry.subject))) {
-    const state = log.stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, subject)
-    if (state !== undefined) environments.set(subject, state)
-  }
+  const cut: ControlReadCut = options.store.load()
   return {
-    tasks,
-    environments,
-    task: taskId => tasks.get(taskId),
-    agent: agentId => log.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, agentId),
+    task: taskId => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
+    agent: agentId => cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, agentId),
+    tasks: () => cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION),
+    environments: () => cut.statesOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION),
   }
 }
 
@@ -314,7 +293,7 @@ function requireOpenedNode(cut: Cut, agentId: string, action: string): void {
  * sentence here as in a projection.
  */
 function requirePlanAllows(cut: Cut, taskId: string): void {
-  for (const view of projectTree(cut.tasks)) {
+  for (const view of projectTree(cut.tasks())) {
     const child = view.children.find(entry => entry.taskId === taskId)
     if (child === undefined) continue
     if (child.status === 'ready') continue

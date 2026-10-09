@@ -3,7 +3,7 @@
  * everything the stack refuses, each refused by name.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
   defineKind,
@@ -28,7 +28,6 @@ import {
   DEMO_V1,
   demoRegistry,
   fact,
-  newLogPath,
   openDemoLog,
   opened,
   POINTER_V1,
@@ -36,12 +35,6 @@ import {
   type Gate,
   type Journal,
 } from './fixtures.ts'
-
-let logPath: string
-
-beforeEach(async () => {
-  logPath = await newLogPath()
-})
 
 describe('the one version gate', () => {
   it('refuses an unknown protocol, then an unknown version, then an unknown kind', async () => {
@@ -349,12 +342,12 @@ describe('illegal transitions', () => {
     })
 
     await log.emit(emit('p1', 'r0001', 'r0002'))
-    expect(log.stateOf('pointer', 1, 'env-1')).toEqual({ revision: 'r0002', generation: 1 })
+    expect(log.stateAt('pointer', 1, 'env-1', log.count)).toEqual({ revision: 'r0002', generation: 1 })
 
     const stale = await asyncRefusalOf(() => log.emit(emit('p2', 'r0001', 'r0003')))
     expect(stale.code).toBe<RefusalCode>('illegal-transition')
     expect(stale.detail).toContain('active revision is "r0002"')
-    expect(log.stateOf('pointer', 1, 'env-1')).toEqual({ revision: 'r0002', generation: 1 })
+    expect(log.stateAt('pointer', 1, 'env-1', log.count)).toEqual({ revision: 'r0002', generation: 1 })
   })
 })
 

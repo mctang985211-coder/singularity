@@ -33,9 +33,6 @@ import {
   ProtocolRegistry as Registry,
   verifierRoleOf,
   type EnvironmentState,
-  type TaskState,
-  TASK_PROTOCOL,
-  TASK_VERSION,
 } from '../src/index.ts'
 import { ControlSessionStore } from '../src/control/session-store.ts'
 import { contract as parentContract, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER } from './task-fixtures.ts'

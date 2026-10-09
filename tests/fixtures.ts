@@ -6,10 +6,6 @@
  * conditional-update discipline. Their only job is to make the frame falsifiable.
  */
 
-import { mkdtemp } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-
 import {
   assertClosedKeys,
   defineKind,
@@ -138,12 +134,6 @@ export function openDemoLog(registry: ProtocolRegistry = demoRegistry()): Memory
   return new MemoryLog(registry, { subjects: DEMO_SUBJECTS })
 }
 
-/** A fresh path in a fresh temporary directory, so no spec shares state with another. */
-export async function newLogPath(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), 'singularity-core-'))
-  return join(directory, 'singularity.log')
-}
-
 /**
  * A correctly framed, correctly chained sequence of `demo` facts built in memory.
  *
@@ -185,7 +175,7 @@ export function refusalOf(step: () => unknown): Refusal {
 }
 
 /** Run an asynchronous step and return the refusal it raised. */
-export async function asyncRefusalOf(step: () => Promise<unknown>): Promise<Refusal> {
+export async function asyncRefusalOf(step: () => unknown): Promise<Refusal> {
   try {
     await step()
   } catch (error) {

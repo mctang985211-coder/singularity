@@ -50,7 +50,6 @@ import {
   TASK_KINDS,
   TASK_PROTOCOL,
   TASK_VERSION,
-  declareTaskProtocol,
   type TaskState,
 } from '../src/task/protocol.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
