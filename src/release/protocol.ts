@@ -16,6 +16,14 @@
  * one precondition on one conditional fact, rather than a state machine that can disagree with the
  * pointer it is supposed to gate.
  *
+ * **Two roles, because one identity must not do both.** `release/drafted` is emitted by the
+ * scheduler role and `release/approved` by {@link APPROVER_ROLE}; the deployment binds them to
+ * different identities. A role the deployment holds no identity for cannot emit at all, so a
+ * deployment without an approver records no approvals — the human step is a binding, not a promise.
+ * `approvedBy` stays in the payload beside the stamped actor because the two answer different
+ * questions: the role is the *authority* an approval must come from, `approvedBy` is the
+ * *attribution* of which human exercised it.
+ *
  * **The subject is the revision id**, as frozen in the design (§7). One consequence is deliberate
  * and worth stating: a revision id names exactly one content *within one environment*, and
  * `environment@2` refuses only the same id in the same environment, so two environments may hold
@@ -35,6 +43,7 @@
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
+import { SCHEDULER_ROLE } from '../task/protocol.ts'
 
 export const RELEASE_PROTOCOL = 'release'
 
@@ -44,14 +53,14 @@ export const RELEASE_PROTOCOL = 'release'
  */
 export const RELEASE_VERSION = 1
 
-/** The trusted role that records drafts. Held by the pipeline, never by a reviewer. */
-export const RELEASE_ROLE = 'release'
-
 /**
- * The trusted role that records approvals. Deliberately a different identity from `RELEASE_ROLE`:
- * the act that proposes content and the act that authorises it must not be the same held identity,
- * for the same reason a verdict's emitter may not be the role that started the run. What the native
- * approval seam contributes is the human behind this role.
+ * The trusted role that records approvals — **distinct from the role that drafts**, which is the
+ * scheduler's (`SCHEDULER_ROLE`). Deliberately a different held identity, for the same reason a
+ * verdict's emitter may not be the role that started the run: if the identity that proposes content
+ * could also authorise it, the log would record a self-approval and the human step would be
+ * decoration. A deployment that holds no identity for this role cannot record an approval at all —
+ * `unknown-emitter-role` — which is what makes "a human authorised this" mechanical rather than
+ * promised. What the native approval seam contributes is the human behind this role.
  */
 export const APPROVER_ROLE = 'approver'
 
@@ -110,8 +119,9 @@ function digest(source: Record<string, unknown>, key: string, where: string): st
 /**
  * Declare the release protocol. Call once at load.
  *
- * The deployment binds two identities: one for `RELEASE_ROLE` (whatever computes and records
- * drafts) and one for `APPROVER_ROLE` (the human authorisation the native approval seam carries).
+ * The deployment binds two identities: the scheduler's (`SCHEDULER_ROLE`, whichever service drafts
+ * content) and this protocol's `APPROVER_ROLE` (the human authorisation the native approval seam
+ * carries). They are bound separately, so the same identity cannot do both.
  */
 export function declareReleaseProtocol(registry: ProtocolRegistry): void {
   registry.declare<ReleaseState>(RELEASE_PROTOCOL, RELEASE_VERSION, {
@@ -119,7 +129,7 @@ export function declareReleaseProtocol(registry: ProtocolRegistry): void {
     kinds: {
       [RELEASE_KINDS.drafted]: defineKind<ReleaseState, { draftDigest: string }>({
         guarantees: APPENDED,
-        emitter: RELEASE_ROLE,
+        emitter: SCHEDULER_ROLE,
         parse: raw => {
           const where = `${RELEASE_KINDS.drafted} payload`
           const source = record(raw, where)

@@ -26,6 +26,7 @@
  * @module singularity-core/strategy/view
  */
 
+import type { EvaluationView } from '../measure/view.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { RevisionRef } from '../task/protocol.ts'
 import {
@@ -39,45 +40,21 @@ import {
 } from './decision.ts'
 import { requirePlan, sameRevision, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
 
-/** One trial slot the measure slice reports as having no observation, with its own reason. */
-export interface MissingTrial {
-  readonly slot: number
-  readonly reason: string
-}
-
-/** One hard constraint's state. `null` = not checked yet, which is not the same as met. */
-export interface CaliberConstraint {
-  readonly criterionId: string
-  readonly met: boolean | null
-}
-
 /**
  * One evaluation as `src/measure/**` projects it (`docs/phase-cd-design.md` §5.4), plus the members
  * this slice needs to *anchor* it: the evaluation id, the two revisions, and the caliber digest §5.4
- * derives separately.
+ * derives separately (`caliberDigestOf`).
  *
  * The two revisions are required because the caliber deliberately excludes them (§5.4): equal
  * calibers alone do not say the two candidates were drafted against **this round's** incumbent, and
  * a gain measured against a different baseline is not this round's gain (`review.md` R03).
  */
-export interface RoundEvaluation {
+export interface RoundEvaluation extends EvaluationView {
   readonly evaluationId: string
   /** The digest of the frozen measurement settings: run, metric, weights, trials, judgement. */
   readonly caliberDigest: string
   readonly baseline: RevisionRef
   readonly candidate: RevisionRef
-  /** `trials` from the evaluation's plan — the denominator, not the number of observations. */
-  readonly denominator: number
-  readonly observed: number
-  readonly missing: readonly MissingTrial[]
-  /** `sum(observed quality) / denominator`: a missing trial counts 0 and the denominator stays. */
-  readonly quality: number
-  /** `null` = unknown, which is not 0. */
-  readonly cost: number | null
-  readonly constraints: readonly CaliberConstraint[]
-  readonly admissible: boolean
-  /** The measure projection's own named reason when it says the evaluation is inadmissible. */
-  readonly why: string | null
 }
 
 /**
@@ -111,12 +88,19 @@ export interface SlotView {
   readonly quality: number | null
   readonly cost: number | null
   readonly denominator: number | null
-  readonly missingTrials: readonly MissingTrial[]
+  readonly missingTrials: EvaluationView['missing']
   /** `quality − the incumbent's frozen quality`, or `null` when either side is not measurable. */
   readonly gain: number | null
   readonly costGain: number | null
   /** Structural asset classes of this candidate that were never accepted before (R05). */
   readonly novelty: number
+  /**
+   * Whether every hard constraint this evaluation judged is met. `false` is never compensable, so
+   * the decision layer drops such a candidate before any aggregate is compared — and this is the
+   * value that says so, filled from the measure projection's own `constraints` and not inferred from
+   * the aggregate.
+   */
+  readonly constraintsMet: boolean
   readonly admissible: boolean
   /** Why this slot was not admitted; `null` exactly when it was. */
   readonly reason: string | null
@@ -147,6 +131,7 @@ interface PlannedSlot {
   readonly reason: string | null
   readonly gain: number | null
   readonly costGain: number | null
+  readonly constraintsMet: boolean
 }
 
 /** The structural asset classes one submission touches, de-duplicated: novelty counts types. */
@@ -173,8 +158,9 @@ function assertCalibration(calibration: Calibration): void {
  * Why one measured slot is not admissible, or `null` when it is.
  *
  * The order is the order of the questions a reader asks: is this measurement even about this
- * candidate (the two anchors), did the measure slice itself refuse it, did a hard constraint fail,
- * is it complete, and is there a frozen baseline to make its gain a gain at all.
+ * candidate (the two anchors), did a hard constraint fail, is the measurement complete, is there a
+ * frozen baseline to make its gain a gain at all, and — last, because it is the least specific —
+ * does the measure slice refuse it for a reason only it can see.
  */
 function inadmissibleReason(
   evaluation: RoundEvaluation,
@@ -187,8 +173,6 @@ function inadmissibleReason(
     return `measured against ${describeRevision(evaluation.baseline)}, not round ${round}'s incumbent ${describeRevision(incumbent)}; its gain is not this round's gain — re-measure it against the incumbent, or propose it in a round whose incumbent it was measured against`
   if (!sameRevision(evaluation.candidate, submission.revision))
     return `measured on ${describeRevision(evaluation.candidate)}, but slot ${submission.slot} offers ${describeRevision(submission.revision)}; the observation is about a different candidate — submit the evaluation of the revision this slot offers`
-  if (!evaluation.admissible)
-    return `the measure slice refuses it: ${evaluation.why ?? 'no reason recorded, which is itself a reason not to pool it'}`
   const violated = evaluation.constraints.filter(constraint => constraint.met === false)
   if (violated.length > 0)
     return `violates hard constraint${violated.length === 1 ? '' : 's'} ${violated
@@ -207,6 +191,11 @@ function inadmissibleReason(
     }; the denominator keeps the plan's trials (R06), so this aggregate is not this candidate's score — finish the trials or record them as missed`
   if (incumbentAggregate === null)
     return `the incumbent ${describeRevision(incumbent)} has no aggregate below the round's frozen history cutoff, so this candidate has no frozen gain to place against the noise floor; measure the incumbent first, or this round can only retain it`
+  // Last, because it is the least specific: the round's own reading of the constraints and the
+  // trials names what it can see itself, and this fallback carries a refusal only the measure slice
+  // could know (a broken trial identity, an unbound input, a retired implementation).
+  if (!evaluation.admissible)
+    return `the measure slice refuses it: ${evaluation.why ?? 'no reason recorded, which is itself a reason not to pool it'}`
   return null
 }
 
@@ -217,7 +206,8 @@ function plannedOf(
   incumbentAggregate: FrozenAggregate | null,
 ): PlannedSlot {
   const evaluation = slice.evaluationOf(submission.evaluationId)
-  if (evaluation === undefined) return { submission, evaluation, reason: null, gain: null, costGain: null }
+  // An unmeasured slot has met no constraint: absence of a judgement is not a passed one.
+  if (evaluation === undefined) return { submission, evaluation, reason: null, gain: null, costGain: null, constraintsMet: false }
   const frozenCostGain =
     incumbentAggregate === null || evaluation.cost === null || incumbentAggregate.cost === null
       ? null
@@ -228,6 +218,7 @@ function plannedOf(
     reason: inadmissibleReason(evaluation, submission, plan.incumbent, incumbentAggregate, plan.round),
     gain: incumbentAggregate === null ? null : evaluation.quality - incumbentAggregate.quality,
     costGain: frozenCostGain,
+    constraintsMet: evaluation.constraints.every(constraint => constraint.met === true),
   }
 }
 
@@ -252,6 +243,7 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
       gain: null,
       costGain: null,
       novelty,
+      constraintsMet: false,
       admissible: false,
       reason: `no evaluation "${submission.evaluationId}" is in this log, so slot ${submission.slot} has no aggregate to compare; measure the candidate and record its evaluation first`,
     }
@@ -267,6 +259,7 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
     gain: planned.gain,
     costGain: planned.costGain,
     novelty,
+    constraintsMet: planned.constraintsMet,
     admissible: reason === null,
     reason,
   }
@@ -320,7 +313,7 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
       exploratory: slot.exploratory,
       assets: assetsOf(edits),
       measurement: measurementOf(slot),
-      constraintsMet: slot.admissible,
+      constraintsMet: slot.constraintsMet,
       inadmissible: slot.reason,
     }
   })

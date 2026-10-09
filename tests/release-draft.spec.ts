@@ -3,9 +3,9 @@
  *
  * The defect this file exists to prevent (`review.md` R07) is an approval that is recorded but
  * binds nothing: the previous system set `guards.bound` true, and its recompute check was never
- * wired. So every test here is about the *content* half of the binding: the draft records the digest
- * the log holds for the revision, the approval carries the digest the approver saw, and an approval
- * whose digest is not the draft's is refused by name rather than trimmed to fit.
+ * wired. So every test here is about the *content* half of the binding: the draft records the log's
+ * digest for the revision, the approval carries the digest the approver saw, and an approval whose
+ * digest is not the draft's is refused by name rather than trimmed to fit.
  *
  * Two layers are exercised, because both exist for different reasons:
  *
@@ -48,11 +48,11 @@ import {
   declareReleaseProtocol,
   RELEASE_KINDS,
   RELEASE_PROTOCOL,
-  RELEASE_ROLE,
   RELEASE_VERSION,
   type ReleaseState,
 } from '../src/release/protocol.ts'
 import { createReleaseCommands } from '../src/release/commands.ts'
+import { SCHEDULER_ROLE } from '../src/task/protocol.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
 
 const ENVIRONMENT = 'library-1'
@@ -61,14 +61,15 @@ const OTHER_REVISION = 'r0002'
 const MANIFEST = { skills: ['count-words'] } as const
 const OTHER_MANIFEST = { skills: ['count-words', 'bounded-size'] } as const
 
-/** The two identities the deployment holds. The pen and the human are not the same one. */
-const RELEASE_SERVICE = 'release-service'
+/** The identities the deployment holds. The role that drafts and the role that approves
+ * are bound separately, so one identity never both proposes and authorises content. */
+const SCHEDULER = 'scheduler-service'
 const APPROVAL_SEAM = 'approval-seam'
 const ALICE = 'human:alice'
 
 const SUBJECTS: Readonly<Record<string, string>> = {
   [ENVIRONMENT_ROLE]: 'environment-service',
-  [RELEASE_ROLE]: RELEASE_SERVICE,
+  [SCHEDULER_ROLE]: SCHEDULER,
   [APPROVER_ROLE]: APPROVAL_SEAM,
 }
 
@@ -89,12 +90,7 @@ async function live(): Promise<{ store: ControlSessionStore; registry: ProtocolR
   const registry = new ProtocolRegistry()
   declareEnvironmentProtocol(registry)
   declareReleaseProtocol(registry)
-  const store = await ControlSessionStore.open({
-    persistence: context.sessionPersistence,
-    controlId: 'release',
-    registry,
-    subjects: SUBJECTS,
-  })
+  const store = await ControlSessionStore.open({ persistence: context.sessionPersistence, controlId: 'release', registry, subjects: SUBJECTS })
   return { store, registry }
 }
 
@@ -145,8 +141,8 @@ function sealed(seq: number, kind: string, payload: unknown, prevDigest: string 
     kind,
     subject,
     commandId: `hand-${seq}`,
-    emitter: kind === RELEASE_KINDS.drafted ? RELEASE_ROLE : APPROVER_ROLE,
-    actor: kind === RELEASE_KINDS.drafted ? RELEASE_SERVICE : APPROVAL_SEAM,
+    emitter: kind === RELEASE_KINDS.drafted ? SCHEDULER_ROLE : APPROVER_ROLE,
+    actor: kind === RELEASE_KINDS.drafted ? SCHEDULER : APPROVAL_SEAM,
     at: `2026-10-10T00:00:0${seq}.000Z`,
     seq,
     prevDigest,
@@ -173,7 +169,7 @@ describe('the draft binds the content the log holds', () => {
 
     expect(envelope.payload).toEqual({ draftDigest: digestOf(MANIFEST) })
     expect(envelope.subject).toBe(REVISION)
-    expect(envelope.emitter).toBe(RELEASE_ROLE)
+    expect(envelope.emitter).toBe(SCHEDULER_ROLE)
     expect(releaseState(store, REVISION)?.draftDigest).toBe(contentDigest(store))
   })
 
@@ -249,7 +245,7 @@ describe('the approval binds the digest the approver saw', () => {
 
     expect(envelope.emitter).toBe(APPROVER_ROLE)
     expect(envelope.actor).toBe(APPROVAL_SEAM)
-    expect(envelope.actor).not.toBe(RELEASE_SERVICE)
+    expect(envelope.actor).not.toBe(SCHEDULER)
     expect(releaseState(store, REVISION)).toEqual({ draftDigest: digestOf(MANIFEST), approvedBy: ALICE })
   })
 
@@ -318,28 +314,32 @@ describe('the approval binds the digest the approver saw', () => {
     const log = releaseLog()
     await log.emit(releaseFact(RELEASE_KINDS.drafted, { draftDigest: digestOf(MANIFEST) }, REVISION, 'draft-1'))
 
-    expect(
-      (await asyncRefusalOf(() => log.emit(releaseFact(RELEASE_KINDS.approved, { draftDigest: digestOf(MANIFEST), approvedBy: '' }, REVISION, 'a1')))).code,
-    ).toBe<RefusalCode>('malformed-payload')
-    expect(
-      (await asyncRefusalOf(() => log.emit(releaseFact(RELEASE_KINDS.approved, { draftDigest: 'nope', approvedBy: ALICE }, REVISION, 'a2')))).code,
-    ).toBe<RefusalCode>('malformed-payload')
-    expect(
-      (await asyncRefusalOf(() => log.emit(releaseFact(RELEASE_KINDS.approved, { draftDigest: digestOf(MANIFEST), approvedBy: ALICE, role: 'admin' }, REVISION, 'a3')))).code,
-    ).toBe<RefusalCode>('malformed-payload')
+    const refused = async (payload: unknown, commandId: string): Promise<RefusalCode> =>
+      (await asyncRefusalOf(() => log.emit(releaseFact(RELEASE_KINDS.approved, payload, REVISION, commandId)))).code
+    expect(await refused({ draftDigest: digestOf(MANIFEST), approvedBy: '' }, 'a1')).toBe<RefusalCode>('malformed-payload')
+    expect(await refused({ draftDigest: 'nope', approvedBy: ALICE }, 'a2')).toBe<RefusalCode>('malformed-payload')
+    expect(await refused({ draftDigest: digestOf(MANIFEST), approvedBy: ALICE, role: 'admin' }, 'a3')).toBe<RefusalCode>('malformed-payload')
   })
 
-  it('refuses an approval in a deployment that holds no identity for the approver role', async () => {
+  it('makes drafting and approving different held identities, in both directions', async () => {
     // Only the drafting identity exists, so nobody can approve: the human half is a deployment
     // binding, not a member a caller can assert on its own.
-    const log = releaseLog({ [RELEASE_ROLE]: RELEASE_SERVICE })
-    await log.emit(releaseFact(RELEASE_KINDS.drafted, { draftDigest: digestOf(MANIFEST) }, REVISION, 'draft-1'))
+    const draftOnly = releaseLog({ [SCHEDULER_ROLE]: SCHEDULER })
+    await draftOnly.emit(releaseFact(RELEASE_KINDS.drafted, { draftDigest: digestOf(MANIFEST) }, REVISION, 'draft-1'))
 
-    const refusal = await asyncRefusalOf(() =>
-      log.emit(releaseFact(RELEASE_KINDS.approved, { draftDigest: digestOf(MANIFEST), approvedBy: ALICE }, REVISION, 'a1')),
+    const unapproved = await asyncRefusalOf(() =>
+      draftOnly.emit(releaseFact(RELEASE_KINDS.approved, { draftDigest: digestOf(MANIFEST), approvedBy: ALICE }, REVISION, 'a1')),
     )
-    expect(refusal.code).toBe<RefusalCode>('unknown-emitter-role')
-    expect(refusal.detail).toContain(APPROVER_ROLE)
+    expect(unapproved.code).toBe<RefusalCode>('unknown-emitter-role')
+    expect(unapproved.detail).toContain(APPROVER_ROLE)
+
+    // And the other way round: the approver's identity cannot record a draft either.
+    const approveOnly = releaseLog({ [APPROVER_ROLE]: APPROVAL_SEAM })
+    const undrafted = await asyncRefusalOf(() =>
+      approveOnly.emit(releaseFact(RELEASE_KINDS.drafted, { draftDigest: digestOf(MANIFEST) }, REVISION, 'draft-2')),
+    )
+    expect(undrafted.code).toBe<RefusalCode>('unknown-emitter-role')
+    expect(undrafted.detail).toContain(SCHEDULER_ROLE)
   })
 })
 

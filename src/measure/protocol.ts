@@ -21,6 +21,13 @@
  * emitted under can only be derived from what the fact carries. The command layer fills them from
  * the frozen plan, so a producer supplies the numbers it observed and never who produced them.
  *
+ * `trial/missed` carries the ref and version but **not** an `implementationDigest`, and the
+ * asymmetry is deliberate rather than an oversight: a miss names no artifact and no number, so
+ * there is no content whose digest could be bound, and inventing one would require an
+ * implementation to have produced bytes it did not produce. The role is what must hold — a
+ * deployment that cannot run the metric cannot report the gap either — and the digest check belongs
+ * where a number exists.
+ *
  * **Why hard constraints are a separate kind.** `constraint/checked` never touches `weights`.
  * Whether a constraint holds is decided by that criterion's own implementation, once per criterion,
  * and no score compensates for it — which is what makes "high score, out of bounds, rejected"

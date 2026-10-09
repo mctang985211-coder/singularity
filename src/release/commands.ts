@@ -14,8 +14,8 @@
  * revision id, content digest — because that is the difference being released, and the log confirms
  * it or refuses with `unknown-revision`. A caller supplies `approvedBy`, because the human identity
  * belongs to the native approval act and nowhere else. A caller never supplies the emitter: the
- * roles `release` and `approver` are stamped by the log from the declarations, so the pipeline that
- * drafts cannot approve its own draft.
+ * `scheduler` and `approver` roles are stamped by the log from the declarations, so the identity
+ * that drafts cannot approve its own draft.
  *
  * **Why `approve` carries no `require`.** Both of its rules — a draft exists, and the offered digest
  * is that draft's — are rules about this one subject, so they live in the reducer (design §2). A

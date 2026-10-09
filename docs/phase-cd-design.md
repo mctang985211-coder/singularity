@@ -228,12 +228,23 @@ missing=[那个槽位]`。旧仓在此返回 `quality=1, incomplete=true`——`
 **历史增益必须冻结在事实里**：`ΔS`/`ΔC` 相对**当轮** incumbent 计算并记录；绝不对"今天的 head"重算。
 这是 R03 的实测反例（A=0.6、B=0.8：发布 B 前 Δ_B=+0.2，发布 B 后 Δ_B=0、Δ_A=-0.2）。
 
-## 7. `release@1` —— 受控发布（subject = **被发布的修订 id**）
+## 7. `release@1` —— 受控发布（subject = **环境 id**，不是修订 id）
+
+**修正（工作流 D 发现）**：修订 id 只在**环境内**唯一——这正是 `RevisionRef` 带 `environmentId` 的原因。
+原先写的 subject = 修订 id 会让第二个环境里同号的修订**永远无法发布**。发布本来也不是"某个修订 id 的事"，
+而是**某个环境的 head 迁移**，所以 subject 是环境 id：
 
 ```ts
-'release/drafted'  { draftDigest: string }        // 草稿的内容摘要：批准要绑定的就是它
-'release/approved' { draftDigest: string; approvedBy: string }
+'release/drafted'  { revisionId: string; draftDigest: string }   // 摘要是要绑定的东西
+'release/approved' { revisionId: string; draftDigest: string; approvedBy: string; approvalId: string }
 ```
+
+- 规则因此是"**一个环境同时只有一份在途草稿**"，比"一个修订 id 一份"更强，也更贴近发布这件事。
+- `draftDigest` 由**调用方提供并校验**（`assertPinnedRevision`），不由命令填充：填出来的值让这条规则
+  **不可能失败**，而它必须可失败。
+- `stale-approval` 的可达情形是"人批准的不是桌上这份内容"，不是"内容在批准后移动了"（一次性草稿下
+  后者不会发生）。文档按可达情形写，不按想象写。
+- `approvalId` 见 §7b。
 
 - `release/drafted`：修订必须已创建（跨 subject ⇒ 命令前置条件）；一次性；
   `draftDigest` 是 **sha256**；它必须等于**该修订内容的摘要**（`unknown-revision` 若不是）——
@@ -243,6 +254,30 @@ missing=[那个槽位]`。旧仓在此返回 `quality=1, incomplete=true`——`
   见 `context.md` §10 给 D 的预告）。一次性。
 - **发布本身不是这个协议的 kind**——发布 = 环境指针切换（§8）。少一个 kind，且"head 不引用半成品"
   由指针的前置条件保证。
+
+## 7b. E6 原生审批（实测宿主缝，不是假设）
+
+宿主装了 `@deepseek-ai/dsh-user-approval`（`0.2.0-rc.2`），cordis 服务在 `ctx.approval`：
+
+```ts
+request(req): Promise<ApprovalOutcome>
+// ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+// 'allowed-once' 是**唯一**的授予；调用方对 'unavailable' **fail closed**
+// 日志审计对：'approval/asked' { id, toolName, callId?, reason? } / 'approval/decided' { id, outcome }
+// 无 turn 打开时 request **拒绝**（空闲的 ask 什么都不写）
+```
+
+**这个缝只提供一件事：人授权过。** 它**没有载荷摘要**，也不复制参数，`allowed-once` 还不持久。
+所以三件事由三个机制分别承担，缺一不可：
+
+| 事项 | 由谁提供 |
+|---|---|
+| 人授权过 | 原生审批缝（`approvalId` + `outcome === 'allowed-once'`） |
+| 谁有权批准 | 我们自己的可信角色（`APPROVER_ROLE`／发射者纪律） |
+| 批准的是哪份内容 | 我们自己的内容摘要（`draftDigest`） |
+
+`request` 抛错、`rejected`、`cancelled`、`unavailable` **全部拒绝**：没有应答者不等于同意。
+缝缺席时按 `src/runtime/agent-session.ts` 的装载期断言具名拒绝，绝不默认放行。
 
 ## 8. `environment@2` —— 唯一指针切换（subject = environment id）
 
@@ -338,6 +373,25 @@ export function select(
 ): Selection
 ```
 
+**B 的实测补充（接口冻结后由实现方发现，写回冻结文本）**：
+
+- **`S*` 下限不在纯层**（分歧账本 D9）：上游拒绝 `S' < S* − δ`（`rrsi/selection.py:107`），而 `S*`
+  不是 `select` 的输入。**这是缺口不是收紧**——纯层在那里比上游**更宽**。下限属**admissibility**：
+  `src/strategy/view.ts` 必须把"低于当轮 incumbent 超过 δ"的候选标成 `inadmissible`，δ 来自
+  `Calibration`（实测噪声与 declared floor 行为不同，不许平均掉）。与 `constraintsMet` 是**两个**
+  独立的不可采纳理由，任一成立即出局。
+- `Measurement.cost` **是记录字段**：成本规则读的是冻结的**相对** `deltaCost`（R03），incumbent 的
+  绝对成本是故意不进来的输入。`Candidate.assets` / `Candidate.exploratory` 同样**不被 `select` 读**：
+  novelty 不许进入选择规则，保留探索槽在提交闸上强制。这三处"未读取"是设计，不是遗漏。
+- `editBudgetFor(round, rounds, first, minimum)` 是**1 起算**（`strategy@1` 的 `round` 从 1 开始，
+  上游的 `t` 从 0 开始）；`rounds ≤ 1` 时只可能是最后一轮，返回 `minimum`。
+- 成本规则的常数（β0=0.10、β1=40、+25% 上限）是**模块常量**，不是参数：只有一套策略，第二份数字
+  就是第二个事实来源。
+- `History` 里**没有 incumbent 身份**，所以"全槽位同一个 incumbent"不能在这里判——它经由
+  `inadmissible` 进来（R02）。
+- `historyCutoff: 0` 时截止之下没有任何事实，于是没有候选有冻结增益，每个槽位都不可采纳，该轮只能
+  保留 incumbent。**这是正确行为**，但要写进 `strategy@1` 的文档，否则第一个读者会以为是 bug。
+
 **C 的用法**：`src/strategy/view.ts` 从 `measure@1` 的投影和 `strategy@1` 的 state 构造
 `Candidate[]` / `History` / `Calibration`，调用 `select`，把结果写进 `round/decided`。
-`constraintsMet` / `inadmissible` 由 C 从 `projectEvaluation`（§5.4）填。
+`constraintsMet` / `inadmissible` 由 C 从 `projectEvaluation`（§5.4）填，下限规则见上。

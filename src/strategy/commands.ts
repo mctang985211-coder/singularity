@@ -93,17 +93,9 @@ export interface StrategyCommands {
 }
 
 export function createStrategyCommands(options: StrategyCommandOptions): StrategyCommands {
-  // The annealing policy is a deployment fact, and a policy that anneals upward is not one. Checked
-  // once, here, rather than per commit: a budget that grows with the round is a different method.
-  if (!Number.isInteger(options.rounds) || options.rounds < 1)
-    refuse('malformed-declaration', `a run needs an integer number of rounds >= 1, got ${String(options.rounds)}`)
-  for (const [name, value] of [
-    ['firstBudget', options.firstBudget],
-    ['minimumBudget', options.minimumBudget],
-  ] as const) {
-    if (!Number.isInteger(value) || value < 0)
-      refuse('malformed-declaration', `${name} must be an integer >= 0, got ${String(value)}`)
-  }
+  // The one policy check that no later fact can catch: a budget that *grows* with the round inverts
+  // the method (a round is supposed to get sparser), while a non-integer or negative budget is
+  // refused by the opening payload's own reader at the fact boundary.
   if (options.minimumBudget > options.firstBudget)
     refuse(
       'malformed-declaration',

@@ -4,36 +4,33 @@
  *
  * The previous system derived the round from the number of history entries and the candidate index
  * (`review.md` R01: `historyFactsOf` used the candidate index as the round; `decision` used the
- * history entry count). Two consequences, both measured there: the annealed edit budget annealed
- * against a number that moved whenever a candidate was re-measured, and two candidates of one round
- * could be drafted against different incumbents and still be compared. So a round here **carries its
- * own number**, its common incumbent, its slot count, its reserved exploration slots, its annealed
- * budget, the log position its history is frozen at, and the metric and weights it is measured
- * under. `round/opened` is one-shot: a round that later needs a different cutoff is a different
- * round, and it gets a different subject.
+ * history entry count). So the annealed budget annealed against a number that moved whenever a
+ * candidate was re-measured, and two candidates of one round could be drafted against different
+ * incumbents and still be compared. A round here **carries its own number**, its common incumbent,
+ * its slot count, its reserved exploration slots, its annealed budget, the log position its history
+ * is frozen at, and the metric and weights it is measured under. `round/opened` is one-shot: a round
+ * that later needs a different cutoff is a different round, and it gets a different subject.
  *
  * What the reducer decides, on the round's own subject, and therefore inside the serial region that
  * produces the fact:
  *
- * 1. **A submission after the close is refused.** A candidate that arrives after the decision would
- *    otherwise be measured against an incumbent nobody re-elected.
+ * 1. **A submission after the close is refused.** A candidate that arrives after the decision was
+ *    otherwise measured against an incumbent nobody re-elected.
  * 2. **A slot outside `[0, candidates)` is refused**, and a slot that already holds a submission is
- *    refused with `evidence-conflict` — one slot holds one candidate, so "which candidate is slot 2"
- *    has one answer.
- * 3. **The annealed budget is real.** More structural edits than `editBudget` is `budget-exhausted`,
- *    the whole point of the budget being frozen in the opening fact.
+ *    refused with `evidence-conflict` — one slot holds one candidate.
+ * 3. **The annealed budget is real.** More structural edits than `editBudget` is `budget-exhausted`.
  * 4. **A reserved exploration slot is a slot, not advice.** The last `explorationSlots` slots are
  *    reserved, and a submission that does not declare `exploratory: true` may not occupy one. RRSI
- *    re-checks this against the diff after the critic (`loop.py:523-530`); the previous port kept
- *    the prompt sentence and dropped the check.
+ *    re-checks this against the diff after the critic (`loop.py:523-530`); the previous port kept the
+ *    prompt sentence and dropped the check.
  * 5. **A decision covers every submitted slot with a named reason.** An outcome for a slot nobody
  *    submitted is refused too: otherwise a hand-made decision could elect a candidate that does not
  *    exist. `winner` is an admitted slot or `null`, and `null` means the incumbent stands.
  *
  * `edits` are the identity of the structural change (`asset` + `target`), not a line count: they are
- * what novelty counts and what a duplicate check can decide. Payloads are closed; a repeated
- * `(asset, target)` inside one submission is refused rather than de-duplicated, so a caller cannot
- * pad a budget check with the same edit twice.
+ * what novelty counts and what a duplicate check can decide. A repeated `(asset, target)` inside one
+ * submission is refused rather than de-duplicated, so a caller cannot pad a budget check with the
+ * same edit twice.
  *
  * @module singularity-core/strategy/protocol
  */
@@ -53,7 +50,6 @@ export const STRATEGY_ROLE = 'strategy'
 
 /** The structural asset classes a candidate may change. A value here has a real edit path. */
 export type EditAsset = 'skill' | 'tool' | 'template'
-
 const EDIT_ASSETS: readonly string[] = ['skill', 'tool', 'template']
 
 /** One structural change, by the identity of what it touches. */
@@ -74,7 +70,7 @@ export interface CandidateSubmission {
   readonly at: string
 }
 
-/** The one decision a round may carry. `winner: null` means no candidate was admitted. */
+/** The one decision a round may carry; `winner: null` means none was admitted. */
 export interface RoundDecisionRecord {
   readonly winner: number | null
   readonly outcomes: readonly Outcome[]
@@ -96,12 +92,11 @@ export interface RoundPlan {
   readonly explorationSlots: number
   /** Structural edits a candidate may declare, annealed from `round`. */
   readonly editBudget: number
-  /** The frozen log position: this round reads only facts below it (`review.md` R03). */
+  /** The frozen log position: this round reads only facts below it (R03). */
   readonly historyCutoff: number
   readonly metric: { readonly unit: string; readonly direction: 'higher' | 'lower' }
   readonly weights: { readonly quality: number; readonly cost: number }
 }
-
 /** The folded state of one round. `subject` in every envelope is this round's id. */
 export interface RoundState {
   readonly roundId: string
@@ -119,7 +114,6 @@ export const STRATEGY_KINDS = {
 } as const
 
 const APPENDED = { appended: true } as const
-
 const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as const
 const METRIC_MEMBERS = ['unit', 'direction'] as const
 const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
@@ -147,9 +141,9 @@ function revisionRef(raw: unknown, where: string): RevisionRef {
 /**
  * The structural edits of one submission: each an identity, none repeated.
  *
- * A repeat is refused rather than de-duplicated, exactly as a decomposition refuses a repeated
- * name: a caller that lists one edit twice would otherwise pass a budget check it did not earn, and
- * a reader could not tell "one change named twice" from "two changes".
+ * A repeat is refused rather than de-duplicated, exactly as a decomposition refuses a repeated name:
+ * a caller listing one edit twice would otherwise pass a budget check it did not earn, and a reader
+ * could not tell "one change named twice" from "two changes".
  */
 function editList(raw: unknown, where: string): readonly StructuralEdit[] {
   if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of {asset, target}, got ${raw === null ? 'null' : typeof raw}`)
@@ -217,7 +211,7 @@ function openedPayload(raw: unknown, where: string): RoundPlan {
       refuse('malformed-payload', `${where}.weights.${key} must be a finite number >= 0, got ${JSON.stringify(value ?? null)}`)
   }
   if (quality === 0)
-    refuse('malformed-payload', `${where}.weights.quality is 0: a round that weights quality at nothing cannot prefer a better candidate to a worse one`)
+    refuse('malformed-payload', `${where}.weights.quality is 0: a round weighting quality at nothing cannot prefer a better candidate to a worse one`)
 
   return {
     round,
