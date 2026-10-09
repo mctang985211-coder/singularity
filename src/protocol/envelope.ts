@@ -25,6 +25,16 @@ export interface Envelope<Payload = unknown> {
   /** What the fact is about: the id whose fold state this fact advances. */
   readonly subject: string
   /**
+   * The caller's own id for the command that produced this fact.
+   *
+   * It travels in the frame because it is provenance, not payload: after a crash between commit and
+   * reply, the successor must recognize a redelivered command from the facts alone. A command id
+   * that lived only in the writer's memory made recovery impossible — the successor could not tell
+   * "already committed" from "never seen", and the domain reducer then refused the redelivery as an
+   * illegal transition.
+   */
+  readonly commandId: string
+  /**
    * The trusted role that produced the fact, from the kind's own declaration. A caller cannot
    * choose this: it is what makes "an executor never judges its own run" checkable on roles.
    */
@@ -50,6 +60,7 @@ export const ENVELOPE_MEMBERS = [
   'version',
   'kind',
   'subject',
+  'commandId',
   'emitter',
   'actor',
   'at',
@@ -192,6 +203,7 @@ export function assertEnvelope(raw: unknown): Envelope {
   const protocol = requireText(record, 'protocol')
   const kind = requireText(record, 'kind')
   const subject = requireText(record, 'subject')
+  const commandId = requireText(record, 'commandId')
   const emitter = requireText(record, 'emitter')
   const actor = requireText(record, 'actor')
   const at = requireText(record, 'at')
@@ -212,7 +224,7 @@ export function assertEnvelope(raw: unknown): Envelope {
   if (!DIGEST_PATTERN.test(digest))
     refuse('malformed-envelope', `envelope digest must be a sha256 hex digest, got ${JSON.stringify(digest)}`)
 
-  const body: EnvelopeBody = { protocol, version, kind, subject, emitter, actor, at, seq, prevDigest, payload }
+  const body: EnvelopeBody = { protocol, version, kind, subject, commandId, emitter, actor, at, seq, prevDigest, payload }
   const computed = digestOfBody(body)
   if (computed !== digest)
     refuse('digest-mismatch', `envelope ${protocol}/${kind} #${seq} carries digest ${digest.slice(0, 12)}… but its body reads ${computed.slice(0, 12)}…`)

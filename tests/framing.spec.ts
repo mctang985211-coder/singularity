@@ -56,6 +56,7 @@ const body = (): EnvelopeBody => ({
   version: 1,
   kind: 'opened',
   subject: 'gate-a',
+  commandId: 'probe-command',
   emitter: 'writer',
   actor: 'writer-1',
   at: '2026-10-09T00:00:00.000Z',
@@ -173,7 +174,7 @@ describe('the one envelope', () => {
   it('is closed: an unknown member is a refusal, never ignored', () => {
     const sealed = sealEnvelope(body())
     expect(assertEnvelope(sealed).digest).toBe(sealed.digest)
-    expect(ENVELOPE_MEMBERS).toHaveLength(11)
+    expect(ENVELOPE_MEMBERS).toHaveLength(12)
 
     const widened = refusalOf(() => assertEnvelope({ ...sealed, note: 'extra' }))
     expect(widened.code).toBe<RefusalCode>('malformed-envelope')

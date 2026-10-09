@@ -280,6 +280,27 @@ describe('command identity', () => {
     expect(refusal.detail).toContain('c-fixed')
     expect(log.entries()).toHaveLength(1)
   })
+
+  it('recognises a lost reply from the facts alone, after a successor adopts them', async () => {
+    // The reviewer's gap: a command committed, its reply never arrived, and the process died. The
+    // successor has only the recorded facts, so command identity must be recoverable from them —
+    // otherwise "already committed" is indistinguishable from "never seen", and the domain reducer
+    // refuses the redelivery as an illegal transition instead of returning the original result.
+    const log = openDemoLog()
+    const command: EmitInput = { commandId: 'lost-reply', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-a', payload: {} }
+    const committed = await log.emit(command)
+
+    const successor = MemoryLog.adopt(log.entries(), demoRegistry(), { subjects: DEMO_SUBJECTS })
+    const recovered = await successor.emit(command)
+
+    expect(recovered.digest).toBe(committed.digest)
+    expect(recovered.seq).toBe(committed.seq)
+    expect(successor.entries()).toHaveLength(1)
+
+    // And the same id carrying a different request is still a conflict, not a second fact.
+    const conflict = await asyncRefusalOf(() => successor.emit({ ...command, subject: 'gate-b' }))
+    expect(conflict.code).toBe<RefusalCode>('command-conflict')
+  })
 })
 
 describe('illegal transitions', () => {

@@ -94,6 +94,16 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 **另一处更正**：review §7 的 E01 复核脚本用的导入路径 `dsh-session-persistence/lib/types/storage-contract.js` **在装好的 build 里不存在**；`validateStoredEvents` 由 `dsh-session-persistence/lib/index.js` 导出。复核时要用后者。
 
+**A1/A3/A5 已落地**（同一轮，子代理执行 + 我修掉它报出的一个真实缺口）：
+
+- `src/control/session-store.ts`：控制 store 落在**它自己的 DSH session** 上（`plugin:singularity:control` + `ignorable: true`，自己的 write 句柄 + `flush`）。DSH 只搬字节，语义全在 `src/protocol/`。
+- **子代理报出的缺口（它正确地没有即兴补）：跨进程命令识别不成立**——`MemoryLog.adopt` 不重建命令表，且信封里没有命令身份，所以后继进程只能把重投当作首次提交（被 reducer 以 `illegal-transition` 拒绝，fail-closed 但不满足 A 的退出条件）。
+- **修法：把 `commandId` 放进信封**（它是**来源**，不是载荷），`adopt` 据此重建命令表（`requestDigest` 由被采纳的事实重算）。**为什么放信封**：崩溃后后继进程必须**只凭事实**就能辨认重投；命令 id 只活在写者内存里，恢复就不可能。信封现在 **12 个成员**。
+- **回归**：`gate.spec.ts` 的 `recognises a lost reply from the facts alone, after a successor adopts them`；`scripts/control-probe.mjs` 第 4b 节由 GAP 变为 `ok`（**failures: 0, gaps: 0**）。
+- **一个运维陷阱已被机制化堵住**：pnpm 11.18 的 `autoInstallPeers` 默认为 true 且运行前有 deps 检查，所以一次 `pnpm verify` 会真的去 registry 装 peer（**该 registry 上确实存在 0.2.0-rc.2**，尽管 `npm view <pkg> version` 返回的是 latest 标签 `0.0.1-rc.1`）。已提交 `pnpm-workspace.yaml` 设 `autoInstallPeers: false` + `verifyDepsBeforeRun: false`（`.npmrc` 的同名键被证明无效）；`pnpm-lock.yaml` 与 HEAD **逐字节一致**，`node_modules` 未被改动。
+- **两个运行时解析文件**（brief 未点名，但 vitest 与裸 node **不读 tsconfig `paths`**）：`vitest.config.ts`（把 4 个包 alias 到已装 build）与 `scripts/dsh-control-runtime.mjs`（`module.register` 的 resolve hook）。tsconfig 的 `paths` 指向 **`<pkg>/lib/types/index.d.ts`**——0.2.0-rc.2 里**没有 `lib/index.d.ts`**。
+- **依赖形态**：4 个 `@deepseek-ai/*` 是 **peerDependencies**（宿主提供），不是 devDependencies。
+
 ### 4.2 RRSI：**我现在亲自读过上游源码**（此前只读 README）
 
 **完整对照件：[`docs/rrsi-upstream-reference.md`](rrsi-upstream-reference.md)**（逐条带行号，覆盖范围见其 §0）。

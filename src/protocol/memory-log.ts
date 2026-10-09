@@ -106,6 +106,19 @@ export class MemoryLog {
       // does not is refused by name, never skipped and never reinterpreted.
       registry.ruleFor(checked.protocol, checked.version, checked.kind)
       log.#entries.push(checked)
+      // Rebuild command identity from the facts. Without this, a successor could not recognize a
+      // command whose reply was lost, and would refuse the redelivery as an illegal transition —
+      // "committed but unanswered" would be indistinguishable from "never seen".
+      log.#commands.set(checked.commandId, {
+        requestDigest: digestOf({
+          protocol: checked.protocol,
+          version: checked.version,
+          kind: checked.kind,
+          subject: checked.subject,
+          payload: checked.payload,
+        }),
+        envelope: checked,
+      })
     }
 
     // Adopting also replays every subject through its reducers, so a sequence that is illegal is
@@ -183,6 +196,7 @@ export class MemoryLog {
       version: input.version,
       kind: input.kind,
       subject: input.subject,
+      commandId: input.commandId,
       emitter: role,
       actor,
       at: this.#now(),

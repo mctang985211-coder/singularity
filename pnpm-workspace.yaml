@@ -1,0 +1,12 @@
+# Project settings for pnpm 11.
+#
+# The @deepseek-ai/* packages declared as peer dependencies in package.json are provided by the host
+# DSH profile at runtime and must never be fetched from a registry (docs/context.md §1 states that
+# rule as absolute: the registry publishes an older, different build). Two consequences:
+#
+#  - `autoInstallPeers: true` (pnpm's default) resolves and downloads those peers on any install.
+#  - pnpm's deps check before `pnpm run` would therefore run an install before `pnpm verify`.
+#
+# Both are turned off here so that nothing is installed and `pnpm verify` runs the scripts it names.
+autoInstallPeers: false
+verifyDepsBeforeRun: false

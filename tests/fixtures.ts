@@ -160,6 +160,7 @@ export function chainOf(facts: readonly { kind: string; subject: string }[]): En
         version: 1,
         kind: fact.kind,
         subject: fact.subject,
+        commandId: `chain-${entries.length}`,
         emitter: 'writer',
         actor: 'writer-1',
         at: `2026-10-09T00:00:0${entries.length}.000Z`,
