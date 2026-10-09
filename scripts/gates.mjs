@@ -31,8 +31,13 @@ const PROBE = process.argv.includes('--probe')
 
 /** A file budget, not a design rule: the blueprint says split by responsibility, never by line count. */
 const MAX_SOURCE_LINES = 400
-/** The module allowed to write durably, until the medium moves behind the DSH adapter. */
-const DURABLE_WRITER = 'src/protocol/log.ts'
+/**
+ * Durability belongs to DSH session persistence, so this codebase writes nothing.
+ *
+ * The rule is absolute rather than an allowlist with one exemption: the previous system kept a
+ * self-built durable log beside the upstream one, and re-implemented a worse version of a barrier,
+ * a lease and a replay it already had.
+ */
 const READ_ONLY_FS = new Set([
   'readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'statSync', 'lstat', 'lstatSync',
   'realpath', 'realpathSync', 'access', 'accessSync', 'readlink', 'readlinkSync', 'existsSync',
@@ -106,11 +111,11 @@ const DETECTORS = [
     },
   },
   {
-    name: 'single-durable-writer',
+    name: 'no-durable-writer',
     detect: (files, views) => {
       const findings = []
       for (const file of files) {
-        if (!file.startsWith('src/') || file === DURABLE_WRITER) continue
+        if (!file.startsWith('src/')) continue
         const imports = /import\s*(?:type\s*)?([\s\S]*?)\s*from\s*['"]([^'"]+)['"]/g
         for (const match of views.raw.get(file).matchAll(imports)) {
           if (!FS_MODULES.has(match[2])) continue
@@ -118,11 +123,11 @@ const DETECTORS = [
           // A default or namespace binding hides every name behind one identifier, so no allowlist
           // can see what it will call. It is refused outright, which is the counterexample fix.
           if (!clause.startsWith('{'))
-            findings.push(`${file} imports ${match[2]} as a ${clause.startsWith('*') ? 'namespace' : 'default'} binding; only ${DURABLE_WRITER} may write durably`)
+            findings.push(`${file} imports ${match[2]} as a ${clause.startsWith('*') ? 'namespace' : 'default'} binding; no module may write durably; DSH session persistence owns the medium`)
           for (const entry of clause.replace(/[{}]/g, '').split(',')) {
             const name = entry.trim().replace(/^type\s+/, '')
             if (name === '') continue
-            if (!READ_ONLY_FS.has(name)) findings.push(`${file} imports ${name} from ${match[2]}; only ${DURABLE_WRITER} may write durably`)
+            if (!READ_ONLY_FS.has(name)) findings.push(`${file} imports ${name} from ${match[2]}; no module may write durably; DSH session persistence owns the medium`)
           }
         }
       }

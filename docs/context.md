@@ -73,16 +73,22 @@
 7. **正规写入缝存在，且不是第二个写句柄**：`ctx.sessions.get(id)` → `session.append(type, data)` → `await ctx.sessions.flush(session)`。先例：`packages/feedback/message-feedback/src/index.ts:231,236,240`（只为持久性断言开 **read** 句柄）、`packages/deliverables/workspace-changes/src/recorder.ts:354`。
 8. **写句柄独占已实测**：同实例/第二实例/子进程持锁时 `SessionAlreadyOwnedError`；read 句柄不受影响；子进程 SIGKILL 后可立即接管（上游 `lease.two-process.e2e.ts` 就是这么做的，子代理也独立复现）。
 
-**因此控制 store 的形态（这是阶段 A 的剩余工作）**：
+**因此控制 store 的形态（阶段 A 剩余工作）——A1/A2 已按证据修正**：
 
-- **每个控制记录一条 DSH 事件，事件类型必须是"已知的、log-only（非 surface）"类型**；`data` 完全由我们拥有。
-- 外层形状：`{ protocol: 'singularity.control', version: 1, kind: <我们的闭合集>, payload: <我们的 JSON> }` 作为该事件的 `data`。
-- **活会话**（root agent 持有写句柄时）：`ctx.sessions.get(id).append(knownType, envelope)` → **必须** `await ctx.sessions.flush(session)`；`false` 即失败。
-- **非活会话**：自己开 `write` 句柄 → `append` → `await handle.flush()` → `close()`。
-- **绝不从活跃缝设置 `ignorable`**（也设不了），绝不用它夹带外来类型。
-- **装载时由我们做全部语义校验**：拒绝未知 `protocol`；拒绝不支持的 `version`；`kind` 必须在我们闭合集内；按 kind 严格校验 `payload`；拒绝未知字段与重复。
-- **不得只凭 DSH 事件类型判断归属**：读日志 → 选 `data.protocol` 属于我们的事件 → 逐个校验。
-- **DSH 只保证**信封形状 + 词表成员 + 深冻结物化（`adoptSessionEvent`）；**每一个语义检查都是我们的**。
+handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，A2 写"活会话用 `ctx.sessions.get(id).append(knownType, …)`"。**这两条与 handoff 自己的禁止项"借用一个已知 DSH 事件名塞不相符的业务载荷"冲突**，而 DSH 生成文件的原文给出裁决：
+
+> "**Downstream (out-of-repo) plugin events are outside this list by construction.** The persisted `SessionEvent.ignorable` marker is the compatibility mechanism; **event-name registration was rejected** because it does not classify omission safety and would make reads composition-dependent."（`packages/core/session/src/known-event-types.ts:11-19`）
+
+**59 个已知类型里没有一个是给我们用的**；挑一个承载 `{protocol:'singularity.control',…}` 就是在污染它的语义，也正好是那个禁止项。因此按 DSH 自己的 doctrine 落地：
+
+- **控制 store 是它自己的一个 DSH session**（稳定 id，由 graph/environment 派生），与执行 agent 的 transcript **分开**——正是 review U01 要求的"控制 store 与 transcript 分开使用稳定身份和链接"，且"多个物理日志可以复用同一存储机制"。
+- 每条控制记录 = 该 session 里的一条**我们自己的事件类型** `plugin:singularity:control`，**带 `ignorable: true`**（其余消费者跳过它，因此不毒化任何人的读取），`data = {protocol, version, kind, payload}`。
+- 写入用**我们自己的 write 句柄** + `await handle.flush()` + `close()`（A3）。**`ignorable` 只能从这个路径设置**——活跃缝 `Session.append` 设不了。
+- **A2（活会话缝）对我们的词表不可用**：它设不了 `ignorable`，于是在 agent 的 session 里写我们自己的类型会让整份会话**永久不可读**。若将来需要在 agent 的 transcript 里留一条**链接**，那是另一个决定，不是控制记录的载体。
+- **装载时由我们做全部语义校验**：读该 session 的日志 → 选出 `type === plugin:singularity:control` 的事件 → `assertEnvelope(data)` + 内层 protocol/version/kind/payload 严格校验。**不得只凭 DSH 事件类型判断归属。**
+- **DSH 只保证**信封形状 + 词表成员 + 深冻结物化（`adoptSessionEvent`）+ 崩溃屏障（`flush`）+ 跨进程 lease；**每一个语义检查都是我们的**。
+
+**A4 已完成**（本轮）：`ProtocolLog` 的文件存储实现删除，`src/protocol/memory-log.ts` 的 `MemoryLog` 成为纯内存事实管线（提交队列 / 发射者纪律 / 命令识别 / `adopt` 重放校验），门禁 `single-durable-writer` 收紧为 **`no-durable-writer`（零持久写者）**且自检仍全绿。持久性从此只有一个归属：DSH。
 
 **会打破它的因素**：非无损 JSON 或超大载荷 → `materializeAppendBatch` 抛 `TypeError`，记录根本不落；选到 **surface** 宿主类型会拖入 message 形状与 `surfaceManager.validateNext` → 必须选 log-only；**在更新版 harness/词表/格式下 resume 会整份会话拒绝**（`assertVersion`、`validateStoredEvents`）→ **我们的事实随日志一起死**；`Session.append` 在写入时不拒绝未标记的未知类型，伤害只在下次读出现；卡住的写者无限持有 flock（**故意无过期**）→ 没有基于租约超时的恢复。
 

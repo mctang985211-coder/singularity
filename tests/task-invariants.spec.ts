@@ -10,7 +10,7 @@ import {
   assertContract,
   assertContractShape,
   foldSubject,
-  ProtocolLog,
+  MemoryLog,
   projectReceipt,
   projectTask,
   REFUSAL_CODES,
@@ -49,8 +49,8 @@ beforeEach(async () => {
 })
 
 /** A log that already carries an admitted, running task. */
-async function running(): Promise<ProtocolLog> {
-  const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: SUBJECTS })
+async function running(): Promise<MemoryLog> {
+  const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
   await log.emit(admitted())
   await log.emit(started())
   return log
@@ -69,7 +69,7 @@ describe('the verifier boundary', () => {
     // The executor and the verifier are different roles, but one identity holds both. Role
     // separation alone would pass this, so the identity is checked too.
     const shared = { scheduler: 'shared-identity', [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'shared-identity' }
-    const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: shared })
+    const log = new MemoryLog(taskRegistry(), { subjects: shared })
     await log.emit(admitted())
     await log.emit(started())
 
@@ -128,7 +128,7 @@ describe('payloads are closed', () => {
   })
 
   it('refuses an unknown payload member instead of accepting it', async () => {
-    const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: SUBJECTS })
+    const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
     const refusal = await asyncRefusalOf(() => log.emit({ ...admitted(), payload: { contract: contract(), approvedBy: 'me' } }))
     expect(refusal.code).toBe<RefusalCode>('malformed-payload')
     expect(refusal.detail).toContain('approvedBy')
@@ -145,7 +145,7 @@ describe('payloads are closed', () => {
   })
 
   it('refuses a revision reference whose digest is not a content digest', async () => {
-    const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: SUBJECTS })
+    const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
     await log.emit(admitted())
     const refusal = await asyncRefusalOf(() =>
       log.emit({ ...started(), payload: { runId: RUN_ID, revision: { ...REVISION, digest: 'not-a-digest' } } }),
@@ -171,7 +171,7 @@ describe('replay never consults what this deployment can run today', () => {
 
   it('folds a log whose verifiers this deployment no longer holds identities for', async () => {
     const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry, { subjects: SUBJECTS })
+    const log = new MemoryLog(registry, { subjects: SUBJECTS })
     for (const command of sliceCommands()) await log.emit(command)
 
     // A later deployment holds no verifier identity at all, yet the recorded facts still explain.

@@ -19,7 +19,7 @@ import {
   foldSubject,
   projectReceipt,
   projectTask,
-  ProtocolLog,
+  MemoryLog,
   receiptDigest,
   renderTaskForAgent,
   ProtocolRegistry,
@@ -71,7 +71,7 @@ const directory = await mkdtemp(join(tmpdir(), 'singularity-slice-'))
 const path = join(directory, 'singularity.log')
 
 try {
-  const log = await ProtocolLog.open(path, registry, { subjects })
+  const log = new MemoryLog(registry, { subjects })
 
   await log.emit(
     emit(TASK_KINDS.admitted, {
@@ -101,7 +101,7 @@ try {
   // the verifier whose role emits it, but this deployment binds the executor to that same
   // identity — so the role check passes and the identity check is what refuses.
   const sharedSubjects = { scheduler: 'shared', [verifierRoleOf({ verifierRef: UNIT, verifierVersion: '1' })]: 'shared' }
-  const sharedLog = await ProtocolLog.open(join(directory, 'shared.log'), registry, { subjects: sharedSubjects })
+  const sharedLog = new MemoryLog(registry, { subjects: sharedSubjects })
   await sharedLog.emit(
     emit(TASK_KINDS.admitted, {
       contract: { goal: 'g', inputs: [], criteria: [{ criterionId: 'c', statement: 's', verifierRef: UNIT, verifierVersion: '1' }] },
@@ -137,10 +137,10 @@ try {
   check('every verdict pins the artifact it judged', view.runs[0]?.verdicts.every(verdict => verdict.artifactDigest === ARTIFACT))
   check('the receipt is derived from the log, not stored', receipt.criteria.length === 2 && view.contractDigest === receipt.contractDigest)
 
-  // Reopening replays everything, and two readers must agree on the receipt.
-  const reopened = await ProtocolLog.open(path, registry, { subjects })
-  const refolded = foldSubject(registry, reopened.entries(), TASK_PROTOCOL, TASK_VERSION, TASK)
-  check('a reopened log yields the same receipt digest', receiptDigest(projectReceipt(refolded, RUN)) === receiptDigest(receipt))
+  // What a durable medium hands back must replay to the same facts, and two readers must agree.
+  const adopted = MemoryLog.adopt(log.entries(), registry, { subjects })
+  const refolded = foldSubject(registry, adopted.entries(), TASK_PROTOCOL, TASK_VERSION, TASK)
+  check('adopting the recorded facts yields the same receipt digest', receiptDigest(projectReceipt(refolded, RUN)) === receiptDigest(receipt))
   check('no receipt kind exists, so a receipt can never be persisted', !Object.values(TASK_KINDS).includes('receipt/sealed'))
 } finally {
   await rm(directory, { recursive: true, force: true })

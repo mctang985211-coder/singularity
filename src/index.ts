@@ -28,7 +28,7 @@ export {
   type KindRule,
   type ProtocolSpec,
 } from './protocol/registry.ts'
-export { ProtocolLog, type EmitInput, type LogOptions } from './protocol/log.ts'
+export { MemoryLog, type EmitInput, type LogOptions } from './protocol/memory-log.ts'
 export { foldSubject, foldSubjects } from './protocol/fold.ts'
 
 export {

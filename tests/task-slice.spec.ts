@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
   foldSubject,
-  ProtocolLog,
+  MemoryLog,
   projectReceipt,
   projectTask,
   receiptDigest,
@@ -46,9 +46,9 @@ beforeEach(async () => {
 })
 
 /** Run the whole slice and fold it. */
-async function slice(): Promise<{ log: ProtocolLog; state: TaskState }> {
+async function slice(): Promise<{ log: MemoryLog; state: TaskState }> {
   const registry = taskRegistry()
-  const log = await ProtocolLog.open(logPath, registry, { subjects: SUBJECTS })
+  const log = new MemoryLog(registry, { subjects: SUBJECTS })
   for (const command of sliceCommands()) await log.emit(command)
 
   const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
@@ -82,7 +82,7 @@ describe('the task slice', () => {
 
   it('reports an admitted task with no run as awaiting a run, not as failed', async () => {
     const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry, { subjects: SUBJECTS })
+    const log = new MemoryLog(registry, { subjects: SUBJECTS })
     await log.emit(admitted())
 
     const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
@@ -109,14 +109,15 @@ describe('the task slice', () => {
     expect(receiptDigest(receipt)).toMatch(/^[0-9a-f]{64}$/)
   })
 
-  it('gives two independent readers the same receipt, before and after a reopen', async () => {
-    const { state } = await slice()
+  it('gives two independent readers the same receipt, before and after adopting the facts', async () => {
+    const { log, state } = await slice()
     const fromMemory = receiptDigest(projectReceipt(state, RUN_ID))
 
+    // What a durable medium hands back must fold to the same task, and agree on the receipt.
     const registry = taskRegistry()
-    const reopened = await ProtocolLog.open(logPath, registry, { subjects: SUBJECTS })
-    const refolded = foldSubject<TaskState>(registry, reopened.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
-    if (refolded === undefined) throw new Error('the reopened log must fold to the same task')
+    const adopted = MemoryLog.adopt(log.entries(), registry, { subjects: SUBJECTS })
+    const refolded = foldSubject<TaskState>(registry, adopted.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
+    if (refolded === undefined) throw new Error('the adopted facts must fold to the same task')
 
     expect(receiptDigest(projectReceipt(refolded, RUN_ID))).toBe(fromMemory)
     expect(projectTask(refolded)).toEqual(projectTask(state))
@@ -134,7 +135,7 @@ describe('the task slice', () => {
   })
 
   it('does not let a receipt be persisted: the vocabulary keeps it derived', async () => {
-    const log = await ProtocolLog.open(logPath, taskRegistry(), { subjects: SUBJECTS })
+    const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
     await log.emit(admitted())
     await log.emit(started())
 
@@ -146,7 +147,7 @@ describe('the task slice', () => {
 
   it('keeps a failure with no recorded reason reported as none, not as an invented sentence', async () => {
     const registry = taskRegistry()
-    const log = await ProtocolLog.open(logPath, registry, { subjects: SUBJECTS })
+    const log = new MemoryLog(registry, { subjects: SUBJECTS })
     await log.emit(admitted())
     await log.emit(started())
     await log.emit(judged('correctness', UNIT_VERIFIER, 'fail'))

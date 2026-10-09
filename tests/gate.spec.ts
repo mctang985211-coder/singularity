@@ -9,7 +9,7 @@ import {
   defineKind,
   foldSubject,
   foldSubjects,
-  ProtocolLog,
+  MemoryLog,
   ProtocolRegistry,
   REFUSAL_CODES,
   refuse,
@@ -45,7 +45,7 @@ beforeEach(async () => {
 
 describe('the one version gate', () => {
   it('refuses an unknown protocol, then an unknown version, then an unknown kind', async () => {
-    const log = await openDemoLog(logPath)
+    const log = openDemoLog()
 
     expect((await asyncRefusalOf(() => log.emit({ ...opened(), protocol: 'nope' }))).code).toBe<RefusalCode>('unknown-protocol')
     expect((await asyncRefusalOf(() => log.emit({ ...opened(), version: 7 }))).code).toBe<RefusalCode>('version-mismatch')
@@ -73,15 +73,15 @@ describe('the one version gate', () => {
     expect(refusalOf(() => registry.versionsOf('nope')).detail).toContain('demo')
   })
 
-  it('applies on load too: a log carrying a protocol this build does not know is refused', async () => {
-    const written = await openDemoLog(logPath)
+  it('applies on adopt too: facts naming a protocol this build does not know are refused', async () => {
+    const written = openDemoLog()
     await written.emit(opened())
 
+    // A deployment that no longer declares `demo` cannot explain its facts, so it refuses them
+    // rather than skipping them — the reviewer's load-gate counterexample, on the adopt path.
     const narrowed = new ProtocolRegistry()
     narrowed.declare<Journal>('audit', 1, AUDIT_V1)
-    const refusal = await asyncRefusalOf(() =>
-      ProtocolLog.open(logPath, narrowed, { subjects: DEMO_SUBJECTS }),
-    )
+    const refusal = refusalOf(() => MemoryLog.adopt(written.entries(), narrowed, { subjects: DEMO_SUBJECTS }))
     expect(refusal.code).toBe<RefusalCode>('unknown-protocol')
   })
 })
@@ -150,7 +150,7 @@ describe('the guarantee vocabulary', () => {
         }),
       },
     })
-    const log = await ProtocolLog.open(logPath, registry, { subjects: DEMO_SUBJECTS })
+    const log = new MemoryLog(registry, { subjects: DEMO_SUBJECTS })
     await log.emit({ commandId: 'c1', protocol: 'demo', version: 2, kind: 'counted', subject: 's', payload: { by: 3 } })
 
     const refusal = await asyncRefusalOf(() =>
@@ -236,7 +236,7 @@ describe('the emitter discipline', () => {
   it('refuses a fact whose role this deployment holds no identity for', async () => {
     const registry = demoRegistry()
     // A deployment that holds the auditor but not the writer.
-    const log = await ProtocolLog.open(logPath, registry, { subjects: { auditor: 'auditor-1' } })
+    const log = new MemoryLog(registry, { subjects: { auditor: 'auditor-1' } })
 
     const refusal = await asyncRefusalOf(() => log.emit(opened()))
     expect(refusal.code).toBe<RefusalCode>('unknown-emitter-role')
@@ -245,7 +245,7 @@ describe('the emitter discipline', () => {
   })
 
   it('offers no parameter for an author, so a caller cannot claim a role', async () => {
-    const log = await openDemoLog(logPath)
+    const log = openDemoLog()
     const input = { ...opened(), actor: 'auditor-1', emitter: 'auditor' } as unknown as EmitInput
     const envelope = await log.emit(input)
 
@@ -257,7 +257,7 @@ describe('the emitter discipline', () => {
 
 describe('command identity', () => {
   it('returns the recorded fact when the same command is delivered twice', async () => {
-    const log = await openDemoLog(logPath)
+    const log = openDemoLog()
     const command: EmitInput = { commandId: 'same-command', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-a', payload: {} }
 
     const first = await log.emit(command)
@@ -270,7 +270,7 @@ describe('command identity', () => {
   })
 
   it('refuses the same command id carrying a different request', async () => {
-    const log = await openDemoLog(logPath)
+    const log = openDemoLog()
     await log.emit({ commandId: 'c-fixed', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-a', payload: {} })
 
     const refusal = await asyncRefusalOf(() =>
@@ -305,7 +305,7 @@ describe('illegal transitions', () => {
   })
 
   it('refuses an illegal fact at append time, so the log never records a sequence it would reject', async () => {
-    const log = await openDemoLog(logPath)
+    const log = openDemoLog()
     await log.emit(opened('gate-b'))
     await log.emit(closed('gate-b'))
 
@@ -317,7 +317,7 @@ describe('illegal transitions', () => {
   it('lets a tenant declare its own compare-and-swap and refuses a stale expectation', async () => {
     const registry = new ProtocolRegistry()
     registry.declare('pointer', 1, POINTER_V1)
-    const log = await ProtocolLog.open(logPath, registry, { subjects: DEMO_SUBJECTS })
+    const log = new MemoryLog(registry, { subjects: DEMO_SUBJECTS })
     const emit = (commandId: string, expected: string, to: string): EmitInput => ({
       commandId,
       protocol: 'pointer',

@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import {
   assertClosedKeys,
   defineKind,
-  ProtocolLog,
+  MemoryLog,
   ProtocolRefusal,
   ProtocolRegistry,
   refuse,
@@ -134,8 +134,8 @@ export const POINTER_V1: ProtocolSpec<{ revision: string; generation: number }> 
   },
 }
 
-export async function openDemoLog(path: string, registry: ProtocolRegistry = demoRegistry()): Promise<ProtocolLog> {
-  return ProtocolLog.open(path, registry, { subjects: DEMO_SUBJECTS })
+export function openDemoLog(registry: ProtocolRegistry = demoRegistry()): MemoryLog {
+  return new MemoryLog(registry, { subjects: DEMO_SUBJECTS })
 }
 
 /** A fresh path in a fresh temporary directory, so no spec shares state with another. */
