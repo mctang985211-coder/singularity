@@ -235,7 +235,9 @@ describe('the shape is closed and the surface is exactly one kind', () => {
     expect(ENVIRONMENT_PROTOCOL).toBe('environment')
     expect(ENVIRONMENT_VERSION).toBe(1)
     expect(registry.versionsOf(ENVIRONMENT_PROTOCOL)).toEqual([ENVIRONMENT_VERSION])
-    expect(registry.kindsOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)).toEqual([ENVIRONMENT_KINDS.revisionCreated])
+    // Derived from the constants rather than spelled out, so adding a kind to this protocol is one
+    // edit and the assertion keeps meaning what it says: the declared set is exactly the constants.
+    expect(registry.kindsOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)).toEqual([...Object.values(ENVIRONMENT_KINDS)].sort())
     expect(registry.conditionalOwner()).toBeUndefined()
     expect(REFUSAL_CODES).toContain<RefusalCode>('revision-conflict')
     expect(REFUSAL_CODES).toContain<RefusalCode>('unknown-revision')

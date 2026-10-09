@@ -1,0 +1,148 @@
+/**
+ * The one read projection of an evaluation: what the plan asked for, and what actually arrived.
+ *
+ * **The denominator is the plan's.** `quality` is `sum(observed) / trials`, never
+ * `sum(observed) / observed.length`. The measurement this replaces aggregated whatever it had and
+ * answered `quality = 1, incomplete = true` for `trials = 2` with one observation: the absent
+ * repetition filled nothing, so a single lucky run read as a perfect score, and every consumer that
+ * forgot to read `incomplete` was wrong. Keeping the plan's denominator means an incomplete
+ * measurement reads as a *worse* one, which is the truthful direction, and `missing` names each slot
+ * so no reader has to derive the gap from two counts.
+ *
+ * **Unknown cost stays unknown.** An observation that reported no cost contributes no zero to the
+ * total: `cost` is `null` unless every observation reported one. A summed `0` would claim the
+ * repetitions were free, and the cost rule downstream would then compare an invented number against
+ * a real one.
+ *
+ * **Nothing here throws.** An evaluation whose plan was never opened, a hard constraint nobody
+ * checked: each is `admissible: false` with a named reason, because the round that consumes this
+ * view owes *every* slot a reason — a projection that refused would make one unopened plan
+ * unreadable for every other candidate in the same round.
+ *
+ * **The caliber is derived, never persisted.** It is the set of measurement settings two
+ * evaluations must share to be comparable: everything the plan froze except the two revisions being
+ * compared. Its digest is computed from the folded state at read time. A stored caliber digest
+ * would be a second copy of the facts, free to drift away from them, and `caliber-mismatch` is only
+ * meaningful while the comparison is over the settings actually frozen in the plan.
+ *
+ * @module singularity-core/measure/view
+ */
+
+import { digestOf } from '../protocol/envelope.ts'
+import type { AcceptanceCriterion } from '../task/contract.ts'
+import type { EvaluationMetric, EvaluationRun, EvaluationState, EvaluationWeights, TrialRecord } from './protocol.ts'
+
+/** One planned slot that produced no number, with the reason it produced none. */
+export interface MissingSlot {
+  readonly slot: number
+  readonly reason: string
+}
+
+/** One hard constraint of the plan, as checked or not. */
+export interface ConstraintView {
+  readonly criterionId: string
+  /** `null` until the criterion's own implementation checks it. Unchecked is not failed. */
+  readonly met: boolean | null
+}
+
+/** The evaluation as a reader sees it. Derived at read time and never written. */
+export interface EvaluationView {
+  /** The plan's slot count. It is the denominator, and it does not move when observations are missing. */
+  readonly denominator: number
+  readonly observed: number
+  /** Every planned slot without an observation, in slot order, each with its reason. */
+  readonly missing: readonly MissingSlot[]
+  /** `sum(observed quality) / denominator`: a missing slot contributes 0 and keeps its place. */
+  readonly quality: number
+  /** `null` when any observation left its cost unknown. Never 0. */
+  readonly cost: number | null
+  /** Every hard constraint of the plan, in judgement order. */
+  readonly constraints: readonly ConstraintView[]
+  readonly admissible: boolean
+  /** Why it is not admissible, naming each failing rule. `null` only when it is admissible. */
+  readonly why: string | null
+}
+
+/** The measured cost, or `null` if any observation left it unknown. Nothing measured has no cost. */
+function costOf(observed: readonly TrialRecord[]): number | null {
+  if (observed.length === 0) return null
+  let total = 0
+  for (const entry of observed) {
+    // Unknown is not zero: an invented 0 would enter the cost rule as a real measurement.
+    if (entry.cost === undefined) return null
+    total += entry.cost
+  }
+  return total
+}
+
+/** Project one folded evaluation state into the one view every reader shares. */
+export function projectEvaluation(state: EvaluationState): EvaluationView {
+  const denominator = state.trials ?? 0
+  const judgement = state.judgement ?? []
+  const observed = state.observed
+
+  const missing: MissingSlot[] = []
+  for (let slot = 0; slot < denominator; slot += 1) {
+    if (observed.some(entry => entry.slot === slot)) continue
+    const declared = state.missed.find(entry => entry.slot === slot)
+    missing.push({
+      slot,
+      reason: declared?.reason ?? 'neither an observation nor a declared miss was recorded for this planned slot',
+    })
+  }
+
+  const constraints: ConstraintView[] = judgement.map(criterion => {
+    const checked = state.checks.find(entry => entry.criterionId === criterion.criterionId)
+    return { criterionId: criterion.criterionId, met: checked === undefined ? null : checked.met }
+  })
+
+  const reasons: string[] = []
+  if (state.trials === undefined) reasons.push('no measurement plan was opened for this evaluation, so there is nothing to report it against')
+  for (const constraint of constraints) {
+    if (constraint.met === null) reasons.push(`hard constraint "${constraint.criterionId}" has not been checked by its implementation`)
+    else if (!constraint.met) reasons.push(`hard constraint "${constraint.criterionId}" was checked by its implementation and not met`)
+  }
+  if (missing.length > 0)
+    reasons.push(
+      `${missing.length} of ${denominator} planned trial slots have no observation: ${missing.map(entry => `slot ${entry.slot} (${entry.reason})`).join('; ')}`,
+    )
+
+  return {
+    denominator,
+    observed: observed.length,
+    missing,
+    quality: denominator === 0 ? 0 : observed.reduce((total, entry) => total + entry.quality, 0) / denominator,
+    cost: costOf(observed),
+    constraints,
+    admissible: reasons.length === 0,
+    why: reasons.length === 0 ? null : reasons.join('; '),
+  }
+}
+
+/**
+ * The measurement settings two evaluations must share to be comparable: everything the plan froze
+ * except the two revisions being compared.
+ */
+export interface Caliber {
+  readonly run: EvaluationRun
+  readonly metric: EvaluationMetric
+  readonly weights: EvaluationWeights
+  readonly trials: number
+  readonly judgement: readonly AcceptanceCriterion[]
+}
+
+/** The caliber of one evaluation, or `undefined` when no plan was opened under that id. */
+export function caliberOf(state: EvaluationState): Caliber | undefined {
+  const { run, metric, weights, trials, judgement } = state
+  if (run === undefined || metric === undefined || weights === undefined || trials === undefined || judgement === undefined) return undefined
+  return { run, metric, weights, trials, judgement }
+}
+
+/**
+ * The caliber's content digest. Two evaluations are comparable exactly when both digests are
+ * defined and equal; a measurement that does not exist shares its settings with nothing.
+ */
+export function caliberDigestOf(state: EvaluationState): string | undefined {
+  const caliber = caliberOf(state)
+  return caliber === undefined ? undefined : digestOf(caliber)
+}

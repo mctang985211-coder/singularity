@@ -96,13 +96,36 @@ readonly conditions: readonly string[]                   // 可观测的外部�
   cost?: number                // 缺席 = 未知，**不是 0**
   artifactDigest: string
   inputDigests: readonly BubbleInput[]   // 必须逐项等于 run 的 bubble 声明
+  verifierRef: string; verifierVersion: string; implementationDigest: string   // 见 5.2
   detail?: string
 }
 
-'trial/missed' { slot: number; reason: string }      // 缺失是显式的，不是"没记录"
+'trial/missed' { slot: number; reason: string; verifierRef: string; verifierVersion: string }
 
-'constraint/checked' { criterionId: string; met: boolean; artifactDigest: string; detail?: string }
+'constraint/checked' {
+  criterionId: string
+  met: boolean
+  artifactDigest: string
+  verifierRef: string; verifierVersion: string; implementationDigest: string
+  detail?: string
+}
 ```
+
+### 5.1b 为什么这三个 kind 要自带实现的 ref/version/digest（**接口冻结时我漏了**）
+
+`emitter` 在框架里只能是**已解析载荷的函数**（`src/protocol/registry.ts`：`emitter: (payload) => string`）。
+§5.2 要求这三个 kind 由 metric / judgement 声明的那**一个实现**发射，但第一版载荷里没有任何
+metric/criterion 身份，**角色无法推导**——也就是说那条规则按原文**实现不出来**。
+
+这正是 `evidence/produced` 的形状：载荷自带 `verifierRef`/`verifierVersion`/`implementationDigest`，
+reducer 拿它和**判据**比对。所以：
+
+- 载荷自带身份 ⇒ 角色可推导；
+- reducer 校验载荷身份与冻结计划**一致**（不一致即 `wrong-verifier`）；
+- **命令行从冻结计划里填这三个成员**，调用方仍然不能自称是哪个实现——和 `recordVerdict` 同一条纪律。
+
+替代方案（让 trial 由 scheduler 角色发射）会删掉"数字只能来自 metric 指名的实现"这条规则，
+即 R06 的"禁止候选自述数字"。所以不接受替代方案。
 
 ### 5.2 发射者（**沿用既有纪律，不另造一套**）
 
