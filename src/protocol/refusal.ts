@@ -70,12 +70,20 @@ export const REFUSAL_CODES = [
   'self-reported-evidence',
   /** A verdict came from a different verifier implementation than the criterion names. */
   'wrong-verifier',
-  /** A criterion already carries a verdict for this run; one criterion has one verdict. */
+  /** A criterion already carries a verdict for this run, or a trial slot already carries an observation. */
   'evidence-conflict',
   /** A revision id was offered twice with different content; content addressing forbids it. */
   'revision-conflict',
   /** A run cannot settle verified while a criterion has no passing verdict. */
   'unadjudicated-criterion',
+  /** Two measurements are not comparable: their frozen calibers differ, so pooling their scores would compare different questions. */
+  'caliber-mismatch',
+  /** The annealed edit budget for this round is spent; a further structural change is a different round. */
+  'budget-exhausted',
+  /** An approval names a draft digest that is no longer the draft's: the content moved after it was approved. */
+  'stale-approval',
+  /** A pointer would move the head to a revision that exists but nobody approved. */
+  'unapproved-revision',
 ] as const
 
 export type RefusalCode = (typeof REFUSAL_CODES)[number]

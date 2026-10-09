@@ -12,15 +12,29 @@ import { describe, expect, it } from 'vitest'
 
 import {
   type EmitInput,
+  foldSubject,
   MemoryLog,
   type RefusalCode,
   TASK_KINDS,
   TASK_PROTOCOL,
   TASK_VERSION,
   type TaskContract,
+  type TaskState,
 } from '../src/index.ts'
-import { asyncRefusalOf } from './fixtures.ts'
-import { ARTIFACT, REVISION, SCHEDULER, SUBJECTS, TASK_ID, contract, taskRegistry, UNIT_VERIFIER } from './task-fixtures.ts'
+import { asyncRefusalOf, refusalOf } from './fixtures.ts'
+import {
+  ARTIFACT,
+  BUBBLE_CONDITIONS,
+  BUBBLE_MODEL,
+  BUBBLE_TOOLS,
+  REVISION,
+  SCHEDULER,
+  SUBJECTS,
+  TASK_ID,
+  contract,
+  taskRegistry,
+  UNIT_VERIFIER,
+} from './task-fixtures.ts'
 
 let counter = 0
 function fact(kind: string, payload: unknown): EmitInput {
@@ -33,7 +47,27 @@ const assigned = (agentId: string, agentIdentity: string): EmitInput => fact(TAS
 const reassigned = (from: string, agentId: string, agentIdentity: string): EmitInput => fact(TASK_KINDS.reassigned, { from, agentId, agentIdentity })
 const started = (): EmitInput => fact(TASK_KINDS.runStarted, { runId: 'run-1', revision: REVISION })
 const INPUTS = [{ name: 'fixture/words.txt', digest: 'f'.repeat(64) }]
-const bubble = (inputs = INPUTS): EmitInput => fact(TASK_KINDS.bubbleOpened, { runId: 'run-1', inputs, workspace: { kind: 'git', ref: 'refs/heads/main' } })
+const bubble = (inputs = INPUTS): EmitInput =>
+  fact(TASK_KINDS.bubbleOpened, {
+    runId: 'run-1',
+    inputs,
+    workspace: { kind: 'git', ref: 'refs/heads/main' },
+    model: BUBBLE_MODEL,
+    tools: BUBBLE_TOOLS,
+    conditions: BUBBLE_CONDITIONS,
+  })
+
+/** The same declaration with one member replaced, for the cases that must be refused. */
+const bubbleWith = (overrides: Record<string, unknown>): EmitInput =>
+  fact(TASK_KINDS.bubbleOpened, {
+    runId: 'run-1',
+    inputs: INPUTS,
+    workspace: { kind: 'git', ref: 'refs/heads/main' },
+    model: BUBBLE_MODEL,
+    tools: BUBBLE_TOOLS,
+    conditions: BUBBLE_CONDITIONS,
+    ...overrides,
+  })
 const judged = (options: { runId?: string; inputDigests?: readonly { readonly name: string; readonly digest: string }[] } = {}): EmitInput =>
   fact(TASK_KINDS.evidenceProduced, {
     runId: options.runId ?? 'run-1',
@@ -100,6 +134,56 @@ describe('only the agent currently answerable may start work', () => {
     await successor.emit(reassigned('agent-1', 'agent-2', 'runtime-2'))
     const admittedRun = await successor.emit(started())
     expect(admittedRun.kind).toBe(TASK_KINDS.runStarted)
+  })
+})
+
+describe('the execution context says what actually ran', () => {
+  it('refuses a bubble that cannot name its model, its tools or its conditions', () => {
+    const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
+    log.emit(admitted())
+    log.emit(assigned('agent-1', SCHEDULER))
+    log.emit(started())
+
+    // Each omission is a different unrecorded condition, and each is refused by name rather than
+    // defaulted: a context that cannot say what ran is not a context a later decision may rest on.
+    for (const member of ['model', 'tools', 'conditions']) {
+      const payload = {
+        runId: 'run-1',
+        inputs: INPUTS,
+        workspace: { kind: 'git', ref: 'refs/heads/main' },
+        model: BUBBLE_MODEL,
+        tools: BUBBLE_TOOLS,
+        conditions: BUBBLE_CONDITIONS,
+      } as Record<string, unknown>
+      delete payload[member]
+      const refusal = refusalOf(() => log.emit(fact(TASK_KINDS.bubbleOpened, payload)))
+      expect(`${member}: ${refusal.code}`).toBe(`${member}: malformed-payload`)
+    }
+
+    // The tool shape is closed: a widened tool is refused, not trimmed.
+    const widened = refusalOf(() => log.emit(bubbleWith({ tools: [{ ...BUBBLE_TOOLS[0], note: 'extra' }] })))
+    expect(widened.code).toBe<RefusalCode>('malformed-payload')
+    expect(widened.detail).toContain('closed')
+
+    // A tool's content identity is a digest, not a version string that happens to look right.
+    expect(refusalOf(() => log.emit(bubbleWith({ tools: [{ name: 'count', version: '1', implementationDigest: 'v1' }] }))).code).toBe<RefusalCode>('malformed-payload')
+    // Two tools under one name are one tool, and a repeated condition is stated once.
+    expect(refusalOf(() => log.emit(bubbleWith({ tools: [BUBBLE_TOOLS[0], BUBBLE_TOOLS[0]] }))).code).toBe<RefusalCode>('malformed-payload')
+    expect(refusalOf(() => log.emit(bubbleWith({ conditions: ['no-network', 'no-network'] }))).code).toBe<RefusalCode>('malformed-payload')
+    expect(log.entries()).toHaveLength(3)
+  })
+
+  it('keeps the manifest on the run, so a reader can say what the execution could reach', () => {
+    const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
+    log.emit(admitted())
+    log.emit(assigned('agent-1', SCHEDULER))
+    log.emit(started())
+    log.emit(bubble())
+
+    const state = foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
+    expect(state?.runs['run-1']?.bubble?.model).toBe(BUBBLE_MODEL)
+    expect(state?.runs['run-1']?.bubble?.tools).toEqual(BUBBLE_TOOLS)
+    expect(state?.runs['run-1']?.bubble?.conditions).toEqual(BUBBLE_CONDITIONS)
   })
 })
 

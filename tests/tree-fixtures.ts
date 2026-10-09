@@ -29,6 +29,9 @@ import {
   taskRegistry,
   UNIT_IMPLEMENTATION,
   UNIT_VERIFIER,
+  BUBBLE_CONDITIONS,
+  BUBBLE_MODEL,
+  BUBBLE_TOOLS,
 } from './task-fixtures.ts'
 
 export const PARENT = 'task-parent'
@@ -104,7 +107,14 @@ export const startRun = (subject: string, runId: string): EmitInput => emit(subj
 export const assigned = (subject: string): EmitInput =>
   emit(subject, TASK_KINDS.assigned, { agentId: `agent-for-${subject}`, agentIdentity: SCHEDULER })
 export const openBubble = (subject: string, runId: string): EmitInput =>
-  emit(subject, TASK_KINDS.bubbleOpened, { runId, inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
+  emit(subject, TASK_KINDS.bubbleOpened, {
+    runId,
+    inputs: BUBBLE_INPUTS,
+    workspace: { kind: 'git', ref: 'refs/heads/main' },
+    model: BUBBLE_MODEL,
+    tools: BUBBLE_TOOLS,
+    conditions: BUBBLE_CONDITIONS,
+  })
 
 /** Start a run **and** declare the context it executes in: a judged run needs both. */
 export async function openRun(log: MemoryLog, subject: string, runId: string): Promise<void> {

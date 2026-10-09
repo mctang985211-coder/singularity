@@ -100,8 +100,23 @@ export const admitted = (value: TaskContract = contract(), commandId?: string): 
 export const assigned = (commandId?: string, agentIdentity: string = SCHEDULER): EmitInput =>
   emit(TASK_KINDS.assigned, { agentId: 'agent-1', agentIdentity }, commandId)
 export const started = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runStarted, { runId, revision: REVISION })
+/**
+ * The isolation manifest every bubble in these specs declares. One place, because a spec that named
+ * a different tool digest in each bubble would be testing a binding it never established.
+ */
+export const BUBBLE_MODEL = 'test-model-1'
+export const BUBBLE_TOOLS = [{ name: 'count', implementationDigest: 'a'.repeat(64), version: '1' }]
+export const BUBBLE_CONDITIONS = ['no-network']
+
 export const bubbleOpened = (runId = RUN_ID): EmitInput =>
-  emit(TASK_KINDS.bubbleOpened, { runId, inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
+  emit(TASK_KINDS.bubbleOpened, {
+    runId,
+    inputs: BUBBLE_INPUTS,
+    workspace: { kind: 'git', ref: 'refs/heads/main' },
+    model: BUBBLE_MODEL,
+    tools: BUBBLE_TOOLS,
+    conditions: BUBBLE_CONDITIONS,
+  })
 export const judged = (
   criterionId: string,
   verifierRef: string,

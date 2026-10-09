@@ -19,7 +19,7 @@
     },
     {
       "protocol": "task",
-      "version": 3,
+      "version": 4,
       "subject": "the task id",
       "kinds": [
         "bubble/opened",

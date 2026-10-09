@@ -40,7 +40,16 @@ import {
   REVISION,
   RUN,
 } from './command-fixtures.ts'
-import { BUBBLE_INPUTS, contract as parentContract, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER } from './task-fixtures.ts'
+import {
+  BUBBLE_CONDITIONS,
+  BUBBLE_INPUTS,
+  BUBBLE_MODEL,
+  BUBBLE_TOOLS,
+  contract as parentContract,
+  SCHEDULER,
+  UNIT_IMPLEMENTATION,
+  UNIT_VERIFIER,
+} from './task-fixtures.ts'
 
 describe('a run starts only when every cross-entity condition holds', () => {
   it('refuses a run pinned to a revision this log never recorded, or to the wrong content', async () => {
@@ -188,7 +197,16 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
     await createRevision(live)
     const commands = await planned(live)
     await commands.startRun({ commandId: 'r1', taskId: CHILD, runId: RUN, revision: pin(live) })
-    await commands.openBubble({ commandId: 'b1', taskId: CHILD, runId: RUN, inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
+    await commands.openBubble({
+      commandId: 'b1',
+      taskId: CHILD,
+      runId: RUN,
+      inputs: BUBBLE_INPUTS,
+      workspace: { kind: 'git', ref: 'refs/heads/main' },
+      model: BUBBLE_MODEL,
+      tools: BUBBLE_TOOLS,
+      conditions: BUBBLE_CONDITIONS,
+    })
 
     const fromElsewhere = await asyncRefusalOf(() =>
       commands.recordVerdict({

@@ -40,7 +40,7 @@ import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from
 import { assertPinnedRevision } from '../environment/binding.ts'
 import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from './protocol.ts'
 import { projectTree } from './tree.ts'
-import type { BubbleInput } from './bubble.ts'
+import type { BubbleInput, BubbleTool } from './bubble.ts'
 import type { DecompositionChild } from './decomposition.ts'
 
 /** What the deployment holds for one agent: the identity that stands for it in the log. */
@@ -93,6 +93,9 @@ export interface AgentCommands {
     readonly runId: string
     readonly inputs: readonly BubbleInput[]
     readonly workspace: { readonly kind: string; readonly ref: string }
+    readonly model: string
+    readonly tools: readonly BubbleTool[]
+    readonly conditions: readonly string[]
   }): Promise<Envelope>
   failRun(input: {
     readonly commandId: string
@@ -173,10 +176,15 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
       }),
 
     openBubble: input =>
+      // The whole declared context goes through: rebuilding the payload from three of its members is
+      // how a required member silently disappears between the caller and the reducer.
       emitRaw(options, input.commandId, TASK_KINDS.bubbleOpened, input.taskId, {
         runId: input.runId,
         inputs: input.inputs,
         workspace: input.workspace,
+        model: input.model,
+        tools: input.tools,
+        conditions: input.conditions,
       }),
 
     failRun: input =>

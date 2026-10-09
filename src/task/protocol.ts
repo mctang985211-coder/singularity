@@ -34,16 +34,20 @@ import { digest, maybeText, record, requireContractOf, requireRun, settled, text
 
 export const TASK_PROTOCOL = 'task'
 /**
- * Version 3. Older versions are **refused by name, with no compatibility layer**: this stack has no
+ * Version 4. Older versions are **refused by name, with no compatibility layer**: this stack has no
  * distributed ledger to migrate, and review §5 is explicit that "no old data here" is not a licence
  * to change a version in place.
  *
- * The bump is batched deliberately. What changed is not one field but the shape of a verdict and
- * the parties to a task: `evidence/produced` gained a **required** `inputDigests`, and
- * responsibility (`task/assigned` / `task/reassigned`) became a precondition of starting work.
- * Batching them into one version means one historical interpretation, not three.
+ * The bumps are batched deliberately, so one version means one historical interpretation:
+ *
+ * - 3: `evidence/produced` gained a **required** `inputDigests`, and responsibility
+ *   (`task/assigned` / `task/reassigned`) became a precondition of starting work.
+ * - 4: `bubble/opened` gained a **required** isolation manifest (`model`, `tools`, `conditions`).
+ *   A release pointer may only move to a revision whose execution context is recoverable, and a
+ *   context that does not name the model and the implementation behind each tool name is not
+ *   recoverable. So the manifest is required, and a bubble that omits it is refused, not defaulted.
  */
-export const TASK_VERSION = 3
+export const TASK_VERSION = 4
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'

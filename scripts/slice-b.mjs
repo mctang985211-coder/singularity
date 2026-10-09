@@ -248,7 +248,18 @@ async function main() {
 
     // ---------------------------------------------------------------- 2. a real run and verdict
     await commands.startRun({ commandId: 'start-count', taskId: CHILD_COUNT, runId: 'run-count', revision: pin })
-    await commands.openBubble({ commandId: 'bubble-count', taskId: CHILD_COUNT, runId: 'run-count', inputs: INPUTS, workspace: { kind: 'dir', ref: workspace } })
+    await commands.openBubble({
+      commandId: 'bubble-count',
+      taskId: CHILD_COUNT,
+      runId: 'run-count',
+      inputs: INPUTS,
+      workspace: { kind: 'dir', ref: workspace },
+      // The isolation manifest R08 requires: the model identity and the content digest of every
+      // tool the execution could reach. A tool's name can be re-pointed; its digest cannot.
+      model: 'probe-model-1',
+      tools: [{ name: 'count', implementationDigest: programDigest, version: '1' }],
+      conditions: ['no-network'],
+    })
 
     // The attempt produces the artifact by running a real program; the verifier then judges it.
     const produced = spawnSync(process.execPath, [producePath, inputPath, artifactPath, '0'], { encoding: 'utf8' })
@@ -342,7 +353,16 @@ async function main() {
 
     // ---------------------------------------------------------------- 6. the budget really stops
     await commands.startRun({ commandId: 'start-limits', taskId: CHILD_LIMITS, runId: 'run-limits', revision: pin })
-    await commands.openBubble({ commandId: 'bubble-limits', taskId: CHILD_LIMITS, runId: 'run-limits', inputs: INPUTS, workspace: { kind: 'dir', ref: workspace } })
+    await commands.openBubble({
+      commandId: 'bubble-limits',
+      taskId: CHILD_LIMITS,
+      runId: 'run-limits',
+      inputs: INPUTS,
+      workspace: { kind: 'dir', ref: workspace },
+      model: 'probe-model-1',
+      tools: [{ name: 'count', implementationDigest: programDigest, version: '1' }],
+      conditions: ['no-network'],
+    })
     await commands.failRun({ commandId: 'fail-limits', taskId: CHILD_LIMITS, runId: 'run-limits', reason: 'the limit check could not be run in this environment' })
 
     const spent = await asyncRefusalOf(() => commands.startRun({ commandId: 'start-limits-again', taskId: CHILD_LIMITS, runId: 'run-limits-2', revision: pin }))

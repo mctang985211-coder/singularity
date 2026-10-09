@@ -15,6 +15,14 @@
  * actually read hash to those digests is the execution adapter's job at the point of judging; a
  * string comparison here cannot establish it, and this module does not pretend otherwise.
  *
+ * **The isolation manifest is required, not decorative.** Fixing only the skill text or a tool's
+ * name does not fix what ran: the tool's implementation can be rebuilt behind its name, and the
+ * model behind a route can be swapped. So a bubble also declares the model identity, every tool's
+ * content digest, and the observable external conditions. A bubble that cannot say what its tools
+ * were is not a reproducible execution context, so the reducer refuses it rather than defaulting.
+ * The tool digest is the same idea as a criterion's `implementationDigest`: a name a deployment can
+ * re-point is not an identity.
+ *
  * @module singularity-core/task/bubble
  */
 
@@ -35,12 +43,27 @@ export interface Bubble {
   readonly runId: string
   readonly inputs: readonly BubbleInput[]
   readonly workspace: { readonly kind: string; readonly ref: string }
+  /** The model that actually ran. Never a default: an unnamed model is an unrecorded condition. */
+  readonly model: string
+  /** Every tool the execution could reach, by name, version and the digest of its implementation. */
+  readonly tools: readonly BubbleTool[]
+  /** The observable external conditions, each named. Empty means "none observed", not "unrecorded". */
+  readonly conditions: readonly string[]
   readonly at: string
 }
 
-export const BUBBLE_MEMBERS = ['runId', 'inputs', 'workspace'] as const
+/** One tool an execution could reach: a name a deployment can re-point, and the content that ran. */
+export interface BubbleTool {
+  readonly name: string
+  readonly implementationDigest: string
+  readonly version: string
+}
+
+export const BUBBLE_MEMBERS = ['runId', 'inputs', 'workspace', 'model', 'tools', 'conditions'] as const
 export const WORKSPACE_MEMBERS = ['kind', 'ref'] as const
 export const BUBBLE_INPUT_MEMBERS = ['name', 'digest'] as const
+/** The closed shape of one tool. Not exported: what is exported is the surface the stack uses. */
+const BUBBLE_TOOL_MEMBERS = ['name', 'implementationDigest', 'version'] as const
 
 const DIGEST = /^[0-9a-f]{64}$/
 
@@ -88,9 +111,45 @@ export function assertInputsBound(bubble: Bubble | undefined, declared: readonly
   }
 }
 
+/** Every tool the execution could reach. Names are unique: two tools with one name are one tool. */
+function toolList(raw: unknown, where: string): readonly BubbleTool[] {
+  if (!Array.isArray(raw))
+    refuse('malformed-payload', `${where} must be an array of the tools the execution could reach, got ${raw === null ? 'null' : typeof raw}`)
+  const seen = new Set<string>()
+  return raw.map((entry, index) => {
+    const at = `${where}[${index}]`
+    const source = record(entry, at)
+    assertClosedKeys(source, BUBBLE_TOOL_MEMBERS, at)
+    const name = text(source, 'name', at)
+    if (seen.has(name)) refuse('malformed-payload', `${where} names tool ${JSON.stringify(name)} twice; one name was one implementation`)
+    seen.add(name)
+    const implementationDigest = text(source, 'implementationDigest', at)
+    if (!DIGEST.test(implementationDigest))
+      refuse('malformed-payload', `${at}.implementationDigest must be a sha256 hex content digest, got ${JSON.stringify(implementationDigest)}`)
+    return { name, implementationDigest, version: text(source, 'version', at) }
+  })
+}
+
+/** The observable external conditions, each named once. An empty list is a claim, not an omission. */
+function conditionList(raw: unknown, where: string): readonly string[] {
+  if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of named conditions, got ${raw === null ? 'null' : typeof raw}`)
+  const seen = new Set<string>()
+  return raw.map((entry, index) => {
+    const at = `${where}[${index}]`
+    if (typeof entry !== 'string' || entry.length === 0)
+      refuse('malformed-payload', `${at} must be a non-empty string, got ${entry === null ? 'null' : typeof entry}`)
+    if (seen.has(entry)) refuse('malformed-payload', `${where} names condition ${JSON.stringify(entry)} twice; a condition is stated once`)
+    seen.add(entry)
+    return entry
+  })
+}
+
 /** `bubble/opened`: one run's execution context, declared once before it is judged. */
 export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { runId: string; inputs: readonly BubbleInput[]; workspace: { kind: string; ref: string } }>({
+  return defineKind<
+    TaskState,
+    { runId: string; inputs: readonly BubbleInput[]; workspace: { kind: string; ref: string }; model: string; tools: readonly BubbleTool[]; conditions: readonly string[] }
+  >({
     guarantees: { appended: true },
     emitter,
     parse: raw => {
@@ -103,6 +162,9 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
         runId: text(source, 'runId', where),
         inputs: inputList(source['inputs'], `${where}.inputs`),
         workspace: { kind: text(workspace, 'kind', `${where}.workspace`), ref: text(workspace, 'ref', `${where}.workspace`) },
+        model: text(source, 'model', where),
+        tools: toolList(source['tools'], `${where}.tools`),
+        conditions: conditionList(source['conditions'], `${where}.conditions`),
       }
     },
     reduce: (state, envelope, payload) => {
@@ -120,7 +182,18 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
         ...state,
         runs: {
           ...state.runs,
-          [payload.runId]: { ...run, bubble: { runId: payload.runId, inputs: payload.inputs, workspace: payload.workspace, at: envelope.at } },
+          [payload.runId]: {
+            ...run,
+            bubble: {
+              runId: payload.runId,
+              inputs: payload.inputs,
+              workspace: payload.workspace,
+              model: payload.model,
+              tools: payload.tools,
+              conditions: payload.conditions,
+              at: envelope.at,
+            },
+          },
         },
       }
     },
