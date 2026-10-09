@@ -17,22 +17,14 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import type { AgentOptions } from '@dangosys/dsh-singularity-agent-runtime'
 import type {
-  AcceptanceCriterion,
-  AdmissionContext,
-  CapabilityManifest,
   ExecutionPhase,
   RunId,
   RunProviderBinding,
-  RunStatus,
   TaskId,
   TaskInstance,
   TaskProposal,
-  TaskProposalDecomposition,
   TaskProposalDecisionOutcome,
-  TaskProposalRoot,
-  TaskProposalStatus,
   TaskRun,
-  TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import { type CapabilityConfig } from '../capability.ts'
 import { ExecutionGate } from '../gate.ts'
@@ -45,13 +37,11 @@ import type {
   AdoptedWorkerResume,
   AdoptedWorkerResumeRequest,
   BatchResultDeliveryStatus,
-  BatchResultMessage,
   BudgetConfig,
   ChildOutcome,
   OrchestrateEnv,
   ReplayOverlay,
   ReplayRunOutcome,
-  SessionObservation,
   TerminalReviewFact,
 } from '../orchestration/types.ts'
 import {
@@ -59,8 +49,6 @@ import {
   type AskedQuestionOutcome,
   type ParentAnswerCall,
   type ParentAskCall,
-  type QuestionCoordinationDeps,
-  type QuestionReconcileReport,
 } from '../question.ts'
 import type { RootRecoveryRequest } from '../recovery.ts'
 import { WORKSPACE_OWNERS_DIR, WorkspaceRegistry } from '../workspace.ts'
@@ -77,11 +65,9 @@ import {
 import type { Config, ProviderLoadReport, RunBinding, DriverEntry, StoreRecoveryState, StoreRecoveryStateView } from '../config.ts'
 import type {
   AdmitBatchRequest,
-  CheckDerivedBatchRequest,
   DecomposeAdmissionResult,
   DecomposeProposalOptions,
   DecomposeSpec,
-  DecompositionPrecheck,
   DecompositionRefusal,
   ProposalContinuation,
   ProposalDecisionResult,
@@ -99,7 +85,6 @@ import type {
   RootIntakeResult,
   RootRecoveryCaller,
   RootRecoveryOutcome,
-  StartBatchDriverOptions,
   StoreRecoveryStatus,
 } from '../types.ts'
 import * as svcLifecycle from './lifecycle.ts'
@@ -131,7 +116,7 @@ import type {
   LibraryReview,
   LibraryWrite,
 } from './environment.ts'
-import type { EnvironmentCommitHost, LibraryRoots, PublishOutcome, PublishRequest } from '../environment/index.ts'
+import type { LibraryRoots, PublishOutcome, PublishRequest } from '../environment/index.ts'
 
 export class TaskRuntime extends Service {
   static inject = ['task', 'agentRuntime', 'graphs', 'sessionQuery']
@@ -262,9 +247,6 @@ export class TaskRuntime extends Service {
   }
 
   /** The revision one run is bound to, or `undefined` on an old-protocol run. */
-  async environmentRevisionForRun(run: TaskRun): Promise<EnvironmentRevision | undefined> {
-    return await svcEnvironment.revisionForRun(this, run)
-  }
 
   /** Fix the initial revision of a brand-new graph before anything binds to it. */
   async ensureInitialEnvironment(rootSessionId: string, actor: string): Promise<EnvironmentLibrary> {
@@ -272,18 +254,11 @@ export class TaskRuntime extends Service {
   }
 
   /** The retired task templates of a session's active revision, as `id@version` keys. */
-  async retiredTaskTemplates(sessionId: string): Promise<ReadonlySet<string>> {
-    return await svcEnvironment.retiredTemplatesFor(this, sessionId)
-  }
-
-  async comparisonRunForSession(sessionId: string): Promise<TaskRun | undefined> {
-    return await svcEnvironment.comparisonRunFor(this, sessionId)
-  }
 
   /** The library as a reader sees it: the effective revision's entries and identity, with no write of any kind. */
   async libraryRead(sessionId: string): Promise<EnvironmentView & { taskTemplatesRoot: string; skillRoot: string }> {
     const library = await this.libraryForSession(sessionId)
-    const run = await this.comparisonRunForSession(sessionId)
+    const run = await svcEnvironment.comparisonRunFor(this, sessionId)
     const view = run === undefined
       ? await svcEnvironment.activeEnvironmentView(this, sessionId)
       : await svcEnvironment.environmentViewForRun(this, run)
@@ -304,7 +279,7 @@ export class TaskRuntime extends Service {
         throw new Error('task-runtime: retention decisions belong to the graph root or delegated supervisor')
       }
     }
-    if ((await this.comparisonRunForSession(sessionId)) !== undefined) {
+    if ((await svcEnvironment.comparisonRunFor(this, sessionId)) !== undefined) {
       throw new Error('Include comparison findings in task_submit_result for graph method supervision')
     }
     return await svcEnvironment.reviewLibraryDraft(this, sessionId, review)
@@ -312,7 +287,7 @@ export class TaskRuntime extends Service {
 
   /** The authority a temporary library write needs: the graph root, an active Run, or delegated method supervision. */
   private async assertLibraryWriteAuthority(sessionId: string): Promise<void> {
-    if ((await this.comparisonRunForSession(sessionId)) !== undefined) {
+    if ((await svcEnvironment.comparisonRunFor(this, sessionId)) !== undefined) {
       throw new Error('Include findings in task_submit_result; the supervisor can add useful experience to the graph library after comparison')
     }
     await this.templateCaller(sessionId)
@@ -338,10 +313,9 @@ export class TaskRuntime extends Service {
   }
 
   async skillViewForSession(sessionId: string, extraRoots: readonly string[] = []): Promise<SkillDiscoveryView> {
-    const overlay = this.sessionExecutionBindings.get(sessionId)?.overlay
     const library = await this.libraryForSession(sessionId)
     const cwd = await this.envPathForSession(sessionId)
-    return { ...(cwd === undefined ? {} : { cwd }), extraRoots: [...extraRoots, ...(overlay?.extraSkillRoots ?? []), library.skillRoot] }
+    return { ...(cwd === undefined ? {} : { cwd }), extraRoots: [...extraRoots, library.skillRoot] }
   }
 
   async taskTemplatesRootFor(sessionId?: string): Promise<string | undefined> {
@@ -351,7 +325,7 @@ export class TaskRuntime extends Service {
 
   async findTaskTemplates(query?: string, callerSessionId?: string) {
     const caller = callerSessionId === undefined ? undefined : await this.templateCaller(callerSessionId)
-    const retired = callerSessionId === undefined ? new Set<string>() : await this.retiredTaskTemplates(callerSessionId)
+    const retired = callerSessionId === undefined ? new Set<string>() : await svcEnvironment.retiredTemplatesFor(this, callerSessionId)
     return findTaskTemplates(caller?.root ?? this.config.taskTemplatesRoot, query, caller?.scope, retired)
   }
 
@@ -429,10 +403,6 @@ export class TaskRuntime extends Service {
     return svcLifecycle.gate(this)
   }
 
-  resolveCapabilities(required: readonly string[]): CapabilityManifest {
-    return svcLifecycle.resolveCapabilitiesImpl(this, required)
-  }
-
   listMcpServers(): Readonly<Record<string, import('../mcp-servers.ts').McpServerTemplate>> {
     return structuredClone(this.config.mcpServers ?? {})
   }
@@ -486,14 +456,6 @@ export class TaskRuntime extends Service {
   }
 
   /** The legacy mutable layout read as a read-only view: no index rebuilt, no byte written. */
-  async legacyLibraryView(sessionId: string): Promise<EnvironmentView> {
-    return await svcEnvironment.legacyLibraryView(this, await svcEnvironment.libraryRootsForSession(this, sessionId))
-  }
-
-  /** The one write tail of a library, for a caller that stages several edits as one unit. */
-  async serializeEnvironment<T>(rootSessionId: string, work: () => Promise<T>): Promise<T> {
-    return await svcEnvironment.serializeEnvironmentFor(this, rootSessionId, work)
-  }
 
   async adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption> {
     return svcRootIntake.adoptRoot(this, storeId, rootSessionId)
@@ -501,10 +463,6 @@ export class TaskRuntime extends Service {
 
   async initializeStoreGates(storeId: string): Promise<void> {
     return svcRootIntake.initializeStoreGates(this, storeId)
-  }
-
-  runGatePhase(run: TaskRun): ExecutionPhase | 'terminal' | undefined {
-    return svcRootIntake.runGatePhase(run)
   }
 
   async intakeRootContract(
@@ -594,10 +552,6 @@ export class TaskRuntime extends Service {
     return svcNotify.registerTerminalReviewListener(this, listener)
   }
 
-  notifyTerminalReview(fact: TerminalReviewFact): void {
-    return svcNotify.notifyTerminalReview(this, fact)
-  }
-
   /** Seal one Run's execution receipt. The store's own check decides; a repeat is `already-sealed`. */
   async sealRunReceipt(storeId: string, taskId: TaskId, runId: RunId): Promise<ReceiptSealStatus> {
     return await svcReceipts.sealRunReceipt(this, storeId, taskId, runId)
@@ -618,11 +572,6 @@ export class TaskRuntime extends Service {
       svcReceipts.queueReceiptSeal(this, storeId, taskId, runId)
       this.warn(`store ${storeId}: sealing the receipt of run "${runId}" failed (${message(error)}); the settlement stands and the receipt stays queued`)
     }
-  }
-
-  /** Advance every queued seal of one store. */
-  async flushReceiptSeals(storeId: string): Promise<ReceiptReconcileReport> {
-    return await svcReceipts.flushReceiptSeals(this, storeId)
   }
 
   /** Seal every terminal new-protocol Run of one store that has no receipt yet. */
@@ -654,103 +603,17 @@ export class TaskRuntime extends Service {
     return svcRootRecovery.recoverRootTask(this, storeId, request, caller)
   }
 
-  async deriveBatch(
-    identity: DecompositionIdentityContext,
-    spec: DecomposeSpec,
-  ): Promise<{ ok: true; batch: NormalizedBatch; envPath?: string } | { ok: false; refusal: DecompositionRefusal }> {
-    return svcAdmission.deriveBatch(this, identity, spec)
-  }
-
-  async manifestsOf(batch: NormalizedBatch, callerSessionId?: string): Promise<CapabilityManifest[]> {
-    return svcAdmission.manifestsOf(this, batch, callerSessionId)
-  }
-
-  storedBatchOf(proposal: TaskProposal): NormalizedBatch {
-    return svcAdmission.storedBatchOf(proposal)
-  }
-
   async decompositionState(sessionId: string) {
     const found = await this.runForSession(sessionId)
     return svcAdmission.decompositionAvailability(this, found.task, found.run, await this.context.task.snapshotIn(found.storeId))
-  }
-
-  async assertDecomposableRun(
-    storeId: string,
-    parentTask: TaskInstance,
-    parentRun: TaskRun,
-    callerSessionId: string,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    return svcAdmission.assertDecomposableRun(this, storeId, parentTask, parentRun, callerSessionId, signal)
-  }
-
-  async inFlightProposalsOf(storeId: string, parentRunId: RunId): Promise<TaskProposalDecomposition[]> {
-    return svcAdmission.inFlightProposalsOf(this, storeId, parentRunId)
-  }
-
-  async checkDerivedBatch(request: CheckDerivedBatchRequest): Promise<DecompositionPrecheck> {
-    return svcAdmission.checkDerivedBatch(this, request)
-  }
-
-  async admitPrecheckedBatch(request: AdmitBatchRequest): Promise<{ batchId: string; childTaskIds: TaskId[] }> {
-    return svcAdmission.admitPrecheckedBatch(this, request)
-  }
-
-  async existingRootTask(storeId: string): Promise<TaskInstance | undefined> {
-    return svcRootIntake.existingRootTask(this, storeId)
-  }
-
-  async continueRootProposalIn(storeId: string, proposal: TaskProposalRoot): Promise<ProposalContinuation> {
-    return svcRootIntake.continueRootProposalIn(this, storeId, proposal)
   }
 
   async serializeRootIntake<T>(storeId: string, work: () => Promise<T>): Promise<T> {
     return svcRootIntake.serializeRootIntake(this, storeId, work)
   }
 
-  async continueProposalIn(
-    storeId: string,
-    proposalId: string,
-    caller: string,
-    options: { spec?: DecomposeSpec; exec?: { callId?: string } },
-  ): Promise<ProposalContinuation> {
-    return svcProposals.continueProposalIn(this, storeId, proposalId, caller, options)
-  }
-
-  async staleProposal(storeId: string, proposal: TaskProposal, reason: string): Promise<ProposalContinuation> {
-    return svcProposals.staleProposal(this, storeId, proposal, reason)
-  }
-
-  async expireProposal(storeId: string, proposal: TaskProposal, reason: string): Promise<ProposalContinuation> {
-    return svcProposals.expireProposal(this, storeId, proposal, reason)
-  }
-
-  async requireProposal(storeId: string, proposalId: string): Promise<TaskProposal> {
-    return svcProposals.requireProposal(this, storeId, proposalId)
-  }
-
-  async readProposal(storeId: string, proposalId: string): Promise<TaskProposal | undefined> {
-    return svcProposals.readProposal(this, storeId, proposalId)
-  }
-
-  async requestProposalReview(request: ReviewSubject): Promise<{ requested: boolean; detail: string }> {
-    return svcProposals.requestProposalReview(this, request)
-  }
-
   async serializeParent<T>(storeId: string, parentTaskId: TaskId, work: () => Promise<T>): Promise<T> {
     return svcProposals.serializeParent(this, storeId, parentTaskId, work)
-  }
-
-  async reconcileProposals(storeId: string): Promise<ReconcileReport['unresolvedProposals']> {
-    return svcProposals.reconcileProposals(this, storeId)
-  }
-
-  async reconcileRootProposal(
-    storeId: string,
-    proposal: TaskProposalRoot,
-    report: (proposal: TaskProposal, status: TaskProposalStatus, reason: string) => Promise<void>,
-  ): Promise<void> {
-    return svcRootIntake.reconcileRootProposal(this, storeId, proposal, report)
   }
 
   async replayTask(
@@ -760,39 +623,6 @@ export class TaskRuntime extends Service {
     callerSessionId: string,
   ): Promise<ReplayRunOutcome> {
     return svcReplay.replayTask(this, storeId, championTaskId, options, callerSessionId)
-  }
-
-  registerDriver(
-    key: string,
-    storeId: string,
-    controller: AbortController,
-    promise: Promise<ChildOutcome[]>,
-    parentTaskId?: TaskId,
-  ): void {
-    return svcDrivers.registerDriver(this, key, storeId, controller, promise, parentTaskId)
-  }
-
-  standDownPendingDrivers(state: StoreRecoveryState): void {
-    return svcDrivers.standDownPendingDrivers(this, state)
-  }
-
-  invalidateStoreRecovery(storeId: string): void {
-    return svcRootRecovery.invalidateStoreRecovery(this, storeId)
-  }
-
-  async batchRecordIn(
-    storeId: string,
-    batchId: string,
-  ): Promise<{ taskId: TaskId; run: TaskRun; memberTaskIds: readonly TaskId[] } | undefined> {
-    return svcDrivers.batchRecordIn(this, storeId, batchId)
-  }
-
-  runSettledFromRuntime(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void {
-    return svcDrivers.runSettledFromRuntime(this, storeId, taskId, runId, status)
-  }
-
-  startBatchDriver(options: StartBatchDriverOptions): void {
-    return svcDrivers.startBatchDriver(this, options)
   }
 
   async submitResult(
@@ -811,10 +641,6 @@ export class TaskRuntime extends Service {
     return svcQuestions.answerParentQuestionImpl(this, callerSessionId, request)
   }
 
-  questionCoordination(): QuestionCoordinationDeps {
-    return svcQuestions.questionCoordination(this)
-  }
-
   async cancelBatch(storeId: string, batchId: string, callerSessionId: string): Promise<ChildOutcome[]> {
     return svcDrivers.cancelBatch(this, storeId, batchId, callerSessionId)
   }
@@ -831,18 +657,6 @@ export class TaskRuntime extends Service {
     return svcDrivers.reconcileStore(this, storeId, rootSessionId)
   }
 
-  async wakeUnclaimedQuestionMessages(storeId: string, deliveries: readonly QuestionReconcileReport[]): Promise<void> {
-    return svcQuestions.wakeUnclaimedQuestionMessages(this, storeId, deliveries)
-  }
-
-  wakeUnclaimedBatchResults(unread: readonly { sessionId: string; messageId: string }[]): void {
-    return svcNotify.wakeUnclaimedBatchResults(this, unread)
-  }
-
-  sessionHoldsPendingMessage(sessionId: string, messageId: string): boolean {
-    return svcNotify.sessionHoldsPendingMessage(this, sessionId, messageId)
-  }
-
   async resumeAdoptedWorkerSession(request: AdoptedWorkerResumeRequest): Promise<AdoptedWorkerResume> {
     return svcSessions.resumeAdoptedWorkerSession(this, request)
   }
@@ -851,20 +665,17 @@ export class TaskRuntime extends Service {
     return svcSessions.rebuildWorkspaceOwnership(this, storeId)
   }
 
-  async releaseStoreWorkspace(storeId: string): Promise<void> {
-    return svcSessions.releaseStoreWorkspace(this, storeId)
+  /**
+   * Pin the workspace one session's runs resolve to. The graph entry calls this
+   * with the bubble it materialized (A0 §1.1): the mapping is the one door that
+   * tells a restarted runtime where the root session works.
+   */
+  pinSessionWorkspace(sessionId: string, workspace: string): void {
+    svcSessions.pinSessionWorkspace(this, sessionId, workspace)
   }
 
   async failBatch(storeId: string, batchId: string, reason: string): Promise<void> {
     return svcDrivers.failBatch(this, storeId, batchId, reason)
-  }
-
-  recoverySessionFor(snapshot: TaskSnapshot | undefined, storeId: string): string {
-    return svcSessions.recoverySessionFor(this, snapshot, storeId)
-  }
-
-  async sessionForStore(storeId: string): Promise<string> {
-    return svcSessions.sessionForStore(this, storeId)
   }
 
   async runForSession(sessionId: string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }> {
@@ -873,10 +684,6 @@ export class TaskRuntime extends Service {
 
   allowsRuntimeDecomposition(): boolean {
     return svcSessions.allowsRuntimeDecomposition(this)
-  }
-
-  gatePhaseFromStore(sessionId: string, run: TaskRun, storeId: string, token: number): void {
-    return svcSessions.gatePhaseFromStore(this, sessionId, run, storeId, token)
   }
 
   async recoveryStatus(storeId: string): Promise<StoreRecoveryStatus> {
@@ -895,47 +702,6 @@ export class TaskRuntime extends Service {
     }
   }
 
-  async assertRecoveryReady(storeId: string, entry: string): Promise<void> {
-    return svcRootRecovery.assertRecoveryReady(this, storeId, entry)
-  }
-
-  reindex(storeId: string, snapshot: TaskSnapshot): void {
-    return svcSessions.reindex(this, storeId, snapshot)
-  }
-
-  async workspacePathForSession(sessionId: string): Promise<string | undefined> {
-    return svcSessions.workspacePathForSession(this, sessionId)
-  }
-
-  async workspacePathFor(sessionId: string): Promise<string | undefined> {
-    return svcSessions.workspacePathFor(this, sessionId)
-  }
-
-  async assertWorkspaceHeldBy(
-    workspace: string,
-    storeId: string,
-    parentTask: TaskInstance,
-    parentRunId: RunId,
-  ): Promise<void> {
-    return svcSessions.assertWorkspaceHeldBy(this, workspace, storeId, parentTask, parentRunId)
-  }
-
-  notify(sessionId: string, text: string): void {
-    return svcNotify.notify(this, sessionId, text)
-  }
-
-  notifyWhenReady(sessionId: string, text: string): void {
-    return svcNotify.notifyWhenReady(this, sessionId, text)
-  }
-
-  async deliverBatchResult(message: BatchResultMessage): Promise<BatchResultDeliveryStatus> {
-    return svcNotify.deliverBatchResult(this, message)
-  }
-
-  async deliverBatchResultNow(message: BatchResultMessage): Promise<BatchResultDeliveryStatus> {
-    return svcNotify.deliverBatchResultNow(this, message)
-  }
-
   async redeliverBatchResult(storeId: string, batchId: string): Promise<BatchResultDeliveryStatus> {
     return svcNotify.redeliverBatchResult(this, storeId, batchId)
   }
@@ -944,54 +710,16 @@ export class TaskRuntime extends Service {
     return svcNotify.reconcileSessionJobs(this, sessionId)
   }
 
-  admissionContext(): AdmissionContext {
-    return svcEnv.admissionContext(this)
-  }
-
   async envPathForSession(sessionId: string): Promise<string | undefined> {
     return svcEnv.envPathForSession(this, sessionId)
-  }
-
-  contractRefusal(parentTaskId: TaskId, reasons: readonly string[]): Error {
-    return svcEnv.contractRefusal(parentTaskId, reasons)
   }
 
   async orchestrateEnv(callerSessionId: string, actor: string, workspace?: string, overlay?: ReplayOverlay): Promise<OrchestrateEnv> {
     return svcEnv.orchestrateEnv(this, callerSessionId, actor, workspace, overlay)
   }
 
-  watchRun(storeId: string, runId: RunId, callback: (status: RunStatus) => void): () => void {
-    return svcEnv.watchRun(this, storeId, runId, callback)
-  }
-
-  sessionBoundInProcess(storeId: string, runId: RunId): string | undefined {
-    return svcEnv.sessionBoundInProcess(this, storeId, runId)
-  }
-
-  async releaseRunWorkspaceLayer(storeId: string, runId: RunId, sessionId: string): Promise<void> {
-    return svcEnv.releaseRunWorkspaceLayer(this, storeId, runId, sessionId)
-  }
-
-  async observeSession(sessionId: string): Promise<SessionObservation | undefined> {
-    return svcEnv.observeSession(this, sessionId)
-  }
-
   softService<T>(name: string): T | undefined {
     return svcEnv.softService(this, name)
-  }
-
-  async registeredVerifierIds(): Promise<readonly string[] | undefined> {
-    return svcEnv.registeredVerifierIdsImpl(this)
-  }
-
-  async providerPrecheck(
-    capabilities: readonly string[],
-    view: SkillDiscoveryView,
-    table: Readonly<Record<string, CapabilityConfig>> = this.config.capabilities,
-    mcpRegistry: Readonly<Record<string, import('../mcp-servers.ts').McpServerTemplate>> = this.config.mcpServers ?? {},
-    callerSessionId?: string,
-  ): Promise<ProviderPrecheck> {
-    return svcEnv.providerPrecheck(this, capabilities, view, table, mcpRegistry, callerSessionId)
   }
 
   async capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheck> {
@@ -1002,19 +730,8 @@ export class TaskRuntime extends Service {
     return svcEnv.readRunBindingImpl(binding)
   }
 
-  async assertKnownVerifierRefs(
-    declared: readonly { childIndex: number; criterion: AcceptanceCriterion }[],
-    what: string,
-  ): Promise<void> {
-    return svcEnv.assertKnownVerifierRefs(this, declared, what)
-  }
-
   liveAgent(sessionId: string): Agent {
     return svcEnv.liveAgent(this, sessionId)
-  }
-
-  agentOrUndefined(sessionId: string): Agent | undefined {
-    return svcEnv.agentOrUndefined(this, sessionId)
   }
 
   /** Public alias of the protected `Service.ctx` for the extracted modules. */

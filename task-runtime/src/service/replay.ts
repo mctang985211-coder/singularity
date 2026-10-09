@@ -21,6 +21,10 @@ import type { WorkspaceOwner } from '../workspace.ts'
 import type { ReplayTaskOptions } from '../types.ts'
 import { message, now } from '../helpers.ts'
 import { rebaseWorkspacePaths } from '../replay-paths.ts'
+import * as svcDrivers from './drivers.ts'
+import * as svcEnv from './env.ts'
+import * as svcRootRecovery from './root-recovery.ts'
+import * as svcSessions from './sessions.ts'
 
 export async function replayTask(
   self: TaskRuntime,
@@ -34,7 +38,7 @@ export async function replayTask(
   if (unknown.length > 0) {
     throw new Error(`task-runtime: replayTask does not accept options [${unknown.join(', ')}]`)
   }
-  await self.assertRecoveryReady(storeId, 'a replay')
+  await svcRootRecovery.assertRecoveryReady(self, storeId, 'a replay')
   const champion = await self.context.task.taskIn(storeId, championTaskId)
   if (champion.status !== 'verified' && champion.status !== 'failed') {
     throw new Error(
@@ -44,7 +48,6 @@ export async function replayTask(
   // A verified/failed task always has at least one run; the latest is the
   // champion run the replay's own run descends from (execution lineage).
   const championRunId = champion.runIds[champion.runIds.length - 1]!
-  const championRun = await self.context.task.runIn(storeId, championRunId)
   /**
    * The immutable environment revision this replay binds: the candidate a
    * caller explicitly trials when it names one, else the active revision. An
@@ -91,11 +94,11 @@ export async function replayTask(
    * longer holds what was judged is refused rather than silently re-read.
    */
   const candidateRoots = revision !== undefined && options.trialCandidateRef !== undefined ? [revision.skillRoot] : []
-  const precheck = await self.providerPrecheck(
+  const precheck = await svcEnv.providerPrecheck(self, 
     Object.keys(manifest.capabilities),
     {
       ...(envPath === undefined ? {} : { cwd: envPath }),
-      extraRoots: (await self.skillViewForSession(callerSessionId, [...(options.overlay?.extraSkillRoots ?? []), ...candidateRoots])).extraRoots,
+      extraRoots: (await self.skillViewForSession(callerSessionId, candidateRoots)).extraRoots,
     },
     table,
     mcpRegistry,
@@ -125,7 +128,7 @@ export async function replayTask(
   if (acceptanceDefects.length > 0) {
     throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join('\n- ')}`)
   }
-  await self.assertKnownVerifierRefs(
+  await svcEnv.assertKnownVerifierRefs(self, 
     fixed.criteria.map(criterion => ({ childIndex: 0, criterion })),
     `replay of "${championTaskId}"`,
   )
@@ -178,7 +181,7 @@ export async function replayTask(
       throw new Error(`task-runtime: replay of "${championTaskId}" refused: ${startVerdict.reason}`)
     }
   }
-  const workspacePath = named ?? (await self.workspacePathForSession(callerSessionId))
+  const workspacePath = named ?? (await svcSessions.workspacePathForSession(self, callerSessionId))
   const workspaceOwner =
     workspacePath === undefined
       ? undefined
@@ -199,10 +202,7 @@ export async function replayTask(
           // what the replay resolved against without re-running discovery.
           providers: precheck,
           lineage: options.lineage,
-          agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, self.config.defaultPreset),
-          ...(options.overlay?.extraSkillRoots === undefined
-            ? {}
-            : { skillRoots: [...options.overlay.extraSkillRoots] }),
+          agentPreset: resolvePreset(manifest, self.config.defaultPreset),
           /**
            * The execution binding this run is placed under (S4-E §Q3): the caller's
            * frozen selection, forwarded verbatim — the orchestration carries it to
@@ -260,7 +260,7 @@ export async function replayTask(
    * cancellation or an unload stops it. Its own promise never rejects — the
    */
   const driverKey = `replay/${storeId}/${task.taskId}`
-  self.registerDriver(
+  svcDrivers.registerDriver(self, 
     driverKey,
     storeId,
     controller,
@@ -272,7 +272,7 @@ export async function replayTask(
   return await promise
 }
 
-export async function claimReplayWorkspace(
+async function claimReplayWorkspace(
   self: TaskRuntime,
   workspace: string,
   storeId: string,
@@ -308,7 +308,7 @@ export async function claimReplayWorkspace(
   return owner
 }
 
-export async function releaseReplayWorkspace(
+async function releaseReplayWorkspace(
   self: TaskRuntime,
   workspace: string,
   owner: WorkspaceOwner,

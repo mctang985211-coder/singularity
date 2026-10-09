@@ -11,7 +11,6 @@ import {
   parseRevisionManifest,
   revisionCapabilityRows,
   revisionSkillOf,
-  revisionTemplateOf,
 } from '../../src/environment/revision.ts'
 import type { EnvironmentRevisionManifest } from '../../src/environment/revision.ts'
 
@@ -53,7 +52,7 @@ describe('environment revision manifest', () => {
     manifest = applySkillEdit(manifest, { name: 'explore-metrics', skillMd: skill('explore-metrics', 'Method one'), expectedVersion: 0, actor: 'tester' })
     expect(revisionSkillOf(manifest, 'explore-metrics')).toMatchObject({ version: 1, status: 'temporary', contractDigest: null })
     manifest = applyTemplateEdit(manifest, template())
-    expect(revisionTemplateOf(manifest, 'explore-next-stage')?.skills).toEqual(['explore-metrics', 'task-coordination'])
+    expect(manifest.taskTemplates.find(entry => entry.templateRef.id === 'explore-next-stage')?.skills).toEqual(['explore-metrics', 'task-coordination'])
     expect(applyTemplateEdit(manifest, template())).toBe(manifest)
     expect(() => applyTemplateEdit(manifest, { ...template(), appliesTo: ['conflicting bytes'] })).toThrow(/new version/)
     manifest = applyReviewEdit(manifest, { kind: 'skill', name: 'explore-metrics', version: 1, status: 'retained', reason: 'verified on three runs', actor: 'reviewer' }, 'reviewer')

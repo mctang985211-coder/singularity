@@ -51,6 +51,10 @@ import type {
   StartRecoveryAttemptInput,
 } from '../types.ts'
 import { message, now } from '../helpers.ts'
+import * as svcDrivers from './drivers.ts'
+import * as svcEnv from './env.ts'
+import * as svcNotify from './notify.ts'
+import * as svcSessions from './sessions.ts'
 
 export async function recoverRootTask(
   self: TaskRuntime,
@@ -67,7 +71,7 @@ export async function recoverRootTask(
       'task-runtime: a recovery attempt is opened for the session that asks for it: pass a non-empty caller session id',
     )
   }
-  if (self.agentOrUndefined(caller.sessionId) === undefined) {
+  if (svcEnv.agentOrUndefined(self, caller.sessionId) === undefined) {
     throw new Error(
       `task-runtime: caller session "${caller.sessionId}" has no live agent, so the new attempt's Session cannot be spawned from it; ` +
         'nothing was written and no run was started',
@@ -78,7 +82,7 @@ export async function recoverRootTask(
   return await self.serializeRootIntake(storeId, () => recoverRootTaskOnce(self, storeId, request, caller))
 }
 
-export async function assertRecoveryCallerOwnsStore(
+async function assertRecoveryCallerOwnsStore(
   self: TaskRuntime,
   storeId: string,
   caller: RootRecoveryCaller,
@@ -128,7 +132,7 @@ function assertRoundCap(
   )
 }
 
-export async function recoverRootTaskOnce(
+async function recoverRootTaskOnce(
   self: TaskRuntime,
   storeId: string,
   request: RootRecoveryRequest,
@@ -226,7 +230,7 @@ export async function recoverRootTaskOnce(
     )
   }
   const unbound: RunMemberReuseRefusal[] = derived?.unbound ?? []
-  const rootSessionId = sourceRun?.sessionId ?? self.recoverySessionFor(snapshot, storeId)
+  const rootSessionId = sourceRun?.sessionId ?? svcSessions.recoverySessionFor(self, snapshot, storeId)
   /**
    * The candidate an explicit trial binds, resolved before the pre-check: the
    * provider verdicts this attempt is bound from must be judged against the
@@ -259,7 +263,7 @@ export async function recoverRootTaskOnce(
     )
   }
   const envPath = await self.envPathForSession(rootSessionId)
-  const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
+  const precheck = await svcEnv.providerPrecheck(self, Object.keys(manifest.capabilities), {
     ...(envPath === undefined ? {} : { cwd: envPath }),
     extraRoots: (await self.skillViewForSession(
       rootSessionId,
@@ -304,7 +308,7 @@ export async function recoverRootTaskOnce(
   })
 }
 
-export function recoveryAttemptForRequest(
+function recoveryAttemptForRequest(
   snapshot: TaskSnapshot,
   request: RootRecoveryRequest,
 ): RootRecoveryOutcome | undefined {
@@ -345,7 +349,7 @@ export function recoveryAttemptForRequest(
   }
 }
 
-export function assertRecoveryContract(source: TaskInstance): void {
+function assertRecoveryContract(source: TaskInstance): void {
   const contract = source.contract
   if (contract === undefined) {
     throw new Error(
@@ -393,7 +397,7 @@ function reviewMetricsLine(review: ReviewRecord): string {
 }
 
 /** The round before one attempt as a notice for the new attempt's own session: criterion verdicts and effort facts, read from the store. */
-export function priorRoundNotice(
+function priorRoundNotice(
   snapshot: TaskSnapshot,
   source: TaskInstance,
   sourceRun: TaskRun,
@@ -430,7 +434,7 @@ export function priorRoundNoticeForRun(snapshot: TaskSnapshot, run: TaskRun): st
   return sourceRun === undefined ? undefined : priorRoundNotice(snapshot, source, sourceRun)
 }
 
-export async function startRecoveryAttempt(
+async function startRecoveryAttempt(
   self: TaskRuntime,
   input: StartRecoveryAttemptInput,
 ): Promise<RootRecoveryOutcome> {
@@ -491,7 +495,7 @@ export async function startRecoveryAttempt(
   // The round's bubble, when the caller materialized one, is the worker's own
   // checkout: it is claimed and resumed exactly like the session's own.
   const workspacePath = request.workspacePath === undefined
-    ? await self.workspacePathForSession(rootSessionId)
+    ? await svcSessions.workspacePathForSession(self, rootSessionId)
     : await normalizeWorkspacePath(request.workspacePath)
   /**
    * A bubble and the run opened into it name one method revision: the driver
@@ -579,7 +583,10 @@ export async function startRecoveryAttempt(
   } catch (error) {
     const reason = message(error)
     const env = await self.orchestrateEnv(actor, actor, workspacePath)
-    const failed = await self.context.task.snapshotIn(storeId).catch(() => undefined)
+    const failed = await self.context.task.snapshotIn(storeId).catch(error => {
+      self.warn(`store ${storeId}: the recovery attempt of run "${runId}" could not be re-read (${message(error)})`)
+      return undefined
+    })
     const run = failed?.runs.find(item => item.runId === runId)
     if (run !== undefined && run.status === 'running') {
       await settleRunFromRuntime(
@@ -606,7 +613,7 @@ export async function startRecoveryAttempt(
   // review records it — verdicts and effort, no score, no judgement.
   if (input.sourceRun !== undefined) {
     const notice = priorRoundNotice(after, source, input.sourceRun)
-    if (notice !== undefined) self.notify(sessionId, notice)
+    if (notice !== undefined) svcNotify.notify(self, sessionId, notice)
   }
   return {
     attempt: 'started',
@@ -633,7 +640,7 @@ export function invalidateStoreRecovery(self: TaskRuntime, storeId: string): voi
   if (state === undefined) return
   if (state.status === 'recovering') {
     state.cancelled = true
-    self.standDownPendingDrivers(state)
+    svcDrivers.standDownPendingDrivers(self, state)
     state.release(false)
   } else {
     self.storeRecovery.delete(storeId)
@@ -661,7 +668,7 @@ export async function recoveryStatus(self: TaskRuntime, storeId: string): Promis
      * whose agent is live here (a resumed root, a spawned worker still in its
      */
     if (self.startedSessions.has(run.sessionId)) continue
-    if (self.agentOrUndefined(run.sessionId) !== undefined) continue
+    if (svcEnv.agentOrUndefined(self, run.sessionId) !== undefined) continue
     if (run.batchId !== undefined && self.drivers.has(`${storeId}/${run.batchId}`)) continue
     if (self.drivers.has(`replay/${storeId}/${run.taskId}`)) continue
     if (rootTaskStoreId(run.sessionId) === storeId) continue

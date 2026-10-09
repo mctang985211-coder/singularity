@@ -11,7 +11,6 @@ import type {
   EvolutionCommitLedger,
   ProviderPrecheck,
 } from '../../src/provider-precheck.ts'
-import { executionProviders } from '../../src/sidecar.ts'
 import type { ExecutionProviderVerdict, RejectedProviderVerdict, SkillProviderVerdict } from '../../src/sidecar.ts'
 
 /**
@@ -263,10 +262,9 @@ describe('precheckProviders', () => {
 
     expect(providerRefusals(report)).toEqual([])
     const verdictValue = verdict(report, 'design-ball', 'ball-align')
+    // The one entry that may close an execution gap stays empty for a knowledge
+    // skill, however loadable it is: the role is the claim.
     expect(verdictValue.valid && verdictValue.role).toBe('knowledge')
-    // The one entry that may close an execution gap stays empty for it, however
-    // loadable it is.
-    expect(executionProviders([verdictValue])).toEqual([])
   })
 
   test('a skill without a sidecar is guidance: accepted, with what its identity does not cover named', async () => {
@@ -279,7 +277,6 @@ describe('precheckProviders', () => {
     expect(verdictValue.valid).toBe(true)
     if (!verdictValue.valid || verdictValue.role !== 'guidance') throw new Error('expected guidance')
     expect(verdictValue.uncovered).toEqual(['README.md'])
-    expect(executionProviders([verdictValue])).toEqual([])
   })
 
   test("overlay roots are searched before the worker's own roots: the overlay skill is what is judged", async () => {

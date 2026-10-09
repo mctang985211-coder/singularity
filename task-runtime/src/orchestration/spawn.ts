@@ -97,7 +97,7 @@ export function skillRootsForRun(overlayRoots: readonly string[], binding: RunPr
 }
 
 /** The bubble's method volume as an overlay skill root, when `workspace` is a bubble workspace; the environment's own libraries are hidden there. */
-export function bubbleSkillRoots(workspace: string | undefined): string[] {
+function bubbleSkillRoots(workspace: string | undefined): string[] {
   if (workspace === undefined) return []
   const root = join(workspace, '.bubble', 'method-volume')
   return existsSync(root) ? [root] : []

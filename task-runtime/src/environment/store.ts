@@ -15,7 +15,6 @@ import type { TaskTemplate } from '@dangosys/dsh-singularity-task'
 import { parseTaskTemplate } from '../task-template.ts'
 import { loadSkillSidecar } from '../sidecar.ts'
 import { SKILL_SIDECAR_FILE, skillContentDigest, skillContractDigest } from '../skill-contract.ts'
-import { readVerifiedFile } from '../verified-read.ts'
 import { ENVIRONMENT_REVISION_ID, manifestDigest, parseRevisionManifest, revisionRefOf } from './revision.ts'
 import type {
   EnvironmentRevision,
@@ -35,7 +34,7 @@ export function libraryRoots(rootSessionId: string, home = process.env.DSH_HOME 
   return { id: rootSessionId, root: join(home, 'singularity', 'environments', rootSessionId) }
 }
 
-export function environmentProtocolMarker(library: LibraryRoots): string {
+function environmentProtocolMarker(library: LibraryRoots): string {
   return join(library.root, 'protocol.json')
 }
 
@@ -244,7 +243,7 @@ export async function copyRevisionDirectory(from: string, to: string): Promise<v
 }
 
 /** The defects one revision directory has against its manifest; empty means the directory is exactly what the manifest declares. */
-export interface RevisionDefects {
+interface RevisionDefects {
   readonly defects: readonly string[]
 }
 
@@ -334,9 +333,4 @@ export async function verifyRevisionDirectory(directory: string, manifest: Envir
     }
   }
   return { defects }
-}
-
-/** Read one file of one skill inside one revision, through the verified walk: no links, no escapes, real entries only. */
-export async function readRevisionSkillFile(revision: EnvironmentRevision, name: string, rel: string): Promise<Buffer> {
-  return readVerifiedFile(join(revision.skillRoot, name), rel)
 }

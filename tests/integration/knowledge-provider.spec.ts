@@ -1,7 +1,6 @@
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { executionProviders } from '../../task-runtime/src/index.ts'
 import type { CapabilityConfig, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { disposeRunStacks, startRunStack, writeKnowledgeSkill } from '../support/run-stack.ts'
 
@@ -11,8 +10,8 @@ import { disposeRunStacks, startRunStack, writeKnowledgeSkill } from '../support
  * The distinction the sidecar contract exists for, asserted on the surfaces that
  * decide it:
  *
- * 1. the pre-check's own verdict — `knowledge`, carrying no execution field, and
- *    absent from {@link executionProviders}, the only set that may close a gap;
+ * 1. the pre-check's own verdict — `knowledge`, carrying no execution field, so
+ *    it can never be part of the set that closes an execution gap;
  * 2. the run's record — the binding names the skill's role and its content
  *    identity, and the worker's own skill layer actually registers those bytes;
  * 3. the gap — a *name* the capability table does not hold is a gap even though a
@@ -84,11 +83,10 @@ describe('a knowledge provider (S1-C)', () => {
     expect(verdict.directory).toBe(directory)
     expect(verdict.contractDigest).toMatch(/^[0-9a-f]{64}$/)
     // The role is not a label: a knowledge verdict carries no execution field at
-    // all, and the only set that may close an execution gap leaves it out.
+    // all, so it can never join the set that closes an execution gap.
     expect('verifierRef' in verdict).toBe(false)
     expect('requiredTools' in verdict).toBe(false)
     expect('precondition' in verdict).toBe(false)
-    expect(executionProviders(row.skills)).toEqual([])
 
     // 2. The run's record and the worker's own layer agree with that verdict.
     const run = await h.task.runIn(root.storeId, outcomes[0]!.runId!)

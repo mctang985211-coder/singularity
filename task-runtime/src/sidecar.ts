@@ -65,7 +65,7 @@ type CapabilityToolAnswer =
   ({ readonly known: true } & CapabilityGrants) | { readonly known: false; readonly reason: string }
 
 /** How a caller lends its capability table to the pre-check. */
-export type CapabilityToolQuery = (capability: string) => CapabilityToolAnswer
+type CapabilityToolQuery = (capability: string) => CapabilityToolAnswer
 
 /** Everything the pre-check needs that is not the candidate itself. */
 export interface SkillValidationContext {
@@ -137,7 +137,7 @@ interface LoadedSkillFrontmatter {
 }
 
 /** One provider under pre-check: the granted skill name and where discovery found it. */
-export interface SkillProviderCandidate {
+interface SkillProviderCandidate {
   /** The skill name a capability grants; the directory under a skill root is named after it. */
   readonly name: string
   /** Absolute path of the skill directory discovery resolved, or absent when nothing was found. */
@@ -175,7 +175,7 @@ export interface ExecutionProviderVerdict {
 }
 
 /** A knowledge skill: loadable, content-verified, and deliberately without any execution claim. */
-export interface KnowledgeProviderVerdict {
+interface KnowledgeProviderVerdict {
   readonly valid: true
   readonly role: 'knowledge'
   readonly name: string
@@ -215,16 +215,6 @@ export interface RejectedProviderVerdict {
 }
 
 export type SkillProviderVerdict = AcceptedSkillProviderVerdict | RejectedProviderVerdict
-
-/**
- * The verdicts that may close an execution gap — and the only place a caller
- * needs to ask. A knowledge or guidance verdict is not in the result, so the
- */
-export function executionProviders(verdicts: readonly SkillProviderVerdict[]): ExecutionProviderVerdict[] {
-  return verdicts.filter(
-    (verdict): verdict is ExecutionProviderVerdict => verdict.valid && verdict.role === 'execution-provider',
-  )
-}
 
 /** One provider's declared content identity inside the registry revision. */
 interface SkillProviderIdentity {

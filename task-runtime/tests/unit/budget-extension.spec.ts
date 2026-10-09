@@ -2,15 +2,8 @@ import { describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { TaskBudgetExtensionClaim, TaskInstance, TaskRun, TaskSnapshot } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
-import type {
-  Config,
-  RootBudgetApproval,
-  RootBudgetApprovalAsk,
-  RootBudgetApprovalDecision,
-  RootBudgetExtensionHost,
-  RootBudgetExtensionRequest,
-  RootBudgetExtensionResult,
-} from '../../src/index.ts'
+import type { Config, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, RootBudgetExtensionResult } from '../../src/index.ts'
+import type { RootBudgetExtensionHost, RootBudgetExtensionRequest } from '../../src/types.ts'
 import { TaskRuntime, resolveRootBudget } from '../../src/index.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'

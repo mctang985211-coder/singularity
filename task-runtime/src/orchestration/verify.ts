@@ -17,7 +17,7 @@ import type { MissingArtifact, OrchestrateEnv } from './types.ts'
 import type { UnmetCriterion } from './types.ts'
 
 /** Grace the cascade's safety net grants a verifier beyond its own deadline before giving up on it. */
-export const VERIFY_SAFETY_MARGIN_MS = 15_000
+const VERIFY_SAFETY_MARGIN_MS = 15_000
 
 /** Read `signal.aborted` behind a function boundary so control-flow narrowing never freezes the value. */
 export function isAborted(signal: AbortSignal | undefined): boolean {

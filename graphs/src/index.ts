@@ -259,7 +259,7 @@ export class GraphsService extends Service {
         )
         // The root session's own workspace is that bubble: the runtime resolves the
         // graph's checkout from this mapping, never from the environment's path.
-        runtime?.sessionWorkspaces.set(rootSessionId, workspace)
+        runtime?.pinSessionWorkspace(rootSessionId, workspace)
         const handle = await this.ctx.agentRuntime.createRoot({
           sessionId: rootSessionId,
           cwd: workspace,
@@ -520,7 +520,7 @@ export class GraphsService extends Service {
     // restarted process resolves the checkout to the environment port the
     // bubble was cloned from. A graph with no bubble keeps the environment path.
     const bubble = latestBubbleWorkspacePath(process.env.DSH_HOME || join(homedir(), '.dsh'), graph.rootSessionId)
-    if (bubble !== undefined) taskRuntime.sessionWorkspaces.set(graph.rootSessionId, bubble)
+    if (bubble !== undefined) taskRuntime.pinSessionWorkspace(graph.rootSessionId, bubble)
     await taskRuntime.adoptRoot(rootTaskStoreId(graph.rootSessionId), graph.rootSessionId)
     await this.ctx.graph.switchStore(graph.graphStoreId)
     await this.ctx.layout.switchStore(graph.layoutStoreId)

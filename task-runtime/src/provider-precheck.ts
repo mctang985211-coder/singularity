@@ -74,7 +74,7 @@ export async function registeredVerifierVocabulary(
  * The refusal of an execution sidecar the deployment cannot judge because its
  * verifier vocabulary could not be listed: the declared ref is refused rather
  */
-export function unlistableVerifierRefusal(
+function unlistableVerifierRefusal(
   name: string,
   directory: string | undefined,
   ref: string,
@@ -443,36 +443,6 @@ export async function precheckProviders(request: ProviderPrecheckRequest): Promi
     ...(verifierRefs === undefined ? {} : { verifierRefs: [...verifierRefs] }),
     revision: registryRevision(request.table, providers, request.mcpRegistry),
   }
-}
-
-/**
- * One capability row as it would read after a replacement, checked by the same
- * pre-check a batch is admitted under: `entry` is folded into `table` — the row
- */
-export async function precheckReplacedCapabilityRow(request: {
-  /** The capability row being written. */
-  readonly name: string
-  /** The row's entry as it will read after the replacement. */
-  readonly entry: CapabilityConfig
-  /** The table the row is folded into — the replacement table, then. */
-  readonly mcpRegistry?: Readonly<Record<string, McpServerTemplate>>
-  readonly table: Readonly<Record<string, CapabilityConfig>>
-  /** Where discovery looks; a deployment's own process viewpoint or a worker's checkout. */
-  readonly view: SkillDiscoveryView
-  /** The registered verifier ids (`VerifierRegistry.verifierIds()`), or absent when the registry cannot be listed. */
-  readonly verifierRefs?: readonly string[]
-  /** The deployment's evolution ledger (`optionalService(ctx, 'evolution')`), or absent when the deployment mounts none. */
-  readonly commitLedger?: EvolutionCommitLedger
-}): Promise<{ readonly precheck: ProviderPrecheck; readonly refusals: readonly string[] }> {
-  const precheck = await precheckProviders({
-    capabilities: [request.name],
-    table: { ...request.table, [request.name]: request.entry },
-    ...(request.mcpRegistry === undefined ? {} : { mcpRegistry: request.mcpRegistry }),
-    view: request.view,
-    ...(request.verifierRefs === undefined ? {} : { verifierRefs: request.verifierRefs }),
-    ...(request.commitLedger === undefined ? {} : { commitLedger: request.commitLedger }),
-  })
-  return { precheck, refusals: providerRefusals(precheck) }
 }
 
 /**

@@ -19,7 +19,7 @@ import { settleSubmittedRun } from './batch.ts'
 import type { OrchestrateEnv, ReplayRunInit, ReplayRunOutcome, ReplayRunSignals } from './types.ts'
 import { missingArtifactReason, missingRequiredArtifacts } from './verify.ts'
 import { observeWorkerRun } from './observe.ts'
-import { recordTerminalReview, runDurationMs } from './settlement.ts'
+import { runDurationMs, settleTerminalRun } from './settlement.ts'
 import { assertPresetUsable, authorizedGrant, permissionFor, skillRootsForRun } from './spawn.ts'
 import { isAborted, isTerminalRun } from './verify.ts'
 
@@ -113,8 +113,7 @@ export async function runReplayTask(
   } catch (error) {
     const reason = `content binding failed: ${message(error)}`
     await env.task.startRunIn(storeId, run, env.actor)
-    await env.task.markRunStatusIn(storeId, task.taskId, run.runId, 'failed', env.actor, { reason })
-    await recordTerminalReview(env, storeId, task.taskId, 'failed', { run, localizedCause: reason, anomalies })
+    await settleTerminalRun(env, storeId, task.taskId, 'failed', { run, reason, anomalies })
     return await finishReplay(env, storeId, run, 'failed')
   }
   await env.task.startRunIn(
@@ -155,8 +154,7 @@ export async function runReplayTask(
     })
   } catch (error) {
     const reason = `spawn failed: ${message(error)}`
-    await env.task.markRunStatusIn(storeId, task.taskId, run.runId, 'failed', env.actor, { reason })
-    await recordTerminalReview(env, storeId, task.taskId, 'failed', { run, localizedCause: reason, anomalies })
+    await settleTerminalRun(env, storeId, task.taskId, 'failed', { run, reason, anomalies })
     return await finishReplay(env, storeId, run, 'failed')
   }
 
@@ -205,24 +203,19 @@ async function settleReplayRun(
 ): Promise<ReplayRunOutcome> {
   const current = await env.task.runIn(storeId, run.runId)
   if (isTerminalRun(current.status)) return await finishReplay(env, storeId, run, statusOutcome(current.status))
-  try {
-    await env.task.markRunStatusIn(storeId, task.taskId, run.runId, settlement.status, env.actor, {
-      ...(settlement.reason === undefined ? {} : { reason: settlement.reason }),
-    })
-  } catch (error) {
+  const result = await settleTerminalRun(env, storeId, task.taskId, settlement.status, {
+    run,
+    reason: settlement.reason,
+    localizedCause: settlement.localizedCause,
+    anomalies: settlement.anomalies,
     /**
      * The store's own arbiter rule, as in `settleChildRun`: a run it now holds
      * terminal was settled by somebody else while this settlement was in flight,
+     * and the settlement that won owns the outcome.
      */
-    const settled = await env.task.runIn(storeId, run.runId).catch(() => undefined)
-    if (settled === undefined || !isTerminalRun(settled.status)) throw error
-    return await finishReplay(env, storeId, run, statusOutcome(settled.status))
-  }
-  await recordTerminalReview(env, storeId, task.taskId, settlement.status, {
-    run,
-    ...(settlement.localizedCause === undefined ? {} : { localizedCause: settlement.localizedCause }),
-    ...(settlement.anomalies === undefined ? {} : { anomalies: settlement.anomalies }),
+    arbitrate: true,
   })
+  if (!result.settled) return await finishReplay(env, storeId, run, statusOutcome(result.run.status))
   env.onRunSettled?.(storeId, task.taskId, run.runId, settlement.status)
   return await finishReplay(env, storeId, run, settlement.status)
 }

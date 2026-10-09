@@ -22,6 +22,12 @@ import {
 import type { StoreRecoveryState } from '../config.ts'
 import type { QuestionResumeReport, ReconcileReport, StartBatchDriverOptions } from '../types.ts'
 import { message, now } from '../helpers.ts'
+import * as svcEnv from './env.ts'
+import * as svcNotify from './notify.ts'
+import * as svcProposals from './proposals.ts'
+import * as svcQuestions from './questions.ts'
+import * as svcRootRecovery from './root-recovery.ts'
+import * as svcSessions from './sessions.ts'
 
 export function registerDriver(
   self: TaskRuntime,
@@ -51,7 +57,7 @@ export function standDownPendingDrivers(self: TaskRuntime, state: StoreRecoveryS
   }
 }
 
-export async function failBatchFromRuntime(
+async function failBatchFromRuntime(
   self: TaskRuntime,
   storeId: string,
   key: string,
@@ -66,8 +72,8 @@ export async function failBatchFromRuntime(
     const found = await batchRecordIn(self, storeId, batchId)
     if (found === undefined) return
     await blockUnstartedChildren(parts, storeId, found.memberTaskIds, reason)
-    const parentRun = await self.context.task.runIn(storeId, found.run.runId).catch(() => undefined)
-    if (parentRun === undefined || parentRun.status !== 'running') return
+    const parentRun = await self.context.task.runIn(storeId, found.run.runId)
+    if (parentRun.status !== 'running') return
     await settleRunFromRuntime(parts, storeId, parentRun, outcome, `batch ${batchId} ${outcome}: ${reason}`)
   } catch (error) {
     self.warn(`store ${storeId}: the failed driver ${key} could not be settled (${message(error)})`)
@@ -89,23 +95,23 @@ export async function batchRecordIn(
     : { taskId: found.run.taskId, run: found.run, memberTaskIds: [...found.batch.memberTaskIds] }
 }
 
-export function batchHeldByRun(run: TaskRun, batchId: string): boolean {
+function batchHeldByRun(run: TaskRun, batchId: string): boolean {
   return run.batches?.some(batch => batch.batchId === batchId) === true
 }
 
-export function settlementParts(self: TaskRuntime, actor: string): RuntimeSettlementEnv {
+function settlementParts(self: TaskRuntime, actor: string): RuntimeSettlementEnv {
   return {
     task: self.context.task,
     actor,
     notify: (sessionId, text) => {
-      self.notify(sessionId, text)
+      svcNotify.notify(self, sessionId, text)
     },
-    observeSession: async sessionId => self.observeSession(sessionId),
+    observeSession: async sessionId => svcEnv.observeSession(self, sessionId),
     budget: { ...self.config.budget },
     onRunSettled: (storeId, taskId, runId, status) => {
       runSettledFromRuntime(self, storeId, taskId, runId, status)
     },
-    onTerminalReview: fact => self.notifyTerminalReview(fact),
+    onTerminalReview: fact => svcNotify.notifyTerminalReview(self, fact),
     sealReceipt: async (storeId, taskId, runId, excludeCallId) => {
       await self.sealReceiptBounded(storeId, taskId, runId, excludeCallId)
     },
@@ -122,15 +128,14 @@ export function runSettledFromRuntime(
 ): void {
   void taskId
   void status
-  const activeSession = self.sessionBoundInProcess(storeId, runId)
+  const activeSession = svcEnv.sessionBoundInProcess(self, storeId, runId)
   if (activeSession !== undefined) self.activeWorkerSessions.delete(activeSession)
   for (const notify of self.capacityWaiters) notify()
   void recomputeAskingSessions(self, storeId, runId)
-  const sessionId = self.sessionBoundInProcess(storeId, runId)
+  const sessionId = svcEnv.sessionBoundInProcess(self, storeId, runId)
   if (sessionId === undefined) return
   self.executionGate.setTerminal(sessionId)
-  const release = self
-    .releaseRunWorkspaceLayer(storeId, runId, sessionId)
+  const release = svcEnv.releaseRunWorkspaceLayer(self, storeId, runId, sessionId)
     .catch(error => {
       self.warn(`run ${runId}: the workspace layer it held could not be released (${message(error)})`)
     })
@@ -148,7 +153,7 @@ export function runSettledFromRuntime(
   self.workspaceReleases.add(release)
 }
 
-export async function recomputeAskingSessions(self: TaskRuntime, storeId: string, runId: RunId): Promise<void> {
+async function recomputeAskingSessions(self: TaskRuntime, storeId: string, runId: RunId): Promise<void> {
   try {
     releaseAskingSessions(self.executionGate, await self.context.task.snapshotIn(storeId), runId)
   } catch (error) {
@@ -159,7 +164,7 @@ export async function recomputeAskingSessions(self: TaskRuntime, storeId: string
   }
 }
 
-export function reportUnsettledQuestionDeliveries(
+function reportUnsettledQuestionDeliveries(
   self: TaskRuntime,
   storeId: string,
   deliveries: readonly QuestionReconcileReport[],
@@ -226,7 +231,7 @@ export async function submitResult(
    * The recovery door comes before the run's own verdicts (A2 §E): a store
    * this process has not recovered is refused by name even when the run
    */
-  await self.assertRecoveryReady(storeId, 'a result submission')
+  await svcRootRecovery.assertRecoveryReady(self, storeId, 'a result submission')
   if (run.status !== 'running') {
     return {
       status: run.status,
@@ -386,7 +391,7 @@ export async function cancelBatch(
   return outcomes
 }
 
-export async function settleCancelledDescendants(
+async function settleCancelledDescendants(
   self: TaskRuntime,
   storeId: string,
   taskId: TaskId,
@@ -415,7 +420,7 @@ export async function settleCancelledDescendants(
   }
 }
 
-export async function abortDescendantBatches(self: TaskRuntime, storeId: string, taskId: TaskId): Promise<void> {
+async function abortDescendantBatches(self: TaskRuntime, storeId: string, taskId: TaskId): Promise<void> {
   let snapshot: TaskSnapshot
   try {
     snapshot = await self.context.task.snapshotIn(storeId)
@@ -442,7 +447,7 @@ export async function abortDescendantBatches(self: TaskRuntime, storeId: string,
 
 export async function cancelGraph(self: TaskRuntime, storeId: string, reason: string): Promise<void> {
   try {
-    self.reindex(storeId, await self.context.task.snapshotIn(storeId))
+    svcSessions.reindex(self, storeId, await self.context.task.snapshotIn(storeId))
   } catch (error) {
     self.warn(
       `store ${storeId}: it could not be read for the cancellation "${reason}" (${message(error)}), so nothing was cancelled`,
@@ -458,7 +463,7 @@ export async function cancelGraph(self: TaskRuntime, storeId: string, reason: st
    * A cancellation invalidates the recovery handle (A2 §E): drivers a still
    * running barrier registered but not started stand down here — not-started
    */
-  self.invalidateStoreRecovery(storeId)
+  svcRootRecovery.invalidateStoreRecovery(self, storeId)
   try {
     for (const [sessionId, binding] of self.sessions) {
       if (binding.storeId === storeId) self.executionGate.setTerminal(sessionId)
@@ -468,13 +473,13 @@ export async function cancelGraph(self: TaskRuntime, storeId: string, reason: st
     await Promise.all(entries.map(entry => entry.promise.catch(() => [])))
 
     const snapshot = await self.context.task.snapshotIn(storeId)
-    const env = await self.orchestrateEnv(await self.sessionForStore(storeId), `cancel-graph:${storeId}`)
+    const env = await self.orchestrateEnv(await svcSessions.sessionForStore(self, storeId), `cancel-graph:${storeId}`)
     const stillRunning = snapshot.runs.filter(run => run.status === 'running')
     for (const run of stillRunning) {
       await settleRunFromRuntime(env, storeId, run, 'cancelled', `cancelled with the graph: ${reason}`)
     }
     for (const run of stillRunning) await self.reconcileSessionJobs(run.sessionId)
-    await self.releaseStoreWorkspace(storeId)
+    await svcSessions.releaseStoreWorkspace(self, storeId)
   } finally {
     self.closingStores.delete(storeId)
   }
@@ -518,12 +523,12 @@ async function stopUnidentifiedBatch(
 
 export async function reconcileStore(self: TaskRuntime, storeId: string, rootSessionId?: string): Promise<ReconcileReport> {
   const snapshot = await self.context.task.snapshotIn(storeId)
-  self.reindex(storeId, snapshot)
+  svcSessions.reindex(self, storeId, snapshot)
   const depthOf = (taskId: TaskId): number => snapshot.tasks.find(task => task.taskId === taskId)?.depth ?? 0
   const ordered = snapshot.runs
     .filter(run => run.status === 'running')
     .sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId))
-  const env = await self.orchestrateEnv(rootSessionId ?? await self.sessionForStore(storeId), `recovery:${storeId}`)
+  const env = await self.orchestrateEnv(rootSessionId ?? await svcSessions.sessionForStore(self, storeId), `recovery:${storeId}`)
   /**
    * Every run this pass brings back works in the store's shared checkout, and
    * the mapping its own Session resolves that checkout from is what `spawn`
@@ -595,9 +600,9 @@ export async function reconcileStore(self: TaskRuntime, storeId: string, rootSes
    * a restart runs, and it runs it *after* the sessions the barrier brought
    */
   const deliverQuestions = async (): Promise<QuestionReconcileReport[]> => {
-    const deliveries = await reconcileQuestionDeliveries(self.questionCoordination(), storeId)
+    const deliveries = await reconcileQuestionDeliveries(svcQuestions.questionCoordination(self, ), storeId)
     reportUnsettledQuestionDeliveries(self, storeId, deliveries)
-    await self.wakeUnclaimedQuestionMessages(storeId, deliveries)
+    await svcQuestions.wakeUnclaimedQuestionMessages(self, storeId, deliveries)
     const barrier = self.storeRecovery.get(storeId)
     const candidates = deliveries.filter(
       delivery => delivery.status === 'delivered' || delivery.status === 'already-present',
@@ -610,7 +615,7 @@ export async function reconcileStore(self: TaskRuntime, storeId: string, rootSes
       for (const delivery of candidates) {
         const target = targetOf.get(delivery.messageId)
         if (target === undefined) continue
-        if (delivery.status === 'delivered' || self.sessionHoldsPendingMessage(target, delivery.messageId)) {
+        if (delivery.status === 'delivered' || svcNotify.sessionHoldsPendingMessage(self, target, delivery.messageId)) {
           barrier.wokenSessions.add(target)
         }
       }
@@ -638,7 +643,7 @@ export async function reconcileStore(self: TaskRuntime, storeId: string, rootSes
         )
       }
     }
-    self.wakeUnclaimedBatchResults(unread)
+    svcNotify.wakeUnclaimedBatchResults(self, unread)
   }
   const barrier = self.storeRecovery.get(storeId)
   let questionDeliveries: QuestionReconcileReport[] = []
@@ -657,7 +662,7 @@ export async function reconcileStore(self: TaskRuntime, storeId: string, rootSes
    * The proposal pass comes last (T2/T3 §5–§6): a batch it admits is driven by
    * the driver it starts, and the workspace question is already settled above,
    */
-  const unresolvedProposals = await self.reconcileProposals(storeId)
+  const unresolvedProposals = await svcProposals.reconcileProposals(self, storeId)
   /**
    * The receipt pass finishes the recovery: a process that died between a run's
    * terminal record and its receipt makes that receipt up here, exactly once.
@@ -675,7 +680,7 @@ export async function failBatch(self: TaskRuntime, storeId: string, batchId: str
   const found = await batchRecordIn(self, storeId, batchId)
   if (found === undefined) return
   const entry = self.drivers.get(`${storeId}/${batchId}`)
-  const env = await self.orchestrateEnv(await self.sessionForStore(storeId), `fail-batch:${storeId}`)
+  const env = await self.orchestrateEnv(await svcSessions.sessionForStore(self, storeId), `fail-batch:${storeId}`)
   // Persist failure before waking the driver's cancellation branch.
   try {
     await settleRunFromRuntime(env, storeId, found.run, 'failed', reason)

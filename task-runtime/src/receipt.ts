@@ -24,7 +24,7 @@ import type { SessionFacts } from './session-facts.ts'
 import { decompositionMatches } from './session-facts.ts'
 
 /** What the sealer hands the builder: the store's own records plus the session facts it gathered. */
-export interface ReceiptBuildInput {
+interface ReceiptBuildInput {
   readonly storeId: string
   readonly snapshot: TaskSnapshot
   readonly run: TaskRun
@@ -37,21 +37,31 @@ export interface ReceiptBuildInput {
 }
 
 /** What one build attempt settled as; `refused` names a missing precondition and the sealer retries later. */
-export type ReceiptBuildResult =
+type ReceiptBuildResult =
   | { readonly status: 'built'; readonly receipt: ExecutionReceipt }
   | { readonly status: 'refused'; readonly reason: string }
 
-/** The execution subtree one run froze: itself first, then every descendant, in store order. */
-export function executionSubtree(snapshot: TaskSnapshot, runId: RunId): readonly RunId[] {
-  const found = new Set<RunId>([runId])
-  for (;;) {
-    const size = found.size
-    for (const run of snapshot.runs) {
-      if (run.parentRunId !== undefined && found.has(run.parentRunId)) found.add(run.runId)
-    }
-    if (found.size === size) break
+/**
+ * One run's ancestors by `parentRunId`: itself first, then its parent up the
+ * chain. A link the snapshot does not hold ends the walk, as does a cycle — the
+ * snapshot's own runs are the only ones walked.
+ */
+export function runAncestors(snapshot: TaskSnapshot, runId: RunId): readonly RunId[] {
+  const parentOf = new Map(snapshot.runs.map(run => [run.runId, run.parentRunId]))
+  const chain: RunId[] = []
+  const seen = new Set<RunId>()
+  let current: RunId | undefined = runId
+  while (current !== undefined && !seen.has(current)) {
+    chain.push(current)
+    seen.add(current)
+    current = parentOf.get(current)
   }
-  return snapshot.runs.filter(run => found.has(run.runId)).map(run => run.runId)
+  return chain
+}
+
+/** The execution subtree one run froze: itself first, then every descendant, in store order. */
+function executionSubtree(snapshot: TaskSnapshot, runId: RunId): readonly RunId[] {
+  return snapshot.runs.filter(run => runAncestors(snapshot, run.runId).includes(runId)).map(run => run.runId)
 }
 
 /** One run's model use, from the facts its session log yielded. */

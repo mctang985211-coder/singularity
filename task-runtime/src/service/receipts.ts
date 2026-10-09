@@ -9,19 +9,21 @@
 import { TERMINAL_RUN_STATUSES } from '@dangosys/dsh-singularity-task'
 import type { ExecutionReceipt, RunId, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { TaskRuntime } from './runtime.ts'
-import { buildExecutionReceipt } from '../receipt.ts'
+import { buildExecutionReceipt, runAncestors } from '../receipt.ts'
 import type { SessionFacts } from '../session-facts.ts'
 import { sessionFactsOf } from '../session-facts.ts'
 import { message } from '../helpers.ts'
 import { drainSession } from '../gate.ts'
 import type { DrainResult, JobsView } from '../gate.ts'
 import { sessionEvents, sessionTokens } from './env.ts'
+import * as svcEnv from './env.ts'
+import * as svcEnvironment from './environment.ts'
 
 /** The actor every receipt is written under; no caller may write one. */
-export const RECEIPT_ACTOR = 'task-runtime:receipt'
+const RECEIPT_ACTOR = 'task-runtime:receipt'
 
 /** How long the sealer waits for a session log to pass a run's terminal boundary. */
-export const RECEIPT_PERSIST_WAIT_MS = 2000
+const RECEIPT_PERSIST_WAIT_MS = 2000
 
 /** How often the sealer re-reads the log while it waits. */
 const RECEIPT_PERSIST_POLL_MS = 50
@@ -33,7 +35,7 @@ const RECEIPT_PERSIST_POLL_MS = 50
  * unconfirmed result becomes the receipt's recorded `drain` fact rather than a
  * settlement that waits out the full write-drain window.
  */
-export const RECEIPT_DRAIN_TIMEOUT_MS = 2_000
+const RECEIPT_DRAIN_TIMEOUT_MS = 2_000
 
 /** What one sealing attempt settled as. */
 export type ReceiptSealStatus =
@@ -71,15 +73,7 @@ function record(report: MutableReport, runId: RunId, status: ReceiptSealStatus):
 
 /** Whether one run is the sealed run or a descendant of it, by `parentRunId`. */
 function atOrUnder(snapshot: TaskSnapshot, root: RunId, candidate: RunId): boolean {
-  const parentOf = new Map(snapshot.runs.map(run => [run.runId, run.parentRunId]))
-  let current: RunId | undefined = candidate
-  const seen = new Set<RunId>()
-  while (current !== undefined && !seen.has(current)) {
-    if (current === root) return true
-    seen.add(current)
-    current = parentOf.get(current)
-  }
-  return false
+  return runAncestors(snapshot, candidate).includes(root)
 }
 
 /**
@@ -131,7 +125,7 @@ async function sealOnce(
       reason: `run "${runId}" is an old-protocol run with no environment revision; no receipt is sealed for it`,
     }
   }
-  const revision = await self.environmentRevisionForRun(run)
+  const revision = await svcEnvironment.revisionForRun(self, run)
   if (revision === undefined) {
     return { status: 'unsupported', reason: `run "${runId}" binds revision "${run.environmentRevisionId}", which the library no longer holds` }
   }
@@ -158,7 +152,7 @@ async function drainForSealing(
   sessionId: string,
   excludeCallId?: string,
 ): Promise<'in-process' | 'reconciled' | 'unconfirmed'> {
-  const agent = self.agentOrUndefined(sessionId)
+  const agent = svcEnv.agentOrUndefined(self, sessionId)
   if (self.startedSessions.has(sessionId) && agent !== undefined) {
     try {
       const drained: DrainResult = await drainSession(self.executionGate, sessionId, {
@@ -261,30 +255,6 @@ export function queueReceiptSeal(self: TaskRuntime, storeId: string, taskId: Tas
       }
     })
   void next
-}
-
-/** Advance every queued seal of one store; a receipt is evidence, so a failure here never throws at the caller. */
-export async function flushReceiptSeals(self: TaskRuntime, storeId: string): Promise<ReceiptReconcileReport> {
-  const report = emptyReport()
-  const pending = self.receiptSeals.get(storeId)
-  if (pending === undefined) return report
-  const snapshot = await self.context.task.snapshotIn(storeId)
-  for (const runId of [...pending]) {
-    const taskId = snapshot.runs.find(run => run.runId === runId)?.taskId
-    if (taskId === undefined) {
-      pending.delete(runId)
-      report.deferred.push({ runId, reason: `run "${runId}" is absent from store "${storeId}"` })
-      continue
-    }
-    try {
-      const status = await sealRunReceipt(self, storeId, taskId, runId)
-      record(report, runId, status)
-      if (status.status === 'sealed' || status.status === 'already-sealed' || status.status === 'unsupported') pending.delete(runId)
-    } catch (error) {
-      report.deferred.push({ runId, reason: message(error) })
-    }
-  }
-  return report
 }
 
 /**

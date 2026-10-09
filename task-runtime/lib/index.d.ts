@@ -1,9 +1,9 @@
 import * as _dangosys_dsh_singularity_task0 from "@dangosys/dsh-singularity-task";
-import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CatalogPath, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, ExecutionReceipt, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReceiptMissingFact, ReceiptRequestIdentity, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RevisionPin, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef, TemplateParameters, TemplateScope } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, BudgetExtensionProposal, CapabilityManifest, CatalogPath, CriterionSpec, DecompositionAdmission, EvidenceBundle, ExecutionPhase, ExecutionReceipt, Obligation, QuestionAnswerRecord, QuestionRecord, ReceiptMissingFact, ReceiptRequestIdentity, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RevisionPin, RunId, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalPolicy, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef, TemplateParameters, TemplateScope } from "@dangosys/dsh-singularity-task";
 import { Context, Service } from "@deepseek-ai/cordis";
-import { SessionEvent, SessionId } from "@deepseek-ai/dsh-session";
+import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { AgentMessageIntent, AgentOptions, McpServerSpec, MessageDeliveryReport, MessageDeliveryStatus, SessionOwnLog, ToolCallBody, ToolCallRef, WorkerGrant, parseSkillFile } from "@dangosys/dsh-singularity-agent-runtime";
+import { AgentOptions, MessageDeliveryStatus, WorkerGrant, parseSkillFile } from "@dangosys/dsh-singularity-agent-runtime";
 import { ContextFormed } from "@deepseek-ai/dsh-llm";
 import { Agent, AgentHandle } from "@deepseek-ai/dsh-agent";
 
@@ -37,17 +37,6 @@ interface McpServerTemplate {
   /** Per-tool-call deadline handed to mcp-client; defaults to the client default (60 s). */
   toolCallTimeoutMs?: number;
 }
-/** Parse deployment and candidate definitions through one schema and namespace policy. */
-declare function parseMcpServerRegistry(value: unknown): Record<string, McpServerTemplate>;
-/**
- * Materialize one manifest's MCP grants into mount-ready specs.
- * @param manifest - the resolved capability manifest (server names already validated at admission).
- */
-declare function resolveMcpServerSpecs(manifest: {
-  capabilities: Record<string, {
-    mcpServers?: string[];
-  }>;
-}, binding: McpEnvBinding | undefined, registry: Readonly<Record<string, McpServerTemplate>>): McpServerSpec[];
 //#endregion
 //#region src/capability.d.ts
 /** One capability entry as held in plugin Config (arrays optional pre-validation). */
@@ -115,7 +104,7 @@ type SkillContractVersion = typeof SKILL_CONTRACT_VERSION;
  * The directories a skill may hold supporting files in. The supported shape is
  * deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
  */
-declare const SUPPORTED_SKILL_RESOURCE_DIRS: readonly string[];
+
 /**
  * One supporting file's identity: where it is inside the skill directory and the
  * SHA-256 of its exact bytes.
@@ -204,37 +193,6 @@ type SkillSidecar = ExecutionSkillSidecar | KnowledgeSkillSidecar;
  * `unknown-field` are their own codes because a caller acts differently on
  */
 type SkillContractDefectCode = 'sidecar-unknown-version' | 'sidecar-unknown-field' | 'sidecar-shape';
-/** One reason a declared sidecar is not acceptable, with the kind of problem named. */
-interface SkillContractDefect {
-  code: SkillContractDefectCode;
-  /** The readable reason, naming the field and the vocabulary it was checked against. */
-  reason: string;
-}
-/**
- * Every reason one declared sidecar is not acceptable, in field order — never
- * just the first, so one refusal names everything wrong with the declaration.
- */
-declare function skillContractDefects(value: unknown): SkillContractDefect[];
-/**
- * The identity of a whole sidecar: SHA-256 over {@link canonicalize} of the
- * declared data, so key order and `undefined`-valued keys do not move it while
- */
-declare function skillContractDigest(sidecar: SkillSidecar): string;
-/**
- * The identity of one content identity: SHA-256 over {@link canonicalize} of the
- * `SKILL.md` digest and the resource list. Separate from
- */
-declare function skillContentDigest(content: SkillContentIdentity): string;
-/**
- * The same declaration with one field replaced: `content.skillMdSha256`.
- * A same-name improvement of an execution skill changes the `SKILL.md` and
- */
-declare function sidecarWithSkillMd(sidecar: SkillSidecar, skillMdSha256: string): SkillSidecar;
-/**
- * The deterministic byte sequence of one declaration — what a file holds when
- * this build writes a sidecar.
- */
-declare function serializeSkillSidecar(sidecar: SkillSidecar): string;
 //#endregion
 //#region src/sidecar.d.ts
 /** Every reason a provider is refused, named so a caller can act on the kind of problem. */
@@ -244,37 +202,6 @@ interface SkillDefect {
   code: SkillDefectCode;
   detail: string;
 }
-/** What the real DSH tool plane a capability grants looks like: expanded names plus the servers it mounts. */
-interface CapabilityGrants {
-  /** Real DSH tool names the capability's tool labels expand to. */
-  readonly tools: readonly string[];
-  /** MCP server names the capability mounts; their tools reach a worker as `mcp__<server>__<tool>`. */
-  readonly mcpServers: readonly string[];
-}
-/**
- * What the context knows about one capability. `known: false` covers both "no
- * such row" and "the row does not resolve" (an unknown tool label, an unknown
- */
-type CapabilityToolAnswer = ({
-  readonly known: true;
-} & CapabilityGrants) | {
-  readonly known: false;
-  readonly reason: string;
-};
-/** How a caller lends its capability table to the pre-check. */
-type CapabilityToolQuery = (capability: string) => CapabilityToolAnswer;
-/** Everything the pre-check needs that is not the candidate itself. */
-interface SkillValidationContext {
-  /** Verifier ids the registry can dispatch to (`VerifierRegistry.verifierIds()`): the whole vocabulary `verifier.ref` may name. */
-  readonly verifierRefs: readonly string[];
-  /** The expanded tool plane of a capability, in the same vocabulary a sidecar's `requiredTools` is written in. */
-  readonly capabilityTools: CapabilityToolQuery;
-}
-/**
- * A capability table as a query, going through `resolveCapabilities` — the same
- * resolution admission performs — so the pre-check sees exactly the grant a
- */
-declare function capabilityToolQuery(capabilities: Readonly<Record<string, CapabilityConfig>>, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): CapabilityToolQuery;
 /** What a skill directory honestly held when it was read. */
 interface LoadedSkillSidecar {
   /** The skill directory that was read, as given. */
@@ -306,17 +233,7 @@ interface LoadedSkillFrontmatter {
   readonly description: string;
 }
 /** One provider under pre-check: the granted skill name and where discovery found it. */
-interface SkillProviderCandidate {
-  /** The skill name a capability grants; the directory under a skill root is named after it. */
-  readonly name: string;
-  /** Absolute path of the skill directory discovery resolved, or absent when nothing was found. */
-  readonly directory?: string;
-  /**
-   * A sidecar the caller already holds (a prepare-time declaration, a ledger
-   * copy). It is never trusted as a substitute for the directory: it must be
-   */
-  readonly sidecar?: SkillSidecar;
-}
+
 /** The only verdict kind that may close an execution gap: an execution sidecar that passed every rule. */
 interface ExecutionProviderVerdict {
   readonly valid: true;
@@ -379,32 +296,10 @@ interface RejectedProviderVerdict {
 }
 type SkillProviderVerdict = AcceptedSkillProviderVerdict | RejectedProviderVerdict;
 /**
- * The verdicts that may close an execution gap — and the only place a caller
- * needs to ask. A knowledge or guidance verdict is not in the result, so the
- */
-declare function executionProviders(verdicts: readonly SkillProviderVerdict[]): ExecutionProviderVerdict[];
-/** One provider's declared content identity inside the registry revision. */
-interface SkillProviderIdentity {
-  /** The skill name a capability grants. */
-  readonly name: string;
-  /** {@link skillContractDigest} of the provider's sidecar, or `null` when the skill carries none. */
-  readonly contractDigest: string | null;
-}
-/**
  * Load and check one skill directory: the directory itself, `SKILL.md`, the
  * sidecar when there is one, the identity of the bytes on disk, and the shape
  */
 declare function loadSkillSidecar(directory: string): Promise<LoadedSkillSidecar>;
-/**
- * The unified pre-check: one candidate provider against the deployment's
- * verifier vocabulary and capability table (guide §2.3, S1-C item 3). Every
- */
-declare function validateSkillProvider(candidate: SkillProviderCandidate, context: SkillValidationContext): Promise<SkillProviderVerdict>;
-/**
- * The registry revision: SHA-256 over {@link canonicalize} of the capability
- * table (each row sorted by name, carrying its skills, the tool labels it
- */
-declare function registryRevision(capabilities: Readonly<Record<string, CapabilityConfig>>, providers: readonly SkillProviderIdentity[], mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): string;
 //#endregion
 //#region src/provider-precheck.d.ts
 /**
@@ -425,11 +320,6 @@ declare function registeredVerifierVocabulary(host: unknown): Promise<{
   ids: readonly string[];
   versions: Readonly<Record<string, string>>;
 } | undefined>;
-/**
- * The refusal of an execution sidecar the deployment cannot judge because its
- * verifier vocabulary could not be listed: the declared ref is refused rather
- */
-declare function unlistableVerifierRefusal(name: string, directory: string | undefined, ref: string): RejectedProviderVerdict;
 /**
  * The evolution commit ledger as a provider check reads it (K2): the production
  * targets a commit left open. Task-runtime never imports the evolution package —
@@ -526,41 +416,8 @@ interface ProviderPrecheckRequest {
  * viewpoint.
  */
 declare function precheckProviders(request: ProviderPrecheckRequest): Promise<ProviderPrecheck>;
-/**
- * One capability row as it would read after a replacement, checked by the same
- * pre-check a batch is admitted under: `entry` is folded into `table` — the row
- */
-declare function precheckReplacedCapabilityRow(request: {
-  /** The capability row being written. */
-  readonly name: string;
-  /** The row's entry as it will read after the replacement. */
-  readonly entry: CapabilityConfig;
-  /** The table the row is folded into — the replacement table, then. */
-  readonly mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
-  readonly table: Readonly<Record<string, CapabilityConfig>>;
-  /** Where discovery looks; a deployment's own process viewpoint or a worker's checkout. */
-  readonly view: SkillDiscoveryView;
-  /** The registered verifier ids (`VerifierRegistry.verifierIds()`), or absent when the registry cannot be listed. */
-  readonly verifierRefs?: readonly string[];
-  /** The deployment's evolution ledger (`optionalService(ctx, 'evolution')`), or absent when the deployment mounts none. */
-  readonly commitLedger?: EvolutionCommitLedger;
-}): Promise<{
-  readonly precheck: ProviderPrecheck;
-  readonly refusals: readonly string[];
-}>;
-/**
- * Every refused provider of one pre-check, one line each, naming the capability
- * that declares it, the skill, the directory when one was found, and every
- */
-declare function providerRefusals(precheck: ProviderPrecheck, taskCapabilities?: readonly string[]): string[];
 //#endregion
 //#region src/environment/revision.d.ts
-/** The one id shape a revision directory, a pointer and a run record all agree on. */
-declare const ENVIRONMENT_REVISION_ID: RegExp;
-/** The id shape of a draft directory; allocated monotonically per library. */
-declare const ENVIRONMENT_DRAFT_ID: RegExp;
-/** The id a draft's prospective revision carries: deterministic, so a killed publish replays onto the same name. */
-declare function candidateRevisionId(draftId: string): string;
 /** One skill as one revision holds it: the current entry of its name, with the lineage-local version and both digests. */
 interface EnvironmentSkillEntry {
   readonly name: string;
@@ -665,18 +522,6 @@ type EnvironmentEdit = {
   readonly kind: 'capability';
   readonly edit: CapabilityRowEdit;
 };
-/**
- * The content digest of a manifest: what the revision **holds** — its skill
- * entries, its task templates and its capability table — plus the generation it
- * belongs to, and nothing else. The identity it is filed under (`revisionId`,
- * which for a candidate is derived from the draft id, the revision it was based
- * on, and when it was staged) is identity, not content: two drafts carrying the
- * same bytes therefore read the same content digest, and a client that keys a
- * candidate by its content (the strategy's same-bytes refutation) matches on it.
- * The identity members are pinned elsewhere — the revision id by the directory
- * name it must equal, and the base and timestamp by the draft record.
- */
-declare function manifestDigest(manifest: Omit<EnvironmentRevisionManifest, 'contentDigest'>): string;
 /** The manifest of a revision that holds nothing yet; `ensureInitialRevision` fills it, a draft copies and edits it. */
 declare function emptyRevisionManifest(input: {
   libraryId: string;
@@ -685,26 +530,8 @@ declare function emptyRevisionManifest(input: {
   basedOn: string | null;
   createdAt: string;
 }): EnvironmentRevisionManifest;
-/** Parse and fully validate one manifest, including its self-digest: a manifest whose bytes were edited is refused by name. */
-declare function parseRevisionManifest(raw: unknown, where: string): EnvironmentRevisionManifest;
-/** The current entry of one skill name in a revision. */
-declare function revisionSkillOf(manifest: EnvironmentRevisionManifest, name: string): EnvironmentSkillEntry | undefined;
-/** The newest entry of one template id in a revision. */
-declare function revisionTemplateOf(manifest: EnvironmentRevisionManifest, id: string): EnvironmentTaskTemplateEntry | undefined;
-/** The listing projection of one manifest. */
-declare function revisionRefOf(manifest: EnvironmentRevisionManifest): EnvironmentRevisionRef;
 /** The graph-internal capability rows of one revision; replaces the old index-derived `libraryCapabilities`. */
 declare function revisionCapabilityRows(manifest: EnvironmentRevisionManifest): Record<string, CapabilityConfig>;
-/** The hard rules any draft edit must pass, checked before any byte moves; the apply functions re-check them. */
-declare function assertDraftEditAllowed(manifest: EnvironmentRevisionManifest, edit: EnvironmentEdit): void;
-/** Apply one skill edit to a manifest, purely: the entry's digests come from the edit's declared bytes. */
-declare function applySkillEdit(manifest: EnvironmentRevisionManifest, edit: SkillEdit): EnvironmentRevisionManifest;
-/** Apply one task template edit to a manifest, purely: an identical repeat is a no-op, a conflicting version is refused. */
-declare function applyTemplateEdit(manifest: EnvironmentRevisionManifest, template: TaskTemplate, table?: Readonly<Record<string, CapabilityConfig>>): EnvironmentRevisionManifest;
-/** Apply one retention review to a manifest, purely: status is a field of the revision, never an in-place edit of a shared index. */
-declare function applyReviewEdit(manifest: EnvironmentRevisionManifest, review: EnvironmentReview, reviewedBy: string): EnvironmentRevisionManifest;
-/** Apply one capability-row edit to a manifest, purely: a null entry removes the row, a null MCP template removes it. */
-declare function applyCapabilityRowEdit(manifest: EnvironmentRevisionManifest, edit: CapabilityRowEdit): EnvironmentRevisionManifest;
 //#endregion
 //#region src/root-budget.d.ts
 /**
@@ -750,35 +577,13 @@ type RootBudgetResolution = ({
  * materializes an absent `rootBudget` as an empty object, so the presence of an
  */
 
-/** The verdict a start or a batch admission gets. A refusal always names the limit it hit. */
-type BudgetVerdict = {
-  readonly allowed: true;
-} | {
-  readonly allowed: false;
-  readonly reason: string;
-};
 /**
  * The root budget a snapshot is under, or the reason none can be measured.
  * The owner is the store's own root: among the parentless tasks, the one whose
  */
 declare function resolveRootBudget(snapshot: TaskSnapshot, config: RootBudgetConfig): RootBudgetResolution;
-/**
- * Whether the persisted run count leaves room for another run.
- */
-declare function checkRunStart(snapshot: TaskSnapshot, budget: ResolvedRootBudget): BudgetVerdict;
 //#endregion
 //#region src/normalize.d.ts
-/** Where one batch came from: the store, the parent, its run, and the caller that submitted it. */
-interface DecompositionIdentityContext {
-  storeId: string;
-  parentTaskId: string;
-  parentRunId: string;
-  callerSessionId: string;
-}
-interface NormalizationContext extends DecompositionIdentityContext {
-  /** The limits in force, resolved by the caller from its configuration and recorded verbatim with the batch. */
-  admissionContext: AdmissionContext;
-}
 /** One normalized child: its contract plus the batch facts the identity covers. */
 interface NormalizedChild {
   contract: TaskContract;
@@ -796,35 +601,6 @@ interface NormalizedBatch {
   /** The batch identity and the limits it was admitted under, ready to be recorded with the decomposition. */
   admission: DecompositionAdmission;
 }
-/**
- * The identity one batch is digested over (§4): where it came from, which
- * contract language it is written in, the caller's reason, and the complete
- */
-declare function decompositionIdentity(context: DecompositionIdentityContext, reason: string, children: readonly NormalizedChild[], binding?: Pick<NormalizedBatch, 'templateRef' | 'templateParameters'>): DecompositionIdentity;
-type NormalizationResult = {
-  ok: true;
-  batch: NormalizedBatch;
-} | {
-  ok: false;
-  reasons: string[];
-};
-/**
- * Normalize one decomposition proposal.
- * Returns every defect it found, never the first: a caller revising a proposal
- */
-declare function normalizeDecomposition(spec: unknown, context: NormalizationContext): NormalizationResult;
-type RootNormalizationResult = {
-  ok: true;
-  contract: TaskContract;
-} | {
-  ok: false;
-  reasons: string[];
-};
-/**
- * Normalize one root contract (A0 §2–§3): the caller's single contract —
- * objective, criteria, assumptions, constraints, declared capabilities — in,
- */
-declare function normalizeRootContract(spec: unknown): RootNormalizationResult;
 //#endregion
 //#region src/recovery.d.ts
 /**
@@ -849,10 +625,6 @@ interface RootRecoveryReuse {
 }
 /** Which round a request asks for: `recovery` (the default) re-runs a failed source, `improve` re-runs a verified one. */
 type RecoveryMode = 'recovery' | 'improve';
-/** The stored kind one mode writes into {@link RunRecovery.kind}. */
-declare function recoveryKindOf(mode: RecoveryMode | undefined): 'recovery' | 'improvement';
-/** The mode one stored kind was asked under; a record written before the field existed reads as a recovery. */
-declare function recoveryModeOf(kind: 'recovery' | 'improvement' | undefined): RecoveryMode;
 /**
  * One recovery request, as the host composition layer hands it to the runtime
  * (plan §F.4: the tool and evolution's coordinator call this entry, and each
@@ -885,31 +657,6 @@ interface RootRecoveryRequest {
 }
 /** The attempt one request key names on a source task, or `undefined`. */
 declare function recoveryAttemptWithKey(snapshot: TaskSnapshot, sourceTaskId: TaskId, requestKey: string): TaskRun | undefined;
-/**
- * The attempt one diagnosis already has whose run has not settled, or
- * `undefined` — the mutual exclusion one diagnosis's recovery has (plan §F.4:
- */
-declare function inFlightRecoveryAttempt(snapshot: TaskSnapshot, sourceTaskId: TaskId, sourceDiagnosisId: string): TaskRun | undefined;
-/**
- * The source run one attempt reads, or `undefined` when the failure had none: a
- * `recovery` names a run that settled `failed`, an `improve` a verified one — and
- * an `improve` that names none reads the task's newest verified run.
- */
-declare function recoverySourceRun(source: TaskInstance, request: RootRecoveryRequest, snapshot: TaskSnapshot, kind: 'recovery' | 'improvement'): TaskRun | undefined;
-/** The rounds one source task has spent, counted from the runs its own `runIds` hold: the two kinds spend separate caps. */
-interface RecoveryRounds {
-  /** Runs of the task that are recovery attempts of a failed source. */
-  readonly recovery: number;
-  /** Runs of the task that are improvement attempts of a verified one. */
-  readonly improvement: number;
-}
-/** Count one source task's attempt runs by kind; a row written before `kind` existed is a recovery. */
-declare function recoveryRoundsOf(snapshot: TaskSnapshot, sourceTaskId: TaskId): RecoveryRounds;
-/** The coded refusal one exhausted per-source cap answers with (A7 §3): the caller's next move is to stop, not to retry. */
-declare class IterationCapRefusal extends Error {
-  readonly code = "iteration-cap";
-  constructor(message: string);
-}
 //#endregion
 //#region src/gate.d.ts
 /** A tool call that was let through and has not reported its result yet. */
@@ -993,6 +740,13 @@ declare class ExecutionGate {
    * authority; `0` for a session it has never written one for. This is the
    */
   decisionToken(sessionId: string): number;
+  /**
+   * Whether `token` is still the session's own ({@link decisionToken}): a
+   * store-implied write read under a stale token is refused. Applying one is
+   * never a decision of this process's own — the token deliberately does not
+   * move, so the next store-derived value read under it still applies.
+   */
+  private decisionTokenCurrent;
   /**
    * Apply a phase the store implies — never one this process decided — and only
    * when it is newer than everything decided here: `token` is the
@@ -1131,10 +885,6 @@ declare class WorkspaceRegistry {
 }
 //#endregion
 //#region src/orchestration/types.d.ts
-/** Raised when the verifier service (ticket C2) is not loaded in the context. */
-declare class VerifierUnavailableError extends Error {
-  name: string;
-}
 interface ChildOutcome {
   taskId: TaskId;
   runId?: RunId;
@@ -1380,9 +1130,6 @@ interface AdoptedWorkerResumeRequest {
 type AdoptedWorkerResume = {
   readonly status: 'live';
 } | {
-  readonly status: 'retry';
-  readonly reason: string;
-} | {
   readonly status: 'refused';
   readonly reason: string;
 };
@@ -1454,18 +1201,6 @@ interface BatchContext {
   providers?: ProviderPrecheck;
 }
 /**
- * One batch a run has ended and been told about — or still has to be told about
- * ({@link owedBatchResults}): the batch, the run whose wait it ends, the Session
- */
-interface OwedBatchResult {
-  readonly taskId: TaskId;
-  readonly runId: RunId;
-  readonly batchId: string;
-  /** The parent's own Session: the target of the message and the Session it is sent from. */
-  readonly sessionId: string;
-  readonly memberTaskIds: readonly TaskId[];
-}
-/**
  * ------------------------------------------------------------------------- *
  * Replay (A3 §3.2/§3.8 applied to the W15 runner)
  */
@@ -1483,16 +1218,6 @@ interface ReplayOverlay {
   capabilityOverrides?: Record<string, CapabilityConfig>;
   /** Candidate definitions resolved for this replay only. */
   mcpServers?: Record<string, McpServerTemplate>;
-  /**
-   * Extra skill roots forwarded to the worker grant (`WorkerGrant.skillRoots`):
-   * every `<root>/<name>/SKILL.md` found is registered into the worker's own
-   */
-  extraSkillRoots?: string[];
-  /**
-   * Preset id mounted instead of the capability/default resolution. Must exist
-   * in the deployment's preset roster — the roster scans constructor-fixed
-   */
-  presetOverride?: string;
 }
 /**
  * What one replay's receipt settled as: `sealed` names the receipt a consumer
@@ -1578,39 +1303,6 @@ interface QuestionReconcileReport {
   readonly messageId: string;
   readonly status: MessageDeliveryStatus | 'refused';
   readonly reason?: string;
-}
-/**
- * The services one question coordination reaches, narrowed to what it calls: the
- * store's own entries (never the whole service), the caller's Session log, and
- */
-interface QuestionCoordinationDeps {
-  /** The Task store: the facts, their one writer, and the snapshot every derivation reads. */
-  readonly task: {
-    snapshotIn(storeId: string): Promise<TaskSnapshot>;
-    askParentQuestionIn(storeId: string, ask: QuestionAsk, actor: string): Promise<{
-      question: QuestionRecord;
-      created: boolean;
-    }>;
-    answerParentQuestionIn(storeId: string, answer: QuestionAnswer, actor: string): Promise<{
-      answer: QuestionAnswerRecord;
-      created: boolean;
-    }>;
-  };
-  /** The caller's own Session, to locate the `tool/call` this call cites (and to read it back before deciding anything). */
-  readonly sessionQuery: {
-    readSession(sessionId: SessionId): Promise<SessionOwnLog>;
-  };
-  /** agent-runtime's handle: the flushed body read-back, the relay, and the recovery reconcile. */
-  readonly messages: {
-    readToolCallBody(ref: ToolCallRef): Promise<ToolCallBody>;
-    ensureAgentMessageDelivered(intent: AgentMessageIntent): Promise<{
-      messageId: string;
-      status: MessageDeliveryStatus;
-    }>;
-    reconcileAgentMessageDeliveries(intents: readonly AgentMessageIntent[]): Promise<MessageDeliveryReport[]>;
-  };
-  /** The execution gate whose *blocking* state these facts decide (A4 §7.2). */
-  readonly gate: ExecutionGate;
 }
 //#endregion
 //#region src/types.d.ts
@@ -1790,19 +1482,6 @@ interface ProposalDecisionResult {
   /** The reason recorded with the outcome, when there was one. */
   reason?: string;
 }
-interface CapabilityGap {
-  /** The child's batch position (its index in the proposal's children). */
-  childIndex: number;
-  /** That child's objective, so the obligation raised for the gap names the work it blocks. */
-  objective: string;
-  /** The capability names the registry could not grant. */
-  missing: readonly string[];
-}
-interface DecompositionRefusal {
-  readonly error: Error;
-  readonly reasons: readonly string[];
-  readonly gaps: readonly CapabilityGap[];
-}
 type ProposalReviewTrigger = 'submitted' | 'tightened' | 'recovered';
 interface ProposalReviewRequestBase {
   readonly storeId: string;
@@ -1847,7 +1526,7 @@ interface QuestionResumeReport {
   /** The run the attempt was about, as the store names it (`run "r-…" (session "s-…")`). */
   readonly subject: string;
   readonly status: AdoptedWorkerResume['status'];
-  /** Present for `retry` and `refused`: why the Session was not brought back. */
+  /** Present for `refused`: why the Session was not brought back. */
   readonly reason?: string;
 }
 interface ReconcileReport {
@@ -1883,32 +1562,6 @@ type StoreRecoveryStatus = {
 } | {
   status: 'recovery-failed';
   reason: string;
-};
-type DecompositionPrecheck = {
-  ok: true;
-  batch: NormalizedBatch;
-  manifests: CapabilityManifest[];
-  providers: ProviderPrecheck;
-} | {
-  ok: false;
-  refusal: DecompositionRefusal;
-};
-type ReviewSubject = {
-  kind?: 'decomposition';
-  storeId: string;
-  trigger: ProposalReviewTrigger;
-  proposal: TaskProposal;
-  parentTask: TaskInstance;
-  batch: NormalizedBatch;
-  manifests: readonly CapabilityManifest[];
-} | {
-  kind: 'root';
-  storeId: string;
-  trigger: ProposalReviewTrigger;
-  proposal: TaskProposal;
-  rootSessionId: string;
-  contract: TaskContract;
-  manifests: readonly CapabilityManifest[];
 };
 interface RootBudgetExtensionRequest {
   readonly requestKey: string;
@@ -1947,36 +1600,6 @@ interface RootBudgetExtensionResult {
   readonly answeredFromRecord: boolean;
   readonly record: TaskBudgetExtension;
 }
-interface AdmitBatchRequest {
-  proposal: TaskProposalDecomposition;
-  parentTask: TaskInstance;
-  parentRun: TaskRun;
-  batch: NormalizedBatch;
-  manifests: readonly CapabilityManifest[];
-  providers: ProviderPrecheck;
-  exec?: {
-    signal?: AbortSignal;
-    callId?: string;
-  };
-}
-/** The stored batch one continuation re-checks before admission (§6): the content the proposal carries and the limits in force now. */
-interface CheckDerivedBatchRequest {
-  readonly identity: DecompositionIdentityContext;
-  readonly parentTask: TaskInstance;
-  readonly batch: NormalizedBatch;
-  readonly envPath?: string;
-}
-/** The batch a runtime start hands to the driver it spawns. */
-interface StartBatchDriverOptions {
-  readonly storeId: string;
-  readonly parentTaskId: TaskId;
-  readonly parentRunId: RunId;
-  readonly batchId: string;
-  readonly callerSessionId: string;
-  readonly reason: string;
-  readonly providers?: ProviderPrecheck;
-  readonly excludeCallId?: string;
-}
 interface RootRecoveryCaller {
   readonly sessionId: string;
   readonly signal?: AbortSignal;
@@ -2002,26 +1625,12 @@ interface RootRecoveryOutcome {
 }
 //#endregion
 //#region src/task-template.d.ts
-/** The sole default for production and Evolution: the runtime resolves this once at construction. */
-declare function defaultTaskTemplatesRoot(): string;
 interface TaskTemplateMatch {
   templateRef: TaskTemplateRef;
   template: TaskTemplate;
 }
 /** Reject unsupported schema vocabulary rather than claiming to validate it. */
 declare function parseTaskTemplate(raw: unknown): TaskTemplate;
-/** Append one immutable version. An identical repeat returns the same reference. */
-declare function registerTaskTemplate(root: string, input: TaskTemplate): Promise<TaskTemplateRef>;
-/** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery.
- *
- * `retired` names the `id@version` keys the owning environment revision holds
- * retired; the caller passes them in, because a template's status is a field of
- * the immutable revision, never of an index a read may rewrite.
- */
-declare function findTaskTemplates(root: string | undefined, query?: string, scope?: TemplateScope, retired?: ReadonlySet<string>): Promise<TaskTemplateMatch[]>;
-/** Expand into the same authoring fields as a free contract; no template-specific execution path follows. */
-declare function bindTaskTemplate<T extends TaskContractInput>(root: string | undefined, spec: T, scope?: TemplateScope, retired?: ReadonlySet<string>): Promise<T & TaskContractInput>;
-declare function bindTaskDecomposition(root: string | undefined, spec: DecomposeSpec, scope?: TemplateScope, retired?: ReadonlySet<string>): Promise<DecomposeSpec>;
 interface TaskTemplateQuery {
   query?: string;
   catalogPath?: CatalogPath;
@@ -2049,13 +1658,6 @@ interface TaskTemplateCatalogPage {
   nextOffset: number | null;
   message?: string;
 }
-declare function taskTemplatePage(root: string | undefined, request: TaskTemplateQuery & {
-  templateRef: TaskTemplateRef;
-}, scope?: TemplateScope): Promise<TaskTemplateMatch>;
-declare function taskTemplatePage(root: string | undefined, request?: Omit<TaskTemplateQuery, 'templateRef'> & {
-  templateRef?: undefined;
-}, scope?: TemplateScope): Promise<TaskTemplateCatalogPage>;
-declare function taskTemplatePage(root: string | undefined, request: TaskTemplateQuery, scope?: TemplateScope): Promise<TaskTemplateMatch | TaskTemplateCatalogPage>;
 //#endregion
 //#region src/run-binding.d.ts
 /** Everything one run needs to bind its content: the verdicts, the rows, and where the snapshot goes. */
@@ -2088,8 +1690,6 @@ interface RunBindingRequest {
   /** The unpublished candidate revision an explicit trial binds; recorded on the binding beside the revision. */
   trialCandidateRef?: string;
 }
-/** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
-declare function mcpServerBindings(manifest: CapabilityManifest, registry: Readonly<Record<string, McpServerTemplate>>): RunMcpServerBinding[];
 /**
  * Bind one run's content: identify the providers its admission judged,
  * materialize their admitted bytes, and verify the snapshot against the record
@@ -2203,13 +1803,6 @@ interface ProviderLoadReport {
    */
   readonly failed?: string;
 }
-declare const DEFAULT_VERIFY_TIMEOUT_MS: number;
-declare const DEFAULT_BUDGET: Readonly<BudgetConfig>;
-declare const DEFAULT_MAX_DEPTH = 4;
-declare const DEFAULT_MAX_CHILDREN = 8;
-declare const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
-/** The shipped supervision backstop: three recovery rounds, two improvement rounds, eight coordination runs. A graph that runs an RSI loop declares its own round count over these (`maxImprovementRoundsFor`). */
-declare const DEFAULT_SUPERVISION: Readonly<SupervisionConfig>;
 interface RunBinding {
   storeId: string;
   taskId: TaskId;
@@ -2285,10 +1878,6 @@ interface StoreRecoveryStateView {
 }
 //#endregion
 //#region src/service/receipts.d.ts
-/** The actor every receipt is written under; no caller may write one. */
-declare const RECEIPT_ACTOR = "task-runtime:receipt";
-/** How long the sealer waits for a session log to pass a run's terminal boundary. */
-declare const RECEIPT_PERSIST_WAIT_MS = 2000;
 /** What one sealing attempt settled as. */
 type ReceiptSealStatus = {
   readonly status: 'sealed';
@@ -2328,52 +1917,10 @@ interface LibraryRoots {
 }
 /** A library root is derived from the graph's immutable root session identity; no second persistent binding. */
 declare function libraryRoots(rootSessionId: string, home?: string): LibraryRoots;
-declare function environmentProtocolMarker(library: LibraryRoots): string;
-declare function revisionsRoot(library: LibraryRoots): string;
-declare function draftsRoot(library: LibraryRoots): string;
-/** The directory of one revision; the id is validated before it ever becomes a path component. */
-declare function revisionRoot(library: LibraryRoots, revisionId: string): string;
-/** fsync one directory so an entry created, renamed or removed inside it is durable. */
-declare function syncDirectory(directory: string): Promise<void>;
-/** Replace `target` with exactly `bytes`, durably: staging sibling, file fsync, rename, directory fsync. */
-declare function writeFileAtomic(target: string, bytes: Buffer | string): Promise<void>;
-/** Append one line to a JSONL log, durably: append, file fsync, directory fsync. */
-declare function appendLineDurable(target: string, line: string): Promise<void>;
-/** Create the two directories every library of the new protocol holds. */
-declare function ensureEnvironmentLayout(library: LibraryRoots): Promise<void>;
-/** The new-protocol marker, written once when a library's initial revision is created; a legacy layout never gets one. */
-declare function ensureProtocolMarker(library: LibraryRoots): Promise<void>;
 /** Whether this library root predates the revision protocol: no marker, but the old mutable layout's tell-tale entries. */
 declare function hasLegacyLayout(library: LibraryRoots): Promise<boolean>;
-declare function serialEnvironment<T>(library: LibraryRoots, work: () => Promise<T>): Promise<T>;
-/** Read and fully validate one revision's manifest, including its self-digest. */
-declare function readRevisionManifest(library: LibraryRoots, revisionId: string): Promise<EnvironmentRevisionManifest>;
 /** Resolve one revision directory, or `undefined` when it does not exist. */
 declare function readRevision(library: LibraryRoots, revisionId: string): Promise<EnvironmentRevision | undefined>;
-/** List every revision of one library as listing projections, sorted by id. */
-declare function listRevisions(library: LibraryRoots): Promise<EnvironmentRevisionRef[]>;
-/** Write one manifest into its directory, durably; the manifest's self-digest is re-checked before a byte moves. */
-declare function writeRevisionManifest(directory: string, manifest: EnvironmentRevisionManifest): Promise<void>;
-/**
- * Freeze one draft into an immutable revision: an atomic same-filesystem rename,
- * then fsync of both the revisions directory and the library root, in that order —
- * a pointer may only ever be written after this returns.
- */
-declare function freezeDraftDirectory(library: LibraryRoots, draftId: string, revisionId: string): Promise<void>;
-/** Copy one revision directory as the starting content of a draft; a draft never edits its base in place. */
-declare function copyRevisionDirectory(from: string, to: string): Promise<void>;
-/** The defects one revision directory has against its manifest; empty means the directory is exactly what the manifest declares. */
-interface RevisionDefects {
-  readonly defects: readonly string[];
-}
-/**
- * Verify one whole revision directory against its manifest: every skill's bytes
- * and sidecar, every template file, and the capability table — the single check
- * that replaces the old commit path's per-file and per-row read-backs.
- */
-declare function verifyRevisionDirectory(directory: string, manifest: EnvironmentRevisionManifest): Promise<RevisionDefects>;
-/** Read one file of one skill inside one revision, through the verified walk: no links, no escapes, real entries only. */
-declare function readRevisionSkillFile(revision: EnvironmentRevision, name: string, rel: string): Promise<Buffer>;
 //#endregion
 //#region src/environment/pointer.d.ts
 /** The one active pointer of a library; `generation` increments on every switch and is the CAS dimension. */
@@ -2422,13 +1969,6 @@ interface EnvironmentPointerCompletion {
   readonly actor: string;
   readonly at: string;
 }
-/** The stages the transaction reports to a test probe, in order. */
-type EnvironmentCommitStage = 'intent-recorded' | 'revision-frozen' | 'revision-verified' | 'pointer-switched' | 'completion-recorded' | 'intent-cleared';
-/** The host a commit runs against; `probe` is a typed test seam a production deployment never sets. */
-interface EnvironmentCommitHost {
-  readonly library: LibraryRoots;
-  probe?(stage: EnvironmentCommitStage, detail?: string): void | Promise<void>;
-}
 /** Where a published revision comes from: a draft (frozen by the transaction) or an already frozen revision. */
 type EnvironmentPublishSource = {
   readonly kind: 'draft';
@@ -2471,12 +2011,8 @@ interface InitialSeed {
 }
 /** Read the current pointer, or `null` when the library has none yet (a fresh or a legacy root). */
 declare function readPointer(library: LibraryRoots): Promise<EnvironmentPointer | null>;
-/** The in-flight switch's intent, or `null` outside a switch window; the single concurrency exclusion point. */
-declare function openPointerIntent(library: LibraryRoots): Promise<EnvironmentPointerIntent | null>;
 /** Every settled switch of one library, in append order. */
 declare function listPointerCompletions(library: LibraryRoots): Promise<EnvironmentPointerCompletion[]>;
-/** The revision the pointer currently names; both must exist and agree, or the library is broken by name. */
-declare function readActiveRevision(library: LibraryRoots): Promise<EnvironmentRevision>;
 /**
  * Create the initial revision `r0001` of a new-protocol library, seeded with the
  * generic task-coordination guidance, and point at it (generation 1). A library
@@ -2484,18 +2020,6 @@ declare function readActiveRevision(library: LibraryRoots): Promise<EnvironmentR
  * view instead, and no `pointer.json` is ever created for it.
  */
 declare function ensureInitialRevision(library: LibraryRoots, seed: InitialSeed): Promise<EnvironmentRevision>;
-/** Publish a draft or a frozen candidate revision: one CAS-checked pointer switch. */
-declare function publishEnvironmentRevision(host: EnvironmentCommitHost, request: PublishRequest): Promise<PublishOutcome>;
-/** Roll back to a frozen revision: the same transaction, freezing skipped, target verified. */
-declare function rollbackEnvironmentRevision(host: EnvironmentCommitHost, request: PublishRequest): Promise<PublishOutcome>;
-/**
- * Settle every open intent of one library after a crash or at startup. The
- * classification reads only disk facts: a switched pointer is completed and
- * cleared, a frozen-but-unswitched intent is finished from step 7, an unfrozen
- * publish intent is redone from step 5, and a pointer moved by a third party
- * blocks the intent without touching anything.
- */
-declare function reconcileEnvironmentPointer(host: EnvironmentCommitHost): Promise<EnvironmentPointerReconcile[]>;
 //#endregion
 //#region src/environment/draft.d.ts
 /** A draft: the prospective candidate revision it holds, with its lineage and a human-readable edit log. */
@@ -2511,13 +2035,6 @@ interface EnvironmentDraft {
   readonly createdAt: string;
   readonly edits: readonly string[];
 }
-/** The listing projection of one draft. */
-interface EnvironmentDraftRef {
-  readonly draftId: string;
-  readonly basedOn: string;
-  readonly edits: number;
-  readonly createdAt: string;
-}
 /**
  * Open a draft on top of a revision (the active one by default): a full copy of
  * the base's directory under `drafts/<draftId>` with a candidate manifest. A
@@ -2530,25 +2047,12 @@ declare function createEnvironmentDraft(library: LibraryRoots, request: {
 }): Promise<EnvironmentDraft>;
 /** Read one draft, or `undefined` when it does not exist. */
 declare function readEnvironmentDraft(library: LibraryRoots, draftId: string): Promise<EnvironmentDraft | undefined>;
-/** List every draft of one library, sorted by id. */
-declare function listEnvironmentDrafts(library: LibraryRoots): Promise<EnvironmentDraftRef[]>;
-/** The newest draft one actor opened, when one exists. */
-declare function latestDraftFor(library: LibraryRoots, actor: string): Promise<EnvironmentDraft | undefined>;
 /**
  * Stage one edit into one draft: payload bytes first, then the manifest, then the
  * draft record — all under the library's single write tail, so concurrent stages
  * of one library serialize.
  */
 declare function stageEnvironmentEdit(library: LibraryRoots, draftId: string, edit: EnvironmentEdit, table?: Readonly<Record<string, CapabilityConfig>>): Promise<EnvironmentDraft>;
-/** Delete one draft's directory; a discarded draft cannot be published, because publishing reads the draft record first. */
-declare function discardEnvironmentDraft(library: LibraryRoots, draftId: string): Promise<void>;
-/**
- * Freeze one draft into an immutable candidate revision (`revisions/c-<draftId>`
- * unless the caller names another id). The pointer does not move: only a publish
- * switches it. This is the standalone entry an explicit trial uses; a publish
- * runs the same freeze inside its transaction.
- */
-declare function freezeEnvironmentDraft(library: LibraryRoots, draftId: string, revisionId?: string): Promise<EnvironmentRevision>;
 //#endregion
 //#region src/service/environment.d.ts
 /** Which protocol one library root is served under; `uninitialized` means neither layout exists yet. */
@@ -2648,12 +2152,9 @@ declare class TaskRuntime extends Service {
   /** The active revision of this session's graph library; a legacy or uninitialized library is refused by name. */
   activeRevisionFor(sessionId: string): Promise<EnvironmentRevision>;
   /** The revision one run is bound to, or `undefined` on an old-protocol run. */
-  environmentRevisionForRun(run: TaskRun): Promise<EnvironmentRevision | undefined>;
   /** Fix the initial revision of a brand-new graph before anything binds to it. */
   ensureInitialEnvironment(rootSessionId: string, actor: string): Promise<EnvironmentLibrary>;
   /** The retired task templates of a session's active revision, as `id@version` keys. */
-  retiredTaskTemplates(sessionId: string): Promise<ReadonlySet<string>>;
-  comparisonRunForSession(sessionId: string): Promise<TaskRun | undefined>;
   /** The library as a reader sees it: the effective revision's entries and identity, with no write of any kind. */
   libraryRead(sessionId: string): Promise<EnvironmentView & {
     taskTemplatesRoot: string;
@@ -2684,7 +2185,6 @@ declare class TaskRuntime extends Service {
   get budget(): Readonly<BudgetConfig>;
   get generatedTaskReview(): 'off' | 'all';
   get gate(): ExecutionGate;
-  resolveCapabilities(required: readonly string[]): CapabilityManifest;
   listMcpServers(): Readonly<Record<string, McpServerTemplate>>;
   listCapabilities(): Readonly<Record<string, CapabilityConfig>>;
   /** Open a draft on the session's active revision; the only mutable region of a library. */
@@ -2708,12 +2208,8 @@ declare class TaskRuntime extends Service {
   openPointerIntent(sessionId: string): Promise<EnvironmentPointerIntent | null>;
   listRevisions(sessionId: string): Promise<EnvironmentRevisionRef[]>;
   /** The legacy mutable layout read as a read-only view: no index rebuilt, no byte written. */
-  legacyLibraryView(sessionId: string): Promise<EnvironmentView>;
-  /** The one write tail of a library, for a caller that stages several edits as one unit. */
-  serializeEnvironment<T>(rootSessionId: string, work: () => Promise<T>): Promise<T>;
   adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption>;
   initializeStoreGates(storeId: string): Promise<void>;
-  runGatePhase(run: TaskRun): ExecutionPhase | 'terminal' | undefined;
   intakeRootContract(storeId: string, rootSessionId: string, spec: RootContractSpec, options?: RootIntakeOptions): Promise<RootIntakeResult>;
   submitRootContractProposal(storeId: string, rootSessionId: string, spec: RootContractSpec, options?: RootIntakeOptions): Promise<ProposalSubmission>;
   decomposeAndRun(storeId: string, parentTaskId: TaskId, parentRunId: RunId, callerSessionId: string, spec: DecomposeSpec, exec?: {
@@ -2739,7 +2235,6 @@ declare class TaskRuntime extends Service {
   proposalsForParent(storeId: string, parentTaskId: TaskId): Promise<TaskProposal[]>;
   registerRootBudgetApproval(approval: RootBudgetApproval): () => void;
   registerTerminalReviewListener(listener: (fact: TerminalReviewFact) => void | Promise<void>): () => void;
-  notifyTerminalReview(fact: TerminalReviewFact): void;
   /** Seal one Run's execution receipt. The store's own check decides; a repeat is `already-sealed`. */
   sealRunReceipt(storeId: string, taskId: TaskId, runId: RunId): Promise<ReceiptSealStatus>;
   /**
@@ -2748,24 +2243,12 @@ declare class TaskRuntime extends Service {
    * recovery pass rather than turning a settlement into a failure.
    */
   sealReceiptBounded(storeId: string, taskId: TaskId, runId: RunId, excludeCallId?: string): Promise<void>;
-  /** Advance every queued seal of one store. */
-  flushReceiptSeals(storeId: string): Promise<ReceiptReconcileReport>;
   /** Seal every terminal new-protocol Run of one store that has no receipt yet. */
   reconcileRunReceipts(storeId: string): Promise<ReceiptReconcileReport>;
   receiptFor(storeId: string, runId: RunId): Promise<ExecutionReceipt | undefined>;
   receiptsOfStore(storeId: string): Promise<readonly ExecutionReceipt[]>;
   extendRootBudget(sessionId: string, host: RootBudgetExtensionHost, request: RootBudgetExtensionRequest): Promise<RootBudgetExtensionResult>;
   recoverRootTask(storeId: string, request: RootRecoveryRequest, caller: RootRecoveryCaller): Promise<RootRecoveryOutcome>;
-  deriveBatch(identity: DecompositionIdentityContext, spec: DecomposeSpec): Promise<{
-    ok: true;
-    batch: NormalizedBatch;
-    envPath?: string;
-  } | {
-    ok: false;
-    refusal: DecompositionRefusal;
-  }>;
-  manifestsOf(batch: NormalizedBatch, callerSessionId?: string): Promise<CapabilityManifest[]>;
-  storedBatchOf(proposal: TaskProposal): NormalizedBatch;
   decompositionState(sessionId: string): Promise<{
     reasons: string[];
     remainingRuns?: number | undefined;
@@ -2774,44 +2257,9 @@ declare class TaskRuntime extends Service {
     maxDepth: number;
     phase: string;
   }>;
-  assertDecomposableRun(storeId: string, parentTask: TaskInstance, parentRun: TaskRun, callerSessionId: string, signal?: AbortSignal): Promise<void>;
-  inFlightProposalsOf(storeId: string, parentRunId: RunId): Promise<TaskProposalDecomposition[]>;
-  checkDerivedBatch(request: CheckDerivedBatchRequest): Promise<DecompositionPrecheck>;
-  admitPrecheckedBatch(request: AdmitBatchRequest): Promise<{
-    batchId: string;
-    childTaskIds: TaskId[];
-  }>;
-  existingRootTask(storeId: string): Promise<TaskInstance | undefined>;
-  continueRootProposalIn(storeId: string, proposal: TaskProposalRoot): Promise<ProposalContinuation>;
   serializeRootIntake<T>(storeId: string, work: () => Promise<T>): Promise<T>;
-  continueProposalIn(storeId: string, proposalId: string, caller: string, options: {
-    spec?: DecomposeSpec;
-    exec?: {
-      callId?: string;
-    };
-  }): Promise<ProposalContinuation>;
-  staleProposal(storeId: string, proposal: TaskProposal, reason: string): Promise<ProposalContinuation>;
-  expireProposal(storeId: string, proposal: TaskProposal, reason: string): Promise<ProposalContinuation>;
-  requireProposal(storeId: string, proposalId: string): Promise<TaskProposal>;
-  readProposal(storeId: string, proposalId: string): Promise<TaskProposal | undefined>;
-  requestProposalReview(request: ReviewSubject): Promise<{
-    requested: boolean;
-    detail: string;
-  }>;
   serializeParent<T>(storeId: string, parentTaskId: TaskId, work: () => Promise<T>): Promise<T>;
-  reconcileProposals(storeId: string): Promise<ReconcileReport['unresolvedProposals']>;
-  reconcileRootProposal(storeId: string, proposal: TaskProposalRoot, report: (proposal: TaskProposal, status: TaskProposalStatus, reason: string) => Promise<void>): Promise<void>;
   replayTask(storeId: string, championTaskId: TaskId, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
-  registerDriver(key: string, storeId: string, controller: AbortController, promise: Promise<ChildOutcome[]>, parentTaskId?: TaskId): void;
-  standDownPendingDrivers(state: StoreRecoveryState): void;
-  invalidateStoreRecovery(storeId: string): void;
-  batchRecordIn(storeId: string, batchId: string): Promise<{
-    taskId: TaskId;
-    run: TaskRun;
-    memberTaskIds: readonly TaskId[];
-  } | undefined>;
-  runSettledFromRuntime(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void;
-  startBatchDriver(options: StartBatchDriverOptions): void;
   submitResult(callerSessionId: string, spec: {
     summary: string;
     evidenceRefs?: string[];
@@ -2824,108 +2272,39 @@ declare class TaskRuntime extends Service {
   }>;
   askParentQuestion(callerSessionId: string, request: ParentAskCall): Promise<AskedQuestionOutcome>;
   answerParentQuestion(callerSessionId: string, request: ParentAnswerCall): Promise<AnsweredQuestionOutcome>;
-  questionCoordination(): QuestionCoordinationDeps;
   cancelBatch(storeId: string, batchId: string, callerSessionId: string): Promise<ChildOutcome[]>;
   cancelGraph(storeId: string, reason: string): Promise<void>;
   awaitBatch(storeId: string, batchId: string): Promise<ChildOutcome[]>;
   reconcileStore(storeId: string, rootSessionId?: string): Promise<ReconcileReport>;
-  wakeUnclaimedQuestionMessages(storeId: string, deliveries: readonly QuestionReconcileReport[]): Promise<void>;
-  wakeUnclaimedBatchResults(unread: readonly {
-    sessionId: string;
-    messageId: string;
-  }[]): void;
-  sessionHoldsPendingMessage(sessionId: string, messageId: string): boolean;
   resumeAdoptedWorkerSession(request: AdoptedWorkerResumeRequest): Promise<AdoptedWorkerResume>;
   rebuildWorkspaceOwnership(storeId: string): Promise<void>;
-  releaseStoreWorkspace(storeId: string): Promise<void>;
+  /**
+   * Pin the workspace one session's runs resolve to. The graph entry calls this
+   * with the bubble it materialized (A0 §1.1): the mapping is the one door that
+   * tells a restarted runtime where the root session works.
+   */
+  pinSessionWorkspace(sessionId: string, workspace: string): void;
   failBatch(storeId: string, batchId: string, reason: string): Promise<void>;
-  recoverySessionFor(snapshot: TaskSnapshot | undefined, storeId: string): string;
-  sessionForStore(storeId: string): Promise<string>;
   runForSession(sessionId: string): Promise<{
     storeId: string;
     task: TaskInstance;
     run: TaskRun;
   }>;
   allowsRuntimeDecomposition(): boolean;
-  gatePhaseFromStore(sessionId: string, run: TaskRun, storeId: string, token: number): void;
   recoveryStatus(storeId: string): Promise<StoreRecoveryStatus>;
   /** The live barrier's deferred work; a store this process holds no barrier for has none to show. */
   recoveryState(storeId: string): StoreRecoveryStateView | undefined;
-  assertRecoveryReady(storeId: string, entry: string): Promise<void>;
-  reindex(storeId: string, snapshot: TaskSnapshot): void;
-  workspacePathForSession(sessionId: string): Promise<string | undefined>;
-  workspacePathFor(sessionId: string): Promise<string | undefined>;
-  assertWorkspaceHeldBy(workspace: string, storeId: string, parentTask: TaskInstance, parentRunId: RunId): Promise<void>;
-  notify(sessionId: string, text: string): void;
-  notifyWhenReady(sessionId: string, text: string): void;
-  deliverBatchResult(message: BatchResultMessage): Promise<BatchResultDeliveryStatus>;
-  deliverBatchResultNow(message: BatchResultMessage): Promise<BatchResultDeliveryStatus>;
   redeliverBatchResult(storeId: string, batchId: string): Promise<BatchResultDeliveryStatus>;
   reconcileSessionJobs(sessionId: string): Promise<void>;
-  admissionContext(): AdmissionContext;
   envPathForSession(sessionId: string): Promise<string | undefined>;
-  contractRefusal(parentTaskId: TaskId, reasons: readonly string[]): Error;
   orchestrateEnv(callerSessionId: string, actor: string, workspace?: string, overlay?: ReplayOverlay): Promise<OrchestrateEnv>;
-  watchRun(storeId: string, runId: RunId, callback: (status: RunStatus) => void): () => void;
-  sessionBoundInProcess(storeId: string, runId: RunId): string | undefined;
-  releaseRunWorkspaceLayer(storeId: string, runId: RunId, sessionId: string): Promise<void>;
-  observeSession(sessionId: string): Promise<SessionObservation | undefined>;
   softService<T>(name: string): T | undefined;
-  registeredVerifierIds(): Promise<readonly string[] | undefined>;
-  providerPrecheck(capabilities: readonly string[], view: SkillDiscoveryView, table?: Readonly<Record<string, CapabilityConfig>>, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>, callerSessionId?: string): Promise<ProviderPrecheck>;
   capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheck>;
   readRunBinding(binding: RunProviderBinding): Promise<RunBindingRead | undefined>;
-  assertKnownVerifierRefs(declared: readonly {
-    childIndex: number;
-    criterion: AcceptanceCriterion;
-  }[], what: string): Promise<void>;
   liveAgent(sessionId: string): Agent;
-  agentOrUndefined(sessionId: string): Agent | undefined;
   /** Public alias of the protected `Service.ctx` for the extracted modules. */
   get context(): Context;
 }
-//#endregion
-//#region src/admission.d.ts
-/**
- * Structural defects of one task's acceptance contract (T1, construction guide
- * §4): what has to hold before a contract can be admitted at all, whichever
- */
-declare function contractDefects(criteria: readonly AcceptanceCriterion[], label: string): string[];
-//#endregion
-//#region src/proposal.d.ts
-/**
- * Whether one proposal is still in flight for the task that made it —
- * submitted and not yet admitted, not yet decided, or decided and not yet
- */
-declare function isOpenProposal(proposal: TaskProposal): boolean;
-/**
- * The open proposal of one run, or `undefined` — §7.4's "已知等待": a run whose
- * own batch is waiting for a review (or for the admission its approval
- */
-declare function openProposalOf(snapshot: TaskSnapshot, taskId: string, runId: string): TaskProposal | undefined;
-//#endregion
-//#region src/protected-inputs.d.ts
-/**
- * Fix the byte identity of every declared protected input, against the
- * checkout directory the criterion's judge will run in.
- */
-declare function fixProtectedInputs(paths: readonly string[], cwd: string | undefined, label: string): Promise<{
-  refs: ProtectedInputRef[];
-  reasons: string[];
-}>;
-/**
- * Fix the declared protected inputs of a whole decomposition proposal before
- * anything else reads it: the runtime calls this ahead of the single
- */
-declare function fixSpecProtectedInputs(spec: DecomposeSpec, cwd: string | undefined): Promise<{
-  spec: DecomposeSpec;
-  reasons: string[];
-}>;
-/**
- * Structural defects of the **fixed** form of every criterion's protected
- * inputs: each declaration must be an array of plain objects carrying exactly
- */
-declare function protectedInputDefects(criteria: readonly AcceptanceCriterion[], label: string): string[];
 //#endregion
 //#region src/obligation.d.ts
 /** One known obligation of a domain pack: a question plus what would answer it. */
@@ -2969,12 +2348,6 @@ declare function loadObligationTemplates(repoRoot: string): Promise<ObligationTe
 /** A domain obligation is satisfied only by a matching criterion in the latest verified run's evidence. */
 declare function checkObligationCoverage(templates: readonly ObligationTemplate[], snapshot: TaskSnapshot): ObligationCoverage;
 //#endregion
-//#region src/service/root-recovery.d.ts
-/** The round before one attempt as a notice for the new attempt's own session: criterion verdicts and effort facts, read from the store. */
-declare function priorRoundNotice(snapshot: TaskSnapshot, source: TaskInstance, sourceRun: TaskRun): string | undefined;
-/** The same notice for a run the store resumed: the attempt's own recovery record names the round before it. */
-declare function priorRoundNoticeForRun(snapshot: TaskSnapshot, run: TaskRun): string | undefined;
-//#endregion
 //#region src/service/bubble.d.ts
 /**
  * Bubble materialization and settlement: one RSI round's isolated workspace.
@@ -2997,15 +2370,6 @@ declare function bubbleWorkspacePath(dshHome: string, rootSessionId: string, rou
  */
 declare function latestBubbleWorkspacePath(dshHome: string, rootSessionId: string): string | undefined;
 /**
- * The method revision one materialized bubble's volume carries, read from its
- * manifest — `undefined` for a legacy bubble and for a path that is no bubble
- * workspace. A Run admitted into a bubble binds exactly this revision.
- */
-declare function bubbleMethodRevisionOf(workspacePath: string): {
-  readonly revisionId: string;
-  readonly digest?: string;
-} | undefined;
-/**
  * Materialize one round's bubble workspace: every environment component cloned
  * at `rsi/<graphId>/round-<N-1>` (round 1 folds the environment into `round-0`
  * first), plus the method volume and the round's manifest. The method volume is
@@ -3027,54 +2391,6 @@ declare function materializeBubble(envPath: string, dshHome: string, rootSession
  */
 declare function settleBubble(envPath: string, workspacePath: string, graphId: string, round: number): Promise<Record<string, string>>;
 //#endregion
-//#region src/verified-read.d.ts
-/**
- * Reading files without following a link: the one implementation of "a path
- * under a root, walked one component at a time through `lstat`".
- */
-/**
- * Where a component walk under a root stopped. The walk is split from the read
- * so a caller that records "absent" can tell it apart from a path that changed
- */
-type VerifiedWalk = {
-  missing: false;
-  abs: string;
-} | {
-  missing: true;
-  reason: 'no such file or directory' | 'a path component is not a directory';
-};
-/**
- * Walk `rel` under `root` one component at a time, refusing anything but real
- * entries: a symbolic link anywhere on the path, a non-regular entry where the
- */
-declare function walkVerified(root: string, rel: string): Promise<VerifiedWalk>;
-/**
- * Read the file at `rel` under `root` as raw bytes, refusing anything but a
- * real regular file: the entry itself and every ancestor between `root` and it
- */
-declare function readVerifiedFile(root: string, rel: string): Promise<Buffer>;
-//#endregion
-//#region src/orchestration/batch.d.ts
-/**
- * Drive one admitted batch to settlement (A3 §3.1): reentrant, store-driven,
- * and owned by the runtime rather than by the tool call that admitted it.
- */
-declare function driveBatch(env: OrchestrateEnv, batch: BatchContext): Promise<ChildOutcome[]>;
-//#endregion
-//#region src/orchestration/verify.d.ts
-/**
- * The L4 exit pointer (KISS §7, VRTC plan phase 3.1), appended to the feedback
- * a root agent reads at each of the three trigger sites. The escalation ledger
- */
-declare function escalationHint(what: string, tried: string, suggested: string): string;
-//#endregion
-//#region src/orchestration/observe.d.ts
-/**
- * The end-of-batch results one store's own facts still owe (K1 §2, §5).
- * A run that is `active` has no unfinished batch — `waiting_children → active`
- */
-declare function owedBatchResults(snapshot: TaskSnapshot): OwedBatchResult[];
-//#endregion
 //#region src/orchestration/settlement.d.ts
 /**
  * ------------------------------------------------------------------------- *
@@ -3087,8 +2403,6 @@ declare function owedBatchResults(snapshot: TaskSnapshot): OwedBatchResult[];
 declare function settleRunFromRuntime(env: RuntimeSettlementEnv, storeId: string, run: TaskRun, status: 'cancelled' | 'failed', reason: string): Promise<void>;
 //#endregion
 //#region src/session-facts.d.ts
-/** The human-facing tools: calling one is a person's intervention, not the worker's own work. */
-declare const HUMAN_TOOLS: ReadonlySet<string>;
 /** One calling configuration and how many requests the session made under it. */
 interface ModelRequestFact {
   readonly identity: ReceiptRequestIdentity;
@@ -3123,17 +2437,6 @@ interface SessionFacts {
   /** The last event's time as an ISO timestamp (the log's own `time` is epoch milliseconds), for judging whether it has already passed a run's terminal boundary. */
   readonly lastEventAt?: string;
 }
-/** Whether one tool result reported a failure. */
-declare function toolResultFailed(data: {
-  error?: unknown;
-  message?: {
-    isError?: boolean;
-  };
-}): boolean;
-/** The `name` a `skill` tool call asked to load, when its arguments name one. */
-declare function skillNameFrom(rawArguments: string): string | undefined;
-/** Parse one session's events and token reading into the facts every reader consumes. One parse, one meaning. */
-declare function sessionFactsOf(events: readonly SessionEvent[], tokens?: ReviewTokenUsage): SessionFacts;
 //#endregion
 //#region src/receipt.d.ts
 /** What the sealer hands the builder: the store's own records plus the session facts it gathered. */
@@ -3156,8 +2459,12 @@ type ReceiptBuildResult = {
   readonly status: 'refused';
   readonly reason: string;
 };
-/** The execution subtree one run froze: itself first, then every descendant, in store order. */
-declare function executionSubtree(snapshot: TaskSnapshot, runId: RunId): readonly RunId[];
+/**
+ * One run's ancestors by `parentRunId`: itself first, then its parent up the
+ * chain. A link the snapshot does not hold ends the walk, as does a cycle — the
+ * snapshot's own runs are the only ones walked.
+ */
+
 /** Build one Run's receipt from the store's records and the session facts handed in. */
 declare function buildExecutionReceipt(input: ReceiptBuildInput): ReceiptBuildResult;
 /** The execution usage one receipt covers: the口径 of a run subtree's tokens and tool calls. */
@@ -3182,10 +2489,6 @@ declare function executionUsage(snapshot: TaskSnapshot, receipt: ExecutionReceip
 /** Refuse a receipt that cannot establish the facts a consumer needs, naming them. */
 declare function requireReceiptFacts(receipt: ExecutionReceipt, facts: readonly ReceiptMissingFact[], where: string): void;
 //#endregion
-//#region src/replay-paths.d.ts
-/** Relocate declared workspace paths, retaining every other contract value. */
-declare function rebaseWorkspacePaths<T>(value: T, from: string, to: string): T;
-//#endregion
 //#region src/index.d.ts
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -3201,4 +2504,4 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 //#endregion
-export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityRowEdit, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionCallFact, type DecompositionReviewRequest, ENVIRONMENT_DRAFT_ID, ENVIRONMENT_REVISION_ID, type EnvironmentCapabilityEntry, type EnvironmentCommitHost, type EnvironmentCommitStage, type EnvironmentDraft, type EnvironmentDraftRef, type EnvironmentEdit, type EnvironmentLibrary, type EnvironmentPointer, type EnvironmentPointerCompletion, type EnvironmentPointerIntent, type EnvironmentPointerReconcile, type EnvironmentProtocol, type EnvironmentPublishSource, type EnvironmentReview, type EnvironmentRevision, type EnvironmentRevisionManifest, type EnvironmentRevisionRef, type EnvironmentSkillEntry, type EnvironmentTaskTemplateEntry, type EnvironmentView, ExecutionGate, type ExecutionUsage, HUMAN_TOOLS, type InitialSeed, IterationCapRefusal, type LibraryEditResult, type LibraryReview, type LibraryRoots, type LibraryWrite, type McpServerTemplate, type ModelRequestFact, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type PublishOutcome, type PublishRequest, RECEIPT_ACTOR, RECEIPT_PERSIST_WAIT_MS, type ReceiptBuildInput, type ReceiptBuildResult, type ReceiptReconcileReport, type ReceiptSealStatus, type RecoveryMode, type RecoveryRounds, type ReplayReceiptReport, type ReplayRunOutcome, type ReplayTaskOptions, type RevisionDefects, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, type SessionFacts, type SkillEdit, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, type TaskRuntime as TaskRuntimeService, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TemplateEdit, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, appendLineDurable, applyCapabilityRowEdit, applyReviewEdit, applySkillEdit, applyTemplateEdit, assertDraftEditAllowed, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleMethodRevisionOf, bubbleWorkspacePath, buildExecutionReceipt, candidateRevisionId, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, copyRevisionDirectory, createEnvironmentDraft, decompositionIdentity, defaultTaskTemplatesRoot, discardEnvironmentDraft, draftsRoot, driveBatch, emptyRevisionManifest, ensureEnvironmentLayout, ensureInitialRevision, ensureProtocolMarker, environmentProtocolMarker, escalationHint, executionProviders, executionSubtree, executionUsage, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, freezeDraftDirectory, freezeEnvironmentDraft, hasLegacyLayout, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, latestDraftFor, libraryRoots, listEnvironmentDrafts, listPointerCompletions, listRevisions, loadObligationTemplates, loadSkillSidecar, manifestDigest, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openPointerIntent, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseRevisionManifest, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, publishEnvironmentRevision, readActiveRevision, readEnvironmentDraft, readPointer, readRevision, readRevisionManifest, readRevisionSkillFile, readVerifiedFile, rebaseWorkspacePaths, reconcileEnvironmentPointer, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requireReceiptFacts, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, revisionCapabilityRows, revisionRefOf, revisionRoot, revisionSkillOf, revisionTemplateOf, revisionsRoot, rollbackEnvironmentRevision, serialEnvironment, serializeSkillSidecar, sessionFactsOf, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillNameFrom, skillSearchRoots, stageEnvironmentEdit, syncDirectory, taskTemplatePage, toolResultFailed, unlistableVerifierRefusal, validateSkillProvider, verifyRevisionDirectory, walkVerified, workerBaseline, writeFileAtomic, writeRevisionManifest };
+export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type CapabilityConfig, type CapabilityProviderPrecheck, type ChildOutcome, type Config, type CriterionSpec, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, type EnvironmentDraft, type EnvironmentEdit, type EnvironmentLibrary, type EnvironmentPointer, type EnvironmentPointerCompletion, type EnvironmentPointerIntent, type EnvironmentPointerReconcile, type EnvironmentPublishSource, type EnvironmentRevision, type EnvironmentRevisionManifest, type EnvironmentView, type ExecutionUsage, type LibraryRoots, type McpServerTemplate, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type PublishOutcome, type PublishRequest, type RecoveryMode, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, type SessionFacts, type SkillProviderVerdict, type StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bubbleWorkspacePath, buildExecutionReceipt, checkObligationCoverage, createEnvironmentDraft, emptyRevisionManifest, ensureInitialRevision, executionUsage, findRepoRoot, hasLegacyLayout, latestBubbleWorkspacePath, libraryRoots, listPointerCompletions, loadObligationTemplates, loadSkillSidecar, materializeBubble, optionalService, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, readEnvironmentDraft, readPointer, readRevision, recoveryAttemptWithKey, registeredVerifierIds, registeredVerifierVocabulary, requireReceiptFacts, resolveCapabilities, resolveRootBudget, revisionCapabilityRows, settleBubble, settleRunFromRuntime, skillSearchRoots, stageEnvironmentEdit, workerBaseline };

@@ -71,7 +71,7 @@ export interface EnvironmentDraft {
 }
 
 /** The listing projection of one draft. */
-export interface EnvironmentDraftRef {
+interface EnvironmentDraftRef {
   readonly draftId: string
   readonly basedOn: string
   readonly edits: number

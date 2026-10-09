@@ -147,7 +147,7 @@ function selectedProviders(
 }
 
 /** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
-export function mcpServerBindings(
+function mcpServerBindings(
   manifest: CapabilityManifest,
   registry: Readonly<Record<string, McpServerTemplate>>,
 ): RunMcpServerBinding[] {

@@ -67,7 +67,7 @@ export interface BatchResultMessage {
  */
 export type BatchResultDeliveryStatus = 'delivered' | 'already-present' | 'unavailable' | 'refused' | 'skipped'
 
-export interface SpawnChildRequest {
+interface SpawnChildRequest {
   sessionId: string
   name: string
   agentPreset?: string
@@ -291,7 +291,6 @@ export interface AdoptedWorkerResumeRequest {
  */
 export type AdoptedWorkerResume =
   | { readonly status: 'live' }
-  | { readonly status: 'retry'; readonly reason: string }
   | { readonly status: 'refused'; readonly reason: string }
 
 /**
@@ -474,16 +473,6 @@ export interface ReplayOverlay {
   capabilityOverrides?: Record<string, CapabilityConfig>
   /** Candidate definitions resolved for this replay only. */
   mcpServers?: Record<string, import('../mcp-servers.ts').McpServerTemplate>
-  /**
-   * Extra skill roots forwarded to the worker grant (`WorkerGrant.skillRoots`):
-   * every `<root>/<name>/SKILL.md` found is registered into the worker's own
-   */
-  extraSkillRoots?: string[]
-  /**
-   * Preset id mounted instead of the capability/default resolution. Must exist
-   * in the deployment's preset roster — the roster scans constructor-fixed
-   */
-  presetOverride?: string
 }
 
 /**

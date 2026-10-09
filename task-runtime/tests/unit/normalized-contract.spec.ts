@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { DecomposeSpec } from '../../src/index.ts'
-import { normalizeDecomposition } from '../../src/index.ts'
-import { DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH } from '../../src/index.ts'
+import { normalizeDecomposition } from '../../src/normalize.ts'
+import { DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH } from '../../src/config.ts'
 import {
   harness,
   createRoot,

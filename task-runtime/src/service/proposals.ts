@@ -38,6 +38,10 @@ import type {
   ReviewSubject,
 } from '../types.ts'
 import { now } from '../helpers.ts'
+import * as svcAdmission from './admission.ts'
+import * as svcEnv from './env.ts'
+import * as svcRootIntake from './root-intake.ts'
+import * as svcRootRecovery from './root-recovery.ts'
 
 export async function decomposeAndRun(
   self: TaskRuntime,
@@ -48,7 +52,7 @@ export async function decomposeAndRun(
   spec: DecomposeSpec,
   exec: { signal?: AbortSignal; callId?: string } = {},
 ): Promise<DecomposeAdmissionResult> {
-  await self.assertRecoveryReady(storeId, 'a decomposition')
+  await svcRootRecovery.assertRecoveryReady(self, storeId, 'a decomposition')
   const submission = await submitDecompositionProposal(
     self,
     storeId,
@@ -94,7 +98,7 @@ export async function submitDecompositionProposal(
   spec: DecomposeSpec,
   options: DecomposeProposalOptions = {},
 ): Promise<ProposalSubmission> {
-  await self.assertRecoveryReady(storeId, 'a decomposition proposal')
+  await svcRootRecovery.assertRecoveryReady(self, storeId, 'a decomposition proposal')
   return await serializeParent(self, storeId, parentTaskId, () =>
     submitProposalOnce(self, storeId, parentTaskId, parentRunId, callerSessionId, spec, options),
   )
@@ -107,7 +111,7 @@ export async function continueProposal(
   caller: string,
   options: { spec?: DecomposeSpec; exec?: { callId?: string } } = {},
 ): Promise<ProposalContinuation> {
-  await self.assertRecoveryReady(storeId, 'the continuation of a proposal')
+  await svcRootRecovery.assertRecoveryReady(self, storeId, 'the continuation of a proposal')
   const proposal = await requireProposal(self, storeId, proposalId)
   if (proposal.kind === 'root') {
     return await self.serializeRootIntake(storeId, () => continueProposalIn(self, storeId, proposalId, caller, options))
@@ -125,7 +129,7 @@ export async function decideProposal(
   decidedBy: string,
   exec: { callId?: string } = {},
 ): Promise<ProposalDecisionResult> {
-  await self.assertRecoveryReady(storeId, 'a proposal decision')
+  await svcRootRecovery.assertRecoveryReady(self, storeId, 'a proposal decision')
   const proposal = await requireProposal(self, storeId, proposalId)
   const serialize = async <T>(work: () => Promise<T>): Promise<T> =>
     proposal.kind === 'root'
@@ -207,13 +211,13 @@ export async function decideProposal(
   })
 }
 
-export async function approvalLatenessReason(
+async function approvalLatenessReason(
   self: TaskRuntime,
   storeId: string,
   proposal: TaskProposal,
 ): Promise<string | undefined> {
   if (proposal.kind !== 'root') return await parentRunEndedReason(self, storeId, proposal)
-  const existing = await self.existingRootTask(storeId)
+  const existing = await svcRootIntake.existingRootTask(self, storeId)
   if (existing === undefined) return undefined
   return `store "${storeId}" already holds root task "${existing.taskId}"`
 }
@@ -235,7 +239,7 @@ export async function cancelProposal(
   return await decideProposal(self, storeId, proposalId, { outcome: 'cancelled' }, caller)
 }
 
-export function proposalCallerOf(proposal: TaskProposal): string {
+function proposalCallerOf(proposal: TaskProposal): string {
   return proposal.kind === 'root' ? proposal.identity.rootSessionId : proposal.identity.callerSessionId
 }
 
@@ -252,7 +256,7 @@ export async function proposalsForParent(
   return [...(snapshot.proposals?.byParentTask[parentTaskId] ?? [])]
 }
 
-export async function submitProposalOnce(
+async function submitProposalOnce(
   self: TaskRuntime,
   storeId: string,
   parentTaskId: TaskId,
@@ -267,7 +271,7 @@ export async function submitProposalOnce(
   const parentRun = await self.context.task.runIn(storeId, parentRunId)
   // (1) The presented batch becomes a normalized one — or the request is
   //     refused, field by field, before a proposal exists.
-  const derived = await self.deriveBatch(identity, spec)
+  const derived = await svcAdmission.deriveBatch(self, identity, spec)
   if (!derived.ok) return await refusePrecheck(self, storeId, parentTaskId, actor, derived.refusal)
   const { batch } = derived
 
@@ -283,7 +287,7 @@ export async function submitProposalOnce(
      * The caller presented the batch again and the digest says it is the one
      * this request names: the stored proposal already carries the content, so
      */
-    const storedBatch = self.storedBatchOf(stored)
+    const storedBatch = svcAdmission.storedBatchOf(stored)
     const review =
       stored.status === 'pending_review'
         ? await requestProposalReview(self, {
@@ -292,7 +296,7 @@ export async function submitProposalOnce(
             proposal: stored,
             parentTask,
             batch: storedBatch,
-            manifests: await self.manifestsOf(storedBatch, callerSessionId),
+            manifests: await svcAdmission.manifestsOf(self, storedBatch, callerSessionId),
           })
         : undefined
     return {
@@ -309,8 +313,8 @@ export async function submitProposalOnce(
    * (3) A genuinely new batch: only a run that may still decide its own work
    *     may propose one, and the batch has to clear every admission rule. Two
    */
-  await self.assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, options.exec?.signal)
-  const checked = await self.checkDerivedBatch({
+  await svcAdmission.assertDecomposableRun(self, storeId, parentTask, parentRun, callerSessionId, options.exec?.signal)
+  const checked = await svcAdmission.checkDerivedBatch(self, {
     identity,
     parentTask,
     batch,
@@ -460,7 +464,7 @@ export async function continueProposalIn(
    * store-level gate and two fingerprints, with no parent task and no parent
    */
   if (proposal.kind === 'root') {
-    return await self.continueRootProposalIn(storeId, proposal)
+    return await svcRootIntake.continueRootProposalIn(self, storeId, proposal)
   }
 
   const parentTaskId = proposal.identity.parentTaskId
@@ -518,9 +522,9 @@ export async function continueProposalIn(
       owner,
     )
     const tightened = await requireProposal(self, storeId, proposalId)
-    const tightenedBatch = self.storedBatchOf(tightened)
+    const tightenedBatch = svcAdmission.storedBatchOf(tightened)
     let detail = 'it is now waiting for a review'
-    const reviewed = await self.checkDerivedBatch({
+    const reviewed = await svcAdmission.checkDerivedBatch(self, {
       identity: {
         storeId,
         parentTaskId: proposal.identity.parentTaskId,
@@ -558,7 +562,7 @@ export async function continueProposalIn(
     callerSessionId: proposal.identity.callerSessionId,
   }
   if (options.spec !== undefined) {
-    const presented = await self.deriveBatch(identity, options.spec)
+    const presented = await svcAdmission.deriveBatch(self, identity, options.spec)
     if (!presented.ok) {
       throw new Error(
         `task-runtime: the batch presented for proposal "${proposalId}" is not a usable one: ${presented.refusal.reasons.join('; ')}`,
@@ -572,13 +576,13 @@ export async function continueProposalIn(
       )
     }
   }
-  const batch = self.storedBatchOf(proposal)
+  const batch = svcAdmission.storedBatchOf(proposal)
 
   /**
    * (4) The re-check (§6): the stored batch is judged again exactly as it was
    * judged at submission — structure, capabilities, providers, verifierRefs —
    */
-  const checked = await self.checkDerivedBatch({
+  const checked = await svcAdmission.checkDerivedBatch(self, {
     identity,
     parentTask,
     batch,
@@ -602,7 +606,7 @@ export async function continueProposalIn(
    * The limits are recomputed from *this* process's configuration and compared
    * with the fingerprint the approval bound: the stored batch carries the
    */
-  const contextDigest = admissionContextDigest(self.admissionContext())
+  const contextDigest = admissionContextDigest(svcEnv.admissionContext(self, ))
   if (contextDigest !== proposal.admissionContextDigest) {
     return await staleProposal(
       self,
@@ -642,7 +646,7 @@ export async function continueProposalIn(
       proposal.identity.callerSessionId,
     )
   }
-  const admitted = await self.admitPrecheckedBatch({
+  const admitted = await svcAdmission.admitPrecheckedBatch(self, {
     proposal,
     parentTask,
     parentRun,
@@ -706,7 +710,7 @@ export async function expireProposal(
   }
 }
 
-export async function parentRunEndedReason(
+async function parentRunEndedReason(
   self: TaskRuntime,
   storeId: string,
   proposal: TaskProposal,
@@ -723,7 +727,7 @@ export async function parentRunEndedReason(
   return undefined
 }
 
-export async function proposalForRequest(
+async function proposalForRequest(
   self: TaskRuntime,
   storeId: string,
   requestKey: string,
@@ -768,7 +772,7 @@ export async function readProposal(
   return snapshot.proposals?.byId[proposalId]
 }
 
-export function submissionDetail(proposal: TaskProposal, existing: boolean): string {
+function submissionDetail(proposal: TaskProposal, existing: boolean): string {
   const head = existing
     ? `request answered from proposal "${proposal.proposalId}" (policy ${proposal.policy}, status ${proposal.status})`
     : `proposal "${proposal.proposalId}" was recorded under policy ${proposal.policy} as ${proposal.status}`
@@ -799,7 +803,7 @@ export async function requestProposalReview(
         'recorded decision moves it',
     }
   }
-  const registeredVerifiers = await self.registeredVerifierIds()
+  const registeredVerifiers = await svcEnv.registeredVerifierIdsImpl(self, )
   const obligations =
     request.kind === 'root'
       ? /**
@@ -853,7 +857,7 @@ export async function requestProposalReview(
   }
 }
 
-export async function refusePrecheck(
+async function refusePrecheck(
   self: TaskRuntime,
   storeId: string,
   parentTaskId: TaskId,
@@ -907,7 +911,7 @@ export async function reconcileProposals(
     const proposalId = proposal.proposalId
     try {
       if (proposal.kind === 'root') {
-        await self.reconcileRootProposal(storeId, proposal, report)
+        await svcRootIntake.reconcileRootProposal(self, storeId, proposal, report)
         continue
       }
       if (proposal.status === 'pending_review') {
@@ -927,9 +931,9 @@ export async function reconcileProposals(
           parentRunId: proposal.identity.parentRunId,
           callerSessionId: proposal.identity.callerSessionId,
         }
-        const batch = self.storedBatchOf(proposal)
+        const batch = svcAdmission.storedBatchOf(proposal)
         const envPath = await self.envPathForSession(proposal.identity.callerSessionId)
-        const checked = await self.checkDerivedBatch({
+        const checked = await svcAdmission.checkDerivedBatch(self, {
           identity,
           parentTask,
           batch,

@@ -69,7 +69,7 @@ function harness() {
     // The graph entry opens its root session's store and adopts the root it already
     // holds (A0 §1.1); creating a graph mints no task.
     adoptRoot: vi.fn(async () => ({ adopted: false as const, detail: 'the fresh store holds no root task yet' })),
-    sessionWorkspaces: new Map<string, string>(),
+    pinSessionWorkspace: vi.fn(),
     // The graph's library fixes its initial revision before round 1's bubble is
     // materialized; the real seeding runs here so the volume is real bytes.
     ensureInitialEnvironment: vi.fn(async (rootSessionId: string, actor: string) => {

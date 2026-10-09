@@ -48,11 +48,6 @@ export function recoveryKindOf(mode: RecoveryMode | undefined): 'recovery' | 'im
   return mode === 'improve' ? 'improvement' : 'recovery'
 }
 
-/** The mode one stored kind was asked under; a record written before the field existed reads as a recovery. */
-export function recoveryModeOf(kind: 'recovery' | 'improvement' | undefined): RecoveryMode {
-  return kind === 'improvement' ? 'improve' : 'recovery'
-}
-
 /**
  * One recovery request, as the host composition layer hands it to the runtime
  * (plan §F.4: the tool and evolution's coordinator call this entry, and each

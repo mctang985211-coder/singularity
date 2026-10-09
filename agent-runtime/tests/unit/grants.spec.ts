@@ -318,7 +318,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
 })
 
-describe('applyWorkerGrant skill overlay (replay extraSkillRoots)', () => {
+describe('applyWorkerGrant skill overlay (extra skill roots)', () => {
   /** One overlay root holding a `verify` candidate skill and an ungranted `overlay-only` skill. */
   function overlayRoot() {
     const dir = mkdtempSync(join(tmpdir(), 'skill-overlay-'))

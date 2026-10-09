@@ -7,12 +7,10 @@ import { randomUUID } from 'node:crypto'
 import type {
   CapabilityManifest,
   DependencyEdge,
-  RunId,
   TaskId,
   TaskInstance,
   TaskProposal,
   TaskProposalBatchConsumption,
-  TaskProposalDecomposition,
   TaskRun,
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
@@ -36,6 +34,10 @@ import type {
 } from '../types.ts'
 import { now } from '../helpers.ts'
 import { isOpenProposal } from '../proposal.ts'
+import * as svcDrivers from './drivers.ts'
+import * as svcEnv from './env.ts'
+import * as svcEnvironment from './environment.ts'
+import * as svcSessions from './sessions.ts'
 
 export async function deriveBatch(
   self: TaskRuntime,
@@ -50,7 +52,7 @@ export async function deriveBatch(
   let bound: DecomposeSpec
   try {
     const { root, scope } = await self.templateCaller(identity.callerSessionId)
-    const retired = await self.retiredTaskTemplates(identity.callerSessionId)
+    const retired = await svcEnvironment.retiredTemplatesFor(self, identity.callerSessionId)
     const expanded = await bindTaskDecomposition(root, spec, scope, retired)
     bound = Array.isArray(expanded?.children)
       ? { ...expanded, children: await Promise.all(expanded.children.map(child => bindTaskTemplate(root, child, scope, retired))) }
@@ -62,11 +64,11 @@ export async function deriveBatch(
   const fixed = await fixSpecProtectedInputs(bound, envPath)
   const normalized = normalizeDecomposition(fixed.spec, {
     ...identity,
-    admissionContext: self.admissionContext(),
+    admissionContext: svcEnv.admissionContext(self, ),
   })
   const reasons = [...fixed.reasons, ...(normalized.ok ? [] : normalized.reasons)]
   if (!normalized.ok || reasons.length > 0) {
-    return { ok: false, refusal: { error: self.contractRefusal(identity.parentTaskId, reasons), reasons, gaps: [] } }
+    return { ok: false, refusal: { error: svcEnv.contractRefusal(identity.parentTaskId, reasons), reasons, gaps: [] } }
   }
   return { ok: true, batch: normalized.batch, ...(envPath === undefined ? {} : { envPath }) }
 }
@@ -168,23 +170,6 @@ export async function assertDecomposableRun(
   if (signal?.aborted === true) {
     throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`)
   }
-}
-
-export async function inFlightProposalsOf(
-  self: TaskRuntime,
-  storeId: string,
-  parentRunId: RunId,
-): Promise<TaskProposalDecomposition[]> {
-  const index = (await self.context.task.snapshotIn(storeId)).proposals
-  /**
-   * An index this snapshot does not carry (a hand-built one) is not "no
-   * proposal exists": the check is skipped rather than answered wrongly, and the
-   */
-  if (index === undefined) return []
-  return index.all.filter(
-    (proposal): proposal is TaskProposalDecomposition =>
-      proposal.kind !== 'root' && proposal.identity.parentRunId === parentRunId && isOpenProposal(proposal),
-  )
 }
 
 export async function checkDerivedBatch(
@@ -293,7 +278,7 @@ export async function checkDerivedBatch(
    * grant must be discoverable from the viewpoint of the workers about to be
    */
   const overlay = self.sessionExecutionBindings.get(identity.callerSessionId)?.overlay
-  const precheck = await self.providerPrecheck(
+  const precheck = await svcEnv.providerPrecheck(self, 
     [...new Set(manifests.flatMap(manifest => Object.keys(manifest.capabilities)))],
     {
       ...(request.envPath === undefined ? {} : { cwd: request.envPath }),
@@ -320,7 +305,7 @@ export async function checkDerivedBatch(
   }
 
   try {
-    await self.assertKnownVerifierRefs(
+    await svcEnv.assertKnownVerifierRefs(self, 
       batch.children.flatMap((child, childIndex) =>
         child.contract.acceptanceCriteria.map(criterion => ({ childIndex, criterion })),
       ),
@@ -376,8 +361,8 @@ export async function admitPrecheckedBatch(
    * Workspace ownership (§3.4): the parent run must be the writer that holds
    * the checkout, or an ancestor of it must be. Anything else is another live
    */
-  const workspacePath = await self.workspacePathForSession(callerSessionId)
-  if (workspacePath !== undefined) await self.assertWorkspaceHeldBy(workspacePath, storeId, parentTask, parentRun.runId)
+  const workspacePath = await svcSessions.workspacePathForSession(self, callerSessionId)
+  if (workspacePath !== undefined) await svcSessions.assertWorkspaceHeldBy(self, workspacePath, storeId, parentTask, parentRun.runId)
 
   const children: TaskInstance[] = batch.children.map((child, index) => ({
     taskId: childTaskIds[index]!,
@@ -446,7 +431,7 @@ export async function admitPrecheckedBatch(
    * Progress belongs to the runtime from here on (§3.7): the caller's signal
    * governed admission only, and this batch's own controller is what a
    */
-  self.startBatchDriver({
+  svcDrivers.startBatchDriver(self, {
     storeId,
     parentTaskId,
     parentRunId: parentRun.runId,

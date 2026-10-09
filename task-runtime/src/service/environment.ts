@@ -32,7 +32,6 @@ import {
   revisionCapabilityRows,
   revisionRoot,
   rollbackEnvironmentRevision,
-  serialEnvironment,
   stageEnvironmentEdit,
 } from '../environment/index.ts'
 import type {
@@ -55,7 +54,7 @@ import type { CapabilityRowEdit } from '../environment/revision.ts'
 export const INITIAL_REVISION_ID = 'r0001'
 
 /** Which protocol one library root is served under; `uninitialized` means neither layout exists yet. */
-export type EnvironmentProtocol = 'environment-revision' | 'legacy' | 'uninitialized'
+type EnvironmentProtocol = 'environment-revision' | 'legacy' | 'uninitialized'
 
 /** One library resolved to the immutable roots a reader works in; no reader ever binds a mutable directory. */
 export interface EnvironmentLibrary {
@@ -94,6 +93,7 @@ export type {
   PublishOutcome,
   PublishRequest,
 } from '../environment/index.ts'
+import * as svcEnv from './env.ts'
 
 /** What one staged library edit answers: a draft holds the change, and nothing is in effect until a publish switches the pointer. */export interface LibraryEditResult {
   readonly libraryId: string
@@ -119,7 +119,7 @@ export interface LibraryReview {
 }
 
 /** The DSH home holding `singularity/environments/<libraryId>`; the same segment `runBindingRoot` sits under. */
-export function environmentHome(self: TaskRuntime): string {
+function environmentHome(self: TaskRuntime): string {
   const configured = self.config.environmentRevisionRoot
   if (configured !== undefined) return configured
   const bindings = self.config.runBindingRoot
@@ -131,7 +131,7 @@ export function environmentHome(self: TaskRuntime): string {
     : join(homedir(), '.dsh')
 }
 
-export function libraryRootsForRoot(self: TaskRuntime, rootSessionId: string): LibraryRoots {
+function libraryRootsForRoot(self: TaskRuntime, rootSessionId: string): LibraryRoots {
   return libraryRoots(rootSessionId, environmentHome(self))
 }
 
@@ -189,7 +189,7 @@ export async function environmentLibraryForSession(self: TaskRuntime, sessionId:
 }
 
 /** The commit host of one library: the library root the transaction runs against. */
-export function environmentCommitHost(self: TaskRuntime, library: LibraryRoots): EnvironmentCommitHost {
+function environmentCommitHost(self: TaskRuntime, library: LibraryRoots): EnvironmentCommitHost {
   return { library }
 }
 
@@ -215,7 +215,7 @@ export async function activeRevisionFor(self: TaskRuntime, sessionId: string): P
   return await activeRevisionForLibrary(self, await activeEnvironmentLibrary(self, sessionId))
 }
 
-export async function activeRevisionForLibrary(self: TaskRuntime, library: EnvironmentLibrary): Promise<EnvironmentRevision> {
+async function activeRevisionForLibrary(self: TaskRuntime, library: EnvironmentLibrary): Promise<EnvironmentRevision> {
   if (library.revision === undefined) {
     throw new Error(
       `task-runtime: library "${library.id}" is ${library.protocol} and holds no active environment revision; ` +
@@ -241,7 +241,7 @@ export async function revisionForRun(self: TaskRuntime, run: TaskRun): Promise<E
 }
 
 /** The library a *writer* addresses: legacy roots are refused by name, an uninitialized one is fixed first. */
-export async function activeEnvironmentLibrary(self: TaskRuntime, sessionId: string): Promise<EnvironmentLibrary> {
+async function activeEnvironmentLibrary(self: TaskRuntime, sessionId: string): Promise<EnvironmentLibrary> {
   const library = await environmentLibraryForSession(self, sessionId)
   if (library.protocol === 'legacy') {
     throw new Error(
@@ -266,7 +266,7 @@ export async function retiredTemplatesFor(self: TaskRuntime, sessionId: string):
   return retiredTemplatesOf(await environmentLibraryForSession(self, sessionId))
 }
 
-export function retiredTemplatesOf(library: EnvironmentLibrary): ReadonlySet<string> {
+function retiredTemplatesOf(library: EnvironmentLibrary): ReadonlySet<string> {
   return new Set(
     (library.revision?.manifest.taskTemplates ?? [])
       .filter(entry => entry.status === 'retired')
@@ -317,18 +317,7 @@ export async function activeEnvironmentView(
   }
 }
 
-/** The read-only view of a legacy library: the flat layout read directly, with no index rebuilt and no byte written. */
-export async function legacyLibraryView(self: TaskRuntime, library: LibraryRoots): Promise<EnvironmentView> {
-  return await legacyViewOfLibrary({
-    id: library.id,
-    root: library.root,
-    protocol: 'legacy',
-    taskTemplatesRoot: join(library.root, 'task-templates'),
-    skillRoot: join(library.root, 'skills'),
-  })
-}
-
-export async function legacyViewOfLibrary(library: EnvironmentLibrary, trialCandidateRef?: string): Promise<EnvironmentView> {
+async function legacyViewOfLibrary(library: EnvironmentLibrary, trialCandidateRef?: string): Promise<EnvironmentView> {
   const skills = await legacySkillsOf(library)
   const taskTemplates = await legacyTemplatesOf(library)
   return {
@@ -433,7 +422,7 @@ async function legacyIndex(library: EnvironmentLibrary, key: 'skills' | 'tasks')
 }
 
 /** The legacy capability rows, derived by reading the flat layout — the same rule the old index applied, with no write. */
-export async function legacyCapabilityRows(library: EnvironmentLibrary): Promise<Record<string, CapabilityConfig>> {
+async function legacyCapabilityRows(library: EnvironmentLibrary): Promise<Record<string, CapabilityConfig>> {
   const retired = await legacyRetiredSkills(library)
   const skills = await legacySkillsOf(library)
   return {
@@ -532,7 +521,7 @@ async function assertCandidateRowUsable(
     else mcpRegistry[name] = template
   }
   const cwd = await self.envPathForSession(sessionId)
-  const precheck = await self.providerPrecheck(
+  const precheck = await svcEnv.providerPrecheck(self, 
     [edit.name],
     { ...(cwd === undefined ? {} : { cwd }), extraRoots: [join(draft.root, 'skills'), library.skillRoot] },
     table,
@@ -583,11 +572,6 @@ export async function openPointerIntentFor(self: TaskRuntime, sessionId: string)
 
 export async function listRevisionsImpl(self: TaskRuntime, sessionId: string): Promise<EnvironmentRevisionRef[]> {
   return await listRevisions(await libraryRootsForSession(self, sessionId))
-}
-
-/** The one write tail of a library, for callers that stage several edits as one unit. */
-export async function serializeEnvironmentFor<T>(self: TaskRuntime, rootSessionId: string, work: () => Promise<T>): Promise<T> {
-  return await serialEnvironment(libraryRootsForRoot(self, rootSessionId), work)
 }
 
 /**

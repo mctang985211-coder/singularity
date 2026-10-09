@@ -4,13 +4,15 @@
 
 import type { TaskRuntime } from './runtime.ts'
 import type { CapabilityManifest } from '@dangosys/dsh-singularity-task'
-import { resolveCapabilities, type CapabilityConfig } from '../capability.ts'
+import { type CapabilityConfig } from '../capability.ts'
 import { ExecutionGate } from '../gate.ts'
 import { message } from '../helpers.ts'
 import { providerDefectLines } from '../provider-precheck.ts'
 import type { RootBudgetConfig } from '../root-budget.ts'
 import type { BudgetConfig } from '../orchestration/types.ts'
 import { DEFAULT_SUPERVISION, type ProviderLoadReport, type SupervisionConfig } from '../config.ts'
+import * as svcEnv from './env.ts'
+import * as svcRootRecovery from './root-recovery.ts'
 
 export function assertClosedRootBudget(budget: RootBudgetConfig | undefined): void {
   if (budget === undefined) return
@@ -134,7 +136,7 @@ export async function unload(self: TaskRuntime): Promise<void> {
    * The unload invalidates every recovery handle first (A2 §E): a driver
    * parked behind a barrier would otherwise hold the await below on a
    */
-  for (const storeId of [...self.storeRecovery.keys()]) self.invalidateStoreRecovery(storeId)
+  for (const storeId of [...self.storeRecovery.keys()]) svcRootRecovery.invalidateStoreRecovery(self, storeId)
   self.storeRecovery.clear()
   const entries = [...self.drivers.values()]
   for (const entry of entries) entry.controller.abort()
@@ -194,10 +196,10 @@ export async function providerLoadReport(self: TaskRuntime): Promise<ProviderLoa
   return self.providerLoad
 }
 
-export async function scanConfiguredProviders(self: TaskRuntime): Promise<ProviderLoadReport> {
+async function scanConfiguredProviders(self: TaskRuntime): Promise<ProviderLoadReport> {
   let report: ProviderLoadReport
   try {
-    const precheck = await self.providerPrecheck(Object.keys(self.config.capabilities), { cwd: process.cwd() })
+    const precheck = await svcEnv.providerPrecheck(self, Object.keys(self.config.capabilities), { cwd: process.cwd() })
     report = { precheck, defects: providerDefectLines(precheck) }
   } catch (error) {
     report = { defects: [], failed: message(error) }
@@ -206,7 +208,7 @@ export async function scanConfiguredProviders(self: TaskRuntime): Promise<Provid
   return report
 }
 
-export function reportProviderLoad(self: TaskRuntime, report: ProviderLoadReport): void {
+function reportProviderLoad(self: TaskRuntime, report: ProviderLoadReport): void {
   const roots = report.precheck?.roots ?? []
   if (report.failed !== undefined) {
     warn(
@@ -245,10 +247,6 @@ export function generatedTaskReview(self: TaskRuntime): 'off' | 'all' {
 
 export function gate(self: TaskRuntime): ExecutionGate {
   return self.executionGate
-}
-
-export function resolveCapabilitiesImpl(self: TaskRuntime, required: readonly string[]): CapabilityManifest {
-  return resolveCapabilities(required, self.config.capabilities, self.config.mcpServers ?? {})
 }
 
 export function listCapabilities(self: TaskRuntime): Readonly<Record<string, CapabilityConfig>> {

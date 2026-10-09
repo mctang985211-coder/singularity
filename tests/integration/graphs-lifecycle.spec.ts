@@ -86,9 +86,13 @@ function harness(overrides: { sessionPersistence?: unknown; events?: SessionEven
     // driver still running would keep spawning workers into an environment that
     // is being cleaned, so the store's task tree is cancelled first (§3.6).
     cancelGraph: vi.fn(async (_storeId: string, _reason: string) => {}),
-    // The live mapping `GraphsService.create` writes: the root session works in
-    // round 1's bubble, and the runtime resolves the checkout from here.
+    // The live mapping `GraphsService.create` writes through the named door: the
+    // root session works in round 1's bubble, and the runtime resolves the
+    // checkout from here.
     sessionWorkspaces: new Map<string, string>(),
+    pinSessionWorkspace: vi.fn((sessionId: string, workspace: string) => {
+      taskRuntime.sessionWorkspaces.set(sessionId, workspace)
+    }),
     // The graph's library fixes its initial revision before round 1's bubble is
     // materialized; the real seeding runs here so the bubble's method volume is
     // the revision's real bytes.

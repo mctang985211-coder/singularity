@@ -56,6 +56,13 @@ import type {
   ActivateRootContractRequest,
 } from '../types.ts'
 import { message, now } from '../helpers.ts'
+import * as svcDrivers from './drivers.ts'
+import * as svcEnv from './env.ts'
+import * as svcEnvironment from './environment.ts'
+import * as svcNotify from './notify.ts'
+import * as svcProposals from './proposals.ts'
+import * as svcRootRecovery from './root-recovery.ts'
+import * as svcSessions from './sessions.ts'
 
 export async function adoptRoot(self: TaskRuntime, storeId: string, rootSessionId: string): Promise<RootAdoption> {
   /**
@@ -112,14 +119,14 @@ export async function adoptRoot(self: TaskRuntime, storeId: string, rootSessionI
     state.pendingQuestionDelivery = undefined
     if (!state.cancelled) {
       if (deferred !== undefined) await deferred()
-      for (const result of state.pendingBatchResults.splice(0)) await self.deliverBatchResultNow(result)
+      for (const result of state.pendingBatchResults.splice(0)) await svcNotify.deliverBatchResultNow(self, result)
       while (state.pendingNotices.length > 0) {
         const notice = state.pendingNotices[0]!
         if (state.wokenSessions.has(notice.sessionId)) {
           state.pendingNotices.shift()
           continue
         }
-        self.notify(notice.sessionId, notice.text)
+        svcNotify.notify(self, notice.sessionId, notice.text)
         state.pendingNotices.shift()
       }
     }
@@ -147,12 +154,12 @@ export async function adoptRoot(self: TaskRuntime, storeId: string, rootSessionI
      * Not-started is not executed (A2 §E): the drivers this barrier
      * registered are aborted and removed, nothing is written on their behalf,
      */
-    self.standDownPendingDrivers(state)
+    svcDrivers.standDownPendingDrivers(self, state)
     release(false)
     // The temporary resources this barrier acquired go back; committed
     // recovery facts stay on the record.
     try {
-      await self.releaseStoreWorkspace(storeId)
+      await svcSessions.releaseStoreWorkspace(self, storeId)
     } catch (cleanup) {
       self.warn(`store ${storeId}: its workspace could not be released after a failed recovery (${message(cleanup)})`)
     }
@@ -184,7 +191,7 @@ export async function reconcileEvolutionCommits(self: TaskRuntime): Promise<void
   }
 }
 
-export async function adoptRootThroughBarrier(
+async function adoptRootThroughBarrier(
   self: TaskRuntime,
   storeId: string,
   rootSessionId: string,
@@ -196,7 +203,7 @@ export async function adoptRootThroughBarrier(
   await reconcileEvolutionCommits(self)
   await openOrCreateStore(self, storeId)
   let snapshot = await self.context.task.snapshotIn(storeId)
-  self.reindex(storeId, snapshot)
+  svcSessions.reindex(self, storeId, snapshot)
   let root = snapshot.tasks.find(task => task.parentTaskId === undefined)
   if (root === undefined) {
     /**
@@ -239,7 +246,7 @@ export async function adoptRootThroughBarrier(
     !rootWasStarted &&
     (phase === 'active' || (phase === 'waiting_children' && pendingCoordinationOf(snapshot, run.runId).length > 0))
   ) {
-    self.notifyWhenReady(
+    svcNotify.notifyWhenReady(self, 
       rootSessionId,
       'task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.',
     )
@@ -285,7 +292,7 @@ export async function initializeStoreGates(self: TaskRuntime, storeId: string): 
     )
   }
   for (const run of snapshot.runs) {
-    self.gatePhaseFromStore(run.sessionId, run, storeId, tokens.get(run.sessionId) ?? 0)
+    svcSessions.gatePhaseFromStore(self, run.sessionId, run, storeId, tokens.get(run.sessionId) ?? 0)
   }
   /**
    * The question blocks come from the same read and the same tokens (A4 §F.1):
@@ -294,7 +301,7 @@ export async function initializeStoreGates(self: TaskRuntime, storeId: string): 
   applyStoreQuestionBlocking(self.executionGate, snapshot, sessionId => tokens.get(sessionId) ?? 0)
 }
 
-export function nothingAdoptedDetail(storeId: string, rootSessionId: string, snapshot: TaskSnapshot): string {
+function nothingAdoptedDetail(storeId: string, rootSessionId: string, snapshot: TaskSnapshot): string {
   const open = (snapshot.proposals?.all ?? []).filter(isOpenProposal)
   const waiting =
     open.length === 0
@@ -312,7 +319,7 @@ export function runGatePhase(run: TaskRun): ExecutionPhase | 'terminal' | undefi
   return run.executionPhase
 }
 
-export async function openOrCreateStore(self: TaskRuntime, storeId: string): Promise<void> {
+async function openOrCreateStore(self: TaskRuntime, storeId: string): Promise<void> {
   try {
     await self.context.task.createStore(storeId)
   } catch (error) {
@@ -333,7 +340,7 @@ export async function intakeRootContract(
       `task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`,
     )
   }
-  await self.assertRecoveryReady(storeId, 'the intake of a root contract')
+  await svcRootRecovery.assertRecoveryReady(self, storeId, 'the intake of a root contract')
   const submission = await submitRootContractProposal(self, storeId, rootSessionId, spec, options)
   const continued = await self.continueProposal(storeId, submission.proposalId, rootSessionId)
   if (continued.status === 'activated') {
@@ -360,13 +367,13 @@ export async function submitRootContractProposal(
   spec: RootContractSpec,
   options: RootIntakeOptions = {},
 ): Promise<ProposalSubmission> {
-  await self.assertRecoveryReady(storeId, 'a root contract proposal')
+  await svcRootRecovery.assertRecoveryReady(self, storeId, 'a root contract proposal')
   return await serializeRootIntake(self, storeId, () =>
     submitRootProposalOnce(self, storeId, rootSessionId, spec, options),
   )
 }
 
-export function rootRequestKey(
+function rootRequestKey(
   storeId: string,
   rootSessionId: string,
   contract: TaskContract,
@@ -382,7 +389,7 @@ export function rootRequestKey(
   )
 }
 
-export async function rootProposalForRequest(
+async function rootProposalForRequest(
   self: TaskRuntime,
   storeId: string,
   requestKey: string,
@@ -449,7 +456,7 @@ export async function assertRootContractOrigin(
   )
 }
 
-export async function rootSessionLog(
+async function rootSessionLog(
   self: TaskRuntime,
   rootSessionId: string,
 ): Promise<{ readonly header: SessionHeader | undefined; readonly events: readonly SessionEvent[] }> {
@@ -476,11 +483,11 @@ export async function rootSessionLog(
   }
 }
 
-export function originRefusal(rootSessionId: string, reason: string): Error {
+function originRefusal(rootSessionId: string, reason: string): Error {
   return new Error(`task-runtime: the root contract of session "${rootSessionId}" was refused: ${reason}`)
 }
 
-export async function submitRootProposalOnce(
+async function submitRootProposalOnce(
   self: TaskRuntime,
   storeId: string,
   rootSessionId: string,
@@ -521,7 +528,7 @@ export async function submitRootProposalOnce(
      */
     const review =
       stored.status === 'pending_review'
-        ? await self.requestProposalReview({
+        ? await svcProposals.requestProposalReview(self, {
             kind: 'root',
             storeId,
             trigger: 'submitted',
@@ -586,8 +593,8 @@ export async function submitRootProposalOnce(
      */
     contract: structuredClone(contract),
     proposalDigest: rootProposalDigest(identity),
-    admissionContext: self.admissionContext(),
-    admissionContextDigest: admissionContextDigest(self.admissionContext()),
+    admissionContext: svcEnv.admissionContext(self, ),
+    admissionContextDigest: admissionContextDigest(svcEnv.admissionContext(self, )),
     reviewContext,
     reviewContextDigest: reviewContextDigest(reviewContext),
     createdAt: now(),
@@ -599,7 +606,7 @@ export async function submitRootProposalOnce(
      * A store that already holds *this* contract is a race, not a failure: the
      * request is answered from the record exactly as a retry is. Anything else
      */
-    const raced = await self.readProposal(storeId, proposal.proposalId).catch(() => undefined)
+    const raced = await svcProposals.readProposal(self, storeId, proposal.proposalId).catch(() => undefined)
     if (raced === undefined || raced.kind !== 'root' || raced.proposalDigest !== proposal.proposalDigest) throw error
     return {
       proposalId: raced.proposalId,
@@ -618,7 +625,7 @@ export async function submitRootProposalOnce(
       detail: rootSubmissionDetail(self, proposal, false),
     }
   }
-  const review = await self.requestProposalReview({
+  const review = await svcProposals.requestProposalReview(self, {
     kind: 'root',
     storeId,
     trigger: 'submitted',
@@ -637,14 +644,14 @@ export async function submitRootProposalOnce(
   }
 }
 
-export async function deriveRootContract(
+async function deriveRootContract(
   self: TaskRuntime,
   spec: RootContractSpec,
   envPath: string | undefined,
   callerSessionId?: string,
 ): Promise<{ ok: true; contract: TaskContract } | { ok: false; refusal: Error }> {
   try {
-    const retired = callerSessionId === undefined ? new Set<string>() : await self.retiredTaskTemplates(callerSessionId)
+    const retired = callerSessionId === undefined ? new Set<string>() : await svcEnvironment.retiredTemplatesFor(self, callerSessionId)
     spec = await bindTaskTemplate(await self.taskTemplatesRootFor(callerSessionId), spec, undefined, retired)
   } catch (error) {
     return { ok: false, refusal: rootRefusal([message(error)]) }
@@ -658,11 +665,11 @@ export async function deriveRootContract(
   return { ok: true, contract: normalized.contract }
 }
 
-export function rootRefusal(reasons: readonly string[]): Error {
+function rootRefusal(reasons: readonly string[]): Error {
   return new Error(`task-runtime: root contract rejected:\n- ${reasons.join('\n- ')}`)
 }
 
-export async function rootManifests(self: TaskRuntime, contract: TaskContract, sessionId?: string): Promise<CapabilityManifest[]> {
+async function rootManifests(self: TaskRuntime, contract: TaskContract, sessionId?: string): Promise<CapabilityManifest[]> {
   return [resolveCapabilities(contract.requiredCapabilities, sessionId === undefined ? self.config.capabilities : await self.capabilitiesForSession(sessionId), self.config.mcpServers)]
 }
 
@@ -671,7 +678,7 @@ export async function existingRootTask(self: TaskRuntime, storeId: string): Prom
   return snapshot.tasks.find(task => task.parentTaskId === undefined)
 }
 
-export async function checkRootContract(self: TaskRuntime, request: CheckRootContractRequest): Promise<RootPrecheck> {
+async function checkRootContract(self: TaskRuntime, request: CheckRootContractRequest): Promise<RootPrecheck> {
   const { rootSessionId, contract } = request
   const label = `root contract of session "${rootSessionId}"`
   const defects = [
@@ -686,7 +693,7 @@ export async function checkRootContract(self: TaskRuntime, request: CheckRootCon
   }
   const manifests = await rootManifests(self, contract, rootSessionId)
   const manifest = manifests[0] as CapabilityManifest
-  const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
+  const precheck = await svcEnv.providerPrecheck(self, Object.keys(manifest.capabilities), {
     ...(request.envPath === undefined ? {} : { cwd: request.envPath }),
     extraRoots: (await self.skillViewForSession(rootSessionId)).extraRoots,
   }, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers ?? {}, rootSessionId)
@@ -701,7 +708,7 @@ export async function checkRootContract(self: TaskRuntime, request: CheckRootCon
     }
   }
   try {
-    await self.assertKnownVerifierRefs(
+    await svcEnv.assertKnownVerifierRefs(self, 
       contract.acceptanceCriteria.map(criterion => ({ childIndex: 0, criterion })),
       label,
     )
@@ -725,7 +732,7 @@ export async function continueRootProposalIn(
   await assertRootContractOrigin(self, storeId, rootSessionId)
   const existing = await existingRootTask(self, storeId)
   if (existing !== undefined) {
-    return await self.expireProposal(
+    return await svcProposals.expireProposal(self, 
       storeId,
       proposal,
       `store "${storeId}" already holds root task "${existing.taskId}"; a root contract is one per store and a changed goal is a new graph ` +
@@ -755,9 +762,9 @@ export async function continueRootProposalIn(
       contract,
       ...(envPath === undefined ? {} : { envPath }),
     })
-    const tightened = await self.requireProposal(storeId, proposal.proposalId)
+    const tightened = await svcProposals.requireProposal(self, storeId, proposal.proposalId)
     if (reviewed.ok) {
-      const review = await self.requestProposalReview({
+      const review = await svcProposals.requestProposalReview(self, {
         kind: 'root',
         storeId,
         trigger: 'tightened',
@@ -776,9 +783,9 @@ export async function continueRootProposalIn(
       detail: `proposal "${proposal.proposalId}" was sent for review: ${detail}`,
     }
   }
-  const contextDigest = admissionContextDigest(self.admissionContext())
+  const contextDigest = admissionContextDigest(svcEnv.admissionContext(self, ))
   if (contextDigest !== proposal.admissionContextDigest) {
-    return await self.staleProposal(
+    return await svcProposals.staleProposal(self, 
       storeId,
       proposal,
       `the limits in force moved since the contract was proposed and reviewed (admission context ${proposal.admissionContextDigest} → ${contextDigest})`,
@@ -791,7 +798,7 @@ export async function continueRootProposalIn(
   })
   if (!checked.ok) {
     if (checked.refusal.error instanceof VerifierUnavailableError) throw checked.refusal.error
-    return await self.staleProposal(
+    return await svcProposals.staleProposal(self, 
       storeId,
       proposal,
       `the contract no longer passes admission: ${checked.refusal.reasons.join('; ')}`,
@@ -805,7 +812,7 @@ export async function continueRootProposalIn(
   })
   const reviewDigest = reviewContextDigest(reviewContext)
   if (reviewDigest !== proposal.reviewContextDigest) {
-    return await self.staleProposal(
+    return await svcProposals.staleProposal(self, 
       storeId,
       proposal,
       `the resolution this contract was reviewed against moved: ${reviewContextDelta(proposal.reviewContext, reviewContext)}`,
@@ -833,7 +840,7 @@ export async function continueRootProposalIn(
   })
 }
 
-export async function activateRootContract(
+async function activateRootContract(
   self: TaskRuntime,
   request: ActivateRootContractRequest,
 ): Promise<ProposalContinuation> {
@@ -841,7 +848,7 @@ export async function activateRootContract(
   const manifest = request.manifests[0] as CapabilityManifest
   const taskId: TaskId = `t-${randomUUID()}`
   const runId: RunId = `r-${randomUUID()}`
-  const workspacePath = await self.workspacePathForSession(rootSessionId)
+  const workspacePath = await svcSessions.workspacePathForSession(self, rootSessionId)
   let claimed: WorkspaceOwner | undefined
   if (workspacePath !== undefined && self.workspaces !== undefined) {
     await self.workspaces.claim(workspacePath, { kind: 'run', storeId, taskId, runId, since: now() })
@@ -922,7 +929,7 @@ export async function activateRootContract(
   self.sessions.set(rootSessionId, { storeId, taskId, runId })
   self.startedSessions.add(rootSessionId)
   self.executionGate.setPhase(rootSessionId, 'active')
-  self.notifyWhenReady(
+  svcNotify.notifyWhenReady(self, 
     rootSessionId,
     `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). ` +
       'This session may now decompose, submit its own result, or cancel.' +
@@ -938,7 +945,7 @@ export async function activateRootContract(
   }
 }
 
-export function rootSubmissionDetail(self: TaskRuntime, proposal: TaskProposal, existing: boolean): string {
+function rootSubmissionDetail(self: TaskRuntime, proposal: TaskProposal, existing: boolean): string {
   const head = existing
     ? `request answered from proposal "${proposal.proposalId}" (policy ${proposal.policy}, status ${proposal.status})`
     : `proposal "${proposal.proposalId}" was recorded under policy ${proposal.policy} as ${proposal.status}`
@@ -975,7 +982,7 @@ export async function reconcileRootProposal(
        * Somebody else became this store's root while the contract waited. It can
        * no longer become one, so the proposal is expired with the reason named
        */
-      const expired = await self.expireProposal(
+      const expired = await svcProposals.expireProposal(self, 
         storeId,
         proposal,
         `store "${storeId}" already holds root task "${existing.taskId}", so this contract can no longer become its root`,
@@ -999,7 +1006,7 @@ export async function reconcileRootProposal(
       )
       return
     }
-    await self.requestProposalReview({
+    await svcProposals.requestProposalReview(self, {
       kind: 'root',
       storeId,
       trigger: 'recovered',
@@ -1015,7 +1022,7 @@ export async function reconcileRootProposal(
    * both live in the continuation, which is also what re-binds an activation
    */
   const continuation = await serializeRootIntake(self, storeId, () =>
-    self.continueProposalIn(storeId, proposalId, proposal.identity.rootSessionId, {}),
+    svcProposals.continueProposalIn(self, storeId, proposalId, proposal.identity.rootSessionId, {}),
   )
   if (continuation.status === 'activated') {
     // The root is live; this process binds it (and derives the phase rather than
@@ -1026,7 +1033,7 @@ export async function reconcileRootProposal(
   await report(proposal, continuation.status, continuation.detail)
 }
 
-export async function rebindActivatedRoot(
+async function rebindActivatedRoot(
   self: TaskRuntime,
   storeId: string,
   rootSessionId: string,
@@ -1045,7 +1052,7 @@ export async function rebindActivatedRoot(
   }
   if (phase === 'terminal') self.executionGate.setTerminal(rootSessionId)
   else if (phase !== undefined) self.executionGate.setPhase(rootSessionId, phase)
-  self.notifyWhenReady(
+  svcNotify.notifyWhenReady(self, 
     rootSessionId,
     `recovery bound this session to its activated root contract: task ${taskId}, run ${runId}` +
       `${phase === 'terminal' ? ' (that run is terminal, so this session is closed to new work)' : ''}. ` +

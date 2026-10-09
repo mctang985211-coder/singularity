@@ -35,7 +35,7 @@ import {
   taskOf,
   waitRunSettled,
 } from './observe.ts'
-import { handOverWorkspace, recordTerminalReview, releaseWorkspaceLayer, runOwner } from './settlement.ts'
+import { handOverWorkspace, releaseWorkspaceLayer, runOwner, settleTerminalRun } from './settlement.ts'
 import { assertPresetUsable, authorizedGrant, permissionFor, skillRootsForRun } from './spawn.ts'
 import type { BatchItem, BlockReason, StartedChild } from './types.ts'
 import { TERMINAL_TASK_STATUSES, isTerminalRun } from './verify.ts'
@@ -117,27 +117,24 @@ export async function settleChildRun(
   const current = snapshot.runs.find(candidate => candidate.runId === run.runId)
   const status: RunStatus = current?.status ?? run.status
   if (isTerminalRun(status)) return adoptedOutcome(item.taskId, run.runId, status, snapshot)
-  try {
-    await env.task.markRunStatusIn(storeId, item.taskId, run.runId, verdict.status, env.actor, {
-      ...(verdict.localizedCause === undefined ? {} : { reason: verdict.localizedCause }),
-    })
-  } catch (error) {
+  const settlement = await settleTerminalRun(env, storeId, item.taskId, verdict.status, {
+    run,
+    reason: verdict.localizedCause,
+    localizedCause: verdict.localizedCause,
+    anomalies: verdict.anomalies,
+    criteria: verdict.criteria,
+    logTail: verdict.logTail,
+    relatedTaskIds: dependencyTaskIds,
     /**
      * Two settlement paths can reach one run at once: a child that decomposed in
      * turn is settled by its own nested batch while this driver is cancelling the
+     * same run, and the store is the arbiter.
      */
-    const settled = await env.task.runIn(storeId, run.runId).catch(() => undefined)
-    if (settled === undefined || !isTerminalRun(settled.status)) throw error
-    return adoptedOutcome(item.taskId, run.runId, settled.status, await env.task.snapshotIn(storeId))
-  }
-  await recordTerminalReview(env, storeId, item.taskId, verdict.status, {
-    run,
-    ...(verdict.localizedCause === undefined ? {} : { localizedCause: verdict.localizedCause }),
-    ...(verdict.anomalies === undefined ? {} : { anomalies: verdict.anomalies }),
-    ...(verdict.criteria === undefined ? {} : { criteria: verdict.criteria }),
-    ...(verdict.logTail === undefined ? {} : { logTail: verdict.logTail }),
-    relatedTaskIds: dependencyTaskIds,
+    arbitrate: true,
   })
+  if (!settlement.settled) {
+    return adoptedOutcome(item.taskId, run.runId, settlement.run.status, await env.task.snapshotIn(storeId))
+  }
   env.onRunSettled?.(storeId, item.taskId, run.runId, verdict.status)
   await releaseWorkspaceLayer(env, runOwner(storeId, item.taskId, run.runId), run.sessionId)
   const evidenceId = childEvidenceId(await env.task.snapshotIn(storeId), run.runId)
@@ -209,10 +206,8 @@ async function blockChild(
   block: BlockReason,
   dependencyTaskIds: readonly TaskId[],
 ): Promise<ChildOutcome> {
-  await env.task.markRunStatusIn(storeId, item.taskId, undefined as unknown as RunId, 'blocked', env.actor, {
+  await settleTerminalRun(env, storeId, item.taskId, 'blocked', {
     reason: block.reason,
-  })
-  await recordTerminalReview(env, storeId, item.taskId, 'blocked', {
     anomalies: [block.reason],
     relatedTaskIds: dependencyTaskIds,
     blockedBy: block.blockers.map(blocker => ({ taskId: blocker.taskId, outcome: blocker.outcome })),

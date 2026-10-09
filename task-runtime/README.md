@@ -27,7 +27,7 @@ none
    proposalIn / proposalsForParent / extendRootBudget / registerRootBudgetApproval /
    recoverRootTask / recoveryStatus / replayTask / submitResult / cancelBatch / cancelGraph /
    awaitBatch / reconcileStore / askParentQuestion / answerParentQuestion / runForSession /
-   workspacePathFor / providerLoadReport / listCapabilities / applyCapabilityRow /
+   pinSessionWorkspace / providerLoadReport / listCapabilities / applyCapabilityRow /
    capabilityProviderReport / readRunBinding / allowsRuntimeDecomposition /
    registerTerminalReviewListener
 2. event subscriptions: `tools/pre-execute`, `tools/result` (the write gate), `task/change` (the run watcher)
@@ -1003,9 +1003,9 @@ needs to know rather than a list borrowed from another subject.
 digest all name one directory — or the caller's own session checkout.
 
 table — the table this replay resolved against, not the configured one.
-The overlay's extra skill roots are searched first because that is the
-order the grant registers them in: a candidate skill in the sandbox is
-what the replayed worker would load. Refused before anything persists.
+A trial's providers are judged against the candidate revision's own skill
+root, searched before the deployment's roots: the verdicts become the
+Run binding's content identity. Refused before anything persists.
 
 Both are structural, both are judged here — before anything persists — and
 the label names the champion this task stands in for.
@@ -1183,8 +1183,8 @@ Rules, in the order they are checked:
 5. A knowledge sidecar is checked for content and carried as knowledge: it
    never becomes an execution provider.
 The verdict is a value: all defects are collected, nothing is written, and a
-caller that only wants execution providers filters with
-{@link executionProviders}.
+caller that only wants execution providers takes the verdicts whose `role` is
+`execution-provider`.
 
 different ways to be wrong, and both would publish a body under a name its
 author did not give it.

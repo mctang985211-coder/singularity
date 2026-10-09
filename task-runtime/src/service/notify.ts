@@ -13,6 +13,8 @@ import { deriveChildOutcomes } from '../orchestration/child.ts'
 import { batchEndMessageId, batchEndMessageText } from '../orchestration/observe.ts'
 import type { BatchResultDeliveryStatus, BatchResultMessage, TerminalReviewFact } from '../orchestration/types.ts'
 import { drainSession } from '../gate.ts'
+import * as svcEnv from './env.ts'
+import * as svcDrivers from './drivers.ts'
 
 export function registerTerminalReviewListener(
   self: TaskRuntime,
@@ -46,7 +48,7 @@ export function notifyTerminalReview(self: TaskRuntime, fact: TerminalReviewFact
 }
 
 export function notify(self: TaskRuntime, sessionId: string, text: string): void {
-  const agent = self.agentOrUndefined(sessionId) as { followup?: (message: unknown) => void } | undefined
+  const agent = svcEnv.agentOrUndefined(self, sessionId) as { followup?: (message: unknown) => void } | undefined
   if (agent === undefined || typeof agent.followup !== 'function') return
   agent.followup(
     createUserMessage({
@@ -68,7 +70,7 @@ export function notifyWhenReady(self: TaskRuntime, sessionId: string, text: stri
 
 /** Queue one owner notice without waking the session: a blocked run reads it in the request the answer's wake opens. */
 export function appendNotice(self: TaskRuntime, sessionId: string, text: string): void {
-  const agent = self.agentOrUndefined(sessionId)
+  const agent = svcEnv.agentOrUndefined(self, sessionId)
   if (agent === undefined) return
   agent.inbox.append(
     'next-turn',
@@ -141,7 +143,7 @@ export async function redeliverBatchResult(
   storeId: string,
   batchId: string,
 ): Promise<BatchResultDeliveryStatus> {
-  const found = await self.batchRecordIn(storeId, batchId)
+  const found = await svcDrivers.batchRecordIn(self, storeId, batchId)
   if (found === undefined) {
     throw new Error(
       `task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; there is nothing to re-deliver`,
@@ -160,7 +162,7 @@ export async function redeliverBatchResult(
 
 export async function reconcileSessionJobs(self: TaskRuntime, sessionId: string): Promise<void> {
   const jobs = self.softService<JobsView>('jobs')
-  const agent = self.agentOrUndefined(sessionId)
+  const agent = svcEnv.agentOrUndefined(self, sessionId)
   if (jobs === undefined || agent === undefined) return
   const drained: DrainResult = await drainSession(self.executionGate, sessionId, {
     timeoutMs: self.config.writeDrainTimeoutMs,
@@ -198,7 +200,7 @@ export function wakeUnclaimedBatchResults(
 }
 
 export function sessionHoldsPendingMessage(self: TaskRuntime, sessionId: string, messageId: string): boolean {
-  const agent = self.agentOrUndefined(sessionId) as
+  const agent = svcEnv.agentOrUndefined(self, sessionId) as
     { inbox?: { nextTurn?: readonly { id?: unknown }[]; nextStep?: readonly { id?: unknown }[] } } | undefined
   const inbox = agent?.inbox
   if (inbox === undefined) return false

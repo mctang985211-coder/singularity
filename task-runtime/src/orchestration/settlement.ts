@@ -16,7 +16,7 @@ import { capabilitySnapshot, workerBaseline } from '../capability.ts'
 import { releaseAskingSessions } from '../question.ts'
 import { message } from '../helpers.ts'
 import type { OrchestrateEnv, ReviewEnrichment, RuntimeSettlementEnv } from './types.ts'
-import { escalationHint } from './verify.ts'
+import { escalationHint, isTerminalRun } from './verify.ts'
 import { describeOwner, releaseLayer } from '../workspace.ts'
 import type { WorkspaceOwner, WorkspaceRegistry } from '../workspace.ts'
 
@@ -230,7 +230,7 @@ interface TerminalReviewOptions {
  * Every run walked to a terminal state gets exactly one review record, written
  * in the same moment right after the terminal status event — the discipline
  */
-export async function recordTerminalReview(
+async function recordTerminalReview(
   env: RuntimeSettlementEnv,
   storeId: string,
   taskId: TaskId,
@@ -284,6 +284,79 @@ export async function recordTerminalReview(
     runId: options.run?.runId ?? null,
     outcome,
   })
+}
+
+/** Options for {@link settleTerminalRun}: one bag for the terminal status event and the review it owes. */
+interface TerminalSettlementOptions {
+  /** The run being settled; a runless (blocked) settlement omits it and marks under no run. */
+  run?: TaskRun
+  /** The status event's reason; a `failed` record carries it as its localized cause too. */
+  reason?: string
+  /** The record's localized cause where it is not the status event's own reason. */
+  localizedCause?: string
+  anomalies?: readonly string[]
+  /** The record's related tasks; a function is resolved after the mark, before the review. */
+  relatedTaskIds?: readonly TaskId[] | (() => readonly TaskId[])
+  criteria?: readonly ReviewCriterion[]
+  /** The failed run's log tail; a function is resolved after the mark, before the review. */
+  logTail?: string | (() => Promise<string | undefined>)
+  blockedBy?: readonly ReviewBlocker[]
+  /** The call that is settling the run: still in flight, so the receipt's drain never waits on it. */
+  excludeCallId?: string
+  /** Work that runs between the terminal mark and the review record — the workspace layer release. */
+  afterMark?: () => Promise<void>
+  /**
+   * Read the store's own arbitration when the mark is refused: another settlement
+   * path may have walked the run terminal while this one was in flight. A run now
+   * terminal elsewhere is then reported back as `{ settled: false }` — the
+   * settlement that won owns the review record — and a run still in flight
+   * rethrows the refusal. Absent, a refused mark propagates.
+   */
+  arbitrate?: boolean
+}
+
+/** What one terminal settlement did: the mark and its review landed, or the store refused the mark and the run was already settled elsewhere. */
+type TerminalSettlementOutcome = { settled: true } | { settled: false; run: TaskRun }
+
+/**
+ * Mark one run terminal and write the review record the transition owes — the
+ * pairing every settlement site repeats, from one option bag: the status event's
+ * `reason` is the record's localized cause on a `failed` settlement, and the
+ * record's own options pass through.
+ */
+export async function settleTerminalRun(
+  env: RuntimeSettlementEnv,
+  storeId: string,
+  taskId: TaskId,
+  status: ReviewOutcome,
+  options: TerminalSettlementOptions = {},
+): Promise<TerminalSettlementOutcome> {
+  const runId = options.run?.runId ?? (undefined as unknown as RunId)
+  try {
+    await env.task.markRunStatusIn(storeId, taskId, runId, status, env.actor, {
+      ...(options.reason === undefined ? {} : { reason: options.reason }),
+    })
+  } catch (error) {
+    if (options.arbitrate !== true) throw error
+    const settled = await env.task.runIn(storeId, runId).catch(() => undefined)
+    if (settled === undefined || !isTerminalRun(settled.status)) throw error
+    return { settled: false, run: settled }
+  }
+  if (options.afterMark !== undefined) await options.afterMark()
+  const localizedCause = options.localizedCause ?? (status === 'failed' ? options.reason : undefined)
+  const logTail = typeof options.logTail === 'function' ? await options.logTail() : options.logTail
+  const relatedTaskIds = typeof options.relatedTaskIds === 'function' ? options.relatedTaskIds() : options.relatedTaskIds
+  await recordTerminalReview(env, storeId, taskId, status, {
+    ...(options.run === undefined ? {} : { run: options.run }),
+    ...(localizedCause === undefined ? {} : { localizedCause }),
+    ...(options.anomalies === undefined ? {} : { anomalies: options.anomalies }),
+    ...(relatedTaskIds === undefined ? {} : { relatedTaskIds }),
+    ...(options.criteria === undefined ? {} : { criteria: options.criteria }),
+    ...(logTail === undefined ? {} : { logTail }),
+    ...(options.blockedBy === undefined ? {} : { blockedBy: options.blockedBy }),
+    ...(options.excludeCallId === undefined ? {} : { excludeCallId: options.excludeCallId }),
+  })
+  return { settled: true }
 }
 
 /** Best-effort owner notification; a deployment without the seam, or a throwing one, changes nothing. */

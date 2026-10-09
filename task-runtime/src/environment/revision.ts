@@ -57,7 +57,7 @@ export interface EnvironmentTaskTemplateEntry {
 }
 
 /** The graph-internal capability table of one revision: explicit rows (including candidate `method:*` rows) and the MCP templates they resolve against. */
-export interface EnvironmentCapabilityEntry {
+interface EnvironmentCapabilityEntry {
   readonly rows: Readonly<Record<string, CapabilityConfig>>
   readonly mcpServers: Readonly<Record<string, McpServerTemplate>>
 }
@@ -97,7 +97,7 @@ export interface EnvironmentRevisionRef {
 }
 
 /** One skill edit staged into a draft: the complete new `SKILL.md` and the complete declared resource set. */
-export interface SkillEdit {
+interface SkillEdit {
   readonly name: string
   readonly skillMd: string
   /** The complete resource set of the new version: `<dir>/<file>` per `isSupportedSkillResourcePath`, plus optionally `SKILL.contract.json`. */
@@ -108,7 +108,7 @@ export interface SkillEdit {
 }
 
 /** One task template edit staged into a draft. */
-export interface TemplateEdit {
+interface TemplateEdit {
   readonly template: TaskTemplate
   readonly actor: string
 }
@@ -122,7 +122,7 @@ export interface CapabilityRowEdit {
 }
 
 /** One retention review staged into a draft (the shape the old library's `reviewTaskLibrary` accepted, plus the reviewer). */
-export interface EnvironmentReview {
+interface EnvironmentReview {
   readonly kind: 'task' | 'skill'
   readonly name: string
   readonly version: number
@@ -243,13 +243,6 @@ export function parseRevisionManifest(raw: unknown, where: string): EnvironmentR
 /** The current entry of one skill name in a revision. */
 export function revisionSkillOf(manifest: EnvironmentRevisionManifest, name: string): EnvironmentSkillEntry | undefined {
   return manifest.skills.find(entry => entry.name === name)
-}
-
-/** The newest entry of one template id in a revision. */
-export function revisionTemplateOf(manifest: EnvironmentRevisionManifest, id: string): EnvironmentTaskTemplateEntry | undefined {
-  return manifest.taskTemplates
-    .filter(entry => entry.templateRef.id === id)
-    .sort((left, right) => right.templateRef.version - left.templateRef.version)[0]
 }
 
 /** The listing projection of one manifest. */

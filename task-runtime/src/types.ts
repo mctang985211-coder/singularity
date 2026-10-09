@@ -294,7 +294,7 @@ export interface QuestionResumeReport {
   /** The run the attempt was about, as the store names it (`run "r-…" (session "s-…")`). */
   readonly subject: string
   readonly status: AdoptedWorkerResume['status']
-  /** Present for `retry` and `refused`: why the Session was not brought back. */
+  /** Present for `refused`: why the Session was not brought back. */
   readonly reason?: string
 }
 

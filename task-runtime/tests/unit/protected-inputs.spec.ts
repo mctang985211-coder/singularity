@@ -9,14 +9,10 @@ import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, VerificationResult
 import { TaskService, contractDigest, rootTaskStoreId } from '../../../task/src/index.ts'
 import { requestedSession } from '../support/person-request.ts'
 import type { ChildOutcome, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
-import {
-  TaskRuntime,
-  contractDefects,
-  fixProtectedInputs,
-  fixSpecProtectedInputs,
-  normalizeDecomposition,
-  protectedInputDefects,
-} from '../../src/index.ts'
+import { TaskRuntime } from '../../src/index.ts'
+import { contractDefects } from '../../src/admission.ts'
+import { fixProtectedInputs, fixSpecProtectedInputs, protectedInputDefects } from '../../src/protected-inputs.ts'
+import { normalizeDecomposition } from '../../src/normalize.ts'
 
 /**
  * S1-V slice 2, the admission/consumer half: a criterion's declared protected

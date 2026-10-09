@@ -382,7 +382,7 @@ var GraphsService = class extends Service {
 				const runtime = this.taskRuntime();
 				const environment = runtime === void 0 ? void 0 : await runtime.ensureInitialEnvironment(rootSessionId, rootSessionId);
 				const workspace = await materializeBubble(envPath, process.env.DSH_HOME || join(homedir(), ".dsh"), rootSessionId, id, 1, { ...environment?.revision === void 0 ? {} : { methodRevisionId: environment.revision.manifest.revisionId } });
-				runtime?.sessionWorkspaces.set(rootSessionId, workspace);
+				runtime?.pinSessionWorkspace(rootSessionId, workspace);
 				const handle = await this.ctx.agentRuntime.createRoot({
 					sessionId: rootSessionId,
 					cwd: workspace,
@@ -630,7 +630,7 @@ var GraphsService = class extends Service {
 		const taskRuntime = this.taskRuntime();
 		if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot recover the root store");
 		const bubble = latestBubbleWorkspacePath(process.env.DSH_HOME || join(homedir(), ".dsh"), graph.rootSessionId);
-		if (bubble !== void 0) taskRuntime.sessionWorkspaces.set(graph.rootSessionId, bubble);
+		if (bubble !== void 0) taskRuntime.pinSessionWorkspace(graph.rootSessionId, bubble);
 		await taskRuntime.adoptRoot(rootTaskStoreId(graph.rootSessionId), graph.rootSessionId);
 		await this.ctx.graph.switchStore(graph.graphStoreId);
 		await this.ctx.layout.switchStore(graph.layoutStoreId);

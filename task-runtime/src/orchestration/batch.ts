@@ -15,9 +15,9 @@ import { batchItems, batchMembers, batchSummary, deliverBatchResult, latestRun, 
 import {
   batchOwner,
   notifyOwner,
-  recordTerminalReview,
   releaseWorkspaceLayer,
   runOwner,
+  settleTerminalRun,
   withVerifierWorkspace,
 } from './settlement.ts'
 import {
@@ -67,11 +67,9 @@ export async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Pro
       batch.callerSessionId,
     )
     const reason = `cancelled by the caller while the batch settled: ${batch.reason}`
-    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled', env.actor, {
-      reason,
-    })
-    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'cancelled', {
+    await settleTerminalRun(env, batch.storeId, batch.parentTaskId, 'cancelled', {
       run: parentRun,
+      reason,
       anomalies: [reason],
       relatedTaskIds: childTaskIds,
     })
@@ -109,12 +107,9 @@ export async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Pro
   }
   if (childPending.length > 0) {
     const reason = `write convergence of the batch's children could not be confirmed: ${childPending.join('; ')}`
-    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed', env.actor, {
-      reason,
-    })
-    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'failed', {
+    await settleTerminalRun(env, batch.storeId, batch.parentTaskId, 'failed', {
       run: parentRun,
-      localizedCause: reason,
+      reason,
       relatedTaskIds: childTaskIds,
     })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed')
@@ -133,12 +128,9 @@ export async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Pro
   })
   if (!drained.confirmed) {
     const reason = `write convergence could not be confirmed: ${drained.pending.join('; ')}`
-    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed', env.actor, {
-      reason,
-    })
-    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'failed', {
+    await settleTerminalRun(env, batch.storeId, batch.parentTaskId, 'failed', {
       run: parentRun,
-      localizedCause: reason,
+      reason,
       relatedTaskIds: childTaskIds,
     })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed')
@@ -252,15 +244,12 @@ async function failParentRun(env: OrchestrateEnv, batch: BatchContext, reason: s
     const parentRun = snapshot.runs.find(run => run.runId === batch.parentRunId)
     if (parentTask === undefined || parentRun === undefined) return
     if (parentRun.status !== 'running') return
-    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed', env.actor, {
-      reason,
-    })
-    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'failed', {
+    await settleTerminalRun(env, batch.storeId, batch.parentTaskId, 'failed', {
       run: parentRun,
-      localizedCause: reason,
+      reason,
       // The batch this failure ends names its own members, never the parent task's
       // children — those are every batch this parent ever admitted.
-      relatedTaskIds: batchMembers(parentRun, batch.batchId),
+      relatedTaskIds: () => batchMembers(parentRun, batch.batchId),
     })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed')
     notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed: ${reason}`)
@@ -350,37 +339,35 @@ export async function settleSubmittedRun(
   const criteria = reviewCriteria(task.acceptanceCriteria, bundle.verifierResults)
   const unmet = unmetMandatory(task.acceptanceCriteria, bundle.verifierResults)
   if (unmet.length === 0) {
-    await env.task.markRunStatusIn(storeId, taskId, runId, 'verified', env.actor)
-    /**
-     * The terminal mark is what frees the checkout: the run is no longer a
-     * writer, and the next entry that claims this store's workspace — a recovery
-     * attempt opened the moment the store reports the run settled — may arrive
-     * before the review record and its receipt seal have done their own I/O.
-     */
-    await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId)
-    await recordTerminalReview(env, storeId, taskId, 'verified', {
+    await settleTerminalRun(env, storeId, taskId, 'verified', {
       run,
       relatedTaskIds,
       criteria,
       anomalies,
       ...(opts.excludeCallId === undefined ? {} : { excludeCallId: opts.excludeCallId }),
+      /**
+       * The terminal mark is what frees the checkout: the run is no longer a
+       * writer, and the next entry that claims this store's workspace — a recovery
+       * attempt opened the moment the store reports the run settled — may arrive
+       * before the review record and its receipt seal have done their own I/O.
+       */
+      afterMark: () => releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId),
     })
     env.onRunSettled?.(storeId, taskId, runId, 'verified')
     return 'verified'
   }
   const reason = failureReason(unmet)
-  await env.task.markRunStatusIn(storeId, taskId, runId, 'failed', env.actor, { reason })
-  // Same order as the verified branch: the checkout is handed back with the
-  // terminal mark, before the review record and the receipt seal run.
-  await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId)
-  await recordTerminalReview(env, storeId, taskId, 'failed', {
+  await settleTerminalRun(env, storeId, taskId, 'failed', {
     run,
-    localizedCause: reason,
+    reason,
     relatedTaskIds,
     criteria,
     anomalies,
-    logTail: await failedLogTail(env, unmet, bundle.verifierResults),
+    // Same order as the verified branch: the checkout is handed back with the
+    // terminal mark, before the review record and the receipt seal run.
+    logTail: () => failedLogTail(env, unmet, bundle.verifierResults),
     ...(opts.excludeCallId === undefined ? {} : { excludeCallId: opts.excludeCallId }),
+    afterMark: () => releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId),
   })
   env.onRunSettled?.(storeId, taskId, runId, 'failed')
   return 'failed'
@@ -407,10 +394,9 @@ async function failSubmittedRun(
 ): Promise<RunStatus> {
   const current = await env.task.runIn(storeId, run.runId)
   if (isTerminalRun(current.status)) return current.status
-  await env.task.markRunStatusIn(storeId, task.taskId, run.runId, 'failed', env.actor, { reason })
-  await recordTerminalReview(env, storeId, task.taskId, 'failed', {
+  await settleTerminalRun(env, storeId, task.taskId, 'failed', {
     run,
-    localizedCause: reason,
+    reason,
     relatedTaskIds,
     anomalies,
   })

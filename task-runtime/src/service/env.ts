@@ -38,10 +38,13 @@ import type {
   SessionProjectionSource,
   SessionLogSource,
 } from '../config.ts'
+import * as svcDrivers from './drivers.ts'
+import * as svcNotify from './notify.ts'
+import * as svcSessions from './sessions.ts'
 
 export { HUMAN_TOOLS, skillNameFrom, toolResultFailed } from '../session-facts.ts'
 
-export function tokenUsageOf(value: unknown): ReviewTokenUsage | undefined {
+function tokenUsageOf(value: unknown): ReviewTokenUsage | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const buckets = value as Partial<Record<keyof ReviewTokenUsage, unknown>>
   const numbers = [buckets.uncachedInputTokens, buckets.outputTokens, buckets.cacheReadTokens, buckets.cacheWriteTokens]
@@ -67,7 +70,7 @@ export function admissionContext(self: TaskRuntime): AdmissionContext {
   }
 }
 
-export async function sessionEnv(
+async function sessionEnv(
   self: TaskRuntime,
   sessionId: string,
 ): Promise<{ path: string; components?: readonly { repo: string; dir: string }[] } | undefined> {
@@ -140,7 +143,7 @@ export async function orchestrateEnv(
    * working in it: the replay's own decomposition builds its env here, and the
    */
   const named = workspace ?? self.sessionWorkspaces.get(callerSessionId)
-  const workspacePath = named ?? (await self.workspacePathForSession(callerSessionId))
+  const workspacePath = named ?? (await svcSessions.workspacePathForSession(self, callerSessionId))
   /**
    * …and it keeps running under what it was spawned under (S4-E §Q3): the frozen
    * model selection of the experiment it belongs to. The same session-level
@@ -160,7 +163,7 @@ export async function orchestrateEnv(
     (callerRun === undefined ? undefined : await svcEnvironment.revisionForRun(self, callerRun)) ??
     (await svcEnvironment.activeRevisionOrUndefined(self, callerSessionId))
   const taskTemplatesRoot = binding?.taskTemplatesRoot ?? callerRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId)
-  const skillView = await self.skillViewForSession(callerSessionId, replayOverlay?.extraSkillRoots)
+  const skillView = await self.skillViewForSession(callerSessionId)
   return {
     task: self.context.task,
     actor,
@@ -215,7 +218,7 @@ export async function orchestrateEnv(
         [name, { ...table[name], skills: [...entry.skills] }])),
     }, mcpRegistry, callerSessionId),
     notify: (sessionId, text) => {
-      self.notify(sessionId, text)
+      svcNotify.notify(self, sessionId, text)
     },
     watchRun: (storeId, runId, callback) => watchRun(self, storeId, runId, callback),
     agentFor: sessionId => agentOrUndefined(self, sessionId),
@@ -225,10 +228,10 @@ export async function orchestrateEnv(
      * layer comes off) is the runtime's own bookkeeping, shared with the
      */
     onRunSettled: (storeId, taskId, runId, status) => {
-      self.runSettledFromRuntime(storeId, taskId, runId, status)
+      svcDrivers.runSettledFromRuntime(self, storeId, taskId, runId, status)
     },
     failBatch: (storeId, batchId, reason) => self.failBatch(storeId, batchId, reason),
-    deliverBatchResult: message => self.deliverBatchResult(message),
+    deliverBatchResult: message => svcNotify.deliverBatchResult(self, message),
     assertPreset: async preset => {
       // The same registry agentRuntime.spawn mounts through; absent only in test contexts.
       const presets = (self.context.get?.('agentPresets') ??
@@ -343,7 +346,7 @@ export async function orchestrateEnv(
     },
     readLogTail: async logRef => runVerifier(self)?.logTail?.(logRef),
     observeSession: async sessionId => observeSession(self, sessionId),
-    onTerminalReview: fact => self.notifyTerminalReview(fact),
+    onTerminalReview: fact => svcNotify.notifyTerminalReview(self, fact),
     sealReceipt: async (storeId, taskId, runId, excludeCallId) => {
       await self.sealReceiptBounded(storeId, taskId, runId, excludeCallId)
     },
@@ -401,7 +404,7 @@ export async function releaseRunWorkspaceLayer(
   runId: RunId,
   sessionId: string,
 ): Promise<void> {
-  const workspace = await self.workspacePathForSession(sessionId)
+  const workspace = await svcSessions.workspacePathForSession(self, sessionId)
   if (workspace === undefined || self.workspaces === undefined) return
   await releaseLayer(
     self.workspaces,
@@ -457,7 +460,7 @@ export function softService<T>(self: TaskRuntime, name: string): T | undefined {
   return optionalService<T>(self.context, name)
 }
 
-export function runVerifier(self: TaskRuntime): RunVerifier | undefined {
+function runVerifier(self: TaskRuntime): RunVerifier | undefined {
   return self.softService<RunVerifier>('verifier')
 }
 

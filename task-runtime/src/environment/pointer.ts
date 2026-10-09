@@ -122,7 +122,7 @@ export interface EnvironmentPointerReconcile {
 }
 
 /** What the initial revision of a new-protocol library is seeded with. */
-export interface InitialSeed {
+interface InitialSeed {
   readonly actor: string
   readonly at?: string
 }

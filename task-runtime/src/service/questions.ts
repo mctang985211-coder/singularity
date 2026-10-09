@@ -18,6 +18,8 @@ import {
   type QuestionCoordinationDeps,
   type QuestionReconcileReport,
 } from '../question.ts'
+import * as svcEnv from './env.ts'
+import * as svcRootRecovery from './root-recovery.ts'
 
 export async function askParentQuestionImpl(
   self: TaskRuntime,
@@ -41,12 +43,12 @@ export async function answerParentQuestionImpl(
   return await answerParentQuestion(questionCoordination(self), caller, request)
 }
 
-export async function questionCaller(
+async function questionCaller(
   self: TaskRuntime,
   callerSessionId: string,
   entry: string,
 ): Promise<QuestionCaller> {
-  if (self.agentOrUndefined(callerSessionId) === undefined) {
+  if (svcEnv.agentOrUndefined(self, callerSessionId) === undefined) {
     throw new Error(
       `task-runtime: ${entry} needs a live caller session; "${callerSessionId}" has no live agent in this process, ` +
         "and the question identity comes from the live caller's own run",
@@ -60,7 +62,7 @@ export async function questionCaller(
       cause: error,
     })
   }
-  await self.assertRecoveryReady(binding.storeId, entry)
+  await svcRootRecovery.assertRecoveryReady(self, binding.storeId, entry)
   return { sessionId: callerSessionId, storeId: binding.storeId, runId: binding.run.runId, actor: callerSessionId }
 }
 

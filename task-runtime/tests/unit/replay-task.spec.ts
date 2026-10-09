@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'vitest'
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { realpath } from 'node:fs/promises'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AcceptanceCriterion } from '../../../task/src/index.ts'
 import { pinSkillHome } from '../support/skill-roots.ts'
 import type { Config } from '../../src/index.ts'
-import { DEFAULT_VERIFY_TIMEOUT_MS } from '../../src/index.ts'
+import { DEFAULT_VERIFY_TIMEOUT_MS } from '../../src/config.ts'
 import {
   type Harness,
   createRoot,
@@ -87,21 +87,12 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     ])
   })
 
-  test('extra skill roots are forwarded to the worker grant, and the prompt never invites a split', async () => {
+  test('a replay spawns as a worker under the capability preset, and the prompt never invites a split', async () => {
     const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
-    await h.runtime.replayTask(
-      STORE,
-      championTaskId,
-      {
-        lineage: 'evolution-replay:p2',
-        overlay: { extraSkillRoots: ['/sandbox/p2/skills'] },
-      },
-      ROOT_SESSION,
-    )
+    await h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:p2' }, ROOT_SESSION)
     const spawn = h.spawned[h.spawned.length - 1]!
-    expect(spawn.grant!.skillRoots).toContain('/sandbox/p2/skills')
-    // the overlay did not change the capability resolution
+    // The capability resolution decides the preset.
     expect(spawn.agentPreset).toBe('standard')
     // A replay never invites a split (its projection carries no decomposition
     // guidance at all — `context/tests/unit/reads.spec.ts`, "a replay reads …"),
@@ -112,48 +103,6 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(spawn.taskWorker).toBe(true)
     const replay = (await h.task.snapshotIn(STORE)).tasks.find(task => task.objective.includes('[evolution-replay:p2]'))
     expect(replay?.objective).toContain('[evolution-replay:p2]')
-  })
-
-  test("a spawning replay binds its own content: the overlay root stays first and the run's snapshot follows it", async () => {
-    const home = pinSkillHome('verify')
-    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
-    const { championTaskId } = await champion(h)
-    // The candidate skill a skill replay passes: a sandbox directory the overlay
-    // root exposes, with no sidecar (loadable guidance for the row under test).
-    const sandbox = join(home, 'sandbox', 'p3', 'skills')
-    await mkdir(join(sandbox, 'verify'), { recursive: true })
-    await writeFile(
-      join(sandbox, 'verify', 'SKILL.md'),
-      '---\nname: verify\ndescription: candidate verify\n---\n\nCANDIDATE BODY\n',
-    )
-
-    const outcome = await h.runtime.replayTask(
-      STORE,
-      championTaskId,
-      {
-        lineage: 'evolution-replay:binding',
-        overlay: {
-          extraSkillRoots: [sandbox],
-          capabilityOverrides: { research: { preset: 'standard', skills: ['verify'] } },
-        },
-      },
-      ROOT_SESSION,
-    )
-
-    expect(outcome.status).toBe('verified')
-    const run = await h.task.runIn(STORE, outcome.runId)
-    const binding = run.providerBinding
-    if (binding === undefined) throw new Error('the replay run recorded no provider binding')
-    expect(binding.skills.map(skill => skill.name)).toEqual(['verify'])
-    expect(binding.skills[0]!.role).toBe('guidance')
-    // P2's order is preserved — the candidate is registered first — and the run's
-    // snapshot of what the pre-check judged follows it.
-    const spawn = h.spawned[h.spawned.length - 1]!
-    expect(spawn.grant!.skillRoots).toEqual([sandbox, binding.snapshotRoot])
-    // The snapshot holds the overlay's bytes, because the overlay is what this
-    // replay's admission judged.
-    expect(await readFile(join(binding.snapshotRoot!, 'verify', 'SKILL.md'), 'utf8')).toContain('CANDIDATE BODY')
-    expect((await h.runtime.readRunBinding(binding))?.defects).toEqual([])
   })
 
   test("the replay renders the champion's own declarations and persists the same two lists", async () => {
@@ -290,26 +239,6 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     } finally {
       rmSync(parent, { recursive: true, force: true })
     }
-  })
-
-  test('a presetOverride wins over the capability resolution; absent it, the capability preset stands', async () => {
-    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
-    const first = await champion(h)
-    await h.runtime.replayTask(
-      STORE,
-      first.championTaskId,
-      {
-        lineage: 'evolution-replay:p3',
-        overlay: { presetOverride: 'custom-preset' },
-      },
-      ROOT_SESSION,
-    )
-    expect(h.spawned[h.spawned.length - 1]!.agentPreset).toBe('custom-preset')
-
-    const h2 = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
-    const second = await champion(h2)
-    await h2.runtime.replayTask(STORE, second.championTaskId, { lineage: 'evolution-replay:p4' }, ROOT_SESSION)
-    expect(h2.spawned[h2.spawned.length - 1]!.agentPreset).toBe('standard')
   })
 
   test('spawn: false runs the deterministic criteria replay: no worker, the verifier settles the candidate contract', async () => {

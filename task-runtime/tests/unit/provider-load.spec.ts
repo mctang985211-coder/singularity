@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { CapabilityConfig } from '../../src/capability.ts'
 import { TaskRuntime } from '../../src/index.ts'
-import { executionProviders } from '../../src/sidecar.ts'
 
 /**
  * The load-time provider scan (S1-C item 3, guide §2.4): the deployment reads
@@ -155,8 +154,6 @@ describe('load-time provider scan (S1-C item 3)', () => {
     const row = report.precheck!.capabilities.find(item => item.capability === 'fixture-capability')!
     expect(row.skills).toHaveLength(1)
     expect(row.skills[0]!.valid).toBe(false)
-    // A refused provider is never part of the effective provider set.
-    expect(executionProviders(row.skills)).toEqual([])
   })
 
   it('reports nothing for a table whose skills are loadable, and does not misreport a skill without a sidecar', async () => {
@@ -169,9 +166,8 @@ describe('load-time provider scan (S1-C item 3)', () => {
     expect(report.defects).toEqual([])
     expect(warnings).toEqual([])
     const verdict = report.precheck!.capabilities[0]!.skills[0]!
+    // Guidance is loadable and carries no execution claim.
     expect(verdict.valid && verdict.role).toBe('guidance')
-    // Guidance is loadable and carries no execution claim: it is not in the provider set either.
-    expect(executionProviders([verdict])).toEqual([])
   })
 
   it('names an execution provider that passes as such, and keeps it in the effective provider set', async () => {
@@ -189,9 +185,11 @@ describe('load-time provider scan (S1-C item 3)', () => {
     const report = await runtime.providerLoadReport()
     expect(report.defects).toEqual([])
     expect(warnings).toEqual([])
-    const providers = executionProviders(report.precheck!.capabilities.flatMap(row => [...row.skills]))
-    expect(providers.map(provider => provider.name)).toEqual([EXECUTION_SKILL])
-    expect(providers[0]!.verifierRef).toBe('command')
+    const verdict = report.precheck!.capabilities[0]!.skills[0]!
+    expect(verdict.valid).toBe(true)
+    if (!verdict.valid || verdict.role !== 'execution-provider') throw new Error('expected an execution provider')
+    expect(verdict.name).toBe(EXECUTION_SKILL)
+    expect(verdict.verifierRef).toBe('command')
     // The scan's revision describes the table and the providers it accepted.
     expect(report.precheck!.revision).toMatch(/^[0-9a-f]{64}$/)
   })

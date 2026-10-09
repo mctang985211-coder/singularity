@@ -23,7 +23,7 @@ import type {
   BudgetExtensionJudgement,
 } from '../types.ts'
 
-export function ceilingsOf(budget: ResolvedRootBudget): RootBudgetCeilings {
+function ceilingsOf(budget: ResolvedRootBudget): RootBudgetCeilings {
   return {
     ...(budget.maxRuns === undefined ? {} : { maxRuns: budget.maxRuns }),
   }
@@ -137,7 +137,7 @@ export async function extendRootBudget(
   return { storeId, rootTaskId: budget.rootTaskId, answeredFromRecord: false, record: stored }
 }
 
-export async function budgetExtensionContext(
+async function budgetExtensionContext(
   self: TaskRuntime,
   sessionId: string,
 ): Promise<{ storeId: string; snapshot: TaskSnapshot; budget: ResolvedRootBudget }> {
@@ -188,7 +188,7 @@ export function budgetExtensionIndex(snapshot: TaskSnapshot): TaskBudgetExtensio
   return index
 }
 
-export function judgeBudgetExtension(
+function judgeBudgetExtension(
   request: RootBudgetExtensionRequest,
   budget: ResolvedRootBudget,
   existing: TaskBudgetExtension | undefined,

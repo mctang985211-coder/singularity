@@ -132,11 +132,21 @@ export class ExecutionGate {
   }
 
   /**
+   * Whether `token` is still the session's own ({@link decisionToken}): a
+   * store-implied write read under a stale token is refused. Applying one is
+   * never a decision of this process's own — the token deliberately does not
+   * move, so the next store-derived value read under it still applies.
+   */
+  private decisionTokenCurrent(sessionId: string, token: number): boolean {
+    return this.decisionToken(sessionId) === token
+  }
+
+  /**
    * Apply a phase the store implies — never one this process decided — and only
    * when it is newer than everything decided here: `token` is the
    */
   applyStorePhase(sessionId: string, phase: ExecutionPhase | 'terminal', token: number): boolean {
-    if (this.decisionToken(sessionId) !== token) return false
+    if (!this.decisionTokenCurrent(sessionId, token)) return false
     this.phases.set(sessionId, phase)
     if (phase === 'terminal') this.questionBlocked.delete(sessionId)
     return true
@@ -157,7 +167,7 @@ export class ExecutionGate {
    * under the same token rule as {@link applyStorePhase}: `token` is the
    */
   applyStoreQuestionsBlocked(sessionId: string, blocked: boolean, token: number): boolean {
-    if (this.decisionToken(sessionId) !== token) return false
+    if (!this.decisionTokenCurrent(sessionId, token)) return false
     if (blocked) this.questionBlocked.add(sessionId)
     else this.questionBlocked.delete(sessionId)
     return true

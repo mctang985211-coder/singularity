@@ -14,13 +14,13 @@ import type { ReceiptRequestIdentity } from '@dangosys/dsh-singularity-task'
 export const HUMAN_TOOLS: ReadonlySet<string> = new Set(['hitl_ask', 'hitl_approve', 'ask_user_question'])
 
 /** One calling configuration and how many requests the session made under it. */
-export interface ModelRequestFact {
+interface ModelRequestFact {
   readonly identity: ReceiptRequestIdentity
   readonly count: number
 }
 
 /** One `task_decompose` call a session made, with the text its successful result carried. */
-export interface DecompositionCallFact {
+interface DecompositionCallFact {
   readonly callId: string
   readonly arguments: string
   /** The matching `tool/result`'s text, when the call succeeded and the result carried text. */

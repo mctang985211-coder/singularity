@@ -559,48 +559,6 @@ describe('replay provider pre-check (S1-C)', () => {
     expect(h.spawned).toHaveLength(spawnsAfterChampion)
   })
 
-  it('refuses a tampered candidate skill and admits the same replay from an overlay root', async () => {
-    const h = await harness({ capabilities: { 'replay-row': { skills: ['candidate-skill'], tools: ['filesystem', 'bash', 'jobs'], mcpServers: ['bbdev'] } } })
-    const root = await champion(h)
-    const sandbox = join(workspace, 'sandbox', 'p1', 'skills')
-    // A candidate skill in the sandbox: the overlay root the replay overlay passes.
-    await mkdir(sandbox, { recursive: true })
-    await cp(join(FIXTURE_SKILLS, 'verify'), join(sandbox, 'candidate-skill'), { recursive: true })
-    // A candidate declares the name it is granted under — the spawn's
-    // `readSkillFile` publishes a body only under the name its frontmatter
-    // declares, so a directory named `candidate-skill` holding `name: verify`
-    // could never be loaded. The frontmatter is renamed and the sidecar's
-    // declared `SKILL.md` digest re-pointed at the new bytes, so the directory
-    // stays internally consistent.
-    const skillFile = join(sandbox, 'candidate-skill', 'SKILL.md')
-    const rewritten = (await readFile(skillFile, 'utf8')).replace(/^name:.*$/m, 'name: candidate-skill')
-    await writeFile(skillFile, rewritten)
-    // The fixture declares capability `verify-ball-functional`; this replay's row is `replay-row`.
-    await patchSidecar(join(sandbox, 'candidate-skill'), sidecar => {
-      sidecar.capabilities = ['replay-row']
-      ;(sidecar.content as { skillMdSha256: string }).skillMdSha256 = createHash('sha256').update(rewritten, 'utf8').digest('hex')
-    })
-    const replay = (): Promise<unknown> => h.runtime.replayTask(STORE, root.taskId, {
-      lineage: 'evolution-replay:s1c-overlay',
-      spawn: false,
-      overlay: { extraSkillRoots: [sandbox] },
-      contract: { objective: 'replay the candidate skill', acceptanceCriteria: [REPLAY_CRITERION], requiredCapabilities: ['replay-row'] },
-    }, ROOT_SESSION)
-
-    // Without the overlay the granted skill is not discoverable anywhere: refused.
-    const refusal = await h.runtime.replayTask(STORE, root.taskId, {
-      lineage: 'evolution-replay:s1c-overlay',
-      spawn: false,
-      contract: { objective: 'replay the candidate skill', acceptanceCriteria: [REPLAY_CRITERION], requiredCapabilities: ['replay-row'] },
-    }, ROOT_SESSION).catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(String(refusal)).toContain('skill "candidate-skill"')
-    expect(String(refusal)).not.toContain(sandbox)
-
-    // With the overlay the candidate root is searched first and the replay runs.
-    const outcome = await replay() as { status: string }
-    expect(outcome.status).toBe('verified')
-  })
-
   it('drives a knowledge capability through a replay too: loadable, and no execution claim', async () => {
     await install('workload-tests', { at: 'checkout' })
     const h = await harness()

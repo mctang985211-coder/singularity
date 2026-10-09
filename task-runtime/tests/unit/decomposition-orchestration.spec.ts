@@ -5,14 +5,8 @@ import type { EvidenceBundle, VerificationResult } from '../../../task/src/index
 import { pinSkillHome } from '../support/skill-roots.ts'
 import type { DecomposeSpec, ChildOutcome } from '../../src/index.ts'
 import { orchestrateEnv } from '../../src/service/env.ts'
-import {
-  DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
-  DEFAULT_MAX_CHILDREN,
-  DEFAULT_MAX_DEPTH,
-  DEFAULT_VERIFY_TIMEOUT_MS,
-  TaskRuntime,
-  workerBaseline,
-} from '../../src/index.ts'
+import { TaskRuntime, workerBaseline } from '../../src/index.ts'
+import { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS } from '../../src/config.ts'
 import {
   type Harness,
   decomposeAndSettle,

@@ -6,10 +6,11 @@ import { join } from 'node:path'
 import { rootTaskStoreId } from '../../../task/src/index.ts'
 import { sha256Hex } from '../../../task/src/contract.ts'
 import { requestedSession } from '../support/person-request.ts'
-import type { OrchestrateEnv } from '../../src/index.ts'
-import { WorkspaceBusyError } from '../../src/index.ts'
-import type { WorkspaceOwner, WorkspaceRegistry } from '../../src/index.ts'
-import { driveBatch, owedBatchResults } from '../../src/index.ts'
+import type { OrchestrateEnv } from '../../src/orchestration/types.ts'
+import { WorkspaceBusyError, WorkspaceRegistry } from '../../src/index.ts'
+import type { WorkspaceOwner } from '../../src/workspace.ts'
+import { driveBatch } from '../../src/orchestration/batch.ts'
+import { owedBatchResults } from '../../src/orchestration/observe.ts'
 import {
   harness,
   createRoot,

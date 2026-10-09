@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url'
 import { skillContractDigest } from '../../src/skill-contract.ts'
 import {
   capabilityToolQuery,
-  executionProviders,
   loadSkillSidecar,
   registryRevision,
   skillValidationContext,
@@ -270,7 +269,6 @@ describe('validateSkillProvider', () => {
       command: "grep -q 'Illegal-input table' references/illegal-input-table.md",
     })
     expect(verdict.contentDigest).toMatch(/^[0-9a-f]{64}$/)
-    expect(executionProviders([verdict])).toEqual([])
   })
 
   test('a skill without a sidecar is guidance: no execution provider, no defect', async () => {
@@ -281,7 +279,6 @@ describe('validateSkillProvider', () => {
     if (verdict.role !== 'guidance') throw new Error('unreachable')
     expect(verdict.uncovered).toEqual([])
     expect(verdict.contentDigest).toMatch(/^[0-9a-f]{64}$/)
-    expect(executionProviders([verdict])).toEqual([])
   })
 
   test('guidance names what its identity does not cover', async () => {
@@ -403,7 +400,7 @@ describe('validateSkillProvider', () => {
     expect(details(verdict, 'content-mismatch')[0]).toContain('references/illegal-input-table.md')
   })
 
-  test('only execution verdicts are execution providers', async () => {
+  test('each fixture validates to its declared role', async () => {
     const execution = accepted(
       await validateSkillProvider({ name: 'verify', directory: await fixture('verify') }, CONTEXT),
     )
@@ -424,7 +421,10 @@ describe('validateSkillProvider', () => {
       ),
     )
     const refused = rejected(await validateSkillProvider({ name: 'verify' }, CONTEXT))
-    expect(executionProviders([execution, knowledge, guidance, refused])).toEqual([execution])
+    expect(execution.role).toBe('execution-provider')
+    expect(knowledge.role).toBe('knowledge')
+    expect(guidance.role).toBe('guidance')
+    expect(refused.valid).toBe(false)
   })
 })
 

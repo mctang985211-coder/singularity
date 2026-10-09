@@ -16,6 +16,18 @@ import { drainSession } from '../gate.ts'
 import type { WorkspaceOwner } from '../workspace.ts'
 import type { RunBinding } from '../config.ts'
 import { message, now } from '../helpers.ts'
+import * as svcEnv from './env.ts'
+import * as svcNotify from './notify.ts'
+import * as svcRootIntake from './root-intake.ts'
+
+/**
+ * Pin the checkout one session's runs resolve to. The graph entry points this
+ * at the bubble it materialized, so a restarted process resolves the root
+ * session's workspace from the runtime rather than from the environment port.
+ */
+export function pinSessionWorkspace(self: TaskRuntime, sessionId: string, workspace: string): void {
+  self.sessionWorkspaces.set(sessionId, workspace)
+}
 
 export async function resumeAdoptedWorkerSession(
   self: TaskRuntime,
@@ -35,7 +47,7 @@ export async function resumeAdoptedWorkerSession(
    * A session already live here is one this process holds: the resume is not
    * repeated (it would be an ownership conflict by construction), and only the
    */
-  const live = self.agentOrUndefined(sessionId) !== undefined
+  const live = svcEnv.agentOrUndefined(self, sessionId) !== undefined
   const bound = self.sessions.get(sessionId)
   if (live && (bound === undefined || bound.storeId !== request.storeId || bound.runId !== request.run.runId)) {
     throw new Error(`task-runtime: Session "${sessionId}" is live under another owner or Run binding`)
@@ -80,12 +92,12 @@ export async function resumeAdoptedWorkerSession(
       'task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.' +
       (prior === undefined ? '' : `\n${prior}`)
     if (blockedOnOwnQuestion) appendNotice(self, sessionId, notice)
-    else self.notifyWhenReady(sessionId, notice)
+    else svcNotify.notifyWhenReady(self, sessionId, notice)
   }
   return { status: 'live' }
 }
 
-export async function applyResumedSessionGate(
+async function applyResumedSessionGate(
   self: TaskRuntime,
   storeId: string,
   sessionId: string,
@@ -99,15 +111,15 @@ export async function applyResumedSessionGate(
   self.executionGate.applyStoreQuestionsBlocked(sessionId, blockingQuestionsOf(snapshot, runId).length > 0, token)
 }
 
-export async function drainAdoptedSession(self: TaskRuntime, sessionId: string): Promise<DrainResult> {
+async function drainAdoptedSession(self: TaskRuntime, sessionId: string): Promise<DrainResult> {
   return await drainSession(self.executionGate, sessionId, {
     timeoutMs: self.config.writeDrainTimeoutMs,
     jobs: self.softService<JobsView>('jobs'),
-    agent: self.agentOrUndefined(sessionId),
+    agent: svcEnv.agentOrUndefined(self, sessionId),
   })
 }
 
-export async function stopAdoptedSession(self: TaskRuntime, sessionId: string): Promise<void> {
+async function stopAdoptedSession(self: TaskRuntime, sessionId: string): Promise<void> {
   try {
     await self.context.agentRuntime.stopAgents([SessionId(sessionId)])
   } catch (error) {
@@ -173,7 +185,7 @@ export async function releaseStoreWorkspace(self: TaskRuntime, storeId: string):
   if (self.workspaces === undefined) return
   await Promise.all(self.workspaceReleases)
   const snapshot = await self.context.task.snapshotIn(storeId)
-  const sessionId = await self.sessionForStore(storeId)
+  const sessionId = await sessionForStore(self, storeId)
   const rootWorkspace = await workspacePathForSession(self, sessionId)
   const paths = new Set(snapshot.runs.flatMap(run => run.placement === undefined ? [] : [run.placement.workspacePath]))
   if (rootWorkspace !== undefined) paths.add(rootWorkspace)
@@ -230,12 +242,12 @@ export function gatePhaseFromStore(
   token: number,
 ): void {
   if (self.closingStores.has(storeId) && self.executionGate.phaseOf(sessionId) !== undefined) return
-  const phase = self.runGatePhase(run)
+  const phase = svcRootIntake.runGatePhase(run)
   if (phase === undefined) return
   self.executionGate.applyStorePhase(sessionId, phase, token)
 }
 
-export async function lookupRun(
+async function lookupRun(
   self: TaskRuntime,
   sessionId: string,
 ): Promise<{ storeId: string; task: TaskInstance; run: TaskRun } | undefined> {
@@ -265,7 +277,7 @@ export async function lookupRun(
   return await resolveBinding(self, rebinding)
 }
 
-export async function resolveBinding(
+async function resolveBinding(
   self: TaskRuntime,
   binding: RunBinding,
 ): Promise<{ storeId: string; task: TaskInstance; run: TaskRun } | undefined> {
@@ -300,10 +312,6 @@ export async function workspacePathForSession(self: TaskRuntime, sessionId: stri
     self.warn(`workspace ownership is skipped for session ${sessionId}: ${message(error)}`)
     return undefined
   }
-}
-
-export async function workspacePathFor(self: TaskRuntime, sessionId: string): Promise<string | undefined> {
-  return self.envPathForSession(sessionId)
 }
 
 export async function assertWorkspaceHeldBy(
@@ -350,7 +358,7 @@ export async function assertWorkspaceHeldBy(
   )
 }
 
-export async function ancestorTaskIdFor(
+async function ancestorTaskIdFor(
   self: TaskRuntime,
   storeId: string,
   taskId: TaskId,

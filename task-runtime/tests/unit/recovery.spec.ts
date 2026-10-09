@@ -15,9 +15,10 @@ import {
   runMemberTaskIds,
 } from '../../../task/src/index.ts'
 import { VerifierRegistry } from '../../../verifier/src/index.ts'
-import type { CapabilityConfig, Config, RootRecoveryRequest, SupervisionConfig } from '../../src/index.ts'
-import type { StoreRecoveryState } from '../../src/config.ts'
-import { IterationCapRefusal, TaskRuntime } from '../../src/index.ts'
+import type { CapabilityConfig, Config, RootRecoveryRequest } from '../../src/index.ts'
+import type { StoreRecoveryState, SupervisionConfig } from '../../src/config.ts'
+import { IterationCapRefusal } from '../../src/recovery.ts'
+import { TaskRuntime } from '../../src/index.ts'
 
 /** The temporary evidence roots this file minted, removed after each test. */
 const directories: string[] = []

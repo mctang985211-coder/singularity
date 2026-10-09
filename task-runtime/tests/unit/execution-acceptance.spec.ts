@@ -3,7 +3,9 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { EvidenceBundle, VerificationResult } from '../../../task/src/index.ts'
 import { pinSkillHome } from '../support/skill-roots.ts'
-import { DEFAULT_BUDGET, VerifierUnavailableError, escalationHint } from '../../src/index.ts'
+import { DEFAULT_BUDGET } from '../../src/config.ts'
+import { VerifierUnavailableError } from '../../src/orchestration/types.ts'
+import { escalationHint } from '../../src/orchestration/verify.ts'
 import {
   harness,
   createRoot,

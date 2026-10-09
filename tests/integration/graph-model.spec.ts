@@ -62,7 +62,7 @@ function harness() {
     ctx.provide('agentRuntime', runtime as never)
     ctx.provide('taskRuntime', {
       adoptRoot: vi.fn(async () => ({ adopted: false, detail: 'none' })),
-      sessionWorkspaces: new Map<string, string>(),
+      pinSessionWorkspace: vi.fn(),
       // The graph's library fixes its initial revision before round 1's bubble
       // is materialized; the real seeding runs here so the volume is real bytes.
       ensureInitialEnvironment: vi.fn(async (rootSessionId: string, actor: string) => {

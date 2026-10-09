@@ -48,18 +48,19 @@ describe('a receipt that could not be written is made up exactly once', () => {
     expect(receiptEvents(h)).toBe(0)
     expect([...(h.runtime.receiptSeals.get(STORE) ?? [])]).toEqual([root.runId])
 
-    // The recovery passes seal it exactly once: the queued seal drains, and the
-    // store's own sweep then finds nothing left to make up.
+    // The recovery pass seals it exactly once — whether the queued attempt or
+    // the sweep itself lands the write, only one receipt event ever appears —
+    // and a second pass finds nothing left to make up.
     task.recordReceiptIn = original
-    await h.runtime.flushReceiptSeals(STORE)
+    await h.runtime.reconcileRunReceipts(STORE)
     const receipt = await h.runtime.receiptFor(STORE, root.runId)
     expect(receipt).toBeDefined()
     expect(receipt?.completeness.status).toBe('complete')
     expect(receiptEvents(h)).toBe(1)
 
-    const sweep = await h.runtime.reconcileRunReceipts(STORE)
-    expect(sweep.sealed).toEqual([])
-    expect(sweep.alreadySealed).toBe(1)
+    const again = await h.runtime.reconcileRunReceipts(STORE)
+    expect(again.sealed).toEqual([])
+    expect(again.alreadySealed).toBe(1)
     expect(receiptEvents(h)).toBe(1)
     await h.runtime.unload()
   })
