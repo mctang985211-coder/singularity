@@ -190,7 +190,9 @@ export function defineMethodDraftTool(ctx: Context) {
 
         const env = environmentPlaneOf(ctx)
         const ledger = await methodLedgerPlaneOf(ctx, caller)
-        const strategy = strategyPlaneOf()
+        // The graph's own strategy switch: the budget and the screen run under
+        // the same policy the evaluation will freeze into its plan.
+        const strategy = strategyPlaneOf(ledger.policy)
         const view = await env.activeEnvironmentView(caller)
         if (view.readOnly) {
           return [

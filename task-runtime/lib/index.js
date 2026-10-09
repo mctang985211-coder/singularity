@@ -8758,6 +8758,268 @@ function storedReuse(declaration) {
 }
 
 //#endregion
+//#region src/service/bubble.ts
+const BUBBLE_GIT = [
+	"-c",
+	"user.name=bubble",
+	"-c",
+	"user.email=bubble@local"
+];
+function runGit(args, cwd) {
+	const result = spawnSync("git", [...cwd === void 0 ? [] : ["-C", cwd], ...args], { encoding: "utf8" });
+	if (result.status !== 0) {
+		const detail = (result.stderr || result.stdout || result.error?.message || "unknown git failure").trim();
+		throw new Error(`bubble: git ${args.join(" ")}${cwd === void 0 ? "" : ` in ${cwd}`} failed: ${detail}`);
+	}
+	return result.stdout.trim();
+}
+/** One environment's component repos: the owner/repo directories that carry a `.git`, never the nested repos inside them. */
+function componentRepos(root) {
+	const found = [];
+	for (const entry of directoryEntries(root)) {
+		if (existsSync(join(root, entry, ".git"))) {
+			found.push(entry);
+			continue;
+		}
+		for (const child of directoryEntries(join(root, entry))) if (existsSync(join(root, entry, child, ".git"))) found.push(`${entry}/${child}`);
+	}
+	return found.sort();
+}
+function directoryEntries(dir) {
+	let entries;
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const names = [];
+	for (const entry of entries) {
+		if (entry.name === ".git" || entry.name.startsWith(".")) continue;
+		let isDirectory = false;
+		try {
+			isDirectory = statSync(join(dir, entry.name)).isDirectory();
+		} catch {
+			isDirectory = false;
+		}
+		if (isDirectory) names.push(entry.name);
+	}
+	return names;
+}
+function hasCommit(repo) {
+	return spawnSync("git", [
+		"-C",
+		repo,
+		"rev-parse",
+		"--verify",
+		"HEAD"
+	], { encoding: "utf8" }).status === 0;
+}
+/** The directory holding one round's bubble manifest and workspace. */
+function bubbleDir(dshHome, rootSessionId, round) {
+	return join(dshHome, "singularity", "environments", rootSessionId, "bubbles", `round-${round}`);
+}
+/** The absolute path of one round's bubble workspace, whether or not it has been materialized. */
+function bubbleWorkspacePath(dshHome, rootSessionId, round) {
+	return join(bubbleDir(dshHome, rootSessionId, round), "workspace");
+}
+/**
+* The workspace of the graph's latest materialized round, or `undefined` when
+* this graph has no bubble at all. A restarted deployment re-pins an adopted
+* root here: the round's bubble is where its Runs work, and without the mapping
+* the runtime falls back to the environment checkout the bubble was cloned from.
+*/
+function latestBubbleWorkspacePath(dshHome, rootSessionId) {
+	const bubbles = join(dshHome, "singularity", "environments", rootSessionId, "bubbles");
+	let latest;
+	for (const entry of directoryEntries(bubbles)) {
+		const round = /^round-(\d+)$/.exec(entry);
+		if (round === null) continue;
+		if (latest === void 0 || Number(round[1]) > latest) latest = Number(round[1]);
+	}
+	return latest === void 0 ? void 0 : bubbleWorkspacePath(dshHome, rootSessionId, latest);
+}
+function readManifest(path) {
+	try {
+		return JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return;
+	}
+}
+/** Fold each env component's current (dirty) tree into a fresh `rsi/<graphId>/round-0` branch, on the mother port's own repo. */
+function genesisRound(envPath, graphId) {
+	const branch = `rsi/${graphId}/round-0`;
+	for (const rel of componentRepos(envPath)) {
+		const repo = join(envPath, rel);
+		if (!hasCommit(repo)) continue;
+		runGit([
+			"checkout",
+			"-B",
+			branch
+		], repo);
+		runGit(["add", "-A"], repo);
+		if (runGit(["status", "--porcelain"], repo).length > 0) runGit([
+			...BUBBLE_GIT,
+			"commit",
+			"-m",
+			"round-0"
+		], repo);
+	}
+}
+/** Copy the graph's legacy flat skills and task templates into the bubble's method volume, when the old-protocol library has them. */
+function copyLegacyMethodVolume(dshHome, rootSessionId, workspace) {
+	const library = join(dshHome, "singularity", "environments", rootSessionId);
+	const skills = join(library, "skills");
+	const templates = join(library, "task-templates");
+	if (!existsSync(skills) && !existsSync(templates)) return;
+	const volume = join(workspace, ".bubble", "method-volume");
+	mkdirSync(volume, { recursive: true });
+	if (existsSync(skills)) cpSync(skills, volume, { recursive: true });
+	if (existsSync(templates)) cpSync(templates, join(volume, "task-templates"), { recursive: true });
+}
+/**
+* Resolve the method volume source of one round's bubble. A legacy library
+* (flat `skills/` without the protocol marker) keeps its old read-only shape
+* and never enters the revision logic; a new-protocol library binds the named
+* revision, or the active pointer's when the round names none. A new-protocol
+* library with no revision to bind is refused by name — never a silent empty
+* volume, never a fallback to the flat path.
+*/
+async function methodVolumeSource(library, methodRevisionId) {
+	if (await hasLegacyLayout(library)) {
+		if (methodRevisionId !== void 0) throw new Error(`bubble: library "${library.id}" has the legacy flat layout and holds no revision "${methodRevisionId}"; a legacy graph's bubble carries the flat library as-is`);
+		return { kind: "legacy" };
+	}
+	const revisionId = methodRevisionId ?? (await readPointer(library))?.revisionId;
+	if (revisionId === void 0) throw new Error(`bubble: library "${library.id}" has no active environment revision and the round named none; a new-protocol bubble's method volume is one frozen revision's bytes`);
+	return {
+		kind: "revision",
+		revisionId
+	};
+}
+/** Copy one revision's skills and task templates into the bubble's method volume; a directory missing or failing verification is refused by name. */
+async function copyRevisionVolume(library, revisionId, workspace) {
+	const revision = await readRevision(library, revisionId);
+	if (revision === void 0) throw new Error(`bubble: library "${library.id}" holds no revision "${revisionId}"; a bubble's method volume is a frozen revision's bytes, never the flat library's`);
+	const { defects } = await verifyRevisionDirectory(revision.root, revision.manifest);
+	if (defects.length > 0) throw new Error(`bubble: revision "${revisionId}" of library "${library.id}" does not verify against its manifest:\n- ${defects.join("\n- ")}`);
+	const volume = join(workspace, ".bubble", "method-volume");
+	rmSync(volume, {
+		recursive: true,
+		force: true
+	});
+	mkdirSync(volume, { recursive: true });
+	if (existsSync(revision.skillRoot)) cpSync(revision.skillRoot, volume, { recursive: true });
+	if (existsSync(revision.taskTemplatesRoot)) cpSync(revision.taskTemplatesRoot, join(volume, "task-templates"), { recursive: true });
+	return {
+		revisionId,
+		digest: revision.manifest.contentDigest
+	};
+}
+/**
+* The method revision one materialized bubble's volume carries, read from its
+* manifest — `undefined` for a legacy bubble and for a path that is no bubble
+* workspace. A Run admitted into a bubble binds exactly this revision.
+*/
+function bubbleMethodRevisionOf(workspacePath) {
+	const manifest = readManifest(join(dirname(workspacePath), "bubble-manifest.json"));
+	if (manifest?.methodRevisionId === void 0) return void 0;
+	return {
+		revisionId: manifest.methodRevisionId,
+		...manifest.methodDigest === void 0 ? {} : { digest: manifest.methodDigest }
+	};
+}
+/**
+* Materialize one round's bubble workspace: every environment component cloned
+* at `rsi/<graphId>/round-<N-1>` (round 1 folds the environment into `round-0`
+* first), plus the method volume and the round's manifest. The method volume is
+* one environment revision's bytes: `options.methodRevisionId` names it (a
+* trial round names its candidate, a graph's first round names the initial
+* revision), and the active pointer answers when the round names none.
+* Idempotent on the pair (round, methodRevisionId): a manifest already naming
+* both returns its workspace untouched, and the same round under another
+* revision is materialized again.
+*/
+async function materializeBubble(envPath, dshHome, rootSessionId, graphId, round, options = {}) {
+	const dir = bubbleDir(dshHome, rootSessionId, round);
+	const workspace = join(dir, "workspace");
+	const manifestPath = join(dir, "bubble-manifest.json");
+	const library = libraryRoots(rootSessionId, dshHome);
+	const source = await methodVolumeSource(library, options.methodRevisionId);
+	const wantedRevision = source.kind === "revision" ? source.revisionId : void 0;
+	const existing = readManifest(manifestPath);
+	if (existing?.round === round && existing.methodRevisionId === wantedRevision) return workspace;
+	mkdirSync(workspace, { recursive: true });
+	if (round === 1) genesisRound(envPath, graphId);
+	const branch = `rsi/${graphId}/round-${round - 1}`;
+	const components = {};
+	for (const rel of componentRepos(envPath)) {
+		const target = join(workspace, rel);
+		mkdirSync(dirname(target), { recursive: true });
+		rmSync(target, {
+			recursive: true,
+			force: true
+		});
+		runGit([
+			"clone",
+			join(envPath, rel),
+			target
+		]);
+		const checkout = spawnSync("git", [
+			"-C",
+			target,
+			"checkout",
+			branch
+		], { encoding: "utf8" });
+		if (checkout.status !== 0) {
+			const detail = (checkout.stderr || checkout.stdout || "").trim();
+			throw new Error(`bubble: branch "${branch}" is not in ${join(envPath, rel)}: ${detail}`);
+		}
+		components[rel] = runGit(["rev-parse", "HEAD"], target);
+	}
+	const method = source.kind === "legacy" ? (copyLegacyMethodVolume(dshHome, rootSessionId, workspace), void 0) : await copyRevisionVolume(library, source.revisionId, workspace);
+	const manifest = {
+		graphId,
+		round,
+		components,
+		...method === void 0 ? {} : {
+			methodRevisionId: method.revisionId,
+			methodDigest: method.digest
+		},
+		createdAt: (/* @__PURE__ */ new Date()).toISOString()
+	};
+	writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+	return workspace;
+}
+/**
+* Settle one round's bubble: commit each component's work on the bubble and
+* push it to `rsi/<graphId>/round-<N>` on the environment's own repo, so the
+* next round's materialization can read it. A component with nothing to commit
+* still has its branch published. Returns each component's new SHA.
+*/
+async function settleBubble(envPath, workspacePath, graphId, round) {
+	const shas = {};
+	if (!existsSync(workspacePath)) return shas;
+	const branch = `rsi/${graphId}/round-${round}`;
+	for (const rel of componentRepos(workspacePath)) {
+		const repo = join(workspacePath, rel);
+		runGit(["add", "-A"], repo);
+		if (runGit(["status", "--porcelain"], repo).length > 0) runGit([
+			...BUBBLE_GIT,
+			"commit",
+			"-m",
+			`round-${round}`
+		], repo);
+		runGit([
+			"push",
+			"origin",
+			`HEAD:refs/heads/${branch}`
+		], repo);
+		shas[rel] = runGit(["rev-parse", "HEAD"], repo);
+	}
+	return shas;
+}
+
+//#endregion
 //#region src/service/root-recovery.ts
 async function recoverRootTask(self, storeId, request, caller) {
 	const defects = recoveryRequestDefects(request);
@@ -9000,6 +9262,15 @@ async function startRecoveryAttempt(self, input) {
 	if (trial !== void 0 && admitted !== void 0 && trial.manifest.revisionId === admitted.manifest.revisionId) throw new Error(`task-runtime: trial candidate "${trialRef}" is the revision this attempt is admitted against; a trial binds an unpublished candidate, and nothing is written`);
 	const revision = trial ?? admitted;
 	const workspacePath = request.workspacePath === void 0 ? await self.workspacePathForSession(rootSessionId) : await normalizeWorkspacePath(request.workspacePath);
+	/**
+	* A bubble and the run opened into it name one method revision: the driver
+	* materialized both from the same resolution, so a pair that disagrees — a
+	* restart's re-pinned workspace, a pointer that moved after the round was
+	* materialized — is refused by name rather than mixed. A workspace that is
+	* no bubble (or a legacy bubble, which carries no revision) is not checked.
+	*/
+	const bubbleMethod = workspacePath === void 0 ? void 0 : bubbleMethodRevisionOf(workspacePath);
+	if (bubbleMethod !== void 0 && (revision === void 0 || bubbleMethod.revisionId !== revision.manifest.revisionId)) throw new Error(`task-runtime: the round's bubble carries method revision "${bubbleMethod.revisionId}" but this attempt binds ${revision === void 0 ? "no environment revision" : `"${revision.manifest.revisionId}"`}; a bubble and the run opened into it name one revision, and nothing is written`);
 	let claimed;
 	if (workspacePath !== void 0 && self.workspaces !== void 0) {
 		await self.workspaces.claim(workspacePath, {
@@ -13573,205 +13844,8 @@ function checkObligationCoverage(templates, snapshot) {
 }
 
 //#endregion
-//#region src/service/bubble.ts
-const BUBBLE_GIT = [
-	"-c",
-	"user.name=bubble",
-	"-c",
-	"user.email=bubble@local"
-];
-function runGit(args, cwd) {
-	const result = spawnSync("git", [...cwd === void 0 ? [] : ["-C", cwd], ...args], { encoding: "utf8" });
-	if (result.status !== 0) {
-		const detail = (result.stderr || result.stdout || result.error?.message || "unknown git failure").trim();
-		throw new Error(`bubble: git ${args.join(" ")}${cwd === void 0 ? "" : ` in ${cwd}`} failed: ${detail}`);
-	}
-	return result.stdout.trim();
-}
-/** One environment's component repos: the owner/repo directories that carry a `.git`, never the nested repos inside them. */
-function componentRepos(root) {
-	const found = [];
-	for (const entry of directoryEntries(root)) {
-		if (existsSync(join(root, entry, ".git"))) {
-			found.push(entry);
-			continue;
-		}
-		for (const child of directoryEntries(join(root, entry))) if (existsSync(join(root, entry, child, ".git"))) found.push(`${entry}/${child}`);
-	}
-	return found.sort();
-}
-function directoryEntries(dir) {
-	let entries;
-	try {
-		entries = readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return [];
-	}
-	const names = [];
-	for (const entry of entries) {
-		if (entry.name === ".git" || entry.name.startsWith(".")) continue;
-		let isDirectory = false;
-		try {
-			isDirectory = statSync(join(dir, entry.name)).isDirectory();
-		} catch {
-			isDirectory = false;
-		}
-		if (isDirectory) names.push(entry.name);
-	}
-	return names;
-}
-function hasCommit(repo) {
-	return spawnSync("git", [
-		"-C",
-		repo,
-		"rev-parse",
-		"--verify",
-		"HEAD"
-	], { encoding: "utf8" }).status === 0;
-}
-/** The directory holding one round's bubble manifest and workspace. */
-function bubbleDir(dshHome, rootSessionId, round) {
-	return join(dshHome, "singularity", "environments", rootSessionId, "bubbles", `round-${round}`);
-}
-/** The absolute path of one round's bubble workspace, whether or not it has been materialized. */
-function bubbleWorkspacePath(dshHome, rootSessionId, round) {
-	return join(bubbleDir(dshHome, rootSessionId, round), "workspace");
-}
-/**
-* The workspace of the graph's latest materialized round, or `undefined` when
-* this graph has no bubble at all. A restarted deployment re-pins an adopted
-* root here: the round's bubble is where its Runs work, and without the mapping
-* the runtime falls back to the environment checkout the bubble was cloned from.
-*/
-function latestBubbleWorkspacePath(dshHome, rootSessionId) {
-	const bubbles = join(dshHome, "singularity", "environments", rootSessionId, "bubbles");
-	let latest;
-	for (const entry of directoryEntries(bubbles)) {
-		const round = /^round-(\d+)$/.exec(entry);
-		if (round === null) continue;
-		if (latest === void 0 || Number(round[1]) > latest) latest = Number(round[1]);
-	}
-	return latest === void 0 ? void 0 : bubbleWorkspacePath(dshHome, rootSessionId, latest);
-}
-function readManifest(path) {
-	try {
-		return JSON.parse(readFileSync(path, "utf8"));
-	} catch {
-		return;
-	}
-}
-/** Fold each env component's current (dirty) tree into a fresh `rsi/<graphId>/round-0` branch, on the mother port's own repo. */
-function genesisRound(envPath, graphId) {
-	const branch = `rsi/${graphId}/round-0`;
-	for (const rel of componentRepos(envPath)) {
-		const repo = join(envPath, rel);
-		if (!hasCommit(repo)) continue;
-		runGit([
-			"checkout",
-			"-B",
-			branch
-		], repo);
-		runGit(["add", "-A"], repo);
-		if (runGit(["status", "--porcelain"], repo).length > 0) runGit([
-			...BUBBLE_GIT,
-			"commit",
-			"-m",
-			"round-0"
-		], repo);
-	}
-}
-/** Copy the graph's production skills and task templates into the bubble's method volume, when the graph has them. */
-function copyMethodVolume(dshHome, rootSessionId, workspace) {
-	const library = join(dshHome, "singularity", "environments", rootSessionId);
-	const skills = join(library, "skills");
-	const templates = join(library, "task-templates");
-	if (!existsSync(skills) && !existsSync(templates)) return;
-	const volume = join(workspace, ".bubble", "method-volume");
-	mkdirSync(volume, { recursive: true });
-	if (existsSync(skills)) cpSync(skills, volume, { recursive: true });
-	if (existsSync(templates)) cpSync(templates, join(volume, "task-templates"), { recursive: true });
-}
-/**
-* Materialize one round's bubble workspace: every environment component cloned
-* at `rsi/<graphId>/round-<N-1>` (round 1 folds the environment into `round-0`
-* first), plus the method volume and the round's manifest. Idempotent: a
-* manifest already naming this round returns its workspace untouched.
-*/
-async function materializeBubble(envPath, dshHome, rootSessionId, graphId, round) {
-	const dir = bubbleDir(dshHome, rootSessionId, round);
-	const workspace = join(dir, "workspace");
-	const manifestPath = join(dir, "bubble-manifest.json");
-	if (readManifest(manifestPath)?.round === round) return workspace;
-	mkdirSync(workspace, { recursive: true });
-	if (round === 1) genesisRound(envPath, graphId);
-	const branch = `rsi/${graphId}/round-${round - 1}`;
-	const components = {};
-	for (const rel of componentRepos(envPath)) {
-		const target = join(workspace, rel);
-		mkdirSync(dirname(target), { recursive: true });
-		rmSync(target, {
-			recursive: true,
-			force: true
-		});
-		runGit([
-			"clone",
-			join(envPath, rel),
-			target
-		]);
-		const checkout = spawnSync("git", [
-			"-C",
-			target,
-			"checkout",
-			branch
-		], { encoding: "utf8" });
-		if (checkout.status !== 0) {
-			const detail = (checkout.stderr || checkout.stdout || "").trim();
-			throw new Error(`bubble: branch "${branch}" is not in ${join(envPath, rel)}: ${detail}`);
-		}
-		components[rel] = runGit(["rev-parse", "HEAD"], target);
-	}
-	copyMethodVolume(dshHome, rootSessionId, workspace);
-	const manifest = {
-		graphId,
-		round,
-		components,
-		createdAt: (/* @__PURE__ */ new Date()).toISOString()
-	};
-	writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-	return workspace;
-}
-/**
-* Settle one round's bubble: commit each component's work on the bubble and
-* push it to `rsi/<graphId>/round-<N>` on the environment's own repo, so the
-* next round's materialization can read it. A component with nothing to commit
-* still has its branch published. Returns each component's new SHA.
-*/
-async function settleBubble(envPath, workspacePath, graphId, round) {
-	const shas = {};
-	if (!existsSync(workspacePath)) return shas;
-	const branch = `rsi/${graphId}/round-${round}`;
-	for (const rel of componentRepos(workspacePath)) {
-		const repo = join(workspacePath, rel);
-		runGit(["add", "-A"], repo);
-		if (runGit(["status", "--porcelain"], repo).length > 0) runGit([
-			...BUBBLE_GIT,
-			"commit",
-			"-m",
-			`round-${round}`
-		], repo);
-		runGit([
-			"push",
-			"origin",
-			`HEAD:refs/heads/${branch}`
-		], repo);
-		shas[rel] = runGit(["rev-parse", "HEAD"], repo);
-	}
-	return shas;
-}
-
-//#endregion
 //#region src/index.ts
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ENVIRONMENT_DRAFT_ID, ENVIRONMENT_REVISION_ID, ExecutionGate, HUMAN_TOOLS, IterationCapRefusal, RECEIPT_ACTOR, RECEIPT_PERSIST_WAIT_MS, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, appendLineDurable, applyCapabilityRowEdit, applyReviewEdit, applySkillEdit, applyTemplateEdit, assertDraftEditAllowed, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleWorkspacePath, buildExecutionReceipt, candidateRevisionId, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, copyRevisionDirectory, createEnvironmentDraft, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, discardEnvironmentDraft, draftsRoot, driveBatch, emptyRevisionManifest, ensureEnvironmentLayout, ensureInitialRevision, ensureProtocolMarker, environmentProtocolMarker, escalationHint, executionProviders, executionSubtree, executionUsage, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, freezeDraftDirectory, freezeEnvironmentDraft, hasLegacyLayout, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, latestDraftFor, libraryRoots, listEnvironmentDrafts, listPointerCompletions, listRevisions, loadObligationTemplates, loadSkillSidecar, manifestDigest, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openPointerIntent, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseRevisionManifest, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, publishEnvironmentRevision, readActiveRevision, readEnvironmentDraft, readPointer, readRevision, readRevisionManifest, readRevisionSkillFile, readVerifiedFile, rebaseWorkspacePaths, reconcileEnvironmentPointer, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requireReceiptFacts, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, revisionCapabilityRows, revisionRefOf, revisionRoot, revisionSkillOf, revisionTemplateOf, revisionsRoot, rollbackEnvironmentRevision, serialEnvironment, serializeSkillSidecar, sessionFactsOf, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillNameFrom, skillSearchRoots, stageEnvironmentEdit, syncDirectory, taskTemplatePage, toolResultFailed, unlistableVerifierRefusal, validateSkillProvider, verifyRevisionDirectory, walkVerified, workerBaseline, writeFileAtomic, writeRevisionManifest };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ENVIRONMENT_DRAFT_ID, ENVIRONMENT_REVISION_ID, ExecutionGate, HUMAN_TOOLS, IterationCapRefusal, RECEIPT_ACTOR, RECEIPT_PERSIST_WAIT_MS, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, appendLineDurable, applyCapabilityRowEdit, applyReviewEdit, applySkillEdit, applyTemplateEdit, assertDraftEditAllowed, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleMethodRevisionOf, bubbleWorkspacePath, buildExecutionReceipt, candidateRevisionId, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, copyRevisionDirectory, createEnvironmentDraft, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, discardEnvironmentDraft, draftsRoot, driveBatch, emptyRevisionManifest, ensureEnvironmentLayout, ensureInitialRevision, ensureProtocolMarker, environmentProtocolMarker, escalationHint, executionProviders, executionSubtree, executionUsage, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, freezeDraftDirectory, freezeEnvironmentDraft, hasLegacyLayout, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, latestDraftFor, libraryRoots, listEnvironmentDrafts, listPointerCompletions, listRevisions, loadObligationTemplates, loadSkillSidecar, manifestDigest, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openPointerIntent, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseRevisionManifest, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, publishEnvironmentRevision, readActiveRevision, readEnvironmentDraft, readPointer, readRevision, readRevisionManifest, readRevisionSkillFile, readVerifiedFile, rebaseWorkspacePaths, reconcileEnvironmentPointer, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requireReceiptFacts, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, revisionCapabilityRows, revisionRefOf, revisionRoot, revisionSkillOf, revisionTemplateOf, revisionsRoot, rollbackEnvironmentRevision, serialEnvironment, serializeSkillSidecar, sessionFactsOf, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillNameFrom, skillSearchRoots, stageEnvironmentEdit, syncDirectory, taskTemplatePage, toolResultFailed, unlistableVerifierRefusal, validateSkillProvider, verifyRevisionDirectory, walkVerified, workerBaseline, writeFileAtomic, writeRevisionManifest };

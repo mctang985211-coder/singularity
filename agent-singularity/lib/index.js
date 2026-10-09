@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, executionUsage, hasLegacyLayout, listPointerCompletions, materializeBubble, optionalService, readEnvironmentDraft, readPointer, readRevision, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
-import { DEFAULT_STRATEGY_POLICY, EvolutionService, OUTCOME_JUDGE_PROMPT, adapterFor, admit, aggregateEvaluation, assertOutcomePlan, calibrateNoise, canonicalJson, cohortDigestOf, createDraft, digestOf, discardDraft, editBudget, evaluate, evaluationOf, evaluationSourcesOf, exploration, foldHistory, foldMethods, markPublished, markRolledback, methodList, modelSelectionOf, openMethodLedger, refutationFor, renderHistory, revisionViewOf, scaleOf, screenBeforeMeasurement, sideMeasurementOf, stallFlag, strategyDecisionOf, validateEvaluation } from "@dangosys/dsh-singularity-evolution";
+import { DEFAULT_STRATEGY_POLICY, EvolutionService, OUTCOME_JUDGE_PROMPT, UNREGULARIZED_STRATEGY_POLICY, adapterFor, admit, aggregateEvaluation, assertOutcomePlan, calibrateNoise, canonicalJson, cohortDigestOf, createDraft, digestOf, discardDraft, editBudget, evaluate, evaluationOf, evaluationSourcesOf, exploration, foldHistory, foldMethods, markPublished, markRolledback, methodList, modelSelectionOf, openMethodLedger, refutationFor, renderHistory, revisionViewOf, scaleOf, screenBeforeMeasurement, sideMeasurementOf, stallFlag, strategyDecisionOf, validateEvaluation } from "@dangosys/dsh-singularity-evolution";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, isTerminalRunStatus, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
@@ -2000,7 +2000,10 @@ async function methodGraphFor(ctx, caller) {
 		id: String(graph.id),
 		rootSessionId,
 		libraryId: rootSessionId,
-		...graph.rsi == null ? {} : { rsi: { humanReview: graph.rsi.humanReview === true } }
+		...graph.rsi == null ? {} : { rsi: {
+			humanReview: graph.rsi.humanReview === true,
+			...graph.rsi.strategy === "regularized" || graph.rsi.strategy === "unregularized" ? { strategy: graph.rsi.strategy } : {}
+		} }
 	};
 }
 /**
@@ -2014,6 +2017,10 @@ async function methodRsiStampFor(ctx, caller) {
 /** The mode one graph's record puts method publication in. Mode is never an argument. */
 async function methodModeFor(ctx, caller) {
 	return (await methodGraphFor(ctx, caller)).rsi?.humanReview === false ? "auto" : "manual";
+}
+/** The strategy policy one graph's own rsi config selects; an absent strategy is the regularized default. */
+function strategyPolicyFor(graph) {
+	return graph.rsi?.strategy === "unregularized" ? UNREGULARIZED_STRATEGY_POLICY : DEFAULT_STRATEGY_POLICY;
 }
 /** Who answers: an unmanned graph's publication is the platform policy's, not a person's. */
 function deciderFor(mode) {
@@ -2093,7 +2100,7 @@ async function methodLedgerPlaneOf(ctx, caller) {
 		id: resolved.id,
 		root: resolved.root
 	};
-	const policy = DEFAULT_STRATEGY_POLICY;
+	const policy = strategyPolicyFor(await methodGraphFor(ctx, caller));
 	const open$1 = async () => {
 		const ledger = await openMethodLedger({
 			root: library.root,
@@ -2132,6 +2139,7 @@ async function methodLedgerPlaneOf(ctx, caller) {
 	return {
 		libraryId: library.id,
 		root: library.root,
+		policy,
 		view: viewOf,
 		async list(filter) {
 			const { sources } = await open$1();
@@ -2846,9 +2854,19 @@ var CoordinationDriver = class {
 			}
 		}
 		const envPath = await this.envPathOf(graph);
-		const workspacePath = envPath === void 0 ? void 0 : await materializeBubble(envPath, bubbleHome(), rootSessionId, graphId, request.businessRound).catch((error) => {
-			this.log(`coordination: graph ${graphId} round ${request.businessRound} bubble could not be materialized (${message(error)})`);
-		});
+		/**
+		* The bubble's method volume binds the revision the round's run will be
+		* admitted against — the same chain `recoverRootTask` resolves: the trial
+		* candidate this round's request names, else the one the source run itself
+		* was opened under, else the source run's pinned revision, else (inside the
+		* materialization) the library's active revision. A bubble that cannot be
+		* materialized refuses the round by name rather than degrading to a round
+		* without its isolation; the refusal is logged and the request retried on
+		* the next activation.
+		*/
+		const sourceRun = snapshot.runs.find((candidate) => candidate.runId === request.sourceRunId);
+		const methodRevisionId = request.trialCandidateRef ?? sourceRun?.trialCandidateRef ?? sourceRun?.environmentRevisionId;
+		const workspacePath = envPath === void 0 ? void 0 : await materializeBubble(envPath, bubbleHome(), rootSessionId, graphId, request.businessRound, { ...methodRevisionId === void 0 ? {} : { methodRevisionId } });
 		const recovery = {
 			sourceTaskId: work.assignment.subject.source.taskId,
 			sourceRunId: request.sourceRunId,
@@ -4412,7 +4430,7 @@ function defineMethodDraftTool(ctx) {
 				const critic = criticOf(args.critic);
 				const env = environmentPlaneOf(ctx);
 				const ledger = await methodLedgerPlaneOf(ctx, caller);
-				const strategy = strategyPlaneOf();
+				const strategy = strategyPlaneOf(ledger.policy);
 				const view = await env.activeEnvironmentView(caller);
 				if (view.readOnly) return [`method_draft rejected: library "${view.libraryId}" is read-only (${view.protocol}); a sealed or legacy graph takes no draft.`, "nothing was created."].join(" ");
 				if (view.revisionId !== args.expectedBaseRevision) return [
@@ -4793,11 +4811,12 @@ function defineMethodEvaluateTool(ctx) {
 				}, exec.signal);
 				const decision = await ledger.decisionFor(args.draftId) ?? await ledger.recordDecision(report);
 				const admission = decision.admissions.find((entry) => entry.candidateId === args.draftId);
-				strategyPlaneOf();
+				const strategy = strategyPlaneOf(ledger.policy);
 				const lines$1 = [
 					renderEvaluation(report),
 					...admission === void 0 ? ["admission: the frozen strategy recorded no admission for this draft"] : renderAdmission(admission, decision.calibration),
-					`scope: ${decision.scope}`
+					`scope: ${decision.scope}`,
+					`strategy: ${strategy.policy.version}, policy digest ${decision.policyDigest.slice(0, 12)} — the strategy this graph is configured with${report.plan.strategy === void 0 ? "" : `, frozen into the plan as ${report.plan.strategy.policyDigest.slice(0, 12)}`}`
 				];
 				if (existing !== void 0) lines$1.push("this draft was already measured under this frozen cohort; the same report was read back and nothing was charged again");
 				lines$1.push(admission?.admissible === true ? "next: method_publish (one approval; a refused or tampered candidate is refused before anyone is asked) or method_discard" : "next: method_discard — the frozen strategy did not admit this candidate, so no approval will be requested");
@@ -4878,7 +4897,7 @@ function defineMethodListTool(ctx) {
 			try {
 				const env = environmentPlaneOf(ctx);
 				const ledger = await methodLedgerPlaneOf(ctx, caller);
-				const strategy = strategyPlaneOf();
+				const strategy = strategyPlaneOf(ledger.policy);
 				const view = await env.activeEnvironmentView(caller);
 				const mode = await methodModeFor(ctx, caller);
 				const filter = {

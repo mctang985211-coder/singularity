@@ -4,8 +4,16 @@
  * charging again, and the one decision record the publication reads is written
  * once from that report.
  */
+import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
+import {
+  DEFAULT_STRATEGY_POLICY,
+  UNREGULARIZED_STRATEGY_POLICY,
+  strategyPolicyDigest,
+} from '@dangosys/dsh-singularity-evolution'
+import type { StrategyDecisionRecord } from '@dangosys/dsh-singularity-evolution'
 import { defineMethodEvaluateTool } from '../../src/tools/method-evaluate.ts'
+import { decisionPathOf } from '../../src/tools/method-shared.ts'
 import { forgeEvaluation, methodWorld } from './method-tools.fixture.ts'
 
 const evaluateTool = (ctx: never) => defineMethodEvaluateTool(ctx)
@@ -104,6 +112,29 @@ describe('method_evaluate', () => {
       delete world.ctx.agentDefaultModel
       const answer = (await evaluateTool(world.ctx as never).execute({ ...CALL, draftId: 'd0001' }, world.exec as never)) as string
       expect(answer).toContain('offers no default model')
+    } finally {
+      await world.dispose()
+    }
+  })
+
+  it.each([
+    ['regularized', DEFAULT_STRATEGY_POLICY],
+    ['unregularized', UNREGULARIZED_STRATEGY_POLICY],
+  ] as const)('records the decision under the %s graph’s policy, traceable by digest', async (strategy, policy) => {
+    const world = await methodWorld({ strategy })
+    try {
+      const forged = await forgeEvaluation(world, { cost: 'reported' })
+      const answer = (await evaluateTool(world.ctx as never).execute({ ...CALL, draftId: forged.draftId }, world.exec as never)) as string
+      const policyDigest = strategyPolicyDigest(policy)
+      expect(answer).toContain(`policy digest ${policyDigest.slice(0, 12)}`)
+      // The record the publication reads back is the one beside the report,
+      // and it names the policy the graph was configured with.
+      const decision = JSON.parse(
+        await readFile(decisionPathOf(world.library.root, forged.draftId, forged.evaluationId), 'utf8'),
+      ) as StrategyDecisionRecord
+      expect(decision.policyDigest).toBe(policyDigest)
+      const other = policy === DEFAULT_STRATEGY_POLICY ? UNREGULARIZED_STRATEGY_POLICY : DEFAULT_STRATEGY_POLICY
+      expect(decision.policyDigest).not.toBe(strategyPolicyDigest(other))
     } finally {
       await world.dispose()
     }

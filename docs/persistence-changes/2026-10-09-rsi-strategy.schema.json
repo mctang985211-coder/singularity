@@ -1,0 +1,13 @@
+{
+  "formatVersion": 1,
+  "roots": [
+    {
+      "key": "event:graphs/event",
+      "kind": "event",
+      "event": "graphs/event",
+      "payload": "GraphsEvent",
+      "digest": "2a75c5fb3153994d18895e11870380006540691a6aea33bc04ab47fb8ce16d4f",
+      "source": "graphs/src/index.ts"
+    }
+  ]
+}

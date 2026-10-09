@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   DEFAULT_STRATEGY_POLICY,
+  UNREGULARIZED_STRATEGY_POLICY,
   adapterFor,
   admit,
   aggregateEvaluation,
@@ -88,7 +89,7 @@ import type {
   PublishOutcome,
   PublishRequest,
 } from '@dangosys/dsh-singularity-task-runtime'
-import type {} from '@dangosys/dsh-singularity-graphs'
+import type { RsiStrategy } from '@dangosys/dsh-singularity-graphs'
 
 /**
  * One method change, as the console reads it off the event stream. The id is
@@ -139,7 +140,7 @@ export interface MethodGraphView {
   readonly id: string
   readonly rootSessionId: string
   readonly libraryId: string
-  readonly rsi?: { readonly humanReview?: boolean }
+  readonly rsi?: { readonly humanReview?: boolean; readonly strategy?: RsiStrategy }
 }
 
 /** The environment revision plane's model-facing seam, one method per runtime entry it uses. */
@@ -203,6 +204,8 @@ export interface PrePublishVerdict {
 export interface MethodLedgerPlane {
   readonly libraryId: string
   readonly root: string
+  /** The strategy policy the graph's own rsi config selects; this plane's evaluations, decisions and history folds all run under it. */
+  readonly policy: StrategyPolicy
   view(draftId: string): Promise<DraftView>
   list(filter?: MethodListFilter): Promise<readonly DraftView[]>
   evaluationOf(draftId: string): Promise<EvaluationReport | undefined>
@@ -284,7 +287,18 @@ export async function methodGraphFor(ctx: Context, caller: string): Promise<Meth
     // A library's id is its graph root's session id: the same segment the
     // environment store names its directory with.
     libraryId: rootSessionId,
-    ...(graph.rsi == null ? {} : { rsi: { humanReview: graph.rsi.humanReview === true } }),
+    ...(graph.rsi == null
+      ? {}
+      : {
+          rsi: {
+            humanReview: graph.rsi.humanReview === true,
+            // The registry validates the field on write; anything unreadable here
+            // falls back to the regularized default rather than failing a read.
+            ...(graph.rsi.strategy === 'regularized' || graph.rsi.strategy === 'unregularized'
+              ? { strategy: graph.rsi.strategy }
+              : {}),
+          },
+        }),
   }
 }
 
@@ -302,6 +316,11 @@ export async function methodRsiStampFor(ctx: Context, caller: string): Promise<s
 export async function methodModeFor(ctx: Context, caller: string): Promise<MethodMode> {
   const graph = await methodGraphFor(ctx, caller)
   return graph.rsi?.humanReview === false ? 'auto' : 'manual'
+}
+
+/** The strategy policy one graph's own rsi config selects; an absent strategy is the regularized default. */
+export function strategyPolicyFor(graph: MethodGraphView): StrategyPolicy {
+  return graph.rsi?.strategy === 'unregularized' ? UNREGULARIZED_STRATEGY_POLICY : DEFAULT_STRATEGY_POLICY
 }
 
 /** Who answers: an unmanned graph's publication is the platform policy's, not a person's. */
@@ -389,7 +408,10 @@ export async function methodLedgerPlaneOf(ctx: Context, caller: string): Promise
   const env = environmentPlaneOf(ctx)
   const resolved = await env.libraryRootsForSession(caller)
   const library: LibraryRoots = { id: resolved.id, root: resolved.root }
-  const policy = DEFAULT_STRATEGY_POLICY
+  // The policy comes from the graph's own record, so every evaluation the plane
+  // runs freezes the strategy the graph was configured with into the plan, and
+  // the decision recorded beside the report recomputes under that same policy.
+  const policy = strategyPolicyFor(await methodGraphFor(ctx, caller))
 
   const open = async () => {
     const ledger = await openMethodLedger({ root: library.root, libraryId: library.id })
@@ -422,6 +444,7 @@ export async function methodLedgerPlaneOf(ctx: Context, caller: string): Promise
   return {
     libraryId: library.id,
     root: library.root,
+    policy,
     view: viewOf,
     async list(filter) {
       const { sources } = await open()

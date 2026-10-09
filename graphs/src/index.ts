@@ -67,7 +67,7 @@ function nextGraphId(existing: readonly string[]): string {
 }
 
 /** The fields an RSI config carries: anything else is refused by name rather than ignored. */
-const RSI_FIELDS: readonly string[] = ['task', 'metrics', 'iterationRounds', 'humanReview', 'epoch']
+const RSI_FIELDS: readonly string[] = ['task', 'metrics', 'iterationRounds', 'humanReview', 'epoch', 'strategy']
 
 /** Validates one RSI config, refusing a malformed one with the offending field named. */
 function assertRsiConfig(rsi: unknown): asserts rsi is RsiConfig {
@@ -97,6 +97,9 @@ function assertRsiConfig(rsi: unknown): asserts rsi is RsiConfig {
   }
   if (fields.epoch !== undefined && (typeof fields.epoch !== 'number' || !Number.isInteger(fields.epoch) || fields.epoch < 1)) {
     throw new Error('graphs: rsi.epoch must be an integer >= 1')
+  }
+  if (fields.strategy !== undefined && fields.strategy !== 'regularized' && fields.strategy !== 'unregularized') {
+    throw new Error(`graphs: rsi.strategy must be 'regularized' or 'unregularized'`)
   }
 }
 
@@ -240,18 +243,23 @@ export class GraphsService extends Service {
 
         // The graph's root runs in round 1's bubble, never in the environment
         // checkout: materializing folds the environment's components into
-        // `rsi/<graph>/round-0` and clones them behind the bubble's wall.
+        // `rsi/<graph>/round-0` and clones them behind the bubble's wall. The
+        // library fixes its initial revision first: the bubble's method volume
+        // is that revision's bytes.
         const envPath = store.get(envId).path
+        const runtime = this.taskRuntime()
+        const environment = runtime === undefined ? undefined : await runtime.ensureInitialEnvironment(rootSessionId, rootSessionId)
         const workspace = await materializeBubble(
           envPath,
           process.env.DSH_HOME || join(homedir(), '.dsh'),
           rootSessionId,
           id,
           1,
+          { ...(environment?.revision === undefined ? {} : { methodRevisionId: environment.revision.manifest.revisionId }) },
         )
         // The root session's own workspace is that bubble: the runtime resolves the
         // graph's checkout from this mapping, never from the environment's path.
-        this.taskRuntime()?.sessionWorkspaces.set(rootSessionId, workspace)
+        runtime?.sessionWorkspaces.set(rootSessionId, workspace)
         const handle = await this.ctx.agentRuntime.createRoot({
           sessionId: rootSessionId,
           cwd: workspace,

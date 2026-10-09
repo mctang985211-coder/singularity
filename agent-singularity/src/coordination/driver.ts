@@ -414,12 +414,23 @@ export class CoordinationDriver {
       }
     }
     const envPath = await this.envPathOf(graph)
+    /**
+     * The bubble's method volume binds the revision the round's run will be
+     * admitted against — the same chain `recoverRootTask` resolves: the trial
+     * candidate this round's request names, else the one the source run itself
+     * was opened under, else the source run's pinned revision, else (inside the
+     * materialization) the library's active revision. A bubble that cannot be
+     * materialized refuses the round by name rather than degrading to a round
+     * without its isolation; the refusal is logged and the request retried on
+     * the next activation.
+     */
+    const sourceRun = snapshot.runs.find(candidate => candidate.runId === request.sourceRunId)
+    const methodRevisionId = request.trialCandidateRef ?? sourceRun?.trialCandidateRef ?? sourceRun?.environmentRevisionId
     const workspacePath =
       envPath === undefined
         ? undefined
-        : await materializeBubble(envPath, bubbleHome(), rootSessionId, graphId, request.businessRound).catch(error => {
-            this.log(`coordination: graph ${graphId} round ${request.businessRound} bubble could not be materialized (${message(error)})`)
-            return undefined
+        : await materializeBubble(envPath, bubbleHome(), rootSessionId, graphId, request.businessRound, {
+            ...(methodRevisionId === undefined ? {} : { methodRevisionId }),
           })
     const sourceTaskId = work.assignment.subject.source.taskId
     const recovery: RootRecoveryRequest = {

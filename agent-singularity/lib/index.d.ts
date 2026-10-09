@@ -2,6 +2,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest } from "@dangosys/dsh-singularity-task-runtime";
 import { ModelSelection, aggregateEvaluation, calibrateNoise, exploration, refutationFor, renderHistory, screenBeforeMeasurement } from "@dangosys/dsh-singularity-evolution";
+import "@dangosys/dsh-singularity-graphs";
 
 //#region src/coordination/supervision.d.ts
 

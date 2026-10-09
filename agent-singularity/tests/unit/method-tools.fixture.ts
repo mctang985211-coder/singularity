@@ -77,7 +77,7 @@ export interface MethodWorld {
   /** The sealed receipts this world's task store serves; a spec pushes the ones its forged trials cite. */
   readonly storeReceipts: unknown[]
   /** The graph's own rsi settings, as `methodModeFor` reads them. */
-  readonly rsi: { humanReview: boolean }
+  readonly rsi: { humanReview: boolean; strategy?: 'regularized' | 'unregularized' }
   revision: (revisionId: string) => Promise<EnvironmentRevision | undefined>
   draft: (draftId: string) => Promise<EnvironmentDraft | undefined>
   pointer: () => Promise<{ revisionId: string; generation: number } | null>
@@ -93,6 +93,8 @@ export async function methodWorld(
     /** Runs inside the approval window, before the answer is returned — the one place a third party can still move the pointer. */
     readonly duringApproval?: () => Promise<void> | void
     readonly humanReview?: boolean
+    /** The graph-level strategy switch the ledger plane resolves its policy from. */
+    readonly strategy?: 'regularized' | 'unregularized'
     readonly trialCandidateRef?: string
     /** Serve the library as read-only (a legacy layout, or a sealed graph). */
     readonly readOnly?: boolean
@@ -177,7 +179,10 @@ export async function methodWorld(
     },
   }
 
-  const rsi = { humanReview: options.humanReview ?? false }
+  const rsi = {
+    humanReview: options.humanReview ?? false,
+    ...(options.strategy === undefined ? {} : { strategy: options.strategy }),
+  }
   const frames: { name: string; frame: unknown }[] = []
   const ctx: Record<string, unknown> = {
     taskRuntime: runtime,

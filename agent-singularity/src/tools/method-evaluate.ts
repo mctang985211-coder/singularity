@@ -272,11 +272,16 @@ export function defineMethodEvaluateTool(ctx: Context) {
         )
         const decision = (await ledger.decisionFor(args.draftId)) ?? (await ledger.recordDecision(report))
         const admission = decision.admissions.find(entry => entry.candidateId === args.draftId)
-        const strategy = strategyPlaneOf()
+        // The graph's own strategy switch: the decision above was derived under
+        // this policy, and the plan froze it, so the line names both digests.
+        const strategy = strategyPlaneOf(ledger.policy)
         const lines = [
           renderEvaluation(report),
           ...(admission === undefined ? ['admission: the frozen strategy recorded no admission for this draft'] : renderAdmission(admission, decision.calibration)),
           `scope: ${decision.scope}`,
+          `strategy: ${strategy.policy.version}, policy digest ${decision.policyDigest.slice(0, 12)} — the strategy this graph is configured with${
+            report.plan.strategy === undefined ? '' : `, frozen into the plan as ${report.plan.strategy.policyDigest.slice(0, 12)}`
+          }`,
         ]
         if (existing !== undefined) lines.push('this draft was already measured under this frozen cohort; the same report was read back and nothing was charged again')
         lines.push(

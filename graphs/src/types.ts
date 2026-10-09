@@ -14,6 +14,9 @@ export interface GraphPinsUpdate {
   readonly rsi?: RsiConfig | null
 }
 
+/** The strategy a graph's method search runs under; the chosen one is frozen into every evaluation scope. */
+export type RsiStrategy = 'regularized' | 'unregularized'
+
 /** The autonomous-improvement settings one graph runs under; absent means the graph runs no RSI loop. */
 export interface RsiConfig {
   /** Objective text recorded for launch/UI; changing it never rewrites an existing frozen root task. */
@@ -26,6 +29,8 @@ export interface RsiConfig {
   readonly humanReview: boolean
   /** Objective epoch (integer >= 1, default 1): bumping it is the one explicit way to start the search over. */
   readonly epoch?: number
+  /** Strategy policy the graph's evaluations freeze (default 'regularized'); 'unregularized' is the comparison arm with every regularizer off. */
+  readonly strategy?: RsiStrategy
 }
 
 export interface GraphRecord {
@@ -68,7 +73,7 @@ export type GraphsEvent =
   | { readonly kind: 'graph/remove'; readonly id: string; readonly archive: GraphArchive }
 
 /** Launch needs only a goal; iteration controls have platform defaults. */
-export type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview' | 'epoch'>>
+export type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview' | 'epoch' | 'strategy'>>
 
 export interface CreateGraphRequest {
   readonly name?: string

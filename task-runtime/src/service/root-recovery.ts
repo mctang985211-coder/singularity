@@ -43,6 +43,7 @@ import type { RecoveryRounds, ReuseContext, RootRecoveryRequest } from '../recov
 import { improvementCapFor, recoveryCapFor } from './lifecycle.ts'
 import type { WorkspaceOwner } from '../workspace.ts'
 import { normalizeWorkspacePath } from '../workspace.ts'
+import { bubbleMethodRevisionOf } from './bubble.ts'
 import type {
   StoreRecoveryStatus,
   RootRecoveryCaller,
@@ -492,6 +493,21 @@ export async function startRecoveryAttempt(
   const workspacePath = request.workspacePath === undefined
     ? await self.workspacePathForSession(rootSessionId)
     : await normalizeWorkspacePath(request.workspacePath)
+  /**
+   * A bubble and the run opened into it name one method revision: the driver
+   * materialized both from the same resolution, so a pair that disagrees — a
+   * restart's re-pinned workspace, a pointer that moved after the round was
+   * materialized — is refused by name rather than mixed. A workspace that is
+   * no bubble (or a legacy bubble, which carries no revision) is not checked.
+   */
+  const bubbleMethod = workspacePath === undefined ? undefined : bubbleMethodRevisionOf(workspacePath)
+  if (bubbleMethod !== undefined && (revision === undefined || bubbleMethod.revisionId !== revision.manifest.revisionId)) {
+    throw new Error(
+      `task-runtime: the round's bubble carries method revision "${bubbleMethod.revisionId}" but this attempt binds ` +
+        `${revision === undefined ? 'no environment revision' : `"${revision.manifest.revisionId}"`}; ` +
+        'a bubble and the run opened into it name one revision, and nothing is written',
+    )
+  }
   let claimed: WorkspaceOwner | undefined
   if (workspacePath !== undefined && self.workspaces !== undefined) {
     await self.workspaces.claim(workspacePath, { kind: 'run', storeId, taskId: source.taskId, runId, since: now() })

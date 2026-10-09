@@ -4,6 +4,7 @@
  * edit-budget schedule the round's candidate count is measured against.
  */
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_STRATEGY_POLICY, UNREGULARIZED_STRATEGY_POLICY } from '@dangosys/dsh-singularity-evolution'
 import {
   METHOD_AUTHORITY_TOOLS,
   METHOD_ROOT_BASELINE,
@@ -11,8 +12,10 @@ import {
   deciderFor,
   environmentPlaneOf,
   methodGraphFor,
+  methodLedgerPlaneOf,
   methodModeFor,
   strategyPlaneOf,
+  strategyPolicyFor,
 } from '../../src/tools/method-shared.ts'
 import { CALLER, DECLARED_EDIT, methodWorld, skillPayload } from './method-tools.fixture.ts'
 
@@ -79,6 +82,59 @@ describe('the frozen edit budget', () => {
   it('is the same pure schedule the strategy owns: no second budget implementation exists here', () => {
     const strategy = strategyPlaneOf()
     expect(strategy.editBudget(3, strategy.policy)).toBe(strategy.editBudget(3, { ...strategy.policy }))
+  })
+})
+
+describe('the graph-level strategy switch', () => {
+  it('selects the unregularized policy only when the graph record names it, and defaults to regularized', async () => {
+    const plain = await methodWorld()
+    const named = await methodWorld({ strategy: 'regularized' })
+    const comparison = await methodWorld({ strategy: 'unregularized' })
+    try {
+      for (const [world, expected] of [
+        [plain, DEFAULT_STRATEGY_POLICY],
+        [named, DEFAULT_STRATEGY_POLICY],
+        [comparison, UNREGULARIZED_STRATEGY_POLICY],
+      ] as const) {
+        const graph = await methodGraphFor(world.ctx as never, CALLER)
+        expect(strategyPolicyFor(graph)).toBe(expected)
+        // The ledger plane carries the same policy its evaluations freeze into
+        // their plans and its decisions recompute under.
+        expect((await methodLedgerPlaneOf(world.ctx as never, CALLER)).policy).toBe(expected)
+      }
+    } finally {
+      await plain.dispose()
+      await named.dispose()
+      await comparison.dispose()
+    }
+  })
+
+  it('anneals the draft edit budget to one only under the regularized arm', async () => {
+    const regularized = await methodWorld()
+    const unregularized = await methodWorld({ strategy: 'unregularized' })
+    try {
+      const { defineMethodDraftTool } = await import('../../src/tools/method-draft.ts')
+      const lastRound = DEFAULT_STRATEGY_POLICY.rounds - 1
+      const call = {
+        kind: 'skill',
+        identity: 'verify',
+        edits: [DECLARED_EDIT, { ...DECLARED_EDIT, id: 'e2', hypothesis: 'a second independent mechanism' }],
+        editPayload: skillPayload('# candidate: check the acceptance'),
+        rationale: 'answer the observed failure',
+        sourceRefs: ['diagnosis:d1'],
+        expectedBaseRevision: 'r0001',
+        round: lastRound,
+        critic: { verdict: 'accept', reason: 'both mechanisms named, the asset parses', evidenceRefs: ['diagnosis:d1'] },
+      }
+      const refused = (await defineMethodDraftTool(regularized.ctx as never).execute(call, regularized.exec as never)) as string
+      expect(refused).toContain(`exceed the round ${String(lastRound)} budget of 1`)
+      const accepted = (await defineMethodDraftTool(unregularized.ctx as never).execute(call, unregularized.exec as never)) as string
+      expect(accepted).toContain('recorded as draft')
+      expect(accepted).toContain(`round ${String(lastRound)} edit budget 2`)
+    } finally {
+      await regularized.dispose()
+      await unregularized.dispose()
+    }
   })
 })
 

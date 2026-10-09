@@ -63,7 +63,7 @@ export {
   recoverySourceRun,
 } from './recovery.ts'
 export { priorRoundNotice, priorRoundNoticeForRun } from './service/root-recovery.ts'
-export { bubbleWorkspacePath, latestBubbleWorkspacePath, materializeBubble, settleBubble } from './service/bubble.ts'
+export { bubbleMethodRevisionOf, bubbleWorkspacePath, latestBubbleWorkspacePath, materializeBubble, settleBubble } from './service/bubble.ts'
 export { readVerifiedFile, walkVerified } from './verified-read.ts'
 export type { RunBindingRead } from './run-binding.ts'
 export { bindRunProviders, mcpServerBindings } from './run-binding.ts'

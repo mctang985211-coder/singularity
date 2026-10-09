@@ -60,7 +60,9 @@ export function defineMethodListTool(ctx: Context) {
       try {
         const env = environmentPlaneOf(ctx)
         const ledger = await methodLedgerPlaneOf(ctx, caller)
-        const strategy = strategyPlaneOf()
+        // The graph's own strategy switch: the history folds and steers under
+        // the same policy the evaluations were measured with.
+        const strategy = strategyPlaneOf(ledger.policy)
         const view = await env.activeEnvironmentView(caller)
         const mode = await methodModeFor(ctx, caller)
         const filter: MethodListFilter = {

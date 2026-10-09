@@ -6,16 +6,19 @@ import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/l
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { EnvStore } from '../../../env-builder/src/service/store.ts'
 import { GraphsService } from '../../graphs/src/index.ts'
+import { ensureInitialRevision, libraryRoots, readRevision } from '../../task-runtime/src/environment/index.ts'
 
 let root: string
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'graphs-reuse-'))
+  vi.stubEnv('DSH_HOME', root)
 })
 
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -67,6 +70,13 @@ function harness() {
     // holds (A0 §1.1); creating a graph mints no task.
     adoptRoot: vi.fn(async () => ({ adopted: false as const, detail: 'the fresh store holds no root task yet' })),
     sessionWorkspaces: new Map<string, string>(),
+    // The graph's library fixes its initial revision before round 1's bubble is
+    // materialized; the real seeding runs here so the volume is real bytes.
+    ensureInitialEnvironment: vi.fn(async (rootSessionId: string, actor: string) => {
+      const roots = libraryRoots(rootSessionId, root)
+      await ensureInitialRevision(roots, { actor })
+      return { id: roots.id, revision: await readRevision(roots, 'r0001') }
+    }),
   }
   ctx.provide('sessionPersistence', { list: async () => [], create: async () => handle } as never)
   ctx.provide('envBuilder', { store } as never)

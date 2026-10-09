@@ -52,6 +52,8 @@ interface GraphPinsUpdate {
   readonly model?: GraphModel | null;
   readonly rsi?: RsiConfig | null;
 }
+/** The strategy a graph's method search runs under; the chosen one is frozen into every evaluation scope. */
+type RsiStrategy = 'regularized' | 'unregularized';
 /** The autonomous-improvement settings one graph runs under; absent means the graph runs no RSI loop. */
 interface RsiConfig {
   /** Objective text recorded for launch/UI; changing it never rewrites an existing frozen root task. */
@@ -64,6 +66,8 @@ interface RsiConfig {
   readonly humanReview: boolean;
   /** Objective epoch (integer >= 1, default 1): bumping it is the one explicit way to start the search over. */
   readonly epoch?: number;
+  /** Strategy policy the graph's evaluations freeze (default 'regularized'); 'unregularized' is the comparison arm with every regularizer off. */
+  readonly strategy?: RsiStrategy;
 }
 interface GraphRecord {
   readonly id: string;
@@ -116,7 +120,7 @@ type GraphsEvent = {
   readonly archive: GraphArchive;
 };
 /** Launch needs only a goal; iteration controls have platform defaults. */
-type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview' | 'epoch'>>;
+type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview' | 'epoch' | 'strategy'>>;
 interface CreateGraphRequest {
   readonly name?: string;
   readonly createEnv?: true;
@@ -221,4 +225,4 @@ interface LegacyGraphViewWire {
   }[];
 }
 //#endregion
-export { GraphSealedError as C, protocolOf as E, GraphProtocol as S, graphAccess as T, GraphsSnapshot as _, GraphRevisionWire as a, GRAPH_PROTOCOL_V2 as b, LegacyGraphViewWire as c, CreateGraphResult as d, GraphArchive as f, GraphsEvent as g, GraphRecord as h, GraphProgressWire as i, graphAccessWire as l, GraphPinsUpdate as m, GraphAccessWire as n, GraphViewWire as o, GraphModel as p, GraphEvaluationWire as r, LegacyCompletionWire as s, ApprovalSourceWire as t, CreateGraphRequest as u, RsiConfig as v, assertCurrentGraph as w, GraphAccess as x, RsiLaunch as y };
+export { GraphProtocol as C, protocolOf as D, graphAccess as E, GraphAccess as S, assertCurrentGraph as T, GraphsSnapshot as _, GraphRevisionWire as a, RsiStrategy as b, LegacyGraphViewWire as c, CreateGraphResult as d, GraphArchive as f, GraphsEvent as g, GraphRecord as h, GraphProgressWire as i, graphAccessWire as l, GraphPinsUpdate as m, GraphAccessWire as n, GraphViewWire as o, GraphModel as p, GraphEvaluationWire as r, LegacyCompletionWire as s, ApprovalSourceWire as t, CreateGraphRequest as u, RsiConfig as v, GraphSealedError as w, GRAPH_PROTOCOL_V2 as x, RsiLaunch as y };

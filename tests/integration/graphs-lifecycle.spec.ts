@@ -10,6 +10,7 @@ import { EnvStore } from '../../../env-builder/src/service/store.ts'
 import { GraphsService } from '../../graphs/src/index.ts'
 import type { GraphPinsUpdate, RsiConfig } from '../../graphs/src/types.ts'
 import { registerGraphs } from '../../graph-web/src/web/api/graphs.ts'
+import { ensureInitialRevision, libraryRoots, readRevision } from '../../task-runtime/src/environment/index.ts'
 
 let root: string
 
@@ -88,6 +89,14 @@ function harness(overrides: { sessionPersistence?: unknown; events?: SessionEven
     // The live mapping `GraphsService.create` writes: the root session works in
     // round 1's bubble, and the runtime resolves the checkout from here.
     sessionWorkspaces: new Map<string, string>(),
+    // The graph's library fixes its initial revision before round 1's bubble is
+    // materialized; the real seeding runs here so the bubble's method volume is
+    // the revision's real bytes.
+    ensureInitialEnvironment: vi.fn(async (rootSessionId: string, actor: string) => {
+      const roots = libraryRoots(rootSessionId, root)
+      await ensureInitialRevision(roots, { actor })
+      return { id: roots.id, revision: await readRevision(roots, 'r0001') }
+    }),
   }
   ctx.provide(
     'sessionPersistence',
@@ -168,6 +177,15 @@ describe('graphs creation lifecycle', () => {
     // The root session's own workspace is that bubble: the runtime resolves the
     // graph's checkout from this mapping rather than from the environment's path.
     expect(taskRuntime.sessionWorkspaces.get(graph.rootSessionId)).toBe(bubble)
+    // The bubble's method volume is the initial revision's bytes, and its
+    // manifest names the revision it was materialized from.
+    const libraryRoot = join(root, 'singularity', 'environments', graph.rootSessionId)
+    expect(readFileSync(join(bubble, '.bubble', 'method-volume', 'task-coordination', 'SKILL.md'), 'utf8')).toBe(
+      readFileSync(join(libraryRoot, 'revisions', 'r0001', 'skills', 'task-coordination', 'SKILL.md'), 'utf8'),
+    )
+    const bubbleManifest = JSON.parse(readFileSync(join(libraryRoot, 'bubbles', 'round-1', 'bubble-manifest.json'), 'utf8'))
+    expect(bubbleManifest).toMatchObject({ graphId: graph.id, round: 1, methodRevisionId: 'r0001' })
+    expect(typeof bubbleManifest.methodDigest).toBe('string')
     // The graph creates no task: it opens the store and adopts the root it holds,
     // and the graph's own name never becomes an objective (A0 §1.2, §1.5).
     expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith(`sg-t-${graph.rootSessionId}`, graph.rootSessionId)
@@ -301,6 +319,7 @@ describe('graph RSI settings persistence and HTTP updates', () => {
     ['zero rounds', { ...rsiConfig, iterationRounds: 0 }, 'rsi.iterationRounds'],
     ['fractional rounds', { ...rsiConfig, iterationRounds: 1.5 }, 'rsi.iterationRounds'],
     ['non-boolean review', { ...rsiConfig, humanReview: 'true' }, 'rsi.humanReview'],
+    ['unknown strategy', { ...rsiConfig, strategy: 'greedy' }, 'rsi.strategy'],
     ['unknown setting', { ...rsiConfig, background: true }, '"background"'],
   ])('refuses create with %s before allocating an environment or root', async (_label, rsi, error) => {
     const { service, store, runtime, events } = harness()
@@ -339,6 +358,18 @@ describe('graph RSI settings persistence and HTTP updates', () => {
     const bumped = await service.setRsi(graph.id, { ...rsiConfig, epoch: 2 })
     expect(bumped.rsi?.epoch).toBe(2)
     expect(await reopen().get(graph.id)).toEqual(bumped)
+  })
+
+  it('stores the strategy switch with the config and replays it verbatim', async () => {
+    const { service, reopen, events } = harness()
+    const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'], rsi: { ...rsiConfig, strategy: 'unregularized' } })
+    expect(graph.rsi).toEqual({ ...rsiConfig, strategy: 'unregularized', epoch: 1 })
+    expect(events[0]).toMatchObject({ data: { kind: 'graph/add', graph: { rsi: { strategy: 'unregularized' } } } })
+    expect(await reopen().get(graph.id)).toEqual(graph)
+
+    const flipped = await service.setRsi(graph.id, { ...rsiConfig, strategy: 'regularized' })
+    expect(flipped.rsi?.strategy).toBe('regularized')
+    expect(await reopen().get(graph.id)).toEqual(flipped)
   })
 
   it('replays an older graph with no RSI settings without adding defaults', async () => {

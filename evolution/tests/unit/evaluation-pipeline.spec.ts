@@ -8,7 +8,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { evaluate, evaluationOf, evaluationIdOf, methodList, reportPathOf, withStrategy } from '../../src/pipeline/evaluate.ts'
-import { DEFAULT_STRATEGY_POLICY } from '../../src/strategy/policy.ts'
+import { DEFAULT_STRATEGY_POLICY, UNREGULARIZED_STRATEGY_POLICY } from '../../src/strategy/policy.ts'
 import { assertEvaluationReport } from '../../src/pipeline/report.ts'
 import { foldMethods } from '../../src/ledger/fold.ts'
 import { digestOf } from '../../src/shared.ts'
@@ -98,5 +98,27 @@ describe('evaluate', () => {
     expect(plan.strategy?.policyDigest).toBe(digestOf(DEFAULT_STRATEGY_POLICY))
     expect(plan.strategy?.cohortDigest).toMatch(/^[a-f0-9]{64}$/)
     expect(evaluationIdOf(report.plan)).toBe(report.evaluationId)
+  })
+
+  it.each([
+    ['regularized', DEFAULT_STRATEGY_POLICY],
+    ['unregularized', UNREGULARIZED_STRATEGY_POLICY],
+  ] as const)('freezes the %s arm’s policy into the plan the ledger records', async (_arm, policy) => {
+    const h = await world()
+    const report = await evaluate(h.sources, { ...evaluateInput(h), policy })
+    expect(report.plan.strategy?.policy).toEqual(policy)
+    expect(report.plan.strategy?.policyDigest).toBe(digestOf(policy))
+    const planLine = h.ledger.records().find(line => line.kind === 'plan')
+    expect(planLine).toMatchObject({ plan: { strategy: { policyDigest: digestOf(policy) } } })
+  })
+
+  it('moves the frozen scope when only the strategy policy changes', async () => {
+    const h = await world()
+    const report = await evaluate(h.sources, { ...evaluateInput(h), policy: UNREGULARIZED_STRATEGY_POLICY })
+    const { strategy: _frozen, ...bare } = report.plan
+    const regularized = withStrategy(bare, DEFAULT_STRATEGY_POLICY)
+    expect(regularized.strategy?.cohortDigest).not.toBe(report.plan.strategy?.cohortDigest)
+    const unregularized = withStrategy(bare, UNREGULARIZED_STRATEGY_POLICY)
+    expect(unregularized.strategy?.cohortDigest).toBe(report.plan.strategy?.cohortDigest)
   })
 })

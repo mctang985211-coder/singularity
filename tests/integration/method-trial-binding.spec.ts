@@ -9,11 +9,13 @@
  * scripted provider, the real `TaskRuntime` (its environment library, drafts and
  * pointer on a real disk), the real task store, and the real coordination file.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { rootTaskStoreId } from '../../task/src/index.ts'
+import { bubbleMethodRevisionOf, bubbleWorkspacePath } from '../../task-runtime/src/service/bubble.ts'
+import { libraryRoots, readRevision } from '../../task-runtime/src/environment/index.ts'
 import { CoordinationDriver } from '../../agent-singularity/src/coordination/driver.ts'
 import { roundRequestKey } from '../../agent-singularity/src/coordination/rounds.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop } from '../support/scripted-loop.ts'
@@ -121,7 +123,15 @@ describe('a trial binding on the real deployment', () => {
         },
         { timeout: 20_000 },
       )
-      // The pointer never moved: the candidate is trialled, not published.
+      // The trial round's bubble carries the candidate: its method volume is
+      // the candidate's verified bytes and its manifest names the candidate,
+      // while the active pointer never moved.
+      const bubble = bubbleWorkspacePath(h.home, ROOT, 2)
+      const candidate = await readRevision(libraryRoots(ROOT, h.home), candidateId)
+      expect(bubbleMethodRevisionOf(bubble)).toEqual({ revisionId: candidateId, digest: candidate!.manifest.contentDigest })
+      expect(readFileSync(join(bubble, '.bubble', 'method-volume', 'trial-skill', 'SKILL.md'), 'utf8')).toBe(
+        skillMd('# a trialled answer'),
+      )
       const after = await h.runtime.activeEnvironmentView(ROOT)
       expect({ revisionId: after.revisionId, generation: after.generation }).toEqual({
         revisionId: before.revisionId,
@@ -160,8 +170,104 @@ describe('a trial binding on the real deployment', () => {
         },
         { timeout: 20_000 },
       )
+      // The round's bubble binds the same revision the run was admitted against.
+      expect(bubbleMethodRevisionOf(bubbleWorkspacePath(h.home, ROOT, 2))?.revisionId).toBe(before.revisionId)
     } finally {
       driver.stop()
     }
   }, 60_000)
+
+  it('carries the promoted revision in the next round’s bubble once a trialled candidate is published', async () => {
+    let h!: ScriptedLoop
+    let root!: { storeId: string; taskId: string; runId: string }
+    let candidateId!: string
+    // The round two run, recorded once the driver opened it: the second
+    // supervisor's completion cites it.
+    let round2: { taskId: string; runId: string } | undefined
+    let supervisors = 0
+    h = await startScriptedLoop({
+      rsi: RSI,
+      script: (sessionId, _index): readonly ScriptEntry[] => {
+        const name = h.spawns.find(spawn => spawn.sessionId === sessionId)?.name ?? ''
+        if (name.startsWith('rsi supervisor')) {
+          supervisors += 1
+          const first = supervisors === 1
+          return [
+            {
+              tool: 'supervisor_complete',
+              args: () => ({
+                businessAction: 'continue',
+                reason: 'the delivered method can be improved',
+                evidenceRefs: [`${(first ? root : (round2 ?? root)).taskId}#${(first ? root : (round2 ?? root)).runId}`],
+                // The first round trials the candidate; the round after its
+                // promotion names no trial — the candidate is what it inherits.
+                ...(first ? { trialCandidateRef: candidateId } : {}),
+              }),
+            },
+          ]
+        }
+        // The root and every round's recovery worker deliver and settle verified.
+        return [{ tool: 'task_submit_result', args: { summary: 'the answer is delivered' } }, { text: 'delivered' }]
+      },
+    })
+    root = await h.begin({
+      objective: 'deliver the answer',
+      requiredCapabilities: ['execute-task'],
+      acceptanceCriteria: criterion('true'),
+    })
+    await h.agent(ROOT).whenIdle()
+
+    const before = await h.runtime.activeEnvironmentView(ROOT)
+    candidateId = await freezeCandidate(h, before.revisionId)
+
+    const driver = await drive(h)
+    try {
+      // Round two trials the candidate; its bubble carries the candidate's bytes.
+      await vi.waitFor(
+        async () => {
+          const snapshot = await h.snapshot(root.storeId)
+          const next = snapshot.runs.find(run => run.recovery?.requestKey === roundRequestKey(GRAPH, 1, 2))
+          expect(next?.trialCandidateRef).toBe(candidateId)
+          round2 = next === undefined ? round2 : { taskId: next.taskId, runId: next.runId }
+        },
+        { timeout: 20_000 },
+      )
+      expect(bubbleMethodRevisionOf(bubbleWorkspacePath(h.home, ROOT, 2))?.revisionId).toBe(candidateId)
+
+      // The trial settles verified and the candidate is promoted: the pointer
+      // moves to it through the runtime's own publish entry.
+      await vi.waitFor(
+        async () => {
+          const settled = (await h.snapshot(root.storeId)).runs.find(run => run.runId === round2?.runId)
+          expect(settled?.status).toBe('verified')
+        },
+        { timeout: 20_000 },
+      )
+      const published = await h.runtime.publishRevision(ROOT, {
+        direction: 'publish',
+        source: { kind: 'revision', revisionId: candidateId },
+        expected: { revisionId: before.revisionId, generation: before.generation },
+        actor: 's-supervisor',
+      })
+      expect(published.pointer.revisionId).toBe(candidateId)
+
+      // Round three opens against the round the trial ran in: the bubble it is
+      // materialized with carries the freshly published revision, and the run
+      // opened into it binds the same bytes.
+      await vi.waitFor(
+        async () => {
+          const snapshot = await h.snapshot(root.storeId)
+          const third = snapshot.runs.find(run => run.recovery?.requestKey === roundRequestKey(GRAPH, 1, 3))
+          expect(third).toBeDefined()
+          expect(third!.trialCandidateRef).toBe(candidateId)
+          expect(third!.providerBinding?.environmentRevisionId).toBe(candidateId)
+        },
+        { timeout: 20_000 },
+      )
+      expect(bubbleMethodRevisionOf(bubbleWorkspacePath(h.home, ROOT, 3))?.revisionId).toBe(candidateId)
+      expect((await h.runtime.activeEnvironmentView(ROOT)).revisionId).toBe(candidateId)
+    } finally {
+      driver.stop()
+    }
+  }, 90_000)
 })

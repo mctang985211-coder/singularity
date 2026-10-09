@@ -6,15 +6,18 @@ import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/l
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { EnvStore } from '../../../env-builder/src/service/store.ts'
 import { GraphsService } from '../../graphs/src/index.ts'
+import { ensureInitialRevision, libraryRoots, readRevision } from '../../task-runtime/src/environment/index.ts'
 
 let root: string
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'graph-model-'))
+  vi.stubEnv('DSH_HOME', root)
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -60,6 +63,13 @@ function harness() {
     ctx.provide('taskRuntime', {
       adoptRoot: vi.fn(async () => ({ adopted: false, detail: 'none' })),
       sessionWorkspaces: new Map<string, string>(),
+      // The graph's library fixes its initial revision before round 1's bubble
+      // is materialized; the real seeding runs here so the volume is real bytes.
+      ensureInitialEnvironment: vi.fn(async (rootSessionId: string, actor: string) => {
+        const roots = libraryRoots(rootSessionId, root)
+        await ensureInitialRevision(roots, { actor })
+        return { id: roots.id, revision: await readRevision(roots, 'r0001') }
+      }),
     } as never)
     ctx.provide('llm', catalog() as never)
   }

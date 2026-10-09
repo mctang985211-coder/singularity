@@ -236,7 +236,8 @@ const RSI_FIELDS = [
 	"metrics",
 	"iterationRounds",
 	"humanReview",
-	"epoch"
+	"epoch",
+	"strategy"
 ];
 /** Validates one RSI config, refusing a malformed one with the offending field named. */
 function assertRsiConfig(rsi) {
@@ -249,6 +250,7 @@ function assertRsiConfig(rsi) {
 	if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1) throw new Error("graphs: rsi.iterationRounds must be an integer >= 1");
 	if (typeof fields.humanReview !== "boolean") throw new Error("graphs: rsi.humanReview must be a boolean");
 	if (fields.epoch !== void 0 && (typeof fields.epoch !== "number" || !Number.isInteger(fields.epoch) || fields.epoch < 1)) throw new Error("graphs: rsi.epoch must be an integer >= 1");
+	if (fields.strategy !== void 0 && fields.strategy !== "regularized" && fields.strategy !== "unregularized") throw new Error(`graphs: rsi.strategy must be 'regularized' or 'unregularized'`);
 }
 /** The registry's own answer when no graph publishes a session; distinguishable by code from a failed read. */
 const SESSION_NOT_IN_GRAPH = "graph-session-not-found";
@@ -377,8 +379,10 @@ var GraphsService = class extends Service {
 				const graphStoreId = `sg-g-${rootSessionId}`;
 				const layoutStoreId = `sg-l-${rootSessionId}`;
 				const envPath = store.get(envId).path;
-				const workspace = await materializeBubble(envPath, process.env.DSH_HOME || join(homedir(), ".dsh"), rootSessionId, id, 1);
-				this.taskRuntime()?.sessionWorkspaces.set(rootSessionId, workspace);
+				const runtime = this.taskRuntime();
+				const environment = runtime === void 0 ? void 0 : await runtime.ensureInitialEnvironment(rootSessionId, rootSessionId);
+				const workspace = await materializeBubble(envPath, process.env.DSH_HOME || join(homedir(), ".dsh"), rootSessionId, id, 1, { ...environment?.revision === void 0 ? {} : { methodRevisionId: environment.revision.manifest.revisionId } });
+				runtime?.sessionWorkspaces.set(rootSessionId, workspace);
 				const handle = await this.ctx.agentRuntime.createRoot({
 					sessionId: rootSessionId,
 					cwd: workspace,
