@@ -21,7 +21,7 @@
 
 **下一次重要审核在 A+B 完成时**（review §5）。A 已收口（`docs/context.md` §4.1 末尾表）。
 
-## 1. B 必须遵守的约束（不依赖待补证据）
+## 1. B 的十条硬约束
 
 | # | 约束 | 出处 / 强制机制 |
 |---|---|---|
@@ -34,6 +34,7 @@
 | 7 | `src/` 里 `conditional: true` 至多一个 | 门禁 `single-conditional-owner`；**B 不引入第二个条件更新**，指针切换留在 D |
 | 8 | 已冻结格式增加必填字段 → **升版本，且不写兼容层** | review §5 末；"不能由'本机没有旧账本'推导'同版本格式可随意改变'" |
 | 9 | 派生状态永不持久化 | 门禁式拒绝 `derived-not-persistable` |
+| 10 | **装载期断言所需的上游缝存在，缺一即具名拒绝装载** | 实测陷阱（证据 B）：一个插件在 `inject` 依赖缺席时**静默不存在**（`ctx.authorization` 在 credentials provider 出现前是 `undefined`）。"静默缺席的能力"正是旧仓的病，不能靠运行期撞见 |
 
 ## 2. 架构决定：写侧不变量是单 subject 的，读侧不变量是全日志的（**已定**）
 
@@ -54,7 +55,7 @@
 
 **代价（诚实记账）**：跨 subject 的**存在性**判定（"run 钉住的 revision 真的被创建过吗"）**不是 reducer 不变量**，只能是全日志投影。投影必须**拒绝**（具名），不是仅仅报告。凡属这一类，本文逐条标出，不假装它在 reducer 里。
 
-## 3. 事实面（**证据 A 已到并复核；E3 一行仍等证据 B**）
+## 3. 事实面（**证据 A、B 都已到并复核；六行全部定案**）
 
 证据 A = [`legacy-behaviour-reference.md`](legacy-behaviour-reference.md)。其中的承重结论我**自己复核过原文**：分解门（`child.ts:576-582,658-663`）、责任不变量（搜不到，三处命中都是无关的 run 继续/proposal 归属拒绝；`handoff.ts:20-21` 自认"只持久化数据"）、二维 CAS（`pointer.ts:371-376,415-422`）、verifier 版本是字面量 `'1'` 且 `stampVersion` 覆盖（`command-verifier.ts:181`、`index.ts:374-380`）、`artifactRefs: []`（`index.ts:432`）、group 无生产者。
 
@@ -65,7 +66,13 @@
 | **初始 Revision** | `revision/created{revisionId, manifest}` | 环境 | 内容摘要由 reducer **重算并自校验**（篡改即拒）；同 id 同内容 = 幂等；同 id 异内容 = 具名拒绝；**没有任何 kind 能改已创建的 revision** | **reducer** | `run/started` 的钉住 + 投影的存在性 |
 | **最小 Bubble** | `bubble/opened{runId, inputs:[{name,digest}], workspace:{kind,ref}}` | task | 一次 run 一个 bubble；只对 running 的 run；**每条 verdict 的输入摘要必须等于该 run 的 bubble 所声明的输入** | **reducer**（同 subject，所以是纯判） | K1 §7 的输入绑定 |
 | **真实 verifier** | `evidence/produced` 增必填 `implementationDigest`；criterion 增 `implementationDigest`；verifier 实现须带 `selftest` 样本 | task | 实现摘要与 criterion 声明不一致即拒；**selftest 必须既有 pass 样本又有 fail 样本** | **reducer** + 部署期 selftest | K1 §7 / §11 |
-| **E3 agent node** | **待证据 B**：引用 DSH 的 session/agent 对象，还是自建模 | — | — | — | 责任（只有活着的 agent 可被指派） |
+| **E3 agent node** | `agent/opened{agentId, role, sessionId}` | agentId | 开通一次；三字段非空；载荷闭合。**"可见节点必有活会话"是 ordering，不是不变量**（见下） | **reducer**（形状）；存活**判不了** | `task/assigned`（只能指派已开通的 agent）+ 投影露出 `sessionId`，供恢复**同一会话**（K1 §9） |
+
+**E3 的形态（证据 B 已裁）**：**引用 DSH 的运行时对象，不自建模。** 持久层是 `SessionHandle`（字节），运行层是 `ctx.agents`（`AgentRegistry`，`dsh-agent`）配 `AgentLoop`（`dsh-agent-loop`，`implements AgentFactory`）——实测用**桩 LlmAdapter** 跑完了一整轮。我们的 `agent/opened` 只记 `sessionId`，不复制 agent 内部。
+
+我们的这个事实正好是 DSH **launcher 层** `ConfiguredAgentIdentities` 的插件侧、可审计对应物：那里也是 `configured agent id → {id: SessionId, resume}`（`dsh-agent-loop/lib/types/index.d.ts:70`），只是它是**进程配置**，我们是**日志事实**。同一信息，后者可重放、可审计。
+
+**"可见节点必有活会话"再次确认为 ordering，且这次有上游证据**：实测陷阱 6——DSH 自己的**可继续子代理在 spawn 之后并不驻留**（`ctx.agents.get` 返回 `undefined`，roster `inactive`），陈旧 id 会让 `membership`/`sendMessage` 抛错。**上游自己都不把"驻留"做成持久事实**，所以我们做不到，且**不假装**：如实写成 ordering + 投影露出 `sessionId` 供消费者查。
 
 **两处关键：为什么 bubble 的输入绑定**能**在 reducer 里**。bubble 与 evidence 都以 task 为 subject，所以"verdict 的输入摘要 = run 的 bubble 声明的输入摘要"是**单 subject 纯判**——不需要 §2 那条"跨 subject 只能靠投影"的代价条款。跨 subject 的只剩 revision 的存在性一条。
 
@@ -117,7 +124,7 @@
 | 11 | 完成后追加消息、卸载验证器 | **B** | 派生 receipt 摘要不变；历史重放与"缺实现拒绝"分开 |
 | 12 | agent / UI 读同一已提交截止范围 | **B** | 唯一投影；未启动的 task 是 `awaiting-run` 不是 `failed`；读路径不追加（既有） |
 
-## 7. 待裁决问题（证据 A 到后已收敛到三个，都属证据 B）
+## 7. 三个待裁决问题（已全部由证据 B 裁决）
 
 **已裁决（证据 A）**：
 
@@ -126,15 +133,17 @@
 - **分解的"子任务真的存在"**：投影**拒绝**（§2 的代价条款）。子任务自身的"存在"= 它以**自己的 subject** 有一份 `task/admitted` 契约；这正是"子 id 出现在父的分解里"不足以证明的东西。
 - **bubble 输入快照的粒度（B 的边界）**：bubble 记 `inputs[]`（名字 + 内容摘要）与 `workspace{kind, ref}`；**工具/工具链版本不放进 bubble**，由 verifier 的 `implementationDigest` 覆盖。理由：R08 说"只固定 Skill 文本或 MCP 定义，不能保证背后的 Tool 实现没有变化"——而 B 里**会做出判决的工具就是验证器**，它已被实现摘要钉住；工作区工具链的测量属 C，B 不假装测过。
 
-**仍待证据 B**：
+**三个问题已由证据 B 裁决（证据 B = `/home/ROXY/code/dsh-phase-b-probe/REPORT.md`，11 个可重跑脚本 + `out/*.txt`；我自己复核了 `ctx.agents` 的声明与 `AgentLoop implements AgentFactory`、`agentTeams: TeamService`、`approval: ApprovalService` + `'approval/asked'`/`ApprovalRequestId` + `callId?: ToolCallId` 且**无摘要**、`trustedIdentity|principal` **零命中**、`static inject: string[]`）**：
 
-1. **E3 的形态**：引用 DSH 的 session/agent 运行时对象，还是我们自己的事实？
-2. **agent 身份绑定**：现有 `subjects: Record<role, identity>` 是否要扩为 per-agent？扩了会不会破坏"执行者不自判自己的 run"的**双重校验**回归（E03 的两条用例）？
-3. **verifier 的 selftest 门放在装载期还是命令期**，以及 `implementationDigest` 由谁算（部署方提供 vs 我们算）。**倾向已定**：依 `contract.ts` 已确立的 shape/availability 拆分——**形状在 fold 期、可运行性在命令期**——selftest 属**命令期**（"今天能不能跑"），装载期只校验摘要存在且形状闭合。待证据 B 只为确认没有上游缝与之冲突。
+1. **E3 的形态 = 引用 DSH 的运行时对象**（见 §3）。
+2. **agent 身份绑定 = 完全 plugin-side**。DSH **没有**受信身份缝：无 `ctx.identity/principal/roles`，agent/approval/auth/credentials/team 诸包里没有任何 `role|principal|trust|identity` 导出；权威处处是**活着的 `Agent` 对象**，唯一叫"role"的是 Team 局部的 `'lead'|'teammate'`。**注意一个近似物不是它**：`ConfiguredAgentIdentities`（`dsh-agent-loop`）只映射 `agent id → {sessionId, resume}`，是 launcher 配置，不是主体认证，且只在包内被消费。→ 因此 `subjects: Record<role, identity>` **保持是我们的**，E03 的角色+身份双重校验**不受影响**（表是我们的，把同一身份绑给两个角色仍被拒）；E3 只在它之上增加 **agent 维度**：`task/assigned{agentId, agentIdentity}` 的身份来自**我们自己的绑定**。
+3. **verifier selftest 门 = 命令期**；`implementationDigest` **由部署方提供**（我们只校验存在与一致，算不了别人的实现摘要）。按 `contract.ts` 已确立的 shape/availability 拆分：装载期只校验形状与摘要存在，**"今天能不能跑"是命令期**。上游无冲突缝（DSH 自己的 `ApprovalService` 也把 `'unavailable'` 与拒绝并列，同一思路）。
 
-## 8. 实现切片与记账（证据 B 一到齐就可按此派发，不再临场设计）
+## 8. 实现切片与记账（六片全部可派发，派发不再是设计步骤）
 
-**顺序与依赖**：S1 与 S2 都动任务协议 → **必须同一次 `TASK_VERSION = 2` 变更落地**，不能分两次改版本。S3/S4 在同一 v2 内追加 kind 与必填字段。**S5 等证据 B。** 每片都必须：门禁全绿、新增回归、且**用变异证明新回归真能失败**。
+**顺序与依赖**：S1 与 S2 都动任务协议 → **必须同一次 `TASK_VERSION = 2` 变更落地**，不能分两次改版本。S3/S4 在同一 v2 内追加 kind 与必填字段。**S5 现也已解锁**（证据 B 已裁 E3 与身份绑定）。每片都必须：门禁全绿、新增回归、且**用变异证明新回归真能失败**。
+
+**按文件所有权分工（避免两个写者改同一个文件）**：`src/task/**`、`tests/task-fixtures.ts` 与既有任务用例**只有一个所有者**（任务协议 v2 是全阶段的耦合点）；`src/environment/**` 与 `src/verifier/**` 各自独立成文件，互不触碰 `src/task/**`，导出留待统一接线。
 
 | 片 | 内容 | 退出条件（可机械判定） |
 |---|---|---|
@@ -142,7 +151,7 @@
 | **S2** | 任务协议 v2：`task/decomposed` **一条完整事实**；`projectTree` | 依赖非 `verified` 时子**不就绪**；terminal-but-unverified 依赖→阻塞**带具名理由**；`dependsOn` 越界/重复/自指/环各具名拒绝；父**没有**完成态事实，只有汇总 |
 | **S3** | v2 必填字段：`evidence/produced` 与 criterion 各增 `implementationDigest`；verifier **selftest 门（命令期）** | 判决的实现摘要 ≠ criterion 声明的 → 具名拒绝（复用 `wrong-verifier`）；verifier **缺 fail 样本即不可运行**（"门禁必须能失败"用在验证器上）；**卸载实现后历史 receipt 摘要不变**，而新执行缺实现具名拒绝 |
 | **S4** | `bubble/opened{runId, inputs[], workspace}`；verdict 的**输入绑定** | 判决的输入摘要 ≠ 该 run 的 bubble 所声明 → 具名拒绝；对已结算的 run 开 bubble / 同 run 开第二个 → `illegal-transition` |
-| **S5**（等证据 B） | E3 + `task/assigned`/`task/reassigned` + `run/started` 的**责任门** | 转移后**旧责任人**启动 run → **具名拒绝**；转移的 `from` ≠ 当前责任人 → 拒绝；只有活着的 agent 可被指派 |
+| **S5** | E3（`agent/opened`，引用 DSH 会话）+ `task/assigned`/`task/reassigned` + `run/started` 的**责任门** + **装载期缝断言**（约束 10） | 转移后**旧责任人**启动 run → **具名拒绝**；转移的 `from` ≠ 当前责任人 → 拒绝；只能指派**已开通**的 agent；所需上游缝缺席 → **装载期具名拒绝**，不是运行期 `undefined` |
 | **S6** | K1 探针（12 场景；含真实 SIGKILL、真实 verifier 的小任务冒烟） | 设计 §6 的表逐条有观测 |
 
 **新增具名拒绝码的记账**（`REFUSAL_CODES` 26 → 31，每条都必须配反例测试）：

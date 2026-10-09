@@ -240,9 +240,30 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 - receipt **派生 + 内容寻址 + 含实现摘要**；**不采用**旧仓"完全不提 verifier"换来的固定来源（那与 `artifactRefs: []` 是同一种病）。
 - `task` 协议升 **v2**（`evidence/produced` 与 criterion 各增必填 `implementationDigest`），**v1 按 `version-mismatch` 具名拒绝，不写兼容层**。
 
-## 10. 下一轮的第一批动作
+## 10. 证据 B：已装 DSH 的缝实测（11 个可重跑脚本）
 
-1. **阶段 A 收口（已完成）**：`tests/control-barrier.spec.ts`，并用变异证明它真能失败（§4.1 末尾表）。
-2. **等证据 B（已装 DSH 缝实测）到齐**，它只裁决三件事：E3 是**引用** DSH 的 session/agent 运行时对象还是自建模；agent 身份绑定是否要从 `Record<role, identity>` 扩为 per-agent（会不会破坏 E03 的双重校验回归）；verifier 的 selftest 门与 `implementationDigest` 放装载期还是命令期（**倾向命令期**，依 `contract.ts` 已确立的 shape/availability 拆分）。
-3. 证据 B 到齐后：填 `docs/phase-b-design.md` §3 的 E3 行 → 提交 → **按 §3 的 kind 表派 B 实现子代理**（brief 直接引设计文档，写明"哪个事实、哪条不变量、哪个强制点、哪个消费者"，避免它们自己发挥）。**在此之前不动手写 `src/`。**
-4. **K1 检查点在 B 完成后**（review §6 的 12 个验收场景；**1–5 已由阶段 A/S2 观测满足，6–12 归 B**，逐条见设计 §6）。
+**交付物** `/home/ROXY/code/dsh-phase-b-probe/`（`REPORT.md` + 11 个脚本 + `out/*.txt`；`singularity-core` 未被触碰）。**我复核过的承重声明**：`ctx.agents: AgentRegistry`（`dsh-agent`）、`AgentLoop implements AgentFactory`（`dsh-agent-loop`）、`agentTeams: TeamService`、`approval: ApprovalService` + `'approval/asked'`/`ApprovalRequestId`、`callId?: ToolCallId` **且无摘要**、`trustedIdentity|principal` **零命中**、`static inject: string[]`。
+
+**存在**：`ctx.agents.create({sessionId,…})` / `resume({resumeSessionId})`（用**桩 LlmAdapter** 跑完整轮，无网络无凭据）；`ctx.subagents`（spawn/fork/`startContinuable`/`sendMessage`/`listChildren`/`listDescendants`）；`ctx.agentTeams`（**实验性**，只有 Team 局部 role）；`ctx.approval.request` 四态。
+
+**不存在**（据此定案，别再找）：通用 group 服务；group router / 唯一对外端点；绑定到角色的**受信身份**；持久化的审批授予（只有审计对 `approval/asked`+`approval/decided` 与 policy 旋钮）；审批的载荷摘要绑定；`@deepseek-ai/dsh-approval`；**活跃 append 缝上的 `ignorable`**。
+两个近似物**不是**它们：`groups` 的命中是客户端 UI 的 `ConversationGroupRegistry` 与模型目录的 `ModelProviderGroup`；`ConfiguredAgentIdentities` 是 launcher 配置 `agent id → {sessionId, resume}`（只在 `dsh-agent-loop` 包内消费），不是主体认证。
+
+**八个实测陷阱**（每一个都会安静地毁掉一个假定）：
+
+1. **`session.append(unknownType, …)` 正常 resolve、写入一条无 `ignorable` 的持久行，然后让整份会话报废**——之后每次读与 `ctx.agents.resume()` 都抛 `SessionFormatUnsupportedError`。外来事件必须走裸 `SessionHandle` + `ignorable: true`（这正是 A 的设计）。
+2. `ctx.sessions.create()` 看着像持久，其实**什么都不写**（`flush()` 返回 `participated=false`，且不报错）。
+3. 插件的 `inject` 依赖缺席时**静默不存在**（`ctx.authorization` 在 credentials provider 出现前是 `undefined`）→ 已成为 B 的约束 10：**装载期断言所需缝存在**。
+4. `resume()` 会写，所以需要 write 租约。
+5. 可继续子代理发 `subagent/start` 而**没有配对的 `subagent/end`**——等那一对会挂死。
+6. 可继续子代理 spawn 后**不驻留**（`ctx.agents.get` → `undefined`，roster `inactive`）；陈旧 id 会让 `membership`/`sendMessage` 抛错。→ **上游自己都不把"驻留"做成持久事实**，所以 E3 的"可见节点必有活会话"只能是 ordering。
+7. 裸日志路径由会话 **`cwd`** 决定，不是只由 id 决定。
+8. 续尾拒绝是**裸 `Error`**，`instanceof` 匹配不到已导出的错误类。
+
+**给 D 的预告（现在记账，届时不用重查）**：原生审批**绑定到确切的 `ToolCallId` + agent，没有载荷摘要、不复制参数**；`allowed-once` 是唯一授予且**不持久**。所以 D 的"批准绑定具体差异"**不能**靠审批缝自带——必须由我们自己的事实绑定内容摘要，审批只提供"人授权过"这一件事。
+
+## 11. 下一轮的第一批动作
+
+1. **设计六行全部定案**（[`docs/phase-b-design.md`](phase-b-design.md)）：S1–S6 已可派发，§8 逐片给了 kind 名、payload、不变量、**强制点**、消费者、可机械判定的退出条件，以及 5 个新拒绝码的逐条记账与复用清单。
+2. **按文件所有权分工，避免两个写者改同一个文件**：`src/environment/**`（S1）与 `src/verifier/**`（S3 的验证器半边）各自独立成文件、**不触碰 `src/task/**`**；**任务协议 v2（S2/S3/S4/S5）单一所有者**——它是全阶段的耦合点，`TASK_VERSION = 2` 只能改一次。
+3. **K1（S6）在 v2 落地后跑**：12 场景，**1–5 已由 A/S2 满足，6–12 归 B**；含真实 SIGKILL（探针已证 23–31 ms 取得租约、前缀连续）与**桩 LlmAdapter** 的确定性小任务冒烟。
