@@ -276,29 +276,35 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 
 原则：**每阶段只做一件能被反例证伪的事**，且每阶段的退出条件必须可机械判定。**不做"整理一遍"这类无法验收的阶段。**
 
+**第一轮审核（[review.md](review.md) §5）用 A–F 阶段取代了本文原先的 S3′–S9**，并指出原先的安排遗漏了 E3、E6 与真实 Task 主路径，且 S9 的领域测量应在依赖它的搜索之前完成。以下以审核的顺序为准。
+
 ## 已完成
 
 | 阶段 | 产出 | 状态 |
 |---|---|---|
-| **S0** | 核心脉络 spec：六实体、五关系、权威写入表、保证阶梯 G1–G4、53 种类 → 38 载荷 | 完成 |
-| **S0-C** | 对 DSH 的更正：`ignorable` 默认即拒绝；`storageDomain` 是第二个持久面 | 完成 |
-| **E1** | 最小验证实验：storageDomain 与 session lease 的实测对比 | 完成 |
-| **S1** | 协议框架：一个信封 + 一条追加路径 + 一个 fold 引擎 + 一个版本闸 + 一个拒绝契约 + 7 条门禁 | 完成（存储层待换） |
-| **S2** | 纵切：Task 契约 → Run → 独立判决 → G4 派生的 receipt → 唯一读投影 → agent/UI 同源 | 完成 |
+| **S0** | 核心脉络 spec：六实体、五关系、权威写入表、保证阶梯、53 种类 → 38 载荷 | 完成 |
+| **S0-C** | 对 DSH 的更正：`ignorable` 语义；`storageDomain` 是第二个持久面 | 完成 |
+| **E1** | 实测：`storageDomain` 跨进程无互斥且静默丢失更新；session 有 `flock` 租约 | 完成 |
+| **S1** | 协议框架：一个信封 + 一条追加路径 + 一个 fold 引擎 + 一个版本闸 + 一个拒绝契约 + 7 条门禁 | 完成（**存储层待换**） |
+| **S2** | 纵切：Task 契约 → Run → 独立判决 → 派生的 receipt → 唯一读投影 → agent/UI 同源 | 完成 |
+| **审核首轮修复** | E02/E03/E04/E06/E07/E08 全部修掉；门禁换成词法剥离 + 拒绝 default/namespace 导入 + **门禁自检** | 完成（`d849430`） |
+| **F01 承载实验** | DSH 事件词表是**仓内生成**的；仓外扩展事件运行时不可见；`ignorable` 是唯一机制且活跃缝设不了 → **控制 store 必须骑在"已知 log-only 类型"上** | 完成（结论见 [context.md](context.md) §4.1） |
+| **RRSI 独立复核** | E09–E12 与 R05/R06 确认，并对审核自身给出两处修正（E12 被高估、R06 需拆分） | 完成 |
 
-**S1/S2 的实测**：`src` 1341 行 / 测试 948 行 / 15 文件 / **41 测试** / **7 门禁**，`pnpm verify` 全绿。
+**当前实测**：`src` 1721 行 / `tests` 1306 行 / **55 测试** / **7 门禁 + 门禁自检**，`pnpm verify` 全绿。
 
-## 待做（每项含退出条件）
+## 待做（审核 §5 的顺序，每项含退出条件）
 
-| 阶段 | 做什么 | 退出条件（可机械判定） | 前置 |
+| 阶段 | 交付 | 退出条件（可机械判定） | 状态 |
 |---|---|---|---|
-| **S3'** | **存储层换会话事件**：删 `ProtocolLog` 的 fsync/读回/size/摘要链，降为纯内存测试后端；写 `SessionEventSink`（形态抄 `EventStoreSet`，接 DSH `session-persistence-jsonl`）；`envelope` 对齐会话事件信封 | 两个进程各自 `write` 打开同一 session → 第二个拿 `SessionAlreadyOwnedError`；杀持有者 → 后继立刻接管；纵切冒烟仍绿 | E1 |
-| **S4** | **E4 Method 的前半**：Environment Revision（不可变 manifest + 内容摘要）+ Run 准入钉住它 | 版本不可变有反例测试（改动即 digest 变）；Run 绑定的 revision 与 receipt 一致 | S3' |
-| **S5** | **G3 指针**：`pointer/switched` 事实 + reducer 的 CAS 校验。**不写 intent 文件** | 陈旧 `expected.generation` 被具名拒绝；崩溃后重放得到同一 active revision；**无第二个持久化文件** | S4 |
-| **S6** | **E4 Method 的后半**：draft → 双侧冻结评估 → 发布/弃置状态机 | 非法跃迁（如未评估即发布）由 reducer 拒绝；同一草稿的两次评估不覆盖 | S5 |
-| **S7** | **M 阶段：把 RRSI 闭环接上**（本次诊断的三处断点 + 多候选 argmax） | `admissions[].novelty` 随声明与 incumbent 历史**变化**（首次 ≥1 / 已接受过为 0 / 两条编辑为 2）；`HistoryEntry.mechanism` 等于声明值 | S6 |
-| **S8** | **G2 与 bubble 批次**：一轮内多组件原子 | 半途崩溃后该轮要么全可见要么全不可见 | S6 |
-| **S9** | **领域数值**：`direction` 联合 + 真实取数器 + `guards.bound` 真实比较 | 一个"越小越好"的测量能直接驱动晋升 | S7 |
+| **A** | 专用控制 store、DSH 承载、串行提交、严格边界、命令结果识别 | 双进程互斥；并发命令正确；屏障失败不返回成功；提交后/答复前崩溃可识别原结果 | **进行中**：串行提交 ✅ 命令识别 ✅ 严格边界 ✅ 承载实验 ✅；**剩余：把存储接到已知 log-only 的 DSH 事件类型上，`append` + `await flush`（`false` 即失败）** |
+| **B** | 最小 E3、Task 分解与责任、初始不可变 Revision、最小 Bubble、真实 verifier 与固定来源 receipt | 根/子任务执行与依赖推进；产物独立验收；SIGKILL 后恢复同一 session/责任/绑定 | 未开始（**K1 检查点**） |
+| **C** | 冻结双侧输入、真实领域取数、非补偿约束、真实重复与噪声依据 | 好候选通过；高分越界拒绝；缺失分母正确；每份报告有真实 trials | 未开始 |
+| **D** | draft 状态机、E6 原生审批、决定重算、唯一指针切换 | 批准绑定具体差异；陈旧/内容变化拒绝；head 不引用半成品 | 未开始 |
+| **E** | 显式 round、真实历史与 frozen deltas、m≥2 选优、探索/剪枝消费者、消费反馈 | 至少两轮完整执行；第二轮读第一轮；历史不被新 head 改写 | 未开始（**K2**） |
+| **F** | 关键行为回归、领域任务集对照、部署替代 | 恢复/边界满足新契约 | 未开始 |
+
+**下一次重要审核在 A+B 完成时**。A 的承载实验已成功，故 A 的剩余工作是把存储接上去；若那一步失败，先改适配契约，不向 B 叠功能。
 
 ## 明确不做
 
@@ -345,24 +351,24 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 
 | 文件 | 行 | 拥有什么 |
 |---|---|---|
-| `src/protocol/envelope.ts` | 155 | 一个信封（闭合成员 + 摘要覆盖 body） |
-| `src/protocol/log.ts` | 203 | 一条追加路径（**待换为会话事件**） |
-| `src/protocol/registry.ts` | 156 | 一个版本闸 + 保证阶梯 + G3 单实例 |
-| `src/protocol/fold.ts` | 75 | 一个 fold 引擎（两个作用域：整库 fail-closed / 单 subject 隔离） |
-| `src/protocol/refusal.ts` | 65 | 一个拒绝契约 |
-| `src/task/contract.ts` | 108 | 可裁定的契约（判据绑定已注册验证器） |
-| `src/task/protocol.ts` | 268 | 5 种 kind + **三条写在 reducer 里的不变量** |
-| `src/task/view.ts` | 195 | 唯一读投影 + G4 派生 receipt + agent 渲染 |
-| `scripts/gates.mjs` | 244 | **7 条门禁** |
-| `scripts/slice.mjs` | 119 | 端到端冒烟（第 7 条门禁跑它） |
+| `src/protocol/envelope.ts` | 268 | 一个信封（闭合成员 + 摘要覆盖 body）+ 无损 JSON 域 + 闭合键规则 |
+| `src/protocol/log.ts` | 314 | 一条追加路径：**提交队列**（并发命令串行化）+ **命令结果识别** + 发射者由协议决定 + 写前 dry-run（**存储层待换**） |
+| `src/protocol/registry.ts` | 254 | 一个版本闸 + **可组合的保证词表** + 发射者纪律 + 声明原子性 + own-key 查询 |
+| `src/protocol/fold.ts` | 80 | 一个 fold 引擎（两个作用域：整库 fail-closed / 单 subject 隔离），装载时也走 kind 的解析器 |
+| `src/protocol/refusal.ts` | 88 | 一个拒绝契约（26 个具名 code） |
+| `src/task/contract.ts` | 152 | 契约：**shape（纯）与可用性（命令期）分开**；闭合契约与判据 |
+| `src/task/protocol.ts` | 334 | 5 种 kind + **三条写在 reducer 里的不变量** + 按 kind 闭合载荷 |
+| `src/task/view.ts` | 265 | 唯一读投影（含 `awaiting-run`）+ 派生 receipt（含验证器实现与产物摘要）+ agent 渲染 |
+| `scripts/gates.mjs` | 345 | **7 条门禁 + 自检**（`--probe`：每个静态检测器都必须能失败） |
+| `scripts/slice.mjs` | 154 | 端到端冒烟（第 7 条门禁跑它） |
 
-**S2 的三条不变量**（写在 reducer 里，不在提示词里）：
+**三条不变量**（写在 reducer 里，不在提示词里）：
 
-1. 判据由它**命名的那个**验证器裁决；
-2. 执行者**永不自判**自己的 run（包括执行者本身就是注册验证器时）；
+1. 判据由它**命名的那个验证器实现**裁决（发射者角色 = `verifier:<ref>@<version>`，所以部署必须真的持有该实现的身份）；
+2. 执行者**永不自判**自己的 run——按角色**和**身份双重校验，所以把同一个身份绑给两个角色也会被拒；
 3. 只有每条判据都有 pass 才允许 verified，拒绝时**点出缺哪条**。
 
-**G4 的示范**：执行凭证从 run 自己的事实在读取时推导，协议**不声明 receipt kind**，所以想存它会被 `unknown-kind` 拒绝；两个读者从同一批事实算出的 `receiptDigest` **由构造相同**。
+**派生层的示范**：执行凭证从 run 自己的事实在读取时推导，协议**不声明 receipt kind**，所以想存它会被 `unknown-kind` 拒绝；两个读者从同一批事实算出的 `receiptDigest` **由构造相同**。
 
 ## 6.4 门禁清单（重建的第一资产）
 
@@ -373,16 +379,23 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | `no-unreferenced-export` | 面大于所用（旧仓 197 处） | ✅ |
 | `no-duplicate-type-body` | 一个类型声明两次 | ✅ |
 | `source-size` | 400 行（起始上界，不是目标） | ✅ |
-| `single-g3-claim` | 第二个 CAS 实例 | ✅ |
+| `single-conditional-owner` | 第二个条件更新（CAS）实例 | ✅ |
 | `vertical-slice-smoke` | 框架不再能折叠（跑真实纵切） | ✅ |
 
-**每条都被注入探针证伪过。** 证伪过程本身抓出了 `no-unreferenced-export` 的一个真实 bug：它有一条捷径把"入口文件存在"当成引用，导致该门禁**永远不可能失败**。这条经验已写进仓库规矩：**新增门禁必须同时给出让它失败的探针。**
+**门禁自检**：`node scripts/gates.mjs --probe` 让每个静态检测器面对一个同时违反全部六条的合成文件 + 一个"只在注释里提到别人导出"的文件，**每一个都必须触发**。它已经两次抓到真实缺陷：
+
+1. `no-unreferenced-export` 曾有一条捷径把"入口文件存在"当成引用，导致该门禁**永远不可能失败**；
+2. 加入注释/字符串剥离后 `single-durable-writer` 失效——import 的模块说明符**本身是字符串**。于是检测器现在读两个视图：**说明符读原文，名字引用读剥离文本**。
+
+规矩：**新增门禁必须同时给出让它失败的探针。**
 
 ## 6.5 依赖约定（必须记住，否则下一个人会装错）
 
 **npm 上发布的 `@deepseek-ai/dsh-*` 是 `0.0.1-rc.1`；本地 CLI 装的是 `0.2.0-rc.2`，两者差距很大（前者很可能不含 `storageDomain`）。**
 
-因此新仓**不得**从 registry 装 `@deepseek-ai/*`，必须像旧 singularity 那样指向 `thirdparty/deepseek-harness`（checkout）或 CLI 已装的那份。这条在 S3' 落地时写入 `package.json` 与文档。
+因此新仓**不得**从 registry 装 `@deepseek-ai/*`，必须像旧 singularity 那样指向 `thirdparty/deepseek-harness`（checkout）或 CLI 已装的那份。这条在阶段 A 落地时写入 `package.json` 与文档。
+
+**另一处路径更正**：review §7 的 E01 复核脚本用 `dsh-session-persistence/lib/types/storage-contract.js`——该文件在装好的 build 里**不存在**；`validateStoredEvents` 由 `dsh-session-persistence/lib/index.js` 导出。
 
 ## 6.6 证据基础（历史工作件，按需查证）
 
@@ -398,12 +411,16 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 
 ---
 
-# 7. 请审查的五个点
+# 7. 五个待决问题：第一轮审核已给出答案
 
-| # | 问题 | 我的建议 |
+审核（[review.md](review.md) §5 末表）逐条回答，本文据此记录，不再作为待决项。
+
+| # | 问题 | 审核结论 |
 |---|---|---|
-| 1 | **三层划分**（DSH 存储 / 我们只做协议纪律 / 领域载荷）是否同意？ | 同意就按 S3' 开始；这一条决定了后面所有事 |
-| 2 | **E3 Agent node 与 E6 Human decision 的落点**：是重建（旧仓 `graph` 5 kind + DSH 审批 seam 为蓝本），还是先复用旧仓？ | 先按蓝本重建，因为旧仓那部分正是"形状繁殖"的重灾区 |
-| 3 | **S7（RRSI 闭环）的优先级**：现在插队到 S4 之前，还是按顺序等 S6？ | 建议按顺序——闭环依赖环境版本与账本，早接会重复 S6 的持久化改动 |
-| 4 | **`storageDomain` 是否彻底不用**？ | 当前无用途；等出现"不属于任何会话"的事实时再加，不预留 |
-| 5 | **旧仓的去留**：并行维护 / 冻结只读 / 最后归档？ | 冻结只读，作为行为规格来源（89,675 行测试编码的不变量是新栈的验收清单） |
+| 1 | **三层划分**（DSH 存储 / 我们只做协议纪律 / 领域载荷）是否同意？ | **保留职责分层**；纯领域规则、DSH 适配器、副作用编排均有明确边界，但**逐项核实上游保证**——不要假定上游会替我们保证语义（F01 就是这样一个反例） |
+| 2 | **E3 / E6 重建还是复用？** | **E3 复用 DSH 的 create/resume 生命周期与旧仓已验证的行为**，只重建必要的领域边界；**E6 接原生审批 seam**；不依据包数决定全量重写 |
+| 3 | **RRSI 闭环是否插队？** | **不插队**：实现留在可信评估（阶段 C）之后；轮次、历史、消费与决定依据的数据契约先定下来 |
+| 4 | **`storageDomain` 是否彻底不用？** | **当前无真实用途就不预建**；以后按跨图共享需求与所有权选择，**不依据现有目录名决定** |
+| 5 | **旧仓去留？** | **冻结为行为参照**，必要维护独立处理；新闭环与关键回归完成后归档；**不迁移只约束旧包结构的测试** |
+
+**审核另外要求本文（蓝图）承担的责任**：更新作用域、权威写入表、版本纪律、阶段依赖与退出条件；**不得把审核建议未经实现直接改标为已完成**。本文 §5 已按此更新；`docs/context.md` 记录逐项反例的状态与剩余工作。
