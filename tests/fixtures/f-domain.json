@@ -1,0 +1,103 @@
+{
+  "domain": "f-domain",
+  "tasks": [
+    {
+      "taskId": "f-task-one",
+      "goal": "answer f-task-one's question from its own input",
+      "inputs": ["in/f-task-one.txt", "in/f-task-one.reference.txt"],
+      "criteria": [
+        {
+          "criterionId": "quality",
+          "statement": "the selection recovers the reference words of the task input",
+          "verifierRef": "meter",
+          "verifierVersion": "1"
+        }
+      ]
+    },
+    {
+      "taskId": "f-task-two",
+      "goal": "answer f-task-two's question from its own input",
+      "inputs": ["in/f-task-two.txt", "in/f-task-two.reference.txt"],
+      "criteria": [
+        {
+          "criterionId": "quality",
+          "statement": "the selection recovers the reference words of the task input",
+          "verifierRef": "meter",
+          "verifierVersion": "1"
+        }
+      ]
+    },
+    {
+      "taskId": "f-task-three",
+      "goal": "answer f-task-three's question from its own input",
+      "inputs": ["in/f-task-three.txt", "in/f-task-three.reference.txt"],
+      "criteria": [
+        {
+          "criterionId": "quality",
+          "statement": "the selection recovers the reference words of the task input",
+          "verifierRef": "meter",
+          "verifierVersion": "1"
+        }
+      ]
+    }
+  ],
+  "frozen": {
+    "revisions": {
+      "baseline": {
+        "revisionId": "f-h0",
+        "methods": {
+          "f-task-one": { "file": "methods/f-h0/f-task-one.json", "tag": "mid" },
+          "f-task-two": { "file": "methods/f-h0/f-task-two.json", "tag": "mid" },
+          "f-task-three": { "file": "methods/f-h0/f-task-three.json", "tag": "mid" }
+        }
+      },
+      "published": {
+        "revisionId": "f-pub",
+        "methods": {
+          "f-task-one": { "file": "methods/f-pub/f-task-one.json", "tag": "strong" },
+          "f-task-two": { "file": "methods/f-pub/f-task-two.json", "tag": "strong" },
+          "f-task-three": { "file": "methods/f-pub/f-task-three.json", "tag": "strong" }
+        }
+      },
+      "below-bar": {
+        "revisionId": "f-weak",
+        "methods": {
+          "f-task-two": { "file": "methods/f-weak/f-task-two.json", "tag": "weak" }
+        }
+      }
+    },
+    "model": "probe-authored/not-a-real-model",
+    "tools": [
+      { "name": "selector", "version": "1" },
+      { "name": "meter", "version": "1" },
+      { "name": "bounds", "version": "1" }
+    ],
+    "conditions": ["no-network"],
+    "metric": {
+      "measured": {
+        "criterionId": "quality",
+        "statement": "the selection recovers the reference words of the task input",
+        "verifierRef": "meter",
+        "verifierVersion": "1"
+      },
+      "unit": "score",
+      "direction": "higher"
+    },
+    "judgement": [
+      {
+        "criterionId": "bounded",
+        "statement": "every selected word is a word of the input it was selected from",
+        "verifierRef": "bounds",
+        "verifierVersion": "1"
+      }
+    ],
+    "weights": { "quality": 100, "cost": 15 },
+    "trials": 2
+  },
+  "standards": { "minQualityGain": 0.1, "maxCostIncrease": 0.15 },
+  "sets": {
+    "solve": ["f-task-one", "f-task-two"],
+    "holdout": ["f-task-three"]
+  },
+  "contentDigest": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b"
+}

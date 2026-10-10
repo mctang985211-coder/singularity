@@ -1,12 +1,12 @@
 {
-  "why": "Every protocol, version and kind this stack declares, with who produces each kind and who reads it. The `protocol-inventory` gate compares this file against the real registries in both directions, because a prose inventory in a document is not checked by anything: docs/context.md claimed 36 files, 140 tests and 9 gates at the commit where the truth was 44, 177 and 11, and nothing noticed. `producedBy` and `readBy` are not machine-checkable; they are here so that adding a shape is a recorded act with a named consumer, which is the one thing the previous system never had to do.",
+  "why": "Every protocol, version, kind and payload member set this stack declares, with who produces each kind and who reads it. The `protocol-inventory` gate compares this file against the live registries in both directions, because a prose inventory in a document is not checked by anything: docs/context.md claimed 36 files, 140 tests and 9 gates at the commit where the truth was 44, 177 and 11, and nothing noticed. The member lists are read out of the parsers themselves — the gate hands each one a payload carrying a member no kind declares and takes the closed set from the refusal — because a list copied into this file from the source would be a second version of the truth; a kind whose row is a bare name is refused, and so is a row that lists a member the parser does not accept. `producedBy` and `readBy` are not machine-checkable; they are here so that adding a shape is a recorded act with a named consumer, which is the one thing the previous system never had to do.",
   "protocols": [
     {
       "protocol": "agent",
       "version": 1,
       "subject": "the agent id",
       "kinds": [
-        "agent/opened"
+        { "name": "agent/opened", "members": ["agentId", "role", "sessionId"] }
       ],
       "producedBy": "scripts/*.mjs deployments (a deployment opens the node before recording it)",
       "readBy": "src/task/commands.ts requireOpenedNode"
@@ -16,8 +16,8 @@
       "version": 2,
       "subject": "the environment id",
       "kinds": [
-        "pointer/switched",
-        "revision/created"
+        { "name": "pointer/switched", "members": ["expected", "to"] },
+        { "name": "revision/created", "members": ["manifest", "revisionId"] }
       ],
       "producedBy": "src/environment/protocol.ts revision/created (a deployment mints revisions) and src/release/commands.ts publish (the one conditional update)",
       "readBy": "src/environment/binding.ts assertPinnedRevision, src/task/commands.ts (the pin gate), src/release/commands.ts (the head it expects)"
@@ -27,10 +27,10 @@
       "version": 3,
       "subject": "the evaluation id",
       "kinds": [
-        "constraint/checked",
-        "evaluation/opened",
-        "trial/missed",
-        "trial/recorded"
+        { "name": "constraint/checked", "members": ["artifactDigest", "criterionId", "detail", "implementationDigest", "met", "verifierRef", "verifierVersion"] },
+        { "name": "evaluation/opened", "members": ["baseline", "candidate", "context", "judgement", "metric", "run", "trials", "weights"] },
+        { "name": "trial/missed", "members": ["reason", "slot", "verifierRef", "verifierVersion"] },
+        { "name": "trial/recorded", "members": ["artifactDigest", "cost", "detail", "implementationDigest", "inputDigests", "quality", "slot", "verifierRef", "verifierVersion"] }
       ],
       "producedBy": "src/measure/commands.ts createMeasureCommands; the three verification kinds are emitted by the implementation the frozen plan names, by content digest",
       "readBy": "src/measure/view.ts projectEvaluation (the aggregate, the missing denominator and the admissibility of one candidate) and caliberDigestOf (the comparability a round pools on)"
@@ -40,8 +40,8 @@
       "version": 1,
       "subject": "the environment whose head is moving",
       "kinds": [
-        "release/approved",
-        "release/drafted"
+        { "name": "release/approved", "members": ["approvalId", "approvedBy", "draftDigest", "revisionId"] },
+        { "name": "release/drafted", "members": ["draftDigest", "revisionId"] }
       ],
       "producedBy": "src/release/commands.ts createReleaseCommands (draft, and approve behind the native approval seam)",
       "readBy": "src/release/commands.ts publish (a head may only move to an approved revision)"
@@ -51,9 +51,9 @@
       "version": 5,
       "subject": "the round id",
       "kinds": [
-        "candidate/submitted",
-        "round/decided",
-        "round/opened"
+        { "name": "candidate/submitted", "members": ["edits", "evaluationId", "exploratory", "revision", "slot"] },
+        { "name": "round/decided", "members": ["calibration", "outcomes", "winner"] },
+        { "name": "round/opened", "members": ["caliber", "candidates", "editBudget", "explorationSlots", "historyCutoff", "incumbent", "round", "weights"] }
       ],
       "producedBy": "src/strategy/commands.ts createStrategyCommands (the submission gate is a precondition of candidate/submitted; the annealed budget is derived, never supplied)",
       "readBy": "src/strategy/view.ts projectRound (each slot's aggregate, frozen gain and admissibility, then the selection, reading the direction from measure's evaluation/opened.metric.direction), src/strategy/plan.ts (the round's frozen plan)"
@@ -63,16 +63,16 @@
       "version": 5,
       "subject": "the task id",
       "kinds": [
-        "bubble/opened",
-        "evidence/produced",
-        "method/consumed",
-        "run/failed",
-        "run/started",
-        "run/verified",
-        "task/admitted",
-        "task/assigned",
-        "task/decomposed",
-        "task/reassigned"
+        { "name": "bubble/opened", "members": ["conditions", "inputs", "model", "runId", "tools", "workspace"] },
+        { "name": "evidence/produced", "members": ["artifactDigest", "criterionId", "detail", "implementationDigest", "inputDigests", "runId", "verdict", "verifierRef", "verifierVersion"] },
+        { "name": "method/consumed", "members": ["method", "revision", "runId", "source"] },
+        { "name": "run/failed", "members": ["reason", "runId"] },
+        { "name": "run/started", "members": ["revision", "runId"] },
+        { "name": "run/verified", "members": ["runId"] },
+        { "name": "task/admitted", "members": ["contract"] },
+        { "name": "task/assigned", "members": ["agentId", "agentIdentity"] },
+        { "name": "task/decomposed", "members": ["children"] },
+        { "name": "task/reassigned", "members": ["agentId", "agentIdentity", "from"] }
       ],
       "producedBy": "src/task/commands.ts createTaskCommands (the only surface that produces task facts)",
       "readBy": "src/task/view.ts projectTask/projectReceipt, src/task/tree.ts projectTree, src/task/consumption.ts unconsumedMethods"

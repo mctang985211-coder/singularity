@@ -7,14 +7,24 @@
  * gates existed and neither constrained *shape proliferation*: adding a format cost nothing,
  * removing one cost a hand audit.
  *
- * Two lessons are built in:
+ * Three lessons are built in:
  *
  * - **A gate that has never failed is not known to work.** `--probe` runs every detector against a
  *   synthetic file set that violates all of them. An earlier version of this file had a shortcut
  *   that made `no-unreferenced-export` unable to fail, and only the probe found it.
  * - **Text matching is not symbol matching.** References are counted over source with comments and
  *   string literals stripped, because a name mentioned in a comment or a message is not a use — a
- *   counterexample that passed every gate before this.
+ *   counterexample that passed every gate before this. Round three went further: it added an export
+ *   nothing imported and stayed green, because the *word* occurred elsewhere as a member name. An
+ *   export is now counted only when another module binds that name through an import or a re-export
+ *   that resolves to the declaring file, which a member name cannot imitate.
+ * - **A pattern is a spelling, and a spelling is not a mechanism.** The same round declared a live
+ *   protocol through `X['declare'](...)` and added an optional payload member with no version bump;
+ *   both stayed green, because the only sweep was the regex `/\.declare\s*[<(]/` and the ledger
+ *   compared `(protocol, version, kind)` while a payload's members live inside a parser function.
+ *   Both are asked of the running code now: every `declare` call is observed on the one prototype it
+ *   has to go through, whichever registry it lands on, and a kind's member set is read out of the
+ *   parser's own refusal. What that still does not reach is written down where it is used.
  *
  * Usage:
  *   node scripts/gates.mjs           scan the real tree
@@ -23,7 +33,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { dirname, join, normalize, relative } from 'node:path'
 
 const ROOT = new URL('..', import.meta.url).pathname
 const SOURCE_DIRS = ['src', 'tests']
@@ -163,19 +173,69 @@ function codeOnly(source) {
   return out.join('')
 }
 
-/** Every name a file exports, from `export <decl>` and from `export { … }` blocks. */
-function exportedNames(code) {
+/**
+ * Every name a file declares as an export: `export <decl>`, and `export { … }` **without** `from`.
+ *
+ * A re-export (`export { X } from './y.ts'`) is deliberately not a new export here. It is a
+ * *binding* of `y.ts`'s `X`, counted where `X` is declared, and counting it twice would let a barrel
+ * file vouch for a name nothing uses. `src/index.ts` is exactly such a barrel.
+ */
+function declaredExports(code) {
   const names = new Set()
   const declarative = /^export\s+(?:declare\s+)?(?:async\s+)?(?:function|const|let|class|interface|type|enum|abstract\s+class)\s+([A-Za-z0-9_$]+)/gm
   for (const match of code.matchAll(declarative)) names.add(match[1])
   const lists = /^export\s*(?:type\s*)?\{([^}]*)\}/gm
   for (const match of code.matchAll(lists)) {
+    if (/^\s*from\b/.test(code.slice(match.index + match[0].length))) continue
     for (const entry of match[1].split(',')) {
       const name = entry.trim().replace(/^type\s+/, '').split(/\s+as\s+/).pop()?.trim()
       if (name !== undefined && /^[A-Za-z0-9_$]+$/.test(name)) names.add(name)
     }
   }
   return names
+}
+
+/**
+ * What one file binds from other modules: each name an `import`/`export … from` clause takes, with
+ * the specifier it came from, plus the specifier of any namespace binding.
+ *
+ * The clause is read out of the code view, so a clause inside a comment or a string is not a
+ * binding; the specifier itself is then read out of the raw text at the same offsets, because
+ * `codeOnly` blanks string contents by design — reading it from the code view would compare the
+ * names against blanks.
+ */
+function moduleBindings(code, raw) {
+  const bound = []
+  const namespaces = []
+  const clause = /\b(?:import|export)\s+([\s\S]{0,600}?)\bfrom\s*(["'])/g
+  for (const match of code.matchAll(clause)) {
+    const quoted = match.index + match[0].length - 1
+    const end = raw.indexOf(raw[quoted], quoted + 1)
+    if (end < 0) continue
+    const specifier = raw.slice(quoted + 1, end)
+    const list = /\{([\s\S]*)\}/.exec(match[1])
+    if (list === null) {
+      namespaces.push(specifier)
+      continue
+    }
+    for (const entry of list[1].split(',')) {
+      const name = entry.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0]?.trim()
+      if (name !== undefined && /^[A-Za-z0-9_$]+$/.test(name)) bound.push({ name, specifier })
+    }
+  }
+  return { bound, namespaces }
+}
+
+/** The file a relative specifier names, or `undefined` when it leaves the scanned tree. */
+function resolveModule(from, specifier, files) {
+  if (!specifier.startsWith('.')) return undefined
+  const target = normalize(join(dirname(from), specifier))
+  return files.includes(target) ? target : undefined
+}
+
+/** The 1-based line an offset into a file falls on. */
+function lineOf(source, index) {
+  return source.slice(0, index).split('\n').length
 }
 
 /**
@@ -230,6 +290,20 @@ const DETECTORS = [
             if (!READ_ONLY_FS.has(name)) findings.push(`${file} imports ${name} from ${match[2]}; no module may write durably; DSH session persistence owns the medium`)
           }
         }
+        // A dynamic import is the same capability through a door a static scan cannot see:
+        // `await import('node:fs/promises')` followed by `writeFile` wrote a real file while all
+        // eighteen gates stayed green. A static pattern cannot be the answer — the next spelling is
+        // `await import('node:' + 'fs')` — so the construct is refused for the same reason a
+        // namespace binding is: the gate cannot see what it will call. A literal that is not a
+        // filesystem module is readable, and legal; everything else is refused.
+        for (const match of views.code.get(file).matchAll(/(?<![\w$.])import\s*\(/g)) {
+          const at = `${file}:${lineOf(views.code.get(file), match.index)}`
+          const literal = /^\s*(['"])([^'"]*)\1/.exec(views.raw.get(file).slice(match.index + match[0].length))
+          if (literal === null)
+            findings.push(`${at} loads a module through a dynamic import whose target the gate cannot read; no module may write durably, so a dynamic import may only name a literal module, and never a filesystem one`)
+          else if (FS_MODULES.has(literal[2]))
+            findings.push(`${at} dynamically imports ${literal[2]}; no module may write durably; DSH session persistence owns the medium`)
+        }
       }
       return findings
     },
@@ -238,26 +312,36 @@ const DETECTORS = [
     name: 'no-unreferenced-export',
     detect: (files, views) => {
       const findings = []
-      const entry = 'src/index.ts'
+      /**
+       * The names other modules bind from each file: an export with no entry here has no consumer.
+       *
+       * This replaced a word search over the other files, which round three walked through by
+       * adding `export const revisions = 0` beside a `revisions` member elsewhere. A binding cannot
+       * be imitated that way, and `noUnusedLocals` already makes a binding a use: an import that is
+       * never read is a compile error, so "bound" cannot be satisfied by an idle import.
+       */
+      const bound = new Map()
+      for (const file of files) {
+        const { bound: names, namespaces } = moduleBindings(views.code.get(file), views.raw.get(file))
+        for (const specifier of namespaces) {
+          if (resolveModule(file, specifier, files) === undefined) continue
+          findings.push(`${file} imports ${specifier} as a namespace binding; a namespace hides which of that module's exports are used, so no count can be made — name what you use`)
+        }
+        for (const { name, specifier } of names) {
+          const target = resolveModule(file, specifier, files)
+          if (target === undefined) continue
+          const set = bound.get(target) ?? new Set()
+          set.add(name)
+          bound.set(target, set)
+        }
+      }
       for (const file of files) {
         if (!file.startsWith('src/')) continue
-        const own = file === entry
-        for (const name of exportedNames(views.code.get(file))) {
-          const word = new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`)
-          let referenced = false
-          for (const other of files) {
-            if (other === file) continue
-            if (word.test(views.code.get(other))) {
-              referenced = true
-              break
-            }
-          }
-          if (!referenced)
-            findings.push(
-              own
-                ? `${file} exports ${name}, which nothing imports; the stack's surface is exactly what is used`
-                : `${file} exports ${name}, which no other module imports; drop the keyword or the export`,
-            )
+        for (const name of declaredExports(views.code.get(file))) {
+          if (bound.get(file)?.has(name) === true) continue
+          findings.push(
+            `${file} exports ${name}, which no other module binds by importing or re-exporting it from this file; drop the keyword or the export`,
+          )
         }
       }
       return findings
@@ -324,9 +408,9 @@ const DETECTORS = [
   },
   {
     name: 'protocol-inventory',
-    /** Its synthetic failure is its own leg below, because it reduces to arithmetic over a file set. */
+    /** Its synthetic failures are its own legs below, because it reads the real registries. */
     probeSeparately: true,
-    detect: () => inventoryFindingsWith(readLedger()),
+    detect: () => inventoryFindingsWith(readLedger(), DECLARED),
   },
   {
     name: 'spec-budget',
@@ -425,80 +509,252 @@ function readLedger() {
   return JSON.parse(readFileSync(join(ROOT, PROTOCOL_LEDGER), 'utf8'))
 }
 
+/** A payload member no kind declares. The gate hands it to every parser, so the refusal names the closed set. */
+const PROBE_MEMBER = '__gate_unknown_member__'
+
 /**
- * What the code actually declares, asked of the registries rather than read out of the source.
+ * What one kind's parser accepts at the top level, read out of the parser itself.
  *
- * A protocol is declared by an exported `declare*Protocol(registry)` in a slice's `protocol.ts`,
- * which is the one convention every slice already follows. The `registry.declare` sweep below is
- * what keeps that convention honest: a shape declared anywhere else is invisible to this function,
- * so the gate says so instead of quietly under-reporting.
+ * `KindRule.parse` is a function, so a member set is not a value anybody can read — and a list
+ * written beside the parser would be a second copy of the truth, free to drift from the check that
+ * is enforced. The one honest source is the refusal the parser already produces: a payload carrying
+ * a member no kind declares is refused by `assertClosedKeys` with `the shape is closed (known: …)`,
+ * which is the parser naming its own member set. Round three added an optional member to
+ * `release@1/release/drafted` with no version bump, and every gate stayed green because nothing
+ * compared that set against anything.
+ *
+ * Three answers, all meaningful: the sorted member names; `null` when the parser accepted the probe,
+ * so the payload is not closed at all; `undefined` when it refused without naming a set, so the gate
+ * cannot see the shape and says so rather than assuming it is fine.
  */
-async function declaredProtocols() {
+function acceptedMembers(rule, where) {
+  try {
+    rule.parse({ [PROBE_MEMBER]: true }, where)
+  } catch (error) {
+    const closed = /shape is closed \(known: ([^)]*)\)/.exec(String(error?.message ?? error))
+    if (closed !== null)
+      return closed[1]
+        .split(',')
+        .map(name => name.trim())
+        .filter(name => name.length > 0)
+        .sort()
+    return undefined
+  }
+  return null
+}
+
+/**
+ * Where a `declare` call was written, read from the stack rather than from the text.
+ *
+ * The nearest frame inside `src` that is not the registry itself. `declareEnvironmentProtocol(FOLD)`
+ * called from another module therefore reports the declarer in the slice's `protocol.ts`: the
+ * declaration is *written* there, and where it is called from is not where it lives. A call written
+ * directly in some other module reports that module, which is what the rule below refuses.
+ */
+function declarationSite() {
+  for (const frame of (new Error().stack ?? '').split('\n')) {
+    const match = /((?:file:\/\/)?[^\s()]*\/src\/[^\s():]+\.ts):\d+:\d+\)?$/.exec(frame.trim())
+    if (match === null) continue
+    const site = relative(ROOT, match[1].replace(/^file:\/\//, ''))
+    if (site === 'src/protocol/registry.ts') continue
+    return site
+  }
+  return 'unknown'
+}
+
+/**
+ * What the code actually declares, asked of the running code rather than read out of the source.
+ *
+ * Three rounds found the same weakness three times, each time as a spelling: a declaration through
+ * an exported `declare*Protocol` in a slice's `protocol.ts` (found), the same declaration on a
+ * registry the module built for itself and reached with `X['declare'](…)` (missed, because the only
+ * sweep was a text pattern), and the payload's member set (invisible, because it lives inside a
+ * function). So this asks the runtime:
+ *
+ * 1. **every module under `src` this process can load is imported**, with the one
+ *    `ProtocolRegistry.prototype.declare` wrapped. A declaration is therefore observed however the
+ *    call is spelled and whichever registry it lands on — `X.declare(…)`, `X['declare'](…)` and a
+ *    destructured `declare` all arrive at the same method, and a registry built inside a module is
+ *    no hiding place;
+ * 2. **every exported `declare*Protocol` is then called** with a registry of this gate's own, which
+ *    is how a declaration that only happens when somebody calls it is seen at all;
+ * 3. **each observed kind's member set is read from its parser** (`acceptedMembers` above), so a
+ *    payload member is part of the declared surface the ledger compares.
+ *
+ * What this does not catch, written down because a gate's coverage is part of what it promises:
+ *
+ * - a declaration that only runs on a path no load reaches — the sweep sees module load and the
+ *   exported declarers, not every call site. The text sweep below is the net under it, and a module
+ *   this process cannot load (the ones importing the host's DSH packages: a runtime seam is not
+ *   loadable here) is *only* covered by that text net, which is spelling-dependent;
+ * - a payload member added to a **nested** closed shape (`contract.criteria[]`, `revision`, …): the
+ *   parser answers for the members it reads at the top level, and reaching a nested set would mean
+ *   synthesising a valid payload for every kind, which is a different and much larger mechanism.
+ */
+async function declaredProtocols(
+  modules = sourceFiles()
+    .filter(file => file.startsWith('src/'))
+    .map(file => ({ name: file, url: new URL(`../${file}`, import.meta.url) })),
+) {
   const { ProtocolRegistry } = await import(new URL('../src/protocol/registry.ts', import.meta.url).href)
-  const found = []
-  for (const file of protocolModules()) {
-    const module = await import(new URL(`../${file}`, import.meta.url).href)
-    const registry = new ProtocolRegistry()
-    const declarers = Object.entries(module).filter(([name, value]) => /^declare[A-Z]\w*Protocol$/.test(name) && typeof value === 'function')
-    for (const [, declare] of declarers) declare(registry)
-    for (const protocol of registry.protocols()) {
-      for (const version of registry.versionsOf(protocol)) {
-        found.push({ protocol, version, kinds: [...registry.kindsOf(protocol, version)].sort() })
+  const observed = []
+  const unloaded = []
+  const refusals = []
+  const original = ProtocolRegistry.prototype.declare
+  ProtocolRegistry.prototype.declare = function (protocol, version, spec) {
+    const published = original.call(this, protocol, version, spec)
+    observed.push({
+      protocol,
+      version,
+      site: declarationSite(),
+      kinds: Object.entries(spec.kinds).map(([name, rule]) => ({ name, members: acceptedMembers(rule, `${protocol}@${version} ${name}`) })),
+    })
+    return published
+  }
+  try {
+    for (const module of modules) {
+      let loaded
+      try {
+        loaded = await import(module.url.href)
+      } catch {
+        unloaded.push(module.name)
+        continue
+      }
+      for (const [name, value] of Object.entries(loaded)) {
+        if (!/^declare[A-Z]\w*Protocol$/.test(name) || typeof value !== 'function') continue
+        try {
+          value(new ProtocolRegistry())
+        } catch (error) {
+          refusals.push(
+            `${module.name}#${name} refused the registry this gate handed it (${`${error?.message ?? error}`.split('\n')[0]}); the inventory calls every exported declarer with an empty registry, so what this one declares is not in the comparison`,
+          )
+        }
       }
     }
+  } finally {
+    ProtocolRegistry.prototype.declare = original
   }
-  return found.sort((left, right) => (left.protocol < right.protocol ? -1 : left.protocol > right.protocol ? 1 : left.version - right.version))
+
+  // One key per protocol version. The same protocol is declared more than once on purpose (a
+  // projection builds its own registry for the protocols it folds), with the same rules, so the
+  // first observation of a kind is kept and the sites are collected from every observation.
+  const byKey = new Map()
+  for (const entry of observed) {
+    const key = `${entry.protocol}@${entry.version}`
+    const merged = byKey.get(key) ?? { protocol: entry.protocol, version: entry.version, kinds: new Map(), sites: new Set() }
+    merged.sites.add(entry.site)
+    for (const kind of entry.kinds) if (!merged.kinds.has(kind.name)) merged.kinds.set(kind.name, kind)
+    byKey.set(key, merged)
+  }
+  const order = (left, right) => (left.protocol < right.protocol ? -1 : left.protocol > right.protocol ? 1 : left.version - right.version)
+  const declared = [...byKey.values()]
+    .map(entry => ({
+      protocol: entry.protocol,
+      version: entry.version,
+      kinds: [...entry.kinds.values()].sort((left, right) => (left.name < right.name ? -1 : 1)),
+    }))
+    .sort(order)
+  const sites = [...byKey.values()]
+    .flatMap(entry => [...entry.sites].map(site => ({ site, protocol: entry.protocol, version: entry.version, kinds: [...entry.kinds.keys()].sort() })))
+    .sort((left, right) => (left.site < right.site ? -1 : left.site > right.site ? 1 : order(left, right)))
+  return { declared, sites, unloaded, refusals }
 }
 
-/** Every slice's `protocol.ts`, which is where a declared shape lives. */
-function protocolModules() {
-  const found = []
-  const walk = directory => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
-      const path = join(directory, entry.name)
-      if (entry.isDirectory()) walk(path)
-      else if (entry.name === 'protocol.ts') found.push(relative(ROOT, path))
-    }
-  }
-  walk(join(ROOT, 'src'))
-  return found.sort()
-}
-
-/** Every file that declares a shape without being a slice's `protocol.ts`. */
-function declarationSitesOutsideProtocolModules() {
-  const allowed = new Set(protocolModules())
+/**
+ * A declaration is written in a slice's `protocol.ts` — one conventional place — or a reader cannot
+ * find it either.
+ *
+ * The sweep sees a declaration wherever it is written, so this is no longer what keeps the inventory
+ * honest; the ledger comparison is. It stays because the *home* of a declared shape is something a
+ * reader has to be able to predict, and because the text net under the sweep can enforce the same
+ * rule, by name, for the modules that cannot be loaded.
+ */
+function declarationSiteFindings(sites) {
   const findings = []
-  for (const file of sourceFiles()) {
-    if (!file.startsWith('src/') || allowed.has(file)) continue
-    const declares = /\.declare\s*[<(]/.exec(codeOnly(readFileSync(join(ROOT, file), 'utf8')))
-    if (declares !== null) findings.push(`${file} declares a protocol without being a slice's protocol.ts; the inventory can only check what it can find`)
+  for (const { site, protocol, version, kinds } of sites) {
+    if (/(^|\/)protocol\.ts$/.test(site)) continue
+    findings.push(`${site} declares ${protocol}@${version} (${kinds.join(', ')}) without being a slice's protocol.ts; a shape declared here is one no reader looks for`)
   }
   return findings
 }
 
 /**
- * Every declared kind must be in the ledger and every ledger row must be declared. Both directions
- * matter: one catches a shape added without a stated consumer, the other a ledger that has drifted
- * into fiction. Parameterised so the self-test can hand it a wrong ledger and watch it fire.
+ * The net under the sweep: the modules the sweep could not account for are read as text instead.
+ *
+ * Spelling-dependent on purpose — the round-three bypass wrote `X['declare'](…)` *because* this
+ * pattern cannot see it — so it is the fallback and never the mechanism. It covers the two groups
+ * the sweep leaves open: a module this process cannot load (one importing the host's DSH packages),
+ * and a module whose `declare` call only happens on a path no load reaches, which the sweep cannot
+ * observe and which the rule above therefore never sees either. A file whose declaration the sweep
+ * did observe is not scanned, so a spelling both mechanisms can see is reported once. The finding
+ * says it is a text match rather than implying the check is stronger than it is.
  */
-function inventoryFindingsWith(ledger) {
+function declarationSitesOutsideProtocolModules(files) {
+  const findings = []
+  for (const file of files) findings.push(...declarationTextFindings(file, readFileSync(join(ROOT, file), 'utf8')))
+  return findings
+}
+
+/** The rule itself, over one file's text, so the self-test can watch it fire and see what it misses. */
+function declarationTextFindings(file, source) {
+  if (/\.declare\s*[<(]/.exec(codeOnly(source)) === null) return []
+  return [
+    `${file} declares a protocol by text and no load reached it, so this is a text match on the dot spelling rather than an observation; a declaration belongs in a slice's protocol.ts, where the sweep sees it whatever it is called`,
+  ]
+}
+
+/**
+ * Every declared kind must be in the ledger and every ledger row must be declared, **with the
+ * payload's member set**, which is the half round three walked through: `release@1/release/drafted`
+ * gained an optional member, the parser accepted it, it landed in state, and the gate compared only
+ * `(protocol, version, kind)` while the file's own rule says a member addition is a version bump.
+ *
+ * Both directions matter, as before: one catches a shape added without a stated consumer, the other
+ * a ledger that has drifted into fiction. Parameterised over both the ledger and the declarations so
+ * the self-test can hand it a wrong one of either and watch it fire.
+ */
+function inventoryFindingsWith(ledger, declared) {
   const rows = Array.isArray(ledger?.protocols) ? ledger.protocols : []
   const key = entry => `${entry.protocol}@${entry.version}`
   const listed = new Map(rows.map(row => [key(row), row]))
   const findings = []
 
-  for (const declared of DECLARED) {
-    const row = listed.get(key(declared))
-    const where = `${declared.protocol}@${declared.version}`
+  for (const entry of declared) {
+    const row = listed.get(key(entry))
+    const where = key(entry)
     if (row === undefined) {
       findings.push(`${where} is declared by the code but no ${PROTOCOL_LEDGER} row names it; adding a shape is a recorded act, so record who produces it and who reads it`)
       continue
     }
-    const named = [...(row.kinds ?? [])].sort()
-    const missing = declared.kinds.filter(kind => !named.includes(kind))
-    const extra = named.filter(kind => !declared.kinds.includes(kind))
-    if (missing.length > 0) findings.push(`${where} declares ${missing.join(', ')}, which its ledger row does not list`)
+    const named = new Map()
+    const bare = []
+    for (const kind of row.kinds ?? []) {
+      if (typeof kind === 'string') {
+        bare.push(kind)
+        named.set(kind, { name: kind })
+      } else named.set(kind.name, kind)
+    }
+    // The old row shape failed loudly rather than quietly: a bare kind name is exactly the ledger
+    // that could not see a payload member change.
+    if (bare.length > 0)
+      findings.push(
+        `${where}'s ledger row lists ${bare.join(', ')} as a bare name, which is the shape that could not see a payload member change; a kind's row is { "name": …, "members": [ … ] }`,
+      )
+    const declaredNames = entry.kinds.map(kind => kind.name)
+    for (const kind of entry.kinds) {
+      const line = named.get(kind.name)
+      if (line === undefined) {
+        findings.push(`${where} declares ${kind.name}, which its ledger row does not list`)
+        continue
+      }
+      if (bare.includes(kind.name)) continue
+      if (!Array.isArray(line.members)) {
+        findings.push(`${where} ${kind.name}'s ledger row has no member set; a payload member is part of the declared shape, so the row lists the members the parser accepts`)
+        continue
+      }
+      findings.push(...shapeFindings(where, kind, line))
+    }
+    const extra = [...named.keys()].filter(name => !declaredNames.includes(name))
     if (extra.length > 0) findings.push(`${where}'s ledger row lists ${extra.join(', ')}, which the code does not declare`)
     for (const field of ['subject', 'producedBy', 'readBy'])
       if (typeof row[field] !== 'string' || row[field].length === 0)
@@ -506,9 +762,37 @@ function inventoryFindingsWith(ledger) {
   }
 
   for (const row of rows) {
-    if (!DECLARED.some(declared => key(declared) === key(row)))
+    if (!declared.some(entry => key(entry) === key(row)))
       findings.push(`${PROTOCOL_LEDGER} names ${key(row)}, which no code declares`)
   }
+  return findings
+}
+
+/**
+ * One kind's payload against its ledger row: the parser's own member set, both directions.
+ *
+ * The two unreadable answers are findings rather than silence, because a shape the gate cannot read
+ * must not read as a shape that is fine.
+ */
+function shapeFindings(where, kind, line) {
+  if (kind.members === null)
+    return [
+      `${where} ${kind.name} accepted a payload member no kind declares (${PROBE_MEMBER}); its payload is not closed, so a member can be added with nothing to notice it`,
+    ]
+  if (kind.members === undefined)
+    return [
+      `${where} ${kind.name} refused the gate's probe without naming its closed member set; the gate reads a shape's members out of that refusal, so the check that refuses an unknown member has to come before the rest of the parser`,
+    ]
+  const listed = [...line.members].sort()
+  const missing = kind.members.filter(member => !listed.includes(member))
+  const extra = listed.filter(member => !kind.members.includes(member))
+  const findings = []
+  if (missing.length > 0)
+    findings.push(
+      `${where} ${kind.name} accepts the payload member(s) ${missing.join(', ')}, which its ledger row does not list; a payload member is part of the declared shape, so adding one is a version bump and a recorded act`,
+    )
+  if (extra.length > 0)
+    findings.push(`${where} ${kind.name}'s ledger row lists the payload member(s) ${extra.join(', ')}, which the parser does not accept; the ledger records the shape that exists`)
   return findings
 }
 
@@ -649,6 +933,9 @@ export const probeClaims = [
 export async function probe(path: string): Promise<string> {
   await writeFile(path, 'x', 'utf8')
   await fs.writeFile(path, 'y', 'utf8')
+  const lazily = await import('node:fs/promises')
+  const hidden = await import('a/specifier/the/gate/cannot/read')
+  await lazily.writeFile(path, hidden, 'utf8')
   return readFile(path, 'utf8')
 }
 ${padding}
@@ -746,19 +1033,149 @@ if (PROBE) {
   if (stripperBreaks === 0)
     console.log(`  ok    codeOnly held its contract on ${STRIPPER_CASES.length} nasty inputs (length, line breaks, what must go, what must stay)`)
 
-  // The inventory reads the real registries, so its probe hands the check a wrong ledger. Each of
-  // the three ways it can disagree must produce a finding, or the ledger protects nothing.
-  for (const [label, wrong] of [
-    ['a kind the code declares but the ledger omits', { ...readLedger(), protocols: readLedger().protocols.map(row => ({ ...row, kinds: row.kinds.filter((_, index) => index > 0) })) }],
-    ['a kind the ledger lists but the code does not declare', { ...readLedger(), protocols: readLedger().protocols.map(row => ({ ...row, kinds: [...row.kinds, 'never/declared'] })) }],
-    ['a protocol the ledger names and no code declares', { ...readLedger(), protocols: [...readLedger().protocols, { protocol: 'ghost', version: 1, kinds: [], subject: 's', producedBy: 'p', readBy: 'r' }] }],
+  // The dynamic-import rule inside no-durable-writer has two branches and one control, and each
+  // must be able to fail: a literal filesystem module is refused, a target the gate cannot read is
+  // refused because the gate cannot see what it will call, and a literal that is not a filesystem
+  // module is legal — a rule that refused every dynamic import would be a different rule.
+  for (const [label, source, expected] of [
+    ['a dynamic import of a filesystem module', `export const load = async () => (await import('node:fs/promises')).writeFile\n`, 1],
+    ['a dynamic import whose target the gate cannot read', 'export const load = async target => await import(target)\n', 1],
+    ['a dynamic import of a module that is not a filesystem one', `export const load = async () => await import('./helper.ts')\n`, 0],
   ]) {
-    const findings = inventoryFindingsWith(wrong)
+    const probeFiles = ['src/__probe_import.ts', 'src/__probe_import_use.ts']
+    const probeRaw = new Map([
+      [probeFiles[0], source],
+      [probeFiles[1], `import { load } from './__probe_import.ts'\nexport const used = load\n`],
+    ])
+    const findings = DETECTORS.find(detector => detector.name === 'no-durable-writer').detect(probeFiles, {
+      raw: probeRaw,
+      code: new Map([...probeRaw].map(([file, text]) => [file, codeOnly(text)])),
+    })
+    if (findings.length === expected) {
+      console.log(`  ok    no-durable-writer handled ${label} (${expected} finding${expected === 1 ? '' : 's'})`)
+    } else {
+      missed += 1
+      console.log(`  FAIL  no-durable-writer reported ${findings.length} findings on ${label}, expected ${expected}`)
+    }
+  }
+
+  // The binding count behind no-unreferenced-export is the round-three fix, so the counterexample
+  // that walked through the word search has its own leg: an export nothing imports whose *name*
+  // occurs in another file as a member name must fire, and the same export, bound by an import,
+  // must not.
+  for (const [label, user, expected] of [
+    ['an export whose name occurs elsewhere only as a member', `export const holder = { orphan: 2 }\n`, 1],
+    ['the same export, bound by an import', `import { orphan } from './__probe_export.ts'\nexport const used = orphan\n`, 0],
+  ]) {
+    const probeFiles = ['src/__probe_export.ts', 'src/__probe_export_user.ts']
+    const probeRaw = new Map([
+      [probeFiles[0], `export const orphan = 1\nexport const other = 2\n`],
+      [probeFiles[1], user],
+    ])
+    const findings = DETECTORS.find(detector => detector.name === 'no-unreferenced-export').detect(probeFiles, {
+      raw: probeRaw,
+      code: new Map([...probeRaw].map(([file, text]) => [file, codeOnly(text)])),
+    })
+    const orphans = findings.filter(finding => finding.includes('orphan'))
+    if (orphans.length === expected) {
+      console.log(`  ok    no-unreferenced-export handled ${label} (${expected} finding${expected === 1 ? '' : 's'})`)
+    } else {
+      missed += 1
+      console.log(`  FAIL  no-unreferenced-export reported ${orphans.length} findings on ${label}, expected ${expected}`)
+    }
+  }
+
+  // The inventory reads the registries and the ledger, so its probe hands the check synthetic
+  // declarations and synthetic ledgers: each way the two can disagree must produce a finding, or the
+  // ledger protects nothing. A kind's member set is a case of its own, because that is the half the
+  // ledger could not see.
+  const probeLedger = kinds => ({ protocols: [{ protocol: 'probe', version: 1, subject: 's', producedBy: 'p', readBy: 'r', kinds }] })
+  const probeDeclared = [{ protocol: 'probe', version: 1, kinds: [{ name: 'probe/kind', members: ['alpha', 'beta'] }] }]
+  const probeKinds = [
+    { name: 'probe/kind', members: ['alpha', 'beta'] },
+    { name: 'never/declared', members: [] },
+  ]
+  for (const [label, ledger, declared] of [
+    ['a kind the code declares but the ledger omits', probeLedger([]), probeDeclared],
+    ['a member the code accepts but the ledger omits', probeLedger([{ name: 'probe/kind', members: ['alpha'] }]), probeDeclared],
+    ['a member the ledger lists but the parser refuses', probeLedger([{ name: 'probe/kind', members: ['alpha', 'beta', 'ghost'] }]), probeDeclared],
+    ['a kind the ledger lists but the code does not declare', probeLedger(probeKinds), probeDeclared],
+    ['a protocol the ledger names and no code declares', { protocols: [...probeLedger(probeKinds).protocols, { protocol: 'ghost', version: 1, kinds: [], subject: 's', producedBy: 'p', readBy: 'r' }] }, probeDeclared],
+    ['a ledger row written as a bare kind name, the shape that could not see a member', probeLedger(['probe/kind']), probeDeclared],
+    ['a ledger row with no member set at all', probeLedger([{ name: 'probe/kind' }]), probeDeclared],
+  ]) {
+    const findings = inventoryFindingsWith(ledger, declared)
     if (findings.length === 0) {
       missed += 1
       console.log(`  FAIL  protocol-inventory did not fire on ${label}`)
     } else {
       console.log(`  ok    protocol-inventory fired on ${label} (${findings.length} findings)`)
+    }
+  }
+
+  // The member set is read out of the parser's own refusal, so the reading itself must be able to
+  // fail in both directions: a parser that accepts the probe has no closure at all, and a parser
+  // that refuses without naming a set is one the gate cannot see. Both are findings, never silence.
+  for (const [label, parse] of [
+    ['a parser that accepts a member no kind declares', () => ({})],
+    [
+      'a parser that refuses without naming its closed set',
+      () => {
+        throw new Error('this payload is refused, but nothing here says what it accepts')
+      },
+    ],
+  ]) {
+    const declared = [{ protocol: 'probe', version: 1, kinds: [{ name: 'probe/kind', members: acceptedMembers({ parse }, 'probe/kind') }] }]
+    const findings = inventoryFindingsWith(probeLedger([{ name: 'probe/kind', members: ['alpha'] }]), declared)
+    if (findings.length === 0) {
+      missed += 1
+      console.log(`  FAIL  protocol-inventory did not fire on ${label}`)
+    } else {
+      console.log(`  ok    protocol-inventory fired on ${label} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
+    }
+  }
+
+  // The sweep is what replaced the regex, so the sweep itself needs a leg that proves it can see a
+  // declaration the text cannot: a module that declares on a registry it built for itself, with the
+  // call spelled `X['declare'](…)`. It is a data: module rather than a file so the probe writes
+  // nothing to the tree. Its site is not a protocol.ts, and its shape is in no ledger row.
+  const sneakModule = `data:text/javascript,${encodeURIComponent(
+    `import { ProtocolRegistry } from ${JSON.stringify(new URL('../src/protocol/registry.ts', import.meta.url).href)}
+const PRIVATE = new ProtocolRegistry()
+PRIVATE['declare']('sneak', 1, { initialState: {}, kinds: { 'sneak/leaked': { guarantees: { appended: true }, emitter: () => 'scheduler', parse: () => ({}), reduce: state => state } } })
+export const concealed = PRIVATE.kindsOf('sneak', 1)
+export function declareBrokenProtocol() { throw new Error('this declarer wants something else in place') }
+`,
+  )}`
+  const sneaked = await declaredProtocols([{ name: 'a synthetic module', url: new URL(sneakModule) }])
+  const sweepFindings = [...sneaked.refusals, ...declarationSiteFindings(sneaked.sites), ...inventoryFindingsWith(readLedger(), sneaked.declared)]
+  if (sweepFindings.length === 0) {
+    missed += 1
+    console.log("  FAIL  the declaration sweep did not fire on a bracket-spelled declaration on a module's own registry")
+  } else {
+    console.log(`  ok    the declaration sweep observed it (${sweepFindings.length} findings)`)
+  }
+  // Its other branch, which must not be silence either: a declarer that refuses the registry the
+  // gate hands it leaves the inventory unable to say what it declares.
+  if (sneaked.refusals.length === 0) {
+    missed += 1
+    console.log('  FAIL  the declaration sweep did not report a declarer that refused its registry')
+  } else {
+    console.log(`  ok    the declaration sweep reported a refused declarer (${sneaked.refusals.length} finding)`)
+  }
+
+  // The text net under the sweep has a leg too, and it states its own limit: it fires on the dot
+  // spelling, which is the one the round-three bypass did *not* use.
+  for (const [label, source, expected] of [
+    ['a dot-spelled declaration in a module no load reached', 'const registry = new ProtocolRegistry()\nregistry.declare("sneak", 1, {})\n', 1],
+    ['the same declaration spelled with brackets', "const registry = new ProtocolRegistry()\nregistry['declare']('sneak', 1, {})\n", 0],
+  ]) {
+    const findings = declarationTextFindings('src/__probe_declare.ts', source)
+    if (findings.length === expected) {
+      console.log(`  ok    the text net handled ${label} (${expected} finding${expected === 1 ? '' : 's'})`)
+    } else {
+      missed += 1
+      console.log(`  FAIL  the text net reported ${findings.length} findings on ${label}, expected ${expected}`)
     }
   }
 
@@ -797,11 +1214,28 @@ if (PROBE) {
 } else {
   const files = sourceFiles()
   const raw = new Map(files.map(file => [file, readFileSync(join(ROOT, file), 'utf8')]))
-  DECLARED = await declaredProtocols()
+  const sweep = await declaredProtocols()
+  DECLARED = sweep.declared
   const results = scan(files, { raw, code: new Map([...raw].map(([file, text]) => [file, codeOnly(text)])) })
-  for (const finding of declarationSitesOutsideProtocolModules()) results.find(result => result.name === 'protocol-inventory')?.findings.push(finding)
+  const inventory = results.find(result => result.name === 'protocol-inventory')
+  // The sweep's own verdicts, which are not detector findings: a declarer this gate could not ask,
+  // where a declaration was written, and the text net under the modules no load accounted for. A
+  // file the sweep did observe is not handed to the net, so one spelling is not reported twice.
+  const observedSites = new Set(sweep.sites.map(entry => entry.site))
+  const unaccounted = files.filter(file => file.startsWith('src/') && !/(^|\/)protocol\.ts$/.test(file) && !observedSites.has(file))
+  for (const finding of [...sweep.refusals, ...declarationSiteFindings(sweep.sites), ...declarationSitesOutsideProtocolModules(unaccounted)])
+    inventory?.findings.push(finding)
   let failed = 0
   console.log(`gates: ${DETECTORS.length} gates over ${files.length} files\n`)
+  // Coverage is stated rather than implied. The first line is a property of the mechanism itself, so
+  // it prints on every run: the parser answers for the members it reads at the top level, and a
+  // nested closed shape is only reachable by synthesising a valid payload, which this is not. The
+  // second is about this run: these modules could not be imported and asked, so their declarations
+  // are the one thing below that is matched by text instead of observed.
+  console.log('  note  protocol-inventory reads a kind\'s payload members from its parser; a member added inside a nested shape (contract.criteria[], revision, …) is not part of that comparison')
+  if (sweep.unloaded.length > 0)
+    console.log(`  note  protocol-inventory could not load ${sweep.unloaded.length} module(s) (${sweep.unloaded.join(', ')}); their declarations are read as text, not observed`)
+  console.log('')
   for (const { name, findings } of results) {
     if (findings.length === 0) {
       console.log(`  ok    ${name}`)
