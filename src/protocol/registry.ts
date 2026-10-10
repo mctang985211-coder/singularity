@@ -7,9 +7,12 @@
  * 1. **Guarantees compose.** Durability, business atomicity, conditional update and pure
  *    derivation are different dimensions; a kind names the ones it needs. `derived` is the only
  *    one that forbids persistence, because derived state is folded from persisted facts.
- * 2. **The payload is parsed once, at the boundary.** Each kind declares its own parser, so a
- *    closed shape is a property of the kind rather than a convention each reducer re-checks.
- *    Parsing runs before the emitter resolves, so an emitter function never sees a malformed body.
+ * 2. **The payload is parsed once, at the boundary.** Each kind declares its own closed member set
+ *    and its own parser, so a closed shape is a property of the kind rather than a convention each
+ *    reducer re-checks. Parsing runs before the emitter resolves, so an emitter function never sees a
+ *    malformed body. The declared set is the enforced one: it is applied before the parser runs, so
+ *    there is one source for what a payload may carry, and a reader that is not the parser — the
+ *    protocol inventory — can compare it with the ledger instead of inferring it from behaviour.
  * 3. **The emitter is declared, never supplied.** Each kind names the trusted role that may
  *    produce it — a literal role, or a function of the parsed payload when the role *is* the
  *    implementation (a verifier's verdict belongs to that verifier). A caller passes no author,
@@ -22,7 +25,7 @@
  * @module singularity-core/protocol/registry
  */
 
-import type { Envelope } from './envelope.ts'
+import { assertClosedKeys, type Envelope } from './envelope.ts'
 import { refuse } from './refusal.ts'
 
 /**
@@ -40,8 +43,82 @@ export interface Guarantees {
   readonly derived?: boolean
 }
 
+/**
+ * A closed member set: the payload members one kind accepts, as a value rather than a behaviour.
+ *
+ * A set that is a value can be read, compared and printed by something that is not the parser — which
+ * is the whole reason it is a value. Round four's gate inferred a kind's member set by handing its
+ * parser a family of payloads and reading the set out of the refusal; that made the gate a program
+ * modelling another program's runtime, and it was wrong for every parser whose accepted set depended
+ * on anything the family never sampled. There is now exactly one source, and it is enforced.
+ */
+export type MemberSet = readonly string[]
+
+/**
+ * The closed shapes *inside* one payload, by the payload member that holds each: `{}` says, in one
+ * place, that this payload closes no shape inside itself.
+ *
+ * A value here is the set the parser enforces for that member — its own members, or each element's
+ * when the member is a list. A shape *inside* a nested shape (each `contract.criteria[]` entry, say)
+ * is closed by the reader that declares it, so one level is all a payload member names.
+ */
+type NestedSets = Readonly<Record<string, MemberSet>>
+
+/**
+ * The mark `defineKind` leaves on a rule, so the registry can refuse one that skipped it.
+ *
+ * A rule built by hand could declare a member set nothing enforces, and the inventory would then be
+ * comparing the ledger with a promise the parse boundary never kept. The mark is not exported, so the
+ * only way to carry it is to have gone through `defineKind`; a rule without it is refused by name.
+ */
+const DECLARED = Symbol('defineKind')
+
 /** The closed guarantee vocabulary. An undeclared key is refused, like any other closed shape. */
 const GUARANTEE_KEYS = ['appended', 'atomicFact', 'conditional', 'derived'] as const
+
+/** One declared member set, refused unless it is a set of distinct non-empty names. */
+function assertMemberSet(set: unknown, where: string): void {
+  // An empty set is a shape, not an omission: a payload that accepts nothing but is still an object.
+  if (!Array.isArray(set))
+    refuse('malformed-declaration', `${where} must be an array of member names, got ${set === null ? 'null' : typeof set}`)
+  const seen = new Set<string>()
+  for (const name of set as readonly unknown[]) {
+    if (typeof name !== 'string' || name.length === 0)
+      refuse('malformed-declaration', `${where} names ${JSON.stringify(name ?? null)}, which is not a member name; a closed set is a list of non-empty strings`)
+    if (seen.has(name as string)) refuse('malformed-declaration', `${where} names ${JSON.stringify(name)} twice; a closed set names each member once`)
+    seen.add(name as string)
+  }
+}
+
+/**
+ * One kind's declared shape, refused unless the declaration can be enforced and read.
+ *
+ * The nested keys are checked against the payload's own members because the declaration is a
+ * statement about *this* payload: a key that names nothing in it is a typo, and a typo is exactly the
+ * kind of second source this interface exists to remove.
+ */
+function assertDeclaredShape(rule: KindRule<unknown>, where: string): void {
+  if ((rule as { readonly [DECLARED]?: true })[DECLARED] !== true)
+    refuse(
+      'malformed-declaration',
+      `${where} was not built by defineKind, so nothing enforces the member set it declares; a declaration is only one source when the boundary closes the payload with it`,
+    )
+  if (rule.members === undefined) return
+  assertMemberSet(rule.members, `${where} declares its payload members`)
+  const nested = rule.nested as unknown
+  if (nested === undefined)
+    refuse('malformed-declaration', `${where} declares payload members and no nested shape set; state it as {}, so a kind that closes no inner shape says so`)
+  if (nested === null || typeof nested !== 'object' || Array.isArray(nested))
+    refuse('malformed-declaration', `${where} declares a nested shape set that is not a record of member sets`)
+  for (const [member, set] of Object.entries(nested as Record<string, unknown>)) {
+    if (!rule.members.includes(member))
+      refuse(
+        'malformed-declaration',
+        `${where} declares a closed shape inside ${JSON.stringify(member)}, which is not one of its payload members (${rule.members.join(', ') || 'none'})`,
+      )
+    assertMemberSet(set, `${where}'s closed shape inside ${JSON.stringify(member)}`)
+  }
+}
 
 function assertGuarantees(guarantees: Guarantees, where: string): void {
   const record = guarantees as unknown as Record<string, unknown>
@@ -70,34 +147,72 @@ function assertGuarantees(guarantees: Guarantees, where: string): void {
 /** What the framework needs from one kind, with the payload type erased. */
 export interface KindRule<State> {
   readonly guarantees: Guarantees
+  /**
+   * The payload's closed member set, declared once.
+   *
+   * When a kind declares one, this is the value the parse boundary enforces and the value the protocol
+   * inventory compares with the ledger, so the two cannot disagree: there is nothing to sample and
+   * nothing to sample wrongly. A kind that declares none is a shape the inventory reports rather than
+   * compares, and a kind in the ledger's surface that declares none is a finding.
+   */
+  readonly members?: MemberSet
+  /** The closed shapes inside the payload, by member; `{}` when the parser closes none. */
+  readonly nested?: NestedSets
   /** The trusted role that may emit this kind, given the parsed payload. */
   readonly emitter: (payload: unknown) => string
   /** Parse and close the payload, or refuse it by name. */
   readonly parse: (raw: unknown, where: string) => unknown
   /** Advance the state, or refuse. Reads the parsed payload. */
   readonly reduce: (state: State, envelope: Envelope, payload: unknown) => State
+  /** The mark `defineKind` leaves; the registry refuses a rule that carries none. */
+  readonly [DECLARED]?: true
 }
 
 /**
  * Define one kind, keeping the payload type through to the reducer.
  *
  * This is the single place the framework's heterogeneous registry erases a payload type, so no
- * reducer has to cast its own body.
+ * reducer has to cast its own body — and the single place a kind's closed member set is declared.
+ *
+ * **The declared set is the enforced one.** `members` is applied to the raw payload here, before the
+ * parser below runs, so no parser can accept a member outside it: a payload carrying one is refused
+ * by the declaration itself, whatever the parser would have done with it. That is what makes the set
+ * one source rather than two — the parser reads no top-level list at all, and the inventory reads
+ * this value instead of asking the parser what it accepts.
+ *
+ * `nested` is passed to the parser, which uses it for the shapes it closes itself: the same constant
+ * cannot be a second version of the truth in the body and in the declaration if the body reads the
+ * declaration.
+ *
+ * A kind that declares no set is not closed by this wrapper, and the protocol inventory reports it
+ * rather than comparing it. Every kind in this tree's ledger surface declares one; a declaration is
+ * what makes a shape part of that surface at all.
  */
-export function defineKind<State, Payload>(spec: {
+export function defineKind<State, Payload, Nested extends NestedSets = Record<string, never>>(spec: {
   readonly guarantees: Guarantees
+  readonly members?: MemberSet
+  readonly nested?: Nested
   readonly emitter: string | ((payload: Payload) => string)
-  readonly parse: (raw: unknown, where: string) => Payload
+  readonly parse: (raw: unknown, where: string, nested: Nested) => Payload
   readonly reduce: (state: State, envelope: Envelope, payload: Payload) => State
 }): KindRule<State> {
   const declared = spec.emitter
   const emitter: (payload: unknown) => string =
     typeof declared === 'string' ? (): string => declared : (raw: unknown): string => declared(raw as Payload)
+  const closed = spec.members
   return {
+    ...(closed === undefined ? {} : { members: closed }),
+    ...(spec.nested === undefined ? {} : { nested: spec.nested }),
     guarantees: spec.guarantees,
     emitter,
-    parse: spec.parse,
+    // A non-object payload is left to the parser, whose own reader names the type it wanted.
+    parse: (raw, where) => {
+      if (closed !== undefined && raw !== null && typeof raw === 'object' && !Array.isArray(raw))
+        assertClosedKeys(raw as Record<string, unknown>, closed, where)
+      return spec.parse(raw, where, spec.nested as Nested)
+    },
     reduce: (state, envelope, payload) => spec.reduce(state, envelope, payload as Payload),
+    [DECLARED]: true,
   }
 }
 
@@ -146,6 +261,7 @@ export class ProtocolRegistry {
       assertGuarantees(rule.guarantees, where)
       if (typeof rule.emitter !== 'function' || typeof rule.parse !== 'function' || typeof rule.reduce !== 'function')
         refuse('malformed-declaration', `${where} must declare an emitter, a payload parser and a reducer (use defineKind)`)
+      assertDeclaredShape(rule as KindRule<unknown>, where)
       if (rule.guarantees.conditional === true) conditionalClaimant = protocol
     }
 

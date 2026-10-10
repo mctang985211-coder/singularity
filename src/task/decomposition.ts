@@ -25,7 +25,7 @@
 
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
-import { defineKind, type KindRule } from '../protocol/registry.ts'
+import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import type { TaskContract } from './contract.ts'
 import type { TaskState } from './protocol.ts'
 import { record, requireContractOf, text } from './shape.ts'
@@ -134,13 +134,15 @@ export function assertDecompositionAgainst(children: readonly DecompositionChild
  * to reason about.
  */
 export function decomposedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { children: readonly DecompositionChild[] }>({
+  return defineKind<TaskState, { children: readonly DecompositionChild[] }, { children: MemberSet }>({
     guarantees: { appended: true, atomicFact: true },
+    members: DECOMPOSITION_MEMBERS,
+    // Each element of `children` is closed by `child` with the one set named here.
+    nested: { children: DECOMPOSITION_CHILD_MEMBERS },
     emitter,
     parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
-      assertClosedKeys(source, DECOMPOSITION_MEMBERS, where)
       const rawChildren = source['children']
       if (!Array.isArray(rawChildren) || rawChildren.length === 0)
         refuse('malformed-payload', `${where}.children must declare at least one sub-task; an empty decomposition plans nothing`)

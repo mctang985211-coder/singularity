@@ -31,7 +31,7 @@
  * @module singularity-core/environment/protocol
  */
 
-import { assertClosedKeys, assertLosslessJson, digestOf } from '../protocol/envelope.ts'
+import { assertLosslessJson, digestOf } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
 
@@ -145,14 +145,16 @@ export function declareEnvironmentProtocol(registry: ProtocolRegistry): void {
   registry.declare<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, {
     initialState: { environmentId: '', revisions: {} },
     kinds: {
-      [ENVIRONMENT_KINDS.revisionCreated]: defineKind<EnvironmentState, { revisionId: string; manifest: unknown }>({
+      [ENVIRONMENT_KINDS.revisionCreated]: defineKind<EnvironmentState, { revisionId: string; manifest: unknown }, {}>({
         guarantees: APPENDED,
+        members: ['revisionId', 'manifest'],
+        nested: {},
         emitter: ENVIRONMENT_ROLE,
         parse: raw => {
           const where = `${ENVIRONMENT_KINDS.revisionCreated} payload`
           const source = record(raw, where)
-          // Closed: a payload cannot even offer a `contentDigest` member, let alone be believed.
-          assertClosedKeys(source, ['revisionId', 'manifest'], where)
+          // Closed by the declaration above: a payload cannot even offer a `contentDigest` member,
+          // let alone be believed.
           if (!Object.hasOwn(source, 'manifest'))
             refuse('malformed-payload', `${where} is missing "manifest"; a revision without content is not a revision`)
           const manifest = source['manifest']
@@ -200,15 +202,16 @@ export function declareEnvironmentProtocol(registry: ProtocolRegistry): void {
           }
         },
       }),
-      [ENVIRONMENT_KINDS.pointerSwitched]: defineKind<EnvironmentState, { expected: string; to: string }>({
+      [ENVIRONMENT_KINDS.pointerSwitched]: defineKind<EnvironmentState, { expected: string; to: string }, {}>({
         // The stack's one conditional update, declared as such: the guarantee is what the
         // `single-conditional-owner` gate and the registry's `conditionalOwner` read.
         guarantees: { appended: true, conditional: true, atomicFact: true },
+        members: ['expected', 'to'],
+        nested: {},
         emitter: PUBLISHER_ROLE,
         parse: raw => {
           const where = `${ENVIRONMENT_KINDS.pointerSwitched} payload`
           const source = record(raw, where)
-          assertClosedKeys(source, ['expected', 'to'], where)
           // `to` is a revision id, so it is non-empty; `expected` may be empty and then names the
           // empty head. A payload cannot offer a content digest here: what `to` names is resolved
           // against the revisions this environment actually created.

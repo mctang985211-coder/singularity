@@ -47,8 +47,12 @@ const MAX_SOURCE_LINES = 400
  * Durability belongs to DSH session persistence, so this codebase writes nothing.
  *
  * The rule is absolute rather than an allowlist with one exemption: the previous system kept a
- * self-built durable log beside the upstream one, and re-implemented a worse version of a barrier,
- * a lease and a replay it already had.
+ * self-built durable log beside the upstream one and re-implemented a worse barrier, lease and replay.
+ *
+ * **This gate is not a passive reader, and a bypass is not passive either.** The sweep imports every
+ * module under `src`, so a write placed at module level does not merely pass the gate: it *performs
+ * the write*, during the gate run, before anybody reads the output. Round five's bypass —
+ * `createRequire(import.meta.url)('node:fs/promises').writeFile(…)` — did exactly that.
  */
 const READ_ONLY_FS = new Set([
   'readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'statSync', 'lstat', 'lstatSync',
@@ -281,7 +285,6 @@ const PUBLISHED_WITHOUT_CONSUMER = new Set([
   'src/strategy/protocol.ts\0EditAsset',
   'src/strategy/protocol.ts\0RoundDecisionRecord',
   'src/strategy/view.ts\0SlotView',
-  'src/task/bubble.ts\0BUBBLE_INPUT_MEMBERS',
   'src/task/bubble.ts\0BUBBLE_MEMBERS',
   'src/task/bubble.ts\0WORKSPACE_MEMBERS',
   'src/task/commands.ts\0AgentCommands',
@@ -289,8 +292,6 @@ const PUBLISHED_WITHOUT_CONSUMER = new Set([
   'src/task/commands.ts\0TaskCommandOptions',
   'src/task/commands.ts\0TaskCommands',
   'src/task/commands.ts\0VerdictInput',
-  'src/task/contract.ts\0CONTRACT_MEMBERS',
-  'src/task/contract.ts\0CRITERION_MEMBERS',
   'src/task/contract.ts\0VerifierRegistry',
   'src/task/decomposition.ts\0assertDecompositionAgainst',
   'src/task/decomposition.ts\0DECOMPOSITION_CHILD_MEMBERS',
@@ -305,6 +306,9 @@ const PUBLISHED_WITHOUT_CONSUMER = new Set([
   'src/task/view.ts\0RunView',
 ])
 
+/** Filled by the gate before it scans: what the loader says each module exports. */
+let RUNTIME_EXPORTS = new Map()
+
 /**
  * Every export no other module binds, with the two ways a name can still be accounted for.
  *
@@ -316,13 +320,27 @@ const PUBLISHED_WITHOUT_CONSUMER = new Set([
  * `PUBLISHED_WITHOUT_CONSUMER` rather than waved through and checked in both directions. Both the
  * record and the entry point are parameters, so the self-test can hand this function another one of
  * either — the rounds that produced this shape are in `docs/context.md` §11g.
+ *
+ * **What a file exports is asked of the file, not of a pattern.** Round five's H-1 re-opened the dead
+ * export in three spellings this reader never enumerated — `export const a = 1, b = 2`, `export
+ * default …` and `export const {a, b} = {…}` — because the list came from a regex. The sweep already
+ * imports every module under `src`, so the loader's namespace is read here too, and the text scan
+ * keeps what the loader erases (type-only exports) and the modules it cannot load.
+ *
+ * **A binding is a consumer; the entry point's own bindings are not.** A name the entry point binds
+ * but does not publish is reachable by no consumer inside this tree or outside it, so its import of a
+ * dead export — round five's cheapest bypass, which needed no entry in the record — is not a use. A
+ * barrel that computed a published value out of an import is judged the same way, and this gate
+ * cannot tell that case apart from the bypass: it says so rather than implying otherwise.
  */
-function unreferencedExportFindings(files, views, recorded) {
+function unreferencedExportFindings(files, views, recorded, runtime = RUNTIME_EXPORTS) {
   const findings = []
   const used = new Set()
   const forwarded = []
+  const bound = new Map()
   for (const file of files) {
     const { bound: names, namespaces } = moduleBindings(views.code.get(file), views.raw.get(file))
+    bound.set(file, names)
     for (const specifier of namespaces) {
       if (resolveModule(file, specifier, files) === undefined) continue
       findings.push(`${file} imports ${specifier} as a namespace binding; a namespace hides which of that module's exports are used, so no count can be made — name what you use`)
@@ -331,7 +349,7 @@ function unreferencedExportFindings(files, views, recorded) {
       const target = resolveModule(file, specifier, files)
       if (target === undefined) continue
       if (forwarding) forwarded.push({ from: file, to: target, name })
-      else used.add(`${target}\0${name}`)
+      else if (file !== ENTRY_POINT) used.add(`${target}\0${name}`)
     }
   }
   // A forwarded name is used exactly when the module doing the forwarding is used, so the uses walk
@@ -358,7 +376,14 @@ function unreferencedExportFindings(files, views, recorded) {
   const declared = new Set()
   for (const file of files) {
     if (!file.startsWith('src/')) continue
-    for (const name of declaredExports(views.code.get(file))) {
+    // What this file exports is the union of two readers that miss different things: the loader's
+    // namespace is where a *value* export's spelling cannot hide (`b` in `export const a = 1, b = 2`,
+    // `default`, a destructuring), and the text scan is where a *type* export lives, because the
+    // loader erases types. Names the file forwards are neither: a forwarding binds another module's
+    // name and is counted where that name is declared.
+    const forwards = new Set((bound.get(file) ?? []).filter(entry => entry.forwarding).map(entry => entry.name))
+    const exported = [...new Set([...declaredExports(views.code.get(file)), ...(runtime.get(file) ?? [])])].filter(name => !forwards.has(name))
+    for (const name of exported) {
       const key = `${file}\0${name}`
       declared.add(key)
       if (used.has(key)) continue
@@ -458,6 +483,13 @@ const DETECTORS = [
           else if (FS_MODULES.has(literal[2]))
             findings.push(`${at} dynamically imports ${literal[2]}; no module may write durably; DSH session persistence owns the medium`)
         }
+        // A module loader built at run time is the dynamic import's door without the wall: a call
+        // expression, not an import, so no import rule can read what it loads. Like a namespace
+        // binding it is refused rather than pattern-matched — there is no readable spelling of
+        // "load anything".
+        const loader = views.code.get(file).search(/\bcreateRequire\b/)
+        if (loader >= 0)
+          findings.push(`${file}:${lineOf(views.code.get(file), loader)} builds a module loader with createRequire; no module may write durably, and a loader no import rule can read is how createRequire(import.meta.url)('node:fs/promises').writeFile(…) wrote a real file while every gate stayed green`)
       }
       return findings
     },
@@ -611,16 +643,19 @@ const DETECTORS = [
  * These are ratchets, not targets: the numbers came down from 0.88 and 7.8 by deleting restatement,
  * and may only go down further; lowering one is part of the commit that makes it possible.
  *
- * The one stated allowance: the ratchet sits at 1.90 while the measurement that set it was 1.8713,
- * about 245 lines. This file is charged like any other evidence, so with no allowance every detector
- * and its probe leg would have to be paid for by deleting a line of evidence — pressure against
- * adding detectors, on the only file whose job is to keep the others honest. It shrinks first: lower
- * the ratchet to the measured value whenever a commit makes that possible. The two ledgers added
- * after round four (`tree-baseline.json` + `tree-inventory`, and `mutation-baseline.json` +
- * `scripts/mutate.mjs` + `mutation-claims`) spent most of it; the measured ratio is stated in this
+ * The one stated allowance: the ratchet sits at 1.88 while the commit that set it measured 1.8761
+ * (16,281 lines of evidence against 8,678 of source), about 34 lines — one detector and one probe leg,
+ * which is what round five's export legs cost.
+ * This file is charged like any other evidence, so with no allowance every detector and its probe leg
+ * would have to be paid for by deleting a line of evidence — pressure against adding detectors, on the
+ * only file whose job is to keep the others honest. It shrinks first: lower the ratchet to the
+ * measured value whenever a commit makes that possible. Round five took it down from 1.90 (measured
+ * 1.8985): the sampling walk and its four answer kinds were deleted, and that paid for the member-set
+ * declarations in `src` and for two closes of its own — the export reader and the durability rule —
+ * with their probe legs, which is what this allowance exists for. The measured ratio is stated in this
  * gate's finding whenever it is over the ratchet, so it is not copied here where it could drift.
  */
-const EVIDENCE_BUDGET = 1.9
+const EVIDENCE_BUDGET = 1.88
 const SPEC_DENSITY = 5
 
 /**
@@ -829,68 +864,22 @@ function mutationClaimFindings(ledger, docs = readDocs(), textOf = file => readF
   return findings
 }
 
-/** A payload member no kind declares. The gate hands it to every parser, so the refusal names the closed set. */
-const PROBE_MEMBER = '__gate_unknown_member__'
-
-/** One parser's answer to one payload: a named member set, an acceptance, or a refusal that names nothing. */
-function parseSample(rule, payload, where) {
-  try {
-    rule.parse(payload, where)
-  } catch (error) {
-    const closed = /shape is closed \(known: ([^)]*)\)/.exec(String(error?.message ?? error))
-    if (closed !== null)
-      return {
-        kind: 'closed',
-        members: closed[1]
-          .split(',')
-          .map(name => name.trim())
-          .filter(name => name.length > 0)
-          .sort(),
-      }
-    return { kind: 'unreadable', detail: `${error?.message ?? error}`.split('\n')[0] }
-  }
-  return { kind: 'open' }
-}
-
 /**
- * What one kind's parser accepts at the top level, read out of the parser itself.
+ * What one kind accepts, read from the declaration rather than from its behaviour.
  *
- * `KindRule.parse` is a function, so a member set is not a value anybody can read, and a list written
- * beside it would be a second copy free to drift from the check that is enforced. The one honest
- * source is the refusal the parser already produces: a payload carrying a member no kind declares is
- * refused by `assertClosedKeys` with `the shape is closed (known: …)` — the parser naming its own set.
+ * `KindRule.members` is a value and it is the value the parse boundary enforces, so the inventory
+ * compares the ledger with the same value the log enforces. Rounds three to five each inferred this
+ * set by handing the parser payloads and reading the refusal out of it, and the fifth round showed
+ * the mechanism's own limit: a parser that closes its payload over a member it never *names* is
+ * reached by no sample of a family that grows only by named members. Sampling is gone rather than
+ * patched — the gate reads what a kind declares, and `defineKind` is where that declaration is
+ * applied to the payload, so a declaration and its parser cannot disagree.
  *
- * What a parser accepts is a function of the payload, so one payload is a sample of one branch, not
- * the member set (round four committed and folded a fact carrying a member the ledger did not list,
- * because the single sample took the other branch). The reading is therefore a family of payloads —
- * the probe member alone, then beside every member the parser has named so far, until the answer
- * stops changing — and two disagreeing samples are a finding, not an average.
- *
- * Four answers, all meaningful: the closed set; `open` when the parser accepted the probe member, so
- * the payload is not closed at all; `unreadable` when it refused without naming a set, so the gate
- * cannot see the shape; and `conditional` when the samples disagree, so there is no one shape to see.
- *
- * What the family still does not reach, printed on every run because it is a limit of the mechanism:
- * a parser conditioned on anything outside the payload's own member set — a module-level flag, the
- * `where` argument, a clock — is reached by no sample at all, and a condition on a *value*
- * (`source['runId'] === 'special'`) only by the probe value that happens to match it.
+ * Two answers, both meaningful: the declared set, or a finding when the declaration names none —
+ * a shape the gate cannot read must not read as a shape that is fine.
  */
-function acceptedMembers(rule, where) {
-  const payloadOf = names => Object.fromEntries([...names.map(name => [name, { [PROBE_MEMBER]: true }]), [PROBE_MEMBER, true]])
-  const samples = []
-  const named = []
-  for (let round = 0; round < 4; round += 1) {
-    const answer = parseSample(rule, payloadOf(named), where)
-    if (answer.kind !== 'closed')
-      return samples.length === 0 ? answer : { kind: 'conditional', samples: [...samples, `${answer.kind}: ${answer.detail ?? ''}`.trim()] }
-    if (samples.length > 0 && samples[0].join(',') !== answer.members.join(','))
-      return { kind: 'conditional', samples: [...samples, answer.members] }
-    samples.push(answer.members)
-    const grown = answer.members.filter(name => !named.includes(name))
-    if (grown.length === 0) break
-    named.push(...grown)
-  }
-  return { kind: 'closed', members: samples[0] }
+function declaredMembers(rule) {
+  return Array.isArray(rule?.members) ? [...rule.members].sort() : undefined
 }
 
 /**
@@ -1040,20 +1029,22 @@ function retryUrl(url) {
  *    so "this process cannot load it" is not a place the sweep stops;
  * 2. **every exported `declare*Protocol` is then called** with a registry of this gate's own, which is
  *    how a declaration that only happens when somebody calls it is seen at all;
- * 3. **each observed kind's member set is read from its parser** (`acceptedMembers` above), so a
- *    payload member is part of the declared surface the ledger compares.
+ * 3. **each observed kind's member set is read from its declaration** (`declaredMembers` above), which
+ *    is the same value `defineKind` applied to the payload at the parse boundary. Nothing is sampled,
+ *    so a payload member cannot be part of a shape the sweep sees and absent from what the log closes.
  *
  * What this does not catch, written down because a gate's coverage is part of what it promises:
  *
  * - a declaration that only runs on a path no load reaches — the sweep sees module load and the
- *   exported declarers, not every call site. The text net below is the fallback, and that net matches
- *   the dot spelling only, which round three defeated with `X['declare'](…)`;
+ *   exported declarers, not every call site. The per-declaration text net below is the fallback, and
+ *   that net matches the dot spelling only, which round three defeated with `X['declare'](…)`;
  * - a module that cannot be loaded even with its host imports stubbed (a syntax error, a host import
  *   this scan did not see, a module that needs a real host to evaluate): reported as a finding naming
  *   exactly that, instead of being covered by the spelling-dependent net quietly;
- * - a payload member added to a **nested** closed shape (`contract.criteria[]`, `revision`, …): the
- *   parser answers for the members it reads at the top level, and reaching a nested set would mean
- *   synthesising a valid payload for every kind, which is a different and much larger mechanism.
+ * - the members inside a **nested** closed shape (`contract.criteria[]`, `revision`, …): a kind
+ *   declares those too (`nested`), and the ledger records the top-level set only, so the comparison
+ *   below reaches the payload's own members and not the shapes inside it. Each nested set is the one
+ *   its own reader enforces, and the run's note names them.
  */
 async function declaredProtocols(
   modules = sourceFiles()
@@ -1073,14 +1064,25 @@ async function declaredProtocols(
       protocol,
       version,
       site: declarationSite(),
-      kinds: Object.entries(spec.kinds).map(([name, rule]) => ({ name, members: acceptedMembers(rule, `${protocol}@${version} ${name}`) })),
+      kinds: Object.entries(spec.kinds).map(([name, rule]) => ({
+        name,
+        members: declaredMembers(rule),
+        nested: rule?.nested === undefined ? undefined : Object.keys(rule.nested).sort(),
+      })),
     })
     return published
   }
+  /** The names each module actually exports, from the namespace the loader built for it. */
+  const exportsByModule = new Map()
   const attempt = async module => {
     LOADING = module.name
     try {
-      return { loaded: await import(module.url.href) }
+      const loaded = await import(module.url.href)
+      // The module's own export list, which is the truth no spelling can hide: `export const a = 1,
+      // b = 2`, `export default …` and `export const {a, b} = …` all appear here, and the text scan
+      // below enumerates exactly one of the three. Keyed by the name this sweep calls the module.
+      exportsByModule.set(module.name, Object.keys(loaded).sort())
+      return { loaded }
     } catch (error) {
       return { error: `${error?.message ?? error}`.split('\n')[0] }
     } finally {
@@ -1146,7 +1148,7 @@ async function declaredProtocols(
   const sites = [...byKey.values()]
     .flatMap(entry => [...entry.sites].map(site => ({ site, protocol: entry.protocol, version: entry.version, kinds: [...entry.kinds.keys()].sort() })))
     .sort((left, right) => (left.site < right.site ? -1 : left.site > right.site ? 1 : order(left, right)))
-  return { declared, sites, unloaded, stubbed, refusals }
+  return { declared, sites, unloaded, stubbed, refusals, exports: exportsByModule }
 }
 
 /**
@@ -1178,26 +1180,44 @@ function declarationSiteFindings(sites) {
 }
 
 /**
- * The net under the sweep: the modules the sweep could not account for are read as text instead.
+ * The net under the sweep, **per declaration rather than per file**.
  *
- * Spelling-dependent on purpose — the round-three bypass wrote `X['declare'](…)` *because* this
- * pattern cannot see it — so it is the fallback and never the mechanism. It covers the two groups the
- * sweep leaves open: a module this process cannot load, and a module whose `declare` call only runs on
- * a path no load reaches. A file the sweep did observe is not scanned, so one spelling is reported
- * once, and the finding says it is a text match rather than implying more.
+ * Round five's BL-4: the net skipped every file one observed declaration appeared in, and every
+ * a slice's `protocol.ts` is such a file, so a declaration no load reached inside one was invisible while the
+ * run's note claimed that a declaration on an unreached path was covered. The honest unit is the
+ * declaration: a file that contains an observed declaration is not a file whose every declaration was
+ * observed.
+ *
+ * What can be counted is the declarations a file spells in the **dot** form — the form this net can
+ * see at all — against the declarations the sweep observed *at that site*. More text than observation
+ * is a surplus no load reached, reported by name and count. Two things it still does not catch, said
+ * here because the note has to be true:
+ *
+ * - a declaration spelled another way (`X['declare'](…)`), which the text cannot count at all — that
+ *   spelling is why the sweep loads modules instead of trusting a net;
+ * - a surplus the sweep *did* observe through an exported declarer, which is not a surplus at all:
+ *   the declaration was read even though no load reached it.
+ *
+ * So a file that carries declarations is only ever checked in the dot spelling, and the run prints
+ * which sites those are rather than implying that an observed file is a fully observed one.
  */
-function declarationSitesOutsideProtocolModules(files) {
+function unaccountedDeclarationFindings(files, observedBySite, read = file => readFileSync(join(ROOT, file), 'utf8')) {
   const findings = []
-  for (const file of files) findings.push(...declarationTextFindings(file, readFileSync(join(ROOT, file), 'utf8')))
+  for (const file of files) {
+    if (!file.startsWith('src/')) continue
+    const text = declarationTextSites(codeOnly(read(file)))
+    const observed = observedBySite.get(file) ?? 0
+    if (text > observed)
+      findings.push(
+        `${file} spells ${text} declaration(s) in the dot form and this run observed ${observed} at that site; the surplus is a declaration no load reached, and the text net sees the dot spelling only — a declaration belongs in a slice's protocol.ts, where the sweep sees it whatever it is called`,
+      )
+  }
   return findings
 }
 
-/** The rule itself, over one file's text, so the self-test can watch it fire and see what it misses. */
-function declarationTextFindings(file, source) {
-  if (/\.declare\s*[<(]/.exec(codeOnly(source)) === null) return []
-  return [
-    `${file} declares a protocol by text and no load reached it, so this is a text match on the dot spelling rather than an observation; a declaration belongs in a slice's protocol.ts, where the sweep sees it whatever it is called`,
-  ]
+/** How many declarations one file's code spells in the dot form — the form this net can see. */
+function declarationTextSites(code) {
+  return (code.match(/\.declare\s*[<(]/g) ?? []).length
 }
 
 /**
@@ -1264,35 +1284,30 @@ function inventoryFindingsWith(ledger, declared) {
 }
 
 /**
- * One kind's payload against its ledger row: the parser's own member set, both directions.
+ * One kind's declared payload against its ledger row, both directions.
  *
- * The unreadable answers are findings rather than silence, because a shape the gate cannot read must
- * not read as a shape that is fine. `conditional` is the round-four case: two payloads got different
- * answers, so the accepted set is a function of the payload and the ledger can only be compared with a
- * set that exists — reporting one branch's answer is how an unlisted member stayed invisible.
+ * The comparison reads `KindRule.members` — the declaration `defineKind` applies to the payload at the
+ * parse boundary — so the two can only disagree when somebody edited the ledger, which is exactly what
+ * a recorded act is for. A kind whose declaration names no set is a finding rather than silence: a
+ * shape this gate cannot read must not read as a shape that is fine.
  */
 function shapeFindings(where, kind, line) {
-  if (kind.members.kind === 'open')
+  if (!Array.isArray(kind.members))
     return [
-      `${where} ${kind.name} accepted a payload member no kind declares (${PROBE_MEMBER}); its payload is not closed, so a member can be added with nothing to notice it`,
+      `${where} ${kind.name} declares no payload member set, so the ledger cannot be compared with what the parse boundary enforces; a kind declares its closed members once, through defineKind`,
     ]
-  if (kind.members.kind === 'unreadable')
+  if (kind.nested === undefined)
     return [
-      `${where} ${kind.name} refused the gate's probe without naming its closed member set (${kind.members.detail}); the gate reads a shape's members out of that refusal, so the check that refuses an unknown member has to come before the rest of the parser`,
+      `${where} ${kind.name} declares its payload members and says nothing about the closed shapes inside them; declare it as {}, so a kind that closes no inner shape says so and one that closes a shape names it`,
     ]
-  if (kind.members.kind === 'conditional')
-    return [
-      `${where} ${kind.name} answers with a different accepted member set depending on the payload it is given (${kind.members.samples
-        .map(sample => (Array.isArray(sample) ? `known: ${sample.join(', ')}` : sample))
-        .join(' vs ')}); the accepted set is a function of the payload, so no single member set can be compared with the ledger and the ledger cannot say what this shape is — close the payload unconditionally, or bump the version and declare the members it accepts`,
-    ]
+  const declared = [...kind.members].sort()
   const listed = [...line.members].sort()
-  const missing = kind.members.members.filter(member => !listed.includes(member))
-  const extra = listed.filter(member => !kind.members.members.includes(member))
+  const missing = declared.filter(member => !listed.includes(member))
+  const extra = listed.filter(member => !declared.includes(member))
   const findings = []
   if (missing.length > 0)
     findings.push(
-      `${where} ${kind.name} accepts the payload member(s) ${missing.join(', ')}, which its ledger row does not list; a payload member is part of the declared shape, so adding one is a version bump and a recorded act`,
+      `${where} ${kind.name} declares the payload member(s) ${missing.join(', ')}, which its ledger row does not list; a payload member is part of the declared shape, so adding one is a version bump and a recorded act`,
     )
   if (extra.length > 0)
     findings.push(`${where} ${kind.name}'s ledger row lists the payload member(s) ${extra.join(', ')}, which the parser does not accept; the ledger records the shape that exists`)
@@ -1647,6 +1662,10 @@ if (PROBE) {
     ['a dynamic import of a module that is not a filesystem one', `export const load = async () => await import('./helper.ts')\n`, 0],
     ['a filesystem module spelled as a concatenation of two literals', `export const load = async () => (await import('node:' + 'fs/promises')).writeFile\n`, 1],
     ['a filesystem module spelled as a template literal', 'export const load = async () => (await import(`node:fs/promises`)).writeFile\n', 1],
+    // Round five's H-2: a module loader built at run time. The write it performed happened during the
+    // sweep that is supposed to notice it, which is why the construct is refused outright.
+    ['a module loader built with createRequire, which no import rule can read', "import { createRequire } from 'node:module'\nexport const load = () => createRequire(import.meta.url)('node:fs/promises').writeFile\n", 1],
+    ['a read-only filesystem import, which is what the rule allows', "import { readFile } from 'node:fs/promises'\nexport const read = readFile\n", 0],
   ]) {
     const probeFiles = ['src/__probe_import.ts', 'src/__probe_import_use.ts']
     const probeRaw = new Map([
@@ -1722,24 +1741,57 @@ if (PROBE) {
     }
   }
 
+  // Round five's H-1, as legs. Three spellings the text scan never enumerated are given the runtime
+  // export list the sweep would have read, and each must be reported: this is what "asked of the file,
+  // not of a pattern" means, and without the runtime names all three would be invisible. The last two
+  // legs are the cheapest bypass — the entry point binding a dead export so the record need not be
+  // touched — which is a use in an ordinary module and no use at all in the barrel that is the boundary.
+  for (const [label, source, runtime, user, barrel, expected] of [
+    ['both declarators of one export statement, which the text scan read as one', 'export const a = 1, b = 2\n', ['a', 'b'], '', false, 2],
+    ['a default export, whose name is not written after the keyword', 'export default 1\n', ['default'], '', false, 1],
+    ['a destructuring export, whose names are inside the pattern', 'export const {a, b} = { a: 1, b: 2 }\n', ['a', 'b'], '', false, 2],
+    ['the entry point importing the dead export, which no consumer can reach', 'export const orphan = 1\n', ['orphan'], `import { orphan } from './__probe_export.ts'\nvoid orphan\n`, true, 1],
+    ['the same import in a module that is not the entry point', 'export const orphan = 1\n', ['orphan'], `import { orphan } from './__probe_export.ts'\nvoid orphan\n`, false, 0],
+  ]) {
+    const entry = barrel ? 'src/index.ts' : 'src/__probe_export_user.ts'
+    const probeFiles = [entry, 'src/__probe_export.ts']
+    const probeRaw = new Map([
+      [entry, user],
+      ['src/__probe_export.ts', source],
+    ])
+    const findings = unreferencedExportFindings(
+      probeFiles,
+      { raw: probeRaw, code: new Map([...probeRaw].map(([file, text]) => [file, codeOnly(text)])) },
+      new Set(),
+      new Map([['src/__probe_export.ts', runtime]]),
+    )
+    if (findings.length === expected) {
+      console.log(`  ok    no-unreferenced-export reported ${findings.length} finding${findings.length === 1 ? '' : 's'} on ${label}`)
+    } else {
+      missed += 1
+      console.log(`  FAIL  no-unreferenced-export reported ${findings.length} findings on ${label}, expected ${expected}: ${findings.join(' | ')}`)
+    }
+  }
+
   // The inventory reads the registries and the ledger, so its probe hands the check synthetic
   // declarations and synthetic ledgers: each way the two can disagree must produce a finding, or the
   // ledger protects nothing. A kind's member set is a case of its own, because that is the half the
   // ledger could not see.
   const probeLedger = kinds => ({ protocols: [{ protocol: 'probe', version: 1, subject: 's', producedBy: 'p', readBy: 'r', kinds }] })
-  const probeDeclared = [{ protocol: 'probe', version: 1, kinds: [{ name: 'probe/kind', members: { kind: 'closed', members: ['alpha', 'beta'] } }] }]
+  const probeDeclared = members => [{ protocol: 'probe', version: 1, kinds: [{ name: 'probe/kind', members }] }]
   const probeKinds = [
     { name: 'probe/kind', members: ['alpha', 'beta'] },
     { name: 'never/declared', members: [] },
   ]
   for (const [label, ledger, declared] of [
-    ['a kind the code declares but the ledger omits', probeLedger([]), probeDeclared],
-    ['a member the code accepts but the ledger omits', probeLedger([{ name: 'probe/kind', members: ['alpha'] }]), probeDeclared],
-    ['a member the ledger lists but the parser refuses', probeLedger([{ name: 'probe/kind', members: ['alpha', 'beta', 'ghost'] }]), probeDeclared],
-    ['a kind the ledger lists but the code does not declare', probeLedger(probeKinds), probeDeclared],
-    ['a protocol the ledger names and no code declares', { protocols: [...probeLedger(probeKinds).protocols, { protocol: 'ghost', version: 1, kinds: [], subject: 's', producedBy: 'p', readBy: 'r' }] }, probeDeclared],
-    ['a ledger row written as a bare kind name, the shape that could not see a member', probeLedger(['probe/kind']), probeDeclared],
-    ['a ledger row with no member set at all', probeLedger([{ name: 'probe/kind' }]), probeDeclared],
+    ['a kind the code declares but the ledger omits', probeLedger([]), probeDeclared(['alpha', 'beta'])],
+    ['a member the code declares but the ledger omits', probeLedger([{ name: 'probe/kind', members: ['alpha'] }]), probeDeclared(['alpha', 'beta'])],
+    ['a member the ledger lists but the code does not declare', probeLedger([{ name: 'probe/kind', members: ['alpha', 'beta', 'ghost'] }]), probeDeclared(['alpha', 'beta'])],
+    ['a kind the ledger lists but the code does not declare', probeLedger(probeKinds), probeDeclared(['alpha', 'beta'])],
+    ['a protocol the ledger names and no code declares', { protocols: [...probeLedger(probeKinds).protocols, { protocol: 'ghost', version: 1, kinds: [], subject: 's', producedBy: 'p', readBy: 'r' }] }, probeDeclared(['alpha', 'beta'])],
+    ['a ledger row written as a bare kind name, the shape that could not see a member', probeLedger(['probe/kind']), probeDeclared(['alpha', 'beta'])],
+    ['a ledger row with no member set at all', probeLedger([{ name: 'probe/kind' }]), probeDeclared(['alpha', 'beta'])],
+    ['a kind whose declaration names no member set', probeLedger([{ name: 'probe/kind', members: [] }]), probeDeclared(undefined)],
   ]) {
     const findings = inventoryFindingsWith(ledger, declared)
     if (findings.length === 0) {
@@ -1750,37 +1802,38 @@ if (PROBE) {
     }
   }
 
-  // The member set is read out of the parser's own refusal, so the reading itself must be able to
-  // fail in every direction: a parser that accepts the probe has no closure at all, a parser that
-  // refuses without naming a set is one the gate cannot see, and — round four's BL-3 — a parser whose
-  // accepted set depends on the payload has no single answer to read. All three are findings, never
-  // silence, and the third is asserted to be the *conditional* answer rather than any finding at all,
-  // because "some finding appeared" is not the same claim as "the conditional parser was refused".
-  const conditionalParse = raw => {
-    const source = raw
-    const known = source['revision'] !== undefined ? ['revision', 'runId', 'operatorNote'] : ['revision', 'runId']
-    for (const key of Object.keys(source)) if (!known.includes(key)) throw new Error(`the shape is closed (known: ${known.join(', ')})`)
-    return source
-  }
-  for (const [label, parse, expected] of [
-    ['a parser that accepts a member no kind declares', () => ({}), 'open'],
-    [
-      'a parser that refuses without naming its closed set',
-      () => {
-        throw new Error('this payload is refused, but nothing here says what it accepts')
-      },
-      'unreadable',
-    ],
-    ['the conditional parser that walked through the one-payload sample', conditionalParse, 'conditional'],
-  ]) {
-    const answer = acceptedMembers({ parse }, 'probe/kind')
-    const declared = [{ protocol: 'probe', version: 1, kinds: [{ name: 'probe/kind', members: answer }] }]
-    const findings = inventoryFindingsWith(probeLedger([{ name: 'probe/kind', members: ['alpha'] }]), declared)
-    if (answer.kind !== expected || findings.length === 0) {
+  // The mechanism itself, which is what replaced the sampling: the declared set is the value the
+  // parse boundary enforces, so a parser that would accept anything is still refused a member the
+  // declaration does not name — and a rule that skipped `defineKind` is refused by name, because a
+  // declared set nothing enforces is the second source this round removed. Both legs are behavioural
+  // rather than a reading of the gate's own source, and both fail loudly.
+  {
+    const { defineKind, ProtocolRegistry: Registry } = await import(new URL('../src/protocol/registry.ts', import.meta.url).href)
+    const rule = defineKind({ guarantees: { appended: true }, members: ['alpha'], nested: {}, emitter: 'writer', parse: raw => raw, reduce: state => state })
+    const registry = new Registry()
+    registry.declare('probe', 1, { initialState: {}, kinds: { 'probe/kind': rule } })
+    let refused
+    try {
+      rule.parse({ alpha: 1, beta: 2 }, 'probe/kind payload')
+      refused = 'accepted'
+    } catch (error) {
+      refused = error?.refusal?.code ?? 'unreadable'
+    }
+    const declared = [{ protocol: 'probe', version: 1, kinds: [{ name: 'probe/kind', members: [...rule.members] }] }]
+    const findings = inventoryFindingsWith(probeLedger([{ name: 'probe/kind', members: ['alpha', 'beta'] }]), declared)
+    const bare = { guarantees: { appended: true }, members: ['alpha'], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }
+    let unbranded
+    try {
+      new Registry().declare('probe', 2, { initialState: {}, kinds: { 'probe/kind': bare } })
+      unbranded = 'accepted'
+    } catch (error) {
+      unbranded = error?.refusal?.code ?? 'unreadable'
+    }
+    if (refused !== 'malformed-payload' || findings.length !== 1 || unbranded !== 'malformed-declaration') {
       missed += 1
-      console.log(`  FAIL  protocol-inventory did not fire on ${label} (read ${answer.kind}, expected ${expected}, ${findings.length} findings)`)
+      console.log(`  FAIL  the declared member set was not the enforced one (an undeclared member: ${refused}; ledger comparison: ${findings.length} findings; a rule that skipped defineKind: ${unbranded})`)
     } else {
-      console.log(`  ok    protocol-inventory read ${answer.kind} and fired on ${label} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
+      console.log(`  ok    defineKind closed the payload with the declared set (an undeclared member refused, ${findings.length} ledger finding) and the registry refused a rule that skipped it`)
     }
   }
 
@@ -1789,9 +1842,9 @@ if (PROBE) {
   // call spelled `X['declare'](…)`. It is a data: module rather than a file so the probe writes
   // nothing to the tree. Its site is not a protocol.ts, and its shape is in no ledger row.
   const sneakModule = `data:text/javascript,${encodeURIComponent(
-    `import { ProtocolRegistry } from ${JSON.stringify(new URL('../src/protocol/registry.ts', import.meta.url).href)}
+    `import { defineKind, ProtocolRegistry } from ${JSON.stringify(new URL('../src/protocol/registry.ts', import.meta.url).href)}
 const PRIVATE = new ProtocolRegistry()
-PRIVATE['declare']('sneak', 1, { initialState: {}, kinds: { 'sneak/leaked': { guarantees: { appended: true }, emitter: () => 'scheduler', parse: () => ({}), reduce: state => state } } })
+PRIVATE['declare']('sneak', 1, { initialState: {}, kinds: { 'sneak/leaked': defineKind({ guarantees: { appended: true }, members: [], nested: {}, emitter: () => 'scheduler', parse: () => ({}), reduce: state => state }) } })
 export const concealed = PRIVATE.kindsOf('sneak', 1)
 export function declareBrokenProtocol() { throw new Error('this declarer wants something else in place') }
 `,
@@ -1825,9 +1878,9 @@ export function declareBrokenProtocol() { throw new Error('this declarer wants s
   writeFileSync(
     hostImportModule,
     `import { Nothing } from '@deepseek-ai/dsh-not-installed'
-import { ProtocolRegistry } from ${JSON.stringify(new URL('../src/protocol/registry.ts', import.meta.url).href)}
+import { defineKind, ProtocolRegistry } from ${JSON.stringify(new URL('../src/protocol/registry.ts', import.meta.url).href)}
 const HIDDEN = new ProtocolRegistry()
-HIDDEN['declare']('hidden', 1, { initialState: {}, kinds: { 'hidden/leaked': { guarantees: { appended: true }, emitter: () => 'scheduler', parse: () => ({}), reduce: state => state } } })
+HIDDEN['declare']('hidden', 1, { initialState: {}, kinds: { 'hidden/leaked': defineKind({ guarantees: { appended: true }, members: [], nested: {}, emitter: () => 'scheduler', parse: () => ({}), reduce: state => state }) } })
 void Nothing
 void HIDDEN.kindsOf('hidden', 1)
 `,
@@ -1846,19 +1899,25 @@ void HIDDEN.kindsOf('hidden', 1)
   }
   rmSync(hostImportRoot, { recursive: true, force: true })
 
-  // The text net under the sweep has a leg too, and it states its own limit rather than reporting a
-  // miss as a success: it fires on the dot spelling, which is the one the round-three bypass did *not*
-  // use, and the bracket spelling is the reason the sweep loads the module instead of trusting a net.
-  for (const [label, source, expected, judged] of [
-    ['a dot-spelled declaration in a module no load reached', 'const registry = new ProtocolRegistry()\nregistry.declare("sneak", 1, {})\n', 1, 'the text net fired on the dot spelling'],
-    ["the same declaration spelled with brackets", "const registry = new ProtocolRegistry()\nregistry['declare']('sneak', 1, {})\n", 0, 'the text net does not match the bracket spelling — a stated limit of the net, which is why the sweep loads the module'],
+  // The declaration net's legs. Round five's BL-4 was that this net skipped a whole file once one of
+  // its declarations had been observed, and every a slice's `protocol.ts` is such a file — so the legs below
+  // are the review's own shape: one declaration observed, a second one in the same file that no load
+  // reached. The last leg is the stated limit rather than a success: the same second declaration
+  // spelled with brackets is counted by nothing, which is why the sweep loads the module instead.
+  const declaredOnce = 'const registry = new ProtocolRegistry()\nregistry.declare("first", 1, {})\n'
+  const bracketSecond = "const registry = new ProtocolRegistry()\nregistry.declare('first', 1, {})\nregistry['declare']('second', 1, {})\n"
+  for (const [label, source, observed, expected] of [
+    ['a dot-spelled declaration in a module no load reached', 'const registry = new ProtocolRegistry()\nregistry.declare("hidden", 1, {})\n', 0, 1],
+    ['the one declaration a file spells, observed at that site', declaredOnce, 1, 0],
+    ["the review's construction: an unreached second declaration in an observed protocol.ts", `${declaredOnce}export function zzHidden(r) {\n  r.declare('zzhidden', 1, {})\n}\n`, 1, 1],
+    ['the same second declaration spelled with brackets, which the net cannot count — its stated limit', bracketSecond, 1, 0],
   ]) {
-    const findings = declarationTextFindings('src/__probe_declare.ts', source)
+    const findings = unaccountedDeclarationFindings(['src/__probe_declare.ts'], new Map([['src/__probe_declare.ts', observed]]), () => source)
     if (findings.length === expected) {
-      console.log(`  ok    ${judged} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
+      console.log(`  ok    the per-declaration net reported ${findings.length} finding${findings.length === 1 ? '' : 's'} on ${label}`)
     } else {
       missed += 1
-      console.log(`  FAIL  the text net reported ${findings.length} findings on ${label}, expected ${expected}`)
+      console.log(`  FAIL  the per-declaration net reported ${findings.length} findings on ${label}, expected ${expected}`)
     }
   }
 
@@ -1926,29 +1985,34 @@ void HIDDEN.kindsOf('hidden', 1)
   const raw = new Map(files.map(file => [file, readFileSync(join(ROOT, file), 'utf8')]))
   const sweep = await declaredProtocols()
   DECLARED = sweep.declared
+  RUNTIME_EXPORTS = sweep.exports
   const results = scan(files, { raw, code: new Map([...raw].map(([file, text]) => [file, codeOnly(text)])) })
   const inventory = results.find(result => result.name === 'protocol-inventory')
   // The sweep's own verdicts, which are not detector findings: a declarer this gate could not ask,
-  // where a declaration was written, and the text net under the modules no load accounted for. A
-  // file the sweep did observe is not handed to the net, so one spelling is not reported twice.
-  const observedSites = new Set(sweep.sites.map(entry => entry.site))
-  // Every module under `src` no load and no observation accounted for, `protocol.ts` included: a
-  // module whose declaration was observed needs no text net, and one whose was not needs it whether
-  // or not its name is conventional. Filtering `protocol.ts` out here is what left the one place a
-  // declaration conventionally lives with no coverage at all when it could not be loaded.
-  const unaccounted = files.filter(file => file.startsWith('src/') && !observedSites.has(file))
-  for (const finding of [...sweep.refusals, ...declarationSiteFindings(sweep.sites), ...declarationSitesOutsideProtocolModules(unaccounted), ...unobservableDeclarations(sweep.unloaded)])
+  // where a declaration was written, and the declarations each file spells that no load reached. The
+  // text net is per declaration, not per file: a file the sweep observed one declaration in is still
+  // a file whose other declarations may never have run, and every a slice's `protocol.ts` is such a file.
+  const observedBySite = new Map()
+  for (const entry of sweep.sites) observedBySite.set(entry.site, (observedBySite.get(entry.site) ?? 0) + 1)
+  for (const finding of [
+    ...sweep.refusals,
+    ...declarationSiteFindings(sweep.sites),
+    ...unaccountedDeclarationFindings(files, observedBySite),
+    ...unobservableDeclarations(sweep.unloaded),
+  ])
     inventory?.findings.push(finding)
   let failed = 0
   console.log(`gates: ${DETECTORS.length} gates over ${files.length} files\n`)
-  // Coverage is stated rather than implied. The first two lines are properties of the mechanism
-  // itself, so they print on every run: the parser answers for the members it reads at the top level,
-  // and a declaration no load reaches is covered by a text net that matches one spelling. The third
-  // is about this run: a module this process could not import as written was imported again with the
-  // host packages it names stubbed, so what it declares at load time is observed, not matched.
-  console.log('  note  protocol-inventory reads a kind\'s payload members from its parser; a member added inside a nested shape (contract.criteria[], revision, …) is not part of that comparison')
-  console.log('  note  protocol-inventory refuses a parser whose accepted member set depends on the payload it is given; a parser conditioned on anything outside the payload\'s own members is reached by no sample')
-  console.log('  note  protocol-inventory observes a declaration when a module loads or an exported declarer is called; a declaration that runs only on a path no load reaches is covered by the text net alone, which matches the dot spelling and not the bracket one')
+  // Coverage is stated rather than implied, and every line here is a property of the mechanism that
+  // can be checked against it. The first two print on every run: the comparison reads each kind's
+  // declared member set, which is the value the parse boundary enforces, and a nested shape is
+  // declared beside it and not compared with the ledger. The third and fourth are about this run:
+  // which sites carried a declaration, and which modules had to be loaded with their host packages
+  // stubbed. The declaration net's own boundary is on the third line, where a reader meets it.
+  const declaredNested = DECLARED.flatMap(entry => entry.kinds.filter(kind => (kind.nested ?? []).length > 0).map(kind => `${entry.protocol}@${entry.version} ${kind.name} (${kind.nested.join(', ')})`))
+  console.log('  note  protocol-inventory compares the ledger with each kind\'s declared member set, which is the same value defineKind applies to the payload before its parser runs; there is nothing to sample, so a parser whose accepted set would depend on the payload cannot make the declared set wrong')
+  console.log(`  note  protocol-inventory compares each kind's declared payload members with its ledger row and does not reach inside a payload: the closed shapes a kind declares there (${declaredNested.join('; ') || 'none in this tree'}) are enforced by the readers that name them, one level down`)
+  console.log(`  note  protocol-inventory observes a declaration when a module loads or an exported declarer is called, and counts each src file's dot-spelled declarations against what was observed at that site; ${observedBySite.size} site(s) carried a declaration this run (${[...observedBySite.keys()].sort().join(', ')}), and in those files a declaration spelled otherwise (X['declare'](…)) on a path no load reaches is reached by neither mechanism`)
   if (PUBLISHED_WITHOUT_CONSUMER.size > 0)
     console.log(`  note  no-unreferenced-export records ${PUBLISHED_WITHOUT_CONSUMER.size} name(s) that src/index.ts publishes and nothing in this tree binds; the record may only shrink, and a name published without being recorded in it is a finding`)
   // The behavioural gates' own limit, printed with the other coverage claims rather than left to the

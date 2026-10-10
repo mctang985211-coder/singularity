@@ -40,7 +40,6 @@
  * @module singularity-core/release/protocol
  */
 
-import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
 import { SCHEDULER_ROLE } from '../task/protocol.ts'
@@ -69,6 +68,10 @@ export const RELEASE_KINDS = {
   approved: 'release/approved',
 } as const
 
+const APPENDED = { appended: true } as const
+const DRAFTED_MEMBERS = ['revisionId', 'draftDigest'] as const
+const APPROVED_MEMBERS = ['revisionId', 'draftDigest', 'approvedBy', 'approvalId'] as const
+
 /**
  * The folded state of one environment's release: the draft on the table, and its approval.
  *
@@ -93,7 +96,6 @@ export interface ReleaseState {
   readonly approvalId?: string
 }
 
-const APPENDED = { appended: true } as const
 const SHA256 = /^[0-9a-f]{64}$/
 
 function record(raw: unknown, where: string): Record<string, unknown> {
@@ -137,13 +139,14 @@ export function declareReleaseProtocol(registry: ProtocolRegistry): void {
   registry.declare<ReleaseState>(RELEASE_PROTOCOL, RELEASE_VERSION, {
     initialState: { revisionId: '', draftDigest: '' },
     kinds: {
-      [RELEASE_KINDS.drafted]: defineKind<ReleaseState, { revisionId: string; draftDigest: string }>({
+      [RELEASE_KINDS.drafted]: defineKind<ReleaseState, { revisionId: string; draftDigest: string }, {}>({
         guarantees: APPENDED,
+        members: DRAFTED_MEMBERS,
+        nested: {},
         emitter: SCHEDULER_ROLE,
         parse: raw => {
           const where = `${RELEASE_KINDS.drafted} payload`
           const source = record(raw, where)
-          assertClosedKeys(source, ['revisionId', 'draftDigest'], where)
           return { revisionId: text(source, 'revisionId', where), draftDigest: digest(source, 'draftDigest', where) }
         },
         reduce: (state, envelope, payload) => {
@@ -167,14 +170,16 @@ export function declareReleaseProtocol(registry: ProtocolRegistry): void {
       }),
       [RELEASE_KINDS.approved]: defineKind<
         ReleaseState,
-        { revisionId: string; draftDigest: string; approvedBy: string; approvalId: string }
+        { revisionId: string; draftDigest: string; approvedBy: string; approvalId: string },
+        {}
       >({
         guarantees: APPENDED,
+        members: APPROVED_MEMBERS,
+        nested: {},
         emitter: APPROVER_ROLE,
         parse: raw => {
           const where = `${RELEASE_KINDS.approved} payload`
           const source = record(raw, where)
-          assertClosedKeys(source, ['revisionId', 'draftDigest', 'approvedBy', 'approvalId'], where)
           return {
             revisionId: text(source, 'revisionId', where),
             draftDigest: digest(source, 'draftDigest', where),

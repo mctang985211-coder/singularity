@@ -25,9 +25,9 @@
 
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
-import { defineKind, type KindRule } from '../protocol/registry.ts'
+import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import type { RevisionRef } from '../task/protocol.ts'
-import { digest, record, text } from '../task/shape.ts'
+import { digest, record, revisionRef, REVISION_MEMBERS } from '../task/shape.ts'
 import type { RoundState } from './protocol.ts'
 
 /**
@@ -59,7 +59,6 @@ export interface RoundPlan {
 }
 
 const APPENDED = { appended: true } as const
-const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as const
 const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
 const OPENED_MEMBERS = ['round', 'incumbent', 'candidates', 'explorationSlots', 'editBudget', 'historyCutoff', 'caliber', 'weights'] as const
 
@@ -71,17 +70,6 @@ export function count(source: Record<string, unknown>, key: string, where: strin
   return value
 }
 
-/** The revision a pin names. The digest is read too: an id alone can be re-pointed. */
-export function revisionRef(raw: unknown, where: string): RevisionRef {
-  const source = record(raw, where)
-  assertClosedKeys(source, REVISION_MEMBERS, where)
-  return {
-    environmentId: text(source, 'environmentId', where),
-    revisionId: text(source, 'revisionId', where),
-    digest: digest(source, 'digest', where),
-  }
-}
-
 /** The plan a round must have to accept a submission or a decision, or a refusal naming why not. */
 export function requirePlan(state: RoundState, where: string): RoundPlan {
   const plan = state.plan
@@ -90,9 +78,8 @@ export function requirePlan(state: RoundState, where: string): RoundPlan {
   return plan
 }
 
-function openedPayload(raw: unknown, where: string): RoundPlan {
+function openedPayload(raw: unknown, where: string, nested: { readonly incumbent: MemberSet; readonly weights: MemberSet }): RoundPlan {
   const source = record(raw, where)
-  assertClosedKeys(source, OPENED_MEMBERS, where)
   const round = count(source, 'round', where)
   if (round < 1) refuse('malformed-payload', `${where}.round must be an integer >= 1, got ${round}; round numbering is explicit, never a count of history entries`)
   const candidates = count(source, 'candidates', where)
@@ -105,7 +92,7 @@ function openedPayload(raw: unknown, where: string): RoundPlan {
     )
 
   const weights = record(source['weights'], `${where}.weights`)
-  assertClosedKeys(weights, WEIGHTS_MEMBERS, `${where}.weights`)
+  assertClosedKeys(weights, nested.weights, `${where}.weights`)
   const quality = weights['quality']
   const cost = weights['cost']
   for (const [key, value] of [['quality', quality], ['cost', cost]] as const) {
@@ -117,7 +104,7 @@ function openedPayload(raw: unknown, where: string): RoundPlan {
 
   return {
     round,
-    incumbent: revisionRef(source['incumbent'], `${where}.incumbent`),
+    incumbent: revisionRef(source['incumbent'], `${where}.incumbent`, nested.incumbent),
     candidates,
     explorationSlots,
     editBudget: count(source, 'editBudget', where),
@@ -136,10 +123,14 @@ function openedPayload(raw: unknown, where: string): RoundPlan {
  * round pools, and the caliber is what makes every pooled measurement agree on it.
  */
 export function openedKind(kind: string, emitter: string): KindRule<RoundState> {
-  return defineKind<RoundState, RoundPlan>({
+  return defineKind<RoundState, RoundPlan, { incumbent: MemberSet; weights: MemberSet }>({
     guarantees: APPENDED,
+    members: OPENED_MEMBERS,
+    // The incumbent is a revision pin and the weights are a record; both are closed below, out of
+    // this declaration, by the sets named here.
+    nested: { incumbent: REVISION_MEMBERS, weights: WEIGHTS_MEMBERS },
     emitter,
-    parse: (raw, where) => openedPayload(raw, where),
+    parse: (raw, where, nested) => openedPayload(raw, where, nested),
     reduce: (state, envelope, payload) => {
       if (state.plan !== undefined)
         refuse(

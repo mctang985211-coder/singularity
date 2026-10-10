@@ -32,11 +32,11 @@
 
 import { assertClosedKeys, digestOf, type Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
-import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
-import { inputList, type Bubble, type BubbleInput } from '../task/bubble.ts'
-import { assertCriterionShape, type AcceptanceCriterion } from '../task/contract.ts'
+import { defineKind, type MemberSet, type ProtocolRegistry } from '../protocol/registry.ts'
+import { BUBBLE_INPUT_MEMBERS, inputList, type Bubble, type BubbleInput } from '../task/bubble.ts'
+import { assertCriterionShape, criterionList, CRITERION_MEMBERS, type AcceptanceCriterion } from '../task/contract.ts'
 import { SCHEDULER_ROLE, verifierRoleOf, type RevisionRef } from '../task/protocol.ts'
-import { digest, maybeText, record, text } from '../task/shape.ts'
+import { digest, maybeText, record, revisionRef, REVISION_MEMBERS, text } from '../task/shape.ts'
 
 export const MEASURE_PROTOCOL = 'measure'
 /**
@@ -54,6 +54,10 @@ export const MEASURE_KINDS = {
   trialMissed: 'trial/missed',
   constraintChecked: 'constraint/checked',
 } as const
+
+const RUN_MEMBERS = ['taskId', 'runId'] as const
+const METRIC_MEMBERS = ['measured', 'unit', 'direction'] as const
+const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
 
 /** Where a measurement happens: the run whose declared bubble every trial is bound to. */
 export interface EvaluationRun {
@@ -146,13 +150,6 @@ export interface EvaluationState {
   readonly checks: readonly ConstraintCheck[]
 }
 
-/** One revision pin: the environment it is unique in, the id, and the content it names. */
-function revisionRef(raw: unknown, where: string): RevisionRef {
-  const source = record(raw, where)
-  assertClosedKeys(source, ['environmentId', 'revisionId', 'digest'], where)
-  return { environmentId: text(source, 'environmentId', where), revisionId: text(source, 'revisionId', where), digest: digest(source, 'digest', where) }
-}
-
 /** A finite number: `NaN` and `Infinity` would not survive the digest a fact's identity is taken over. */
 function finite(source: Record<string, unknown>, key: string, where: string): number {
   const value = source[key]
@@ -166,39 +163,26 @@ function maybeFinite(source: Record<string, unknown>, key: string, where: string
   return Object.hasOwn(source, key) ? finite(source, key, where) : undefined
 }
 
-function metricOf(raw: unknown, where: string): EvaluationMetric {
+function metricOf(raw: unknown, where: string, members: MemberSet = METRIC_MEMBERS): EvaluationMetric {
   const source = record(raw, where)
-  assertClosedKeys(source, ['measured', 'unit', 'direction'], where)
+  assertClosedKeys(source, members, where)
   const direction = source['direction']
   if (direction !== 'higher' && direction !== 'lower')
     refuse('malformed-payload', `${where}.direction must be "higher" or "lower", got ${JSON.stringify(direction ?? null)}`)
   return { measured: assertCriterionShape(source['measured'], `${where}.measured`), unit: text(source, 'unit', where), direction }
 }
 
-function weightsOf(raw: unknown, where: string): EvaluationWeights {
+function weightsOf(raw: unknown, where: string, members: MemberSet = WEIGHTS_MEMBERS): EvaluationWeights {
   const source = record(raw, where)
-  assertClosedKeys(source, ['quality', 'cost'], where)
+  assertClosedKeys(source, members, where)
   const quality = finite(source, 'quality', where)
   // A plan that weights quality at nothing cannot rank candidates by quality, so it measures nothing.
   if (quality <= 0) refuse('malformed-payload', `${where}.quality must be greater than 0, got ${String(quality)}`)
   return { quality, cost: finite(source, 'cost', where) }
 }
 
-/** One closed list of criteria with unique ids, read by the contract's own criterion reader. */
-function criterionList(raw: unknown, where: string): readonly AcceptanceCriterion[] {
-  if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of acceptance criteria, got ${raw === null ? 'null' : typeof raw}`)
-  const seen = new Set<string>()
-  return raw.map((entry, index) => {
-    const criterion = assertCriterionShape(entry, `${where}[${index}]`)
-    if (seen.has(criterion.criterionId)) refuse('malformed-contract', `${where} declares "${criterion.criterionId}" twice; a criterion id is stable and unique`)
-    seen.add(criterion.criterionId)
-    return criterion
-  })
-}
-
 function trialOf(raw: unknown, where: string): TrialRecord {
   const source = record(raw, where)
-  assertClosedKeys(source, ['slot', 'quality', 'cost', 'artifactDigest', 'inputDigests', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'], where)
   const cost = maybeFinite(source, 'cost', where)
   const detail = maybeText(source, 'detail', where)
   return {
@@ -216,7 +200,6 @@ function trialOf(raw: unknown, where: string): TrialRecord {
 
 function missedOf(raw: unknown, where: string): MissedTrial {
   const source = record(raw, where)
-  assertClosedKeys(source, ['slot', 'reason', 'verifierRef', 'verifierVersion'], where)
   return {
     slot: finite(source, 'slot', where),
     reason: text(source, 'reason', where),
@@ -227,7 +210,6 @@ function missedOf(raw: unknown, where: string): MissedTrial {
 
 function constraintOf(raw: unknown, where: string): ConstraintCheck {
   const source = record(raw, where)
-  assertClosedKeys(source, ['criterionId', 'met', 'artifactDigest', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'], where)
   const met = source['met']
   if (typeof met !== 'boolean') refuse('malformed-payload', `${where}.met must be a boolean, got ${met === null ? 'null' : typeof met}`)
   const detail = maybeText(source, 'detail', where)
@@ -290,30 +272,33 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
     kinds: {
       [MEASURE_KINDS.evaluationOpened]: defineKind<
         EvaluationState,
-        { baseline: RevisionRef; candidate: RevisionRef; run: EvaluationRun; context: string; metric: EvaluationMetric; weights: EvaluationWeights; trials: number; judgement: readonly AcceptanceCriterion[] }
+        { baseline: RevisionRef; candidate: RevisionRef; run: EvaluationRun; context: string; metric: EvaluationMetric; weights: EvaluationWeights; trials: number; judgement: readonly AcceptanceCriterion[] },
+        { baseline: MemberSet; candidate: MemberSet; run: MemberSet; metric: MemberSet; weights: MemberSet; judgement: MemberSet }
       >({
         guarantees: { appended: true },
+        members: ['baseline', 'candidate', 'run', 'context', 'metric', 'weights', 'trials', 'judgement'],
+        // The shapes inside this payload, by the member that holds each; `judgement[]` is closed by
+        // `contract.ts`'s criterion reader, which enforces the one set named here.
+        nested: { baseline: REVISION_MEMBERS, candidate: REVISION_MEMBERS, run: RUN_MEMBERS, metric: METRIC_MEMBERS, weights: WEIGHTS_MEMBERS, judgement: CRITERION_MEMBERS },
         emitter: SCHEDULER_ROLE,
-        parse: raw => {
-          const where = `${MEASURE_KINDS.evaluationOpened} payload`
+        parse: (raw, where, nested) => {
           const source = record(raw, where)
-          assertClosedKeys(source, ['baseline', 'candidate', 'run', 'context', 'metric', 'weights', 'trials', 'judgement'], where)
           const trials = finite(source, 'trials', where)
           if (!Number.isInteger(trials) || trials < 1)
             refuse('malformed-payload', `${where}.trials must be an integer >= 1, got ${String(trials)}; a plan with no slots has no denominator, so nothing could be reported complete or missing`)
-          const metric = metricOf(source['metric'], `${where}.metric`)
+          const metric = metricOf(source['metric'], `${where}.metric`, nested.metric)
           const judgement = criterionList(source['judgement'], `${where}.judgement`)
           if (judgement.some(criterion => criterion.criterionId === metric.measured.criterionId))
             refuse('malformed-contract', `${where} judges "${metric.measured.criterionId}" as a hard constraint and measures it as the metric; a constraint nobody trades off and a number that is traded off are two criteria`)
           const run = record(source['run'], `${where}.run`)
-          assertClosedKeys(run, ['taskId', 'runId'], `${where}.run`)
+          assertClosedKeys(run, nested.run, `${where}.run`)
           return {
-            baseline: revisionRef(source['baseline'], `${where}.baseline`),
-            candidate: revisionRef(source['candidate'], `${where}.candidate`),
+            baseline: revisionRef(source['baseline'], `${where}.baseline`, nested.baseline),
+            candidate: revisionRef(source['candidate'], `${where}.candidate`, nested.candidate),
             run: { taskId: text(run, 'taskId', `${where}.run`), runId: text(run, 'runId', `${where}.run`) },
             context: digest(source, 'context', where),
             metric,
-            weights: weightsOf(source['weights'], `${where}.weights`),
+            weights: weightsOf(source['weights'], `${where}.weights`, nested.weights),
             trials,
             judgement,
           }
@@ -337,8 +322,10 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
         },
       }),
 
-      [MEASURE_KINDS.trialRecorded]: defineKind<EvaluationState, TrialRecord>({
+      [MEASURE_KINDS.trialRecorded]: defineKind<EvaluationState, TrialRecord, { inputDigests: MemberSet }>({
         guarantees: { appended: true },
+        members: ['slot', 'quality', 'cost', 'artifactDigest', 'inputDigests', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'],
+        nested: { inputDigests: BUBBLE_INPUT_MEMBERS }, // closed by `inputList`, which enforces this one set
         // The role *is* the implementation: a deployment must hold that verifier's identity to emit
         // its numbers, and the log refuses the fact when it does not.
         emitter: payload => verifierRoleOf(payload),
@@ -355,8 +342,10 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
         },
       }),
 
-      [MEASURE_KINDS.trialMissed]: defineKind<EvaluationState, MissedTrial>({
+      [MEASURE_KINDS.trialMissed]: defineKind<EvaluationState, MissedTrial, {}>({
         guarantees: { appended: true },
+        members: ['slot', 'reason', 'verifierRef', 'verifierVersion'],
+        nested: {},
         emitter: payload => verifierRoleOf(payload),
         parse: raw => missedOf(raw, `${MEASURE_KINDS.trialMissed} payload`),
         reduce: (state, envelope, payload) => {
@@ -371,8 +360,10 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
         },
       }),
 
-      [MEASURE_KINDS.constraintChecked]: defineKind<EvaluationState, ConstraintCheck>({
+      [MEASURE_KINDS.constraintChecked]: defineKind<EvaluationState, ConstraintCheck, {}>({
         guarantees: { appended: true },
+        members: ['criterionId', 'met', 'artifactDigest', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'],
+        nested: {},
         emitter: payload => verifierRoleOf(payload),
         parse: raw => constraintOf(raw, `${MEASURE_KINDS.constraintChecked} payload`),
         reduce: (state, envelope, payload) => {

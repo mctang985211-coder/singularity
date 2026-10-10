@@ -10,9 +10,10 @@
  * @module singularity-core/task/shape
  */
 
+import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { TaskContract } from './contract.ts'
-import type { RunState, RunStatus, TaskState } from './protocol.ts'
+import type { RevisionRef, RunState, RunStatus, TaskState } from './protocol.ts'
 
 const DIGEST = /^[0-9a-f]{64}$/
 export function record(raw: unknown, where: string): Record<string, unknown> {
@@ -39,6 +40,22 @@ export function digest(source: Record<string, unknown>, key: string, where: stri
   if (!DIGEST.test(value))
     refuse('malformed-payload', `${where}.${key} must be a sha256 hex content digest, got ${JSON.stringify(value)}`)
   return value
+}
+
+/**
+ * The revision pin, read once for every slice that carries one.
+ *
+ * `task`, `measure` and `strategy` all name the revision a fact is about, and each declared its own
+ * copy of the set until the fifth round made a member set a value: three copies of one shape is three
+ * places a fourth member could appear in one and not the others. The digest is part of it because an
+ * id alone can be re-pointed.
+ */
+export const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as const
+
+export function revisionRef(raw: unknown, where: string, members: readonly string[] = REVISION_MEMBERS): RevisionRef {
+  const source = record(raw, where)
+  assertClosedKeys(source, members, where)
+  return { environmentId: text(source, 'environmentId', where), revisionId: text(source, 'revisionId', where), digest: digest(source, 'digest', where) }
 }
 
 /** The run a fact names, or a refusal naming the run. */

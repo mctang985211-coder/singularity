@@ -19,7 +19,6 @@
  * @module singularity-core/agent/protocol
  */
 
-import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
 
@@ -49,15 +48,16 @@ export function declareAgentProtocol(registry: ProtocolRegistry): void {
   registry.declare<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, {
     initialState: { agentId: '', role: '', sessionId: '', openedAt: '' },
     kinds: {
-      [AGENT_KINDS.opened]: defineKind<AgentState, { agentId: string; role: string; sessionId: string }>({
+      [AGENT_KINDS.opened]: defineKind<AgentState, { agentId: string; role: string; sessionId: string }, {}>({
         guarantees: { appended: true },
+        members: AGENT_OPENED_MEMBERS,
+        nested: {},
         emitter: AGENT_ROLE,
         parse: raw => {
           const where = `${AGENT_KINDS.opened} payload`
           if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
             refuse('malformed-payload', `${where} must be an object, got ${raw === null ? 'null' : Array.isArray(raw) ? 'an array' : typeof raw}`)
           const source = raw as Record<string, unknown>
-          assertClosedKeys(source, AGENT_OPENED_MEMBERS, where)
           const field = (key: string): string => {
             const value = source[key]
             if (typeof value !== 'string' || value.length === 0)

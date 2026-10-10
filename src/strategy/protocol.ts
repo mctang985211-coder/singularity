@@ -83,11 +83,11 @@
 
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
-import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
+import { defineKind, type MemberSet, type ProtocolRegistry } from '../protocol/registry.ts'
 import type { RevisionRef } from '../task/protocol.ts'
-import { record, text } from '../task/shape.ts'
+import { record, revisionRef, REVISION_MEMBERS, text } from '../task/shape.ts'
 import type { Calibration, Outcome } from './decision.ts'
-import { count, openedKind, requirePlan, revisionRef, type RoundPlan } from './plan.ts'
+import { count, openedKind, requirePlan, type RoundPlan } from './plan.ts'
 
 /**
  * The plan's shape is declared in `plan.ts` beside the reader that enforces it, and published here
@@ -160,6 +160,8 @@ const APPENDED = { appended: true } as const
 const EDIT_MEMBERS = ['asset', 'target'] as const
 const OUTCOME_MEMBERS = ['slot', 'admitted', 'reason'] as const
 const CALIBRATION_MEMBERS = ['floor', 'source'] as const
+const SUBMISSION_MEMBERS = ['slot', 'revision', 'evaluationId', 'edits', 'exploratory'] as const
+const DECIDED_MEMBERS = ['winner', 'outcomes', 'calibration'] as const
 
 /** Two revision references name the same content. An id alone is not enough: it can be re-pointed. */
 export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
@@ -173,9 +175,9 @@ export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
  * rule that a band cannot be anonymous — `measured` and `declared` floors are different claims (R06)
  * — has one definition rather than two.
  */
-export function readCalibration(raw: unknown, where: string): Calibration {
+export function readCalibration(raw: unknown, where: string, members: MemberSet = CALIBRATION_MEMBERS): Calibration {
   const source = record(raw, where)
-  assertClosedKeys(source, CALIBRATION_MEMBERS, where)
+  assertClosedKeys(source, members, where)
   const floor = source['floor']
   if (typeof floor !== 'number' || !Number.isFinite(floor) || floor < 0)
     refuse('malformed-payload', `${where}.floor must be a finite number >= 0, got ${JSON.stringify(floor ?? null)}`)
@@ -195,13 +197,13 @@ export function readCalibration(raw: unknown, where: string): Calibration {
  * a caller listing one edit twice would otherwise pass a budget check it did not earn, and a reader
  * could not tell "one change named twice" from "two changes".
  */
-function editList(raw: unknown, where: string): readonly StructuralEdit[] {
+function editList(raw: unknown, where: string, members: MemberSet): readonly StructuralEdit[] {
   if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of {asset, target}, got ${raw === null ? 'null' : typeof raw}`)
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const at = `${where}[${index}]`
     const source = record(entry, at)
-    assertClosedKeys(source, EDIT_MEMBERS, at)
+    assertClosedKeys(source, members, at)
     const asset = source['asset']
     if (typeof asset !== 'string' || !EDIT_ASSETS.includes(asset))
       refuse('malformed-payload', `${at}.asset must be one of ${EDIT_ASSETS.join(', ')}, got ${JSON.stringify(asset ?? null)}`)
@@ -216,9 +218,8 @@ function editList(raw: unknown, where: string): readonly StructuralEdit[] {
 /** The submission payload, before the log stamps who submitted it. */
 type Submission = Omit<CandidateSubmission, 'actor' | 'at'>
 
-function submissionPayload(raw: unknown, where: string): Submission {
+function submissionPayload(raw: unknown, where: string, nested: { readonly edits: MemberSet }): Submission {
   const source = record(raw, where)
-  assertClosedKeys(source, ['slot', 'revision', 'evaluationId', 'edits', 'exploratory'], where)
   const exploratory = source['exploratory']
   if (typeof exploratory !== 'boolean')
     refuse('malformed-payload', `${where}.exploratory must be true or false, got ${exploratory === undefined ? 'nothing' : JSON.stringify(exploratory)}; a reserved slot turns on this member and a missing one is not a false one`)
@@ -226,16 +227,15 @@ function submissionPayload(raw: unknown, where: string): Submission {
     slot: count(source, 'slot', where),
     revision: revisionRef(source['revision'], `${where}.revision`),
     evaluationId: text(source, 'evaluationId', where),
-    edits: editList(source['edits'], `${where}.edits`),
+    edits: editList(source['edits'], `${where}.edits`, nested.edits),
     exploratory,
   }
 }
 
 type Decided = { winner: number | null; outcomes: readonly Outcome[]; calibration: Calibration }
 
-function decidedPayload(raw: unknown, where: string): Decided {
+function decidedPayload(raw: unknown, where: string, nested: { readonly outcomes: MemberSet; readonly calibration: MemberSet }): Decided {
   const source = record(raw, where)
-  assertClosedKeys(source, ['winner', 'outcomes', 'calibration'], where)
   const winner = source['winner']
   if (winner !== null && (typeof winner !== 'number' || !Number.isInteger(winner) || winner < 0))
     refuse('malformed-payload', `${where}.winner must be a slot number or null, got ${winner === undefined ? 'nothing' : JSON.stringify(winner)}`)
@@ -245,7 +245,7 @@ function decidedPayload(raw: unknown, where: string): Decided {
   const outcomes = rawOutcomes.map((entry, index): Outcome => {
     const at = `${where}.outcomes[${index}]`
     const outcome = record(entry, at)
-    assertClosedKeys(outcome, OUTCOME_MEMBERS, at)
+    assertClosedKeys(outcome, nested.outcomes, at)
     const admitted = outcome['admitted']
     if (typeof admitted !== 'boolean')
       refuse('malformed-payload', `${at}.admitted must be true or false, got ${admitted === undefined ? 'nothing' : JSON.stringify(admitted)}`)
@@ -255,7 +255,7 @@ function decidedPayload(raw: unknown, where: string): Decided {
   })
   // The band is required, not optional: a decision whose basis has to be inferred from the reasons
   // is the sentence-instead-of-a-guarantee this member exists to remove.
-  return { winner, outcomes, calibration: readCalibration(source['calibration'], `${where}.calibration`) }
+  return { winner, outcomes, calibration: readCalibration(source['calibration'], `${where}.calibration`, nested.calibration) }
 }
 
 /**
@@ -268,10 +268,14 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
     kinds: {
       [STRATEGY_KINDS.roundOpened]: openedKind(STRATEGY_KINDS.roundOpened, STRATEGY_ROLE),
 
-      [STRATEGY_KINDS.candidateSubmitted]: defineKind<RoundState, Submission>({
+      [STRATEGY_KINDS.candidateSubmitted]: defineKind<RoundState, Submission, { edits: MemberSet; revision: MemberSet }>({
         guarantees: APPENDED,
+        members: SUBMISSION_MEMBERS,
+        // `edits[]` is closed below with this set; `revision` is closed by `revisionRef`, which
+        // enforces the one revision set `plan.ts` declares.
+        nested: { edits: EDIT_MEMBERS, revision: REVISION_MEMBERS },
         emitter: STRATEGY_ROLE,
-        parse: (raw, where) => submissionPayload(raw, where),
+        parse: (raw, where, nested) => submissionPayload(raw, where, nested),
         reduce: (state, envelope, payload) => {
           const where = `${STRATEGY_KINDS.candidateSubmitted} #${envelope.seq}`
           const plan = requirePlan(state, where)
@@ -320,10 +324,13 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
         },
       }),
 
-      [STRATEGY_KINDS.roundDecided]: defineKind<RoundState, Decided>({
+      [STRATEGY_KINDS.roundDecided]: defineKind<RoundState, Decided, { outcomes: MemberSet; calibration: MemberSet }>({
         guarantees: APPENDED,
+        members: DECIDED_MEMBERS,
+        // Each `outcomes[]` entry and the `calibration` record are closed below with these sets.
+        nested: { outcomes: OUTCOME_MEMBERS, calibration: CALIBRATION_MEMBERS },
         emitter: STRATEGY_ROLE,
-        parse: (raw, where) => decidedPayload(raw, where),
+        parse: (raw, where, nested) => decidedPayload(raw, where, nested),
         reduce: (state, envelope, payload) => {
           const where = `${STRATEGY_KINDS.roundDecided} #${envelope.seq}`
           const plan = requirePlan(state, where)

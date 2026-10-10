@@ -28,7 +28,7 @@
 
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
-import { defineKind, type KindRule } from '../protocol/registry.ts'
+import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import type { TaskState } from './protocol.ts'
 import { record, requireContractOf, requireRun, text } from './shape.ts'
 
@@ -148,16 +148,19 @@ function conditionList(raw: unknown, where: string): readonly string[] {
 export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskState> {
   return defineKind<
     TaskState,
-    { runId: string; inputs: readonly BubbleInput[]; workspace: { kind: string; ref: string }; model: string; tools: readonly BubbleTool[]; conditions: readonly string[] }
+    { runId: string; inputs: readonly BubbleInput[]; workspace: { kind: string; ref: string }; model: string; tools: readonly BubbleTool[]; conditions: readonly string[] },
+    { workspace: MemberSet; inputs: MemberSet; tools: MemberSet }
   >({
     guarantees: { appended: true },
+    members: BUBBLE_MEMBERS,
+    // `inputs[]` and `tools[]` are closed by their own readers with the sets named here; `workspace`
+    // is closed below, out of this declaration.
+    nested: { workspace: WORKSPACE_MEMBERS, inputs: BUBBLE_INPUT_MEMBERS, tools: BUBBLE_TOOL_MEMBERS },
     emitter,
-    parse: raw => {
-      const where = `${kind} payload`
+    parse: (raw, where, nested) => {
       const source = record(raw, where)
-      assertClosedKeys(source, BUBBLE_MEMBERS, where)
       const workspace = record(source['workspace'], `${where}.workspace`)
-      assertClosedKeys(workspace, WORKSPACE_MEMBERS, `${where}.workspace`)
+      assertClosedKeys(workspace, nested.workspace, `${where}.workspace`)
       return {
         runId: text(source, 'runId', where),
         inputs: inputList(source['inputs'], `${where}.inputs`),

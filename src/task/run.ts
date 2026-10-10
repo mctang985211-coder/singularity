@@ -32,13 +32,12 @@
  * @module singularity-core/task/run
  */
 
-import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
-import { defineKind, type KindRule } from '../protocol/registry.ts'
+import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import { sameRevision } from '../strategy/protocol.ts'
-import { assertInputsBound, inputList, type Bubble, type BubbleInput } from './bubble.ts'
+import { assertInputsBound, BUBBLE_INPUT_MEMBERS, inputList, type Bubble, type BubbleInput } from './bubble.ts'
 import { requireResponsible } from './responsibility.ts'
-import { digest, maybeText, record, requireContractOf, requireRun, settled, text } from './shape.ts'
+import { digest, maybeText, record, requireContractOf, requireRun, revisionRef, REVISION_MEMBERS, settled, text } from './shape.ts'
 import type { RevisionRef, TaskState } from './protocol.ts'
 
 export type RunStatus = 'running' | 'verified' | 'failed'
@@ -96,26 +95,24 @@ export interface RunState {
 
 const APPENDED = { appended: true } as const
 const METHOD_CONSUMED_MEMBERS = ['runId', 'revision', 'method', 'source'] as const
+const RUN_STARTED_MEMBERS = ['runId', 'revision'] as const
+const RUN_VERIFIED_MEMBERS = ['runId'] as const
+const RUN_FAILED_MEMBERS = ['runId', 'reason'] as const
+const EVIDENCE_PRODUCED_MEMBERS = ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'inputDigests', 'detail'] as const
 
 /** `run/started`: one attempt at a task, pinned to the revision it will be judged against. */
 export function runStartedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { runId: string; revision: RevisionRef }>({
+  return defineKind<TaskState, { runId: string; revision: RevisionRef }, { revision: MemberSet }>({
     guarantees: APPENDED,
+    // The closed set is a declared value, and it is the one the parse boundary enforces: a list
+    // written here at the call site — or a conditional one, as the fifth review wrote — cannot
+    // widen what the log accepts, and the inventory compares this declaration rather than a sample.
+    members: RUN_STARTED_MEMBERS,
+    nested: { revision: REVISION_MEMBERS },
     emitter,
-    parse: raw => {
-      const where = `${kind} payload`
+    parse: (raw, where, nested) => {
       const source = record(raw, where)
-      assertClosedKeys(source, ['runId', 'revision'], where)
-      const revision = record(source['revision'], `${where}.revision`)
-      assertClosedKeys(revision, ['environmentId', 'revisionId', 'digest'], `${where}.revision`)
-      return {
-        runId: text(source, 'runId', where),
-        revision: {
-          environmentId: text(revision, 'environmentId', `${where}.revision`),
-          revisionId: text(revision, 'revisionId', `${where}.revision`),
-          digest: digest(revision, 'digest', `${where}.revision`),
-        },
-      }
+      return { runId: text(source, 'runId', where), revision: revisionRef(source['revision'], `${where}.revision`, nested.revision) }
     },
     reduce: (state, envelope, payload) => {
       const where = `${kind} #${envelope.seq}`
@@ -162,20 +159,19 @@ export function evidenceProducedKind(
       artifactDigest: string
       inputDigests: readonly BubbleInput[]
       detail?: string
-    }
+    },
+    { inputDigests: MemberSet }
   >({
     guarantees: APPENDED,
+    members: EVIDENCE_PRODUCED_MEMBERS,
+    // `inputDigests[]` is closed by `inputList`, which enforces the one set named here.
+    nested: { inputDigests: BUBBLE_INPUT_MEMBERS },
     // The role *is* the implementation: a deployment must hold that verifier's identity to
     // emit its verdicts, and the log refuses the fact when it does not.
     emitter,
     parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
-      assertClosedKeys(
-        source,
-        ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'inputDigests', 'detail'],
-        where,
-      )
       const verdict = source['verdict']
       if (verdict !== 'pass' && verdict !== 'fail')
         refuse('malformed-payload', `${where}.verdict must be "pass" or "fail", got ${JSON.stringify(verdict ?? null)}`)
@@ -265,13 +261,14 @@ export function evidenceProducedKind(
 
 /** `run/verified`: the run settles, and only once every criterion has a passing verdict. */
 export function runVerifiedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { runId: string }>({
+  return defineKind<TaskState, { runId: string }, {}>({
     guarantees: APPENDED,
+    members: RUN_VERIFIED_MEMBERS,
+    nested: {},
     emitter,
     parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
-      assertClosedKeys(source, ['runId'], where)
       return { runId: text(source, 'runId', where) }
     },
     reduce: (state, envelope, payload) => {
@@ -307,13 +304,14 @@ export function runVerifiedKind(kind: string, emitter: string): KindRule<TaskSta
 
 /** `run/failed`: the run settles the other way. A missing reason stays missing. */
 export function runFailedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { runId: string; reason?: string }>({
+  return defineKind<TaskState, { runId: string; reason?: string }, {}>({
     guarantees: APPENDED,
+    members: RUN_FAILED_MEMBERS,
+    nested: {},
     emitter,
     parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
-      assertClosedKeys(source, ['runId', 'reason'], where)
       const reason = maybeText(source, 'reason', where)
       return { runId: text(source, 'runId', where), ...(reason === undefined ? {} : { reason }) }
     },
@@ -348,22 +346,16 @@ export function runFailedKind(kind: string, emitter: string): KindRule<TaskState
  * record of it; refusing those would refuse the honest order of a real execution.
  */
 export function methodConsumedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { runId: string; revision: RevisionRef; method: string; source: string }>({
+  return defineKind<TaskState, { runId: string; revision: RevisionRef; method: string; source: string }, { revision: MemberSet }>({
     guarantees: APPENDED,
+    members: METHOD_CONSUMED_MEMBERS,
+    nested: { revision: REVISION_MEMBERS },
     emitter,
-    parse: raw => {
-      const where = `${kind} payload`
+    parse: (raw, where, nested) => {
       const source = record(raw, where)
-      assertClosedKeys(source, METHOD_CONSUMED_MEMBERS, where)
-      const revision = record(source['revision'], `${where}.revision`)
-      assertClosedKeys(revision, ['environmentId', 'revisionId', 'digest'], `${where}.revision`)
       return {
         runId: text(source, 'runId', where),
-        revision: {
-          environmentId: text(revision, 'environmentId', `${where}.revision`),
-          revisionId: text(revision, 'revisionId', `${where}.revision`),
-          digest: digest(revision, 'digest', `${where}.revision`),
-        },
+        revision: revisionRef(source['revision'], `${where}.revision`, nested.revision),
         method: text(source, 'method', where),
         source: text(source, 'source', where),
       }

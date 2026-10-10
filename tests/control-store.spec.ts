@@ -133,8 +133,10 @@ function plantedEnvelope(kind: string, version: number): Envelope {
 const PROBE_V1: ProtocolSpec<{ readonly numbers: readonly number[] }> = {
   initialState: { numbers: [] },
   kinds: {
-    noted: defineKind<{ readonly numbers: readonly number[] }, { n: number }>({
+    noted: defineKind<{ readonly numbers: readonly number[] }, { n: number }, {}>({
       guarantees: { appended: true },
+      members: ['n'],
+      nested: {},
       emitter: 'writer',
       parse: (raw, where) => {
         if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) refuse('malformed-payload', `${where} must be an object`)

@@ -7,7 +7,6 @@
  */
 
 import {
-  assertClosedKeys,
   defineKind,
   MemoryLog,
   ProtocolRefusal,
@@ -38,11 +37,13 @@ export const DEMO_SUBJECTS: Readonly<Record<string, string>> = {
   pointer: 'pointer-service',
 }
 
-/** Every demo payload is empty and closed, so a stray member is a refusal. */
+/**
+ * Every demo payload is an object and nothing else: the closed set is empty, and it is declared by
+ * each kind below rather than written here, so a stray member is still a refusal.
+ */
 function emptyPayload(raw: unknown, where: string): Record<string, never> {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
     refuse('malformed-payload', `${where} must be an object`)
-  assertClosedKeys(raw as Record<string, unknown>, [], where)
   return {}
 }
 
@@ -51,14 +52,18 @@ const APPENDED = { appended: true } as const
 export const DEMO_V1: ProtocolSpec<Gate> = {
   initialState: { open: false, bumps: 0 },
   kinds: {
-    opened: defineKind<Gate, Record<string, never>>({
+    opened: defineKind<Gate, Record<string, never>, {}>({
       guarantees: APPENDED,
+      members: [],
+      nested: {},
       emitter: 'writer',
       parse: (raw, where) => emptyPayload(raw, where),
       reduce: () => ({ open: true, bumps: 0 }),
     }),
-    bumped: defineKind<Gate, Record<string, never>>({
+    bumped: defineKind<Gate, Record<string, never>, {}>({
       guarantees: APPENDED,
+      members: [],
+      nested: {},
       emitter: 'writer',
       parse: (raw, where) => emptyPayload(raw, where),
       reduce: (state, envelope) => {
@@ -66,8 +71,10 @@ export const DEMO_V1: ProtocolSpec<Gate> = {
         return { open: true, bumps: state.bumps + 1 }
       },
     }),
-    closed: defineKind<Gate, Record<string, never>>({
+    closed: defineKind<Gate, Record<string, never>, {}>({
       guarantees: APPENDED,
+      members: [],
+      nested: {},
       emitter: 'writer',
       parse: (raw, where) => emptyPayload(raw, where),
       reduce: () => ({ open: false, bumps: 0 }),
@@ -78,12 +85,13 @@ export const DEMO_V1: ProtocolSpec<Gate> = {
 export const AUDIT_V1: ProtocolSpec<Journal> = {
   initialState: { notes: [] },
   kinds: {
-    noted: defineKind<Journal, { text: string }>({
+    noted: defineKind<Journal, { text: string }, {}>({
       guarantees: APPENDED,
+      members: ['text'],
+      nested: {},
       emitter: 'auditor',
       parse: (raw, where) => {
         const source = raw as Record<string, unknown>
-        assertClosedKeys(source, ['text'], where)
         const text = source['text']
         if (typeof text !== 'string' || text.length === 0) refuse('malformed-payload', `${where}.text must be a non-empty string`)
         return { text }
@@ -105,12 +113,13 @@ export function demoRegistry(): ProtocolRegistry {
 export const POINTER_V1: ProtocolSpec<{ revision: string; generation: number }> = {
   initialState: { revision: 'r0001', generation: 0 },
   kinds: {
-    switched: defineKind<{ revision: string; generation: number }, { expected: string; to: string }>({
+    switched: defineKind<{ revision: string; generation: number }, { expected: string; to: string }, {}>({
       guarantees: { appended: true, conditional: true, atomicFact: true },
+      members: ['expected', 'to'],
+      nested: {},
       emitter: 'pointer',
       parse: (raw, where) => {
         const source = raw as Record<string, unknown>
-        assertClosedKeys(source, ['expected', 'to'], where)
         const expected = source['expected']
         const to = source['to']
         if (typeof expected !== 'string' || expected.length === 0) refuse('malformed-payload', `${where}.expected must be a non-empty string`)

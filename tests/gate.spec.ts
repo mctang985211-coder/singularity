@@ -15,6 +15,7 @@ import {
   refuse,
   type EmitInput,
   type Guarantees,
+  type KindRule,
   type ProtocolSpec,
   type RefusalCode,
 } from '../src/index.ts'
@@ -84,21 +85,21 @@ describe('the guarantee vocabulary', () => {
 
   it('refuses a guarantee combination that cannot hold', () => {
     const registry = new ProtocolRegistry()
-    const derivedAndAppended: ProtocolSpec<unknown> = { initialState: {}, kinds: { x: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, derived: true }, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
+    const derivedAndAppended: ProtocolSpec<unknown> = { initialState: {}, kinds: { x: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, derived: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
     expect(refusalOf(() => registry.declare('demo', 1, derivedAndAppended)).code).toBe<RefusalCode>('unknown-guarantee')
-    const conditionalOnly: ProtocolSpec<unknown> = { initialState: {}, kinds: { y: defineKind<unknown, Record<string, never>>({ guarantees: { appended: false, conditional: true }, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
+    const conditionalOnly: ProtocolSpec<unknown> = { initialState: {}, kinds: { y: defineKind<unknown, Record<string, never>>({ guarantees: { appended: false, conditional: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
     expect(refusalOf(() => registry.declare('demo', 1, conditionalOnly)).code).toBe<RefusalCode>('unknown-guarantee')
   })
 
   it('refuses a derived kind at the log boundary: derived state is folded, never written', async () => {
     const registry = new ProtocolRegistry()
     registry.declare<{ total: number }>('demo', 2, { initialState: { total: 0 }, kinds: {
-      counted: defineKind<{ total: number }, { by: number }>({ guarantees: { appended: true }, emitter: 'writer', parse: raw => {
+      counted: defineKind<{ total: number }, { by: number }>({ guarantees: { appended: true }, members: ['by'], nested: {}, emitter: 'writer', parse: raw => {
         const by = (raw as { by?: unknown }).by
         if (typeof by !== 'number' || !Number.isInteger(by)) refuse('malformed-payload', 'counted.by must be an integer')
         return { by }
       }, reduce: (state, _envelope, payload) => ({ total: state.total + payload.by }) }),
-      summary: defineKind<{ total: number }, Record<string, never>>({ guarantees: { appended: false, derived: true }, emitter: 'writer', parse: () => ({}), reduce: state => state }),
+      summary: defineKind<{ total: number }, Record<string, never>>({ guarantees: { appended: false, derived: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }),
     } })
     const log = new MemoryLog(registry, { subjects: DEMO_SUBJECTS })
     await log.emit({ commandId: 'c1', protocol: 'demo', version: 2, kind: 'counted', subject: 's', payload: { by: 3 } })
@@ -110,7 +111,7 @@ describe('the guarantee vocabulary', () => {
   it('allows exactly one conditional-update owner, and a refused claim leaves none behind', () => {
     const registry = new ProtocolRegistry()
     registry.declare('pointer', 1, POINTER_V1)
-    const rival: ProtocolSpec<unknown> = { initialState: {}, kinds: { moved: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, conditional: true }, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
+    const rival: ProtocolSpec<unknown> = { initialState: {}, kinds: { moved: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, conditional: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
     expect(refusalOf(() => registry.declare('rival', 1, rival)).code).toBe<RefusalCode>('second-conditional-owner')
     expect(registry.conditionalOwner()).toBe('pointer')
   })
@@ -121,8 +122,8 @@ describe('declaration is all-or-nothing', () => {
   it('leaves no conditional owner behind when a later kind is invalid', () => {
     const registry = new ProtocolRegistry()
     const spec: ProtocolSpec<unknown> = { initialState: {}, kinds: {
-      claims: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, conditional: true }, emitter: 'writer', parse: () => ({}), reduce: state => state }),
-      broken: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, bogus: true } as unknown as Guarantees, emitter: 'writer', parse: () => ({}), reduce: state => state }),
+      claims: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, conditional: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }),
+      broken: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, bogus: true } as unknown as Guarantees, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }),
     } }
     expect(refusalOf(() => registry.declare('broken-protocol', 1, spec)).code).toBe<RefusalCode>('unknown-guarantee')
     expect([registry.conditionalOwner(), refusalOf(() => registry.versionsOf('broken-protocol')).code]).toEqual([undefined, 'unknown-protocol'])
@@ -131,7 +132,16 @@ describe('declaration is all-or-nothing', () => {
   it('refuses a declaration it cannot honour, all before publishing', () => {
     const registry = new ProtocolRegistry()
     expect([refusalOf(() => registry.declare('demo', 0, DEMO_V1)).code, refusalOf(() => registry.declare('', 1, DEMO_V1)).code, refusalOf(() => registry.declare('demo', 1, { initialState: {}, kinds: {} })).code]).toEqual(['malformed-declaration', 'malformed-declaration', 'malformed-declaration'])
-    registry.declare<Gate>('demo', 1, { initialState: { open: false, bumps: 0 }, kinds: { opened: { guarantees: { appended: true }, emitter: () => '', parse: () => ({}), reduce: () => ({ open: true, bumps: 0 }) } } })
+    registry.declare<Gate>('demo', 1, { initialState: { open: false, bumps: 0 }, kinds: { opened: defineKind<Gate, Record<string, never>, {}>({ guarantees: { appended: true }, members: [], nested: {}, emitter: () => '', parse: () => ({}), reduce: () => ({ open: true, bumps: 0 }) }) } })
+    // A rule that names no closed member set cannot be enforced or read, so it is not a declaration —
+    // and neither is one built around `defineKind`, whose declared set nothing would enforce.
+    const rules = {
+      bare: { guarantees: { appended: true }, emitter: () => '', parse: () => ({}), reduce: () => ({}) },
+      unbranded: { guarantees: { appended: true }, members: [], nested: {}, emitter: () => '', parse: () => ({}), reduce: () => ({}) },
+    } as unknown as Record<string, KindRule<unknown>>
+    expect(
+      ['bare', 'unbranded'].map(name => refusalOf(() => registry.declare(name, 1, { initialState: {}, kinds: { opened: rules[name] as KindRule<unknown> } })).code),
+    ).toEqual(['malformed-declaration', 'malformed-declaration'])
     // A duplicate is refused, and the original declaration still answers.
     expect([refusalOf(() => registry.declare('demo', 1, DEMO_V1)).code, registry.kindsOf('demo', 1)]).toEqual(['duplicate-declaration', ['opened']])
   })

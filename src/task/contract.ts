@@ -109,6 +109,24 @@ export function assertCriterionShape(raw: unknown, field: string): AcceptanceCri
 }
 
 /**
+ * One closed list of criteria with unique ids, read by the criterion reader above.
+ *
+ * Beside `assertCriterionShape` because it is the same rule over a list: a criterion id is stable and
+ * unique, so a repeat is refused rather than merged — two entries under one id are two claims about
+ * one criterion, and no reader could tell them apart afterwards.
+ */
+export function criterionList(raw: unknown, where: string): readonly AcceptanceCriterion[] {
+  if (!Array.isArray(raw)) refuse('malformed-contract', `${where} must be an array of acceptance criteria, got ${raw === null ? 'null' : typeof raw}`)
+  const seen = new Set<string>()
+  return raw.map((entry, index) => {
+    const criterion = assertCriterionShape(entry, `${where}[${index}]`)
+    if (seen.has(criterion.criterionId)) refuse('malformed-contract', `${where} declares "${criterion.criterionId}" twice; a criterion id is stable and unique`)
+    seen.add(criterion.criterionId)
+    return criterion
+  })
+}
+
+/**
  * Read one contract's closed shape. Pure, so a reducer may call it while replaying a log whose
  * verifiers are long gone.
  */

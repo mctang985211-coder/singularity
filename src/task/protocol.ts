@@ -14,11 +14,10 @@
  * @module singularity-core/task/protocol
  */
 
-import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
-import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
+import { defineKind, type MemberSet, type ProtocolRegistry } from '../protocol/registry.ts'
 import { AGENT_ROLE } from '../agent/protocol.ts'
-import { assertContractShape, contractDigest, type TaskContract } from './contract.ts'
+import { assertContractShape, CONTRACT_MEMBERS, contractDigest, type TaskContract } from './contract.ts'
 import { bubbleOpenedKind } from './bubble.ts'
 import { decomposedKind, type Decomposition } from './decomposition.ts'
 import { assignedKind, reassignedKind, type Responsibility } from './responsibility.ts'
@@ -115,12 +114,15 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
   registry.declare<TaskState>(TASK_PROTOCOL, TASK_VERSION, {
     initialState: { taskId: '', runs: {} },
     kinds: {
-      [TASK_KINDS.admitted]: defineKind<TaskState, { contract: TaskContract }>({
+      [TASK_KINDS.admitted]: defineKind<TaskState, { contract: TaskContract }, { contract: MemberSet }>({
         guarantees: { appended: true },
+        members: ['contract'],
+        // The contract's own members, and each criterion inside it, are closed by `contract.ts`'s
+        // readers with the sets those readers declare — one level is what a payload member names.
+        nested: { contract: CONTRACT_MEMBERS },
         emitter: SCHEDULER_ROLE,
         parse: raw => {
           const source = record(raw, `${TASK_KINDS.admitted} payload`)
-          assertClosedKeys(source, ['contract'], `${TASK_KINDS.admitted} payload`)
           return { contract: assertContractShape(source['contract'], `${TASK_KINDS.admitted} payload.contract`) }
         },
         reduce: (state, envelope, payload) => {

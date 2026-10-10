@@ -18,7 +18,6 @@
  * @module singularity-core/task/responsibility
  */
 
-import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule } from '../protocol/registry.ts'
 import type { TaskState } from './protocol.ts'
@@ -36,13 +35,14 @@ export const REASSIGNMENT_MEMBERS = ['from', 'agentId', 'agentIdentity'] as cons
 
 /** `task/assigned`: the first assignment. A second one is a transfer, not an assignment. */
 export function assignedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { agentId: string; agentIdentity: string }>({
+  return defineKind<TaskState, { agentId: string; agentIdentity: string }, {}>({
     guarantees: { appended: true },
+    members: RESPONSIBILITY_MEMBERS,
+    nested: {},
     emitter,
     parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
-      assertClosedKeys(source, RESPONSIBILITY_MEMBERS, where)
       return { agentId: text(source, 'agentId', where), agentIdentity: text(source, 'agentIdentity', where) }
     },
     reduce: (state, envelope, payload) => {
@@ -61,13 +61,14 @@ export function assignedKind(kind: string, emitter: string): KindRule<TaskState>
 
 /** `task/reassigned`: a transfer, which must name the holder it takes responsibility from. */
 export function reassignedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { from: string; agentId: string; agentIdentity: string }>({
+  return defineKind<TaskState, { from: string; agentId: string; agentIdentity: string }, {}>({
     guarantees: { appended: true },
+    members: REASSIGNMENT_MEMBERS,
+    nested: {},
     emitter,
     parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
-      assertClosedKeys(source, REASSIGNMENT_MEMBERS, where)
       return {
         from: text(source, 'from', where),
         agentId: text(source, 'agentId', where),
