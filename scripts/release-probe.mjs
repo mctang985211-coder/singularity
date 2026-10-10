@@ -1,32 +1,6 @@
 #!/usr/bin/env node
 /**
  * `release@1` + `environment@2` + the native approval seam, in one real process.
- *
- * The unit specs decide each rule against a live control store; this probe observes the **publication
- * path end to end**, on bytes that survive a close and a reopen, with the real runtime mounted:
- *
- *   1. **the native seam answers, and only one answer is consent.** With no answerer composed the ask
- *      resolves `'unavailable'` and the command refuses; with an answerer that rejects it refuses
- *      too; with an answerer that grants once, `release/approved` is recorded carrying the
- *      `approval/asked` id the service logged on the asking agent's session;
- *   2. **the draft binds the content the log holds**, and a draft whose digest is not that content is
- *      refused by name;
- *   3. **the head only moves by compare-and-swap**, onto a revision this environment created, whose
- *      approved content this environment holds;
- *   4. **one environment's release never answers for another's** — the same revision id in two
- *      environments is two different contents, and each head moves on its own;
- *   5. **the pointer is derived**: folding the facts again yields the same head, and a reopened store
- *      reads the same head from the same bytes.
- *
- * **What the granting observation is, and is not.** An answerer composed here is a listener on the
- * deployment's `approval/request` waterfall — which is what a UI answerer is — so what is observed is
- * the *seam plumbing*: the real service issues the audit pair, and our fact carries that id. It is
- * **not** observed that a human decided anything: no real UI answerer is composed in this process,
- * and that stays unobserved rather than simulated.
- *
- * Run: node scripts/release-probe.mjs
- *
- * @module singularity-core/scripts/release-probe
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'

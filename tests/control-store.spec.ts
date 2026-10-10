@@ -1,19 +1,5 @@
 /**
  * The control store, against a real DSH session on disk.
- *
- * Each spec exists because the DSH layer must not be trusted with the decision:
- *
- * 1. **A record round-trips.** One fact is emitted, the raw session file is read back, and a
- *    *second* store over the same session adopts it: same digest, same folded state. The bytes on
- *    disk are our own event type, marked `ignorable`, carrying the sealed envelope.
- * 2. **Unknown inner kind, version and field are refused by us.** The planted records are
- *    well-formed DSH events — DSH has no opinion about their data — so only our own carrier decode
- *    and `MemoryLog.adopt` can refuse them, and each refusal has a name.
- * 3. **A payload DSH cannot serialize is refused before it is written.** `-0` is a finite number
- *    our frame accepts and DSH's materializer refuses; the session must hold no bytes for it, and
- *    the store must not keep a sequence the medium never saw.
- * 4. **A command is identified by its result.** The same command id carrying the same request
- *    returns the recorded fact; the same id carrying a different request is refused.
  */
 
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'

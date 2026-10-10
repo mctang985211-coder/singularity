@@ -1,9 +1,5 @@
 /**
  * The vertical slice, happy path: a contract is admitted, a run starts pinned to a revision,
- * independent verifiers judge every criterion, the run settles, and readers project the result.
- *
- * This is the smallest flow that crosses every layer: contract validation, the log's emitter and
- * command discipline, the fold, the projection, both renderings, and the derived receipt.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -51,7 +47,6 @@ import {
 
 /**
  * The two consumption bases, spelled here rather than imported: the projection names them once
- * internally, and a spec that read that name back would be asserting the code against itself.
  */
 const DECLARED_BASIS = 'declared'
 const JUDGED_BASIS = 'judged'

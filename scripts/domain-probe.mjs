@@ -1,65 +1,6 @@
 #!/usr/bin/env node
 /**
  * F: one frozen domain task set, one same-caliber comparison, and the comparison's own aggregation.
- *
- * `cd-probe` shows a *revision* being measured, decided and published, and it does that inside the
- * product's own round protocol. F asks the last question of the old stack's replacement: **on a
- * frozen set of domain tasks, does the published method actually beat the baseline?** That is
- * forensics, not a mechanism, and this probe is deliberately built out of what already exists:
- *
- *   1. **The fixture is the comparison's identity.** `tests/fixtures/f-domain.json` holds the tasks
- *      (each with its own goal, inputs and criteria), the frozen caliber (`model`, tool digests,
- *      conditions, metric, judgement, weights, `trials` — the members a `measure@3` caliber already
- *      has), the frozen standards, and the **solve and holdout sets recorded separately**. Its
- *      canonical `digestOf` is printed; the comparison's identity is that digest together with the
- *      two revisions' content digests.
- *   2. **Every task really runs, twice, per side.** For each task and each side this probe opens a
- *      run (`task@5`), declares its bubble, opens a `measure@3` evaluation, and drives
- *      `src/measure/execution.ts` against `scripts/measure-runner.mjs`, which spawns two real
- *      programs per trial: the fixed selector applies the *revision's declared method* to the task's
- *      input, and the meter computes the number from the artifact. The number in the log is the one
- *      the meter printed.
- *   3. **The same question is asked twice.** Both sides declare a bubble carrying the fixture's
- *      model, tool digests, conditions and the task's inputs, and both evaluations freeze the
- *      fixture's metric, judgement, weights and `trials`. So `caliberDigestOf` must come out equal
- *      on the two sides — and equal to the caliber assembled from the fixture itself, so "same
- *      caliber" is a claim about the fixture and not a pair of evaluations agreeing with each other.
- *   4. **The comparison is the experiment's, not the product's.** Every aggregation below is this
- *      probe's own reading of two `EvaluationView`s and the frozen standards. The product has no
- *      projection that says "the published method won"; a cross-task reading is not an invariant of
- *      the log, and F adds none.
- *   5. **Below the bar reads as not having met it.** One task is additionally measured with a
- *      revision that is deliberately *worse* than the baseline. Its frozen gain is below
- *      `minQualityGain`, and this probe asserts that it reads as not having met the standard — a
- *      measured negative result, not a wiring claim (`review.md` §4 R09).
- *
- *      **That assertion is this probe's verdict, and no product refuses a worse revision.** The
- *      measurement surface accepts the below-bar revision, opens its evaluation, records both its
- *      trials and its met hard constraint, exactly as it accepts the published one; nothing in
- *      `src/` elects the better revision, and F adds no refusal. What is observed is that *this
- *      comparison* reads the worse revision as not having met the frozen standard — the reading is
- *      the experiment's, in the same sense as the aggregation. Calling the revision "refused" would
- *      name a refusal that does not exist anywhere in the product.
- *
- * **Holdout and solve are never pooled.** The two sets come out of the fixture as two lists, every
- * verdict names the set it belongs to, and the pooled numbers are computed per set. R08's rule is
- * why: data that has been fed back to the proposer has entered the search and may not be presented
- * as held-out evidence, so a reading that averaged the two would be a reading that lost that
- * distinction.
- *
- * **What is observed, and what is not.** The measurement *path* is real end to end — real processes,
- * real artifacts, the artifact hash taken after the run, the implementation resolved by the digest of
- * its bytes — but the method files the programs read are written by **this probe**, and the declared
- * model is a name this fixture carries, not a model that ran. So what is observed is "under one frozen
- * caliber, the number the fixture's published method produced beats the fixture's baseline method on
- * this frozen task set", and it is **not** observed that a real model improved. The real-model route
- * is `scripts/model-smoke.mjs`, deliberately not a gate because it needs network and credentials.
- * The behaviour regression half of F's exit condition is the four probes that already exist
- * (`control-probe`, `recovery-probe`, `slice-b`, `cd-probe`); F adds no regression mechanism.
- *
- * Run: node scripts/domain-probe.mjs
- *
- * @module singularity-core/scripts/domain-probe
  */
 
 import { execFile } from 'node:child_process'
@@ -88,11 +29,6 @@ const FIXTURE_PATH = join(ROOT, 'tests', 'fixtures', 'f-domain.json')
 
 /**
  * The fixture's canonical content digest, written down here by hand.
- *
- * It is a literal on purpose: printing the digest the probe just computed and calling it the
- * expected one is the tautology `docs/spec-policy.md` §1 forbids, and a fixture whose digest is not
- * pinned is not a frozen identity at all. This literal is recomputed by `node -e` from the file when
- * the fixture changes, and the check below fails until it is updated.
  */
 const FROZEN_FIXTURE_DIGEST = '2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b'
 
@@ -128,9 +64,6 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 
 /**
  * Count the invocations each program logged for itself, by the label it appended to the marker file.
- *
- * This is the independent half of "there were real executions": the plan's numbers say what was
- * recorded, and this says what actually ran. `meter:run:<plan>:<slot>` is one real attempt.
  */
 async function markerRuns(marker) {
   const text = await readFile(marker, 'utf8').catch(() => '')
@@ -198,14 +131,6 @@ function wordsOfTask(taskId, targets, fillers) {
 
 /**
  * The methods, written as the method files the selector reads.
- *
- * The selector keeps the input words the method's own word list names, so what a method selects is
- * exactly the intersection of that list with the task's input. The three tags are therefore three
- * different selections over one input:
- *
- * - `mid` — the H0 baseline: one target word, so it recovers a quarter of the reference list.
- * - `strong` — the published method: every target word, so it recovers the reference list.
- * - `weak` — deliberately worse than the baseline: nothing at all.
  */
 function methodWordsOf(tag, layout) {
   if (tag === 'mid') return [layout.targets[0]]
@@ -546,10 +471,6 @@ async function main() {
     // --------------------------------------------------------------------- 3. measuring one side
     /**
      * Measure one (task, side) pair for real: one run, one bubble, one `measure@3` plan, `trials`
-     * real executions recorded as observations or as explicitly declared misses.
-     *
-     * `baseline` is the pin the plan compares against, and it is the fixture's H0 revision on both
-     * sides: every number is read as a delta against the same incumbent.
      */
     const measureSide = async (taskId, side, planId, modes, baselineSide) => {
       const runId = `run-${planId}`
@@ -632,8 +553,6 @@ async function main() {
 
     /**
      * Every plan the aggregation reads, projected from the log rather than remembered from the loop
-     * above: the baseline side of the below-bar task, for instance, is the same H0 plan every other
-     * verdict reads and is not measured a second time just to be named here.
      */
     const viewOf = planId => projectEvaluation(evaluationOf(planId))
     const planIds = taskIds.flatMap(taskId => [`${taskId}-baseline`, `${taskId}-published`]).concat([`${belowBarTask}-below-bar`])
@@ -644,14 +563,6 @@ async function main() {
     const caliberOfPlan = planId => caliberDigestOf(evaluationOf(planId))
     /**
      * The caliber the fixture froze, assembled here **from the fixture** and from nothing the probe
-     * worked out along the way.
-     *
-     * The frozen members are the fixture's own values, and the context digest is recomputed from the
-     * fixture's declared model, conditions and per-task inputs (the tool digests are the bytes on
-     * disk, because the fixture freezes the tool *names* it expects to be run under — see
-     * `docs/f-evidence.md`). If the evaluations were opened under some other question, this is where
-     * it shows: "same caliber" has to mean the fixture's caliber, or it only means "these two agree
-     * with each other".
      */
     const frozenCaliberInputs = taskId =>
       digestOf({
@@ -819,24 +730,6 @@ async function main() {
 
     /**
      * One task's verdict, as this probe reads it: both sides' aggregates, the delta **in the
-     * measurement's own direction**, and whether the fixture's standards say the bar was met.
-     *
-     * The orientation is the metric's, and it is what turns two numbers into a verdict: under
-     * `higher` the candidate wins by being larger, under `lower` by being smaller. `gain` was once
-     * `candidate.quality - baseline.quality` with the direction consulted nowhere but the passthrough
-     * into `openEvaluation`, which read "beats H0" for a method the fixture itself declared worse —
-     * the same defect as round three's H1, one layer out. Two directions that disagree are two
-     * calibers and this probe will not rank across them: `directionSign` is `-1` only for `lower`,
-     * and the check above refuses a fixture whose metric states neither.
-     *
-     * `worstCaseGain` is the honest floor rather than the point estimate. `quality` is
-     * `observed / denominator`, so an incomplete candidate has already been charged for its missing
-     * slot; the floor charges it once more, **against the direction of improvement** — the `-0.5` is
-     * signed like the gain it is subtracted from, or under `lower` it would move the candidate *toward*
-     * the bar instead of away from it — and then requires *that* number to clear the bar, so a
-     * comparison cannot clear `minQualityGain` on the strength of a planned trial nobody ran. The cost
-     * standard is a ceiling, so a side with an unknown cost cannot be shown to be inside it: an unknown
-     * cost reads as not met, exactly as `projectEvaluation` refuses to turn one into 0.
      */
     const verdictOf = (label, candidateSide, taskId, bars) => {
       const baseline = sideReport(`${taskId}-baseline`)
@@ -1106,17 +999,6 @@ async function main() {
     const verb = direction === 'lower' ? 'is beaten by' : 'beats'
     /**
      * **The readout and the ordering must be one claim, and the direction is what makes them one.**
-     *
-     * `verb` is computed from `direction`; the ranking is `directionSign` applied to the two qualities.
-     * Written independently the two can disagree, and nothing compared them: round six's construction —
-     * the fixture flipped to `lower` with `directionSign` forced to the constant `1` — ran every other
-     * check green and printed `gain 0.7500 … → met true` directly above "the published method **is
-     * beaten by** H0", because every other check is written in terms of the same sign and so agreed
-     * with itself. The direction is not a probe-local value to be trusted here: `view.direction` is
-     * read back out of the folded log by `projectEvaluation` and is a member of the caliber digest, so
-     * the sign is read from the views, and the verb must be the one the ordering implies. A constant
-     * sign now contradicts the views it ranks, and a verb that outlives its own numbers is refused
-     * instead of printed in the marker.
      */
     const carriedDirections = [...new Set(planIds.map(planId => views[planId].direction))]
     const signOfDirection = value => (value === 'lower' ? -1 : value === 'higher' ? 1 : undefined)

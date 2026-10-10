@@ -1,7 +1,5 @@
 /**
  * The task protocol's invariants, each refused by name — plus the two regressions the reviewer's
- * counterexamples established: a closed payload is not silently widened, and explaining an old
- * fact never depends on what this deployment can run today.
  */
 
 import { describe, expect, it } from 'vitest'

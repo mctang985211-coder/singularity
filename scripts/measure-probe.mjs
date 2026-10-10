@@ -1,29 +1,6 @@
 #!/usr/bin/env node
 /**
  * C — one real measurement, end to end, observed rather than asserted about a stub.
- *
- * What it proves, in the order it proves it:
- *
- *   1. **A report has real trials.** A measurement program on disk is resolved by the content digest
- *      of its own bytes, its selftest runs for real, the adapter (`scripts/measure-runner.mjs`)
- *      spawns it in a real process, and the number that reaches the log is the one that program
- *      printed. The program writes a marker file, so "it ran" is a byte on disk, and the artifact
- *      digest recorded is the digest of the bytes it left behind.
- *   2. **A missing denominator is correct.** The plan says `trials = 2`; one slot is observed and one
- *      is explicitly missed. The projection reports `denominator = 2`, `quality = observed / 2` and
- *      names the empty slot. The system this replaces answered `quality = 1, incomplete = true`.
- *   3. **Unknown cost stays unknown.** The program reported no cost, so the folded cost is `null`,
- *      not `0`.
- *   4. **Hard constraints are non-compensating.** The one observation is a perfect score and the
- *      constraint is checked by its own implementation and fails: the evaluation stays inadmissible,
- *      and no number buys it back.
- *
- * It also observes that a rebuilt implementation is not found by its name: a metric whose content
- * digest this deployment does not hold is refused before the program is started at all.
- *
- * Run: node scripts/measure-probe.mjs
- *
- * @module singularity-core/scripts/measure-probe
  */
 
 import { execFile } from 'node:child_process'
@@ -62,7 +39,6 @@ const CANDIDATE = { environmentId: 'probe-library', revisionId: 'r0001', digest:
 
 /**
  * The measurement program, as real bytes on disk. `mode = fail` is a run that produced no number;
- * otherwise it prints one JSON line `{quality, cost?}`, with `-` meaning "no cost was observed".
  */
 const METER_SOURCE = [
   "import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'",

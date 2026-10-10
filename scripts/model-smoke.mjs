@@ -1,24 +1,22 @@
 #!/usr/bin/env node
 /**
- * K1's real-model smoke: one call through the deployment's own LLM route.
+ * K1's real-model smoke: one call through the deployment's own route, and one agent turn driven by it.
  *
- * Everything else in this phase was observed with a stub adapter, which proves structure and proves
- * nothing about whether a real model can be reached. This mounts the credentials provider and the
- * provider adapter the host profile actually configures, and makes one call.
+ * Everything else in this phase was observed with a stub adapter, which proves structure and nothing
+ * about whether a real model can be reached. Two sections, because they are different claims: a real
+ * completion, and a real model **driving an agent turn** through the same plugin stack the runtime
+ * track mounts — with the real provider instead of a stub adapter, so the session ends up holding an
+ * assistant message a live model produced.
  *
- * The assertions are deliberately structural — that a call was dispatched, that the stream settled
- * without an error, and that a non-empty assistant text came back. Nothing here depends on the
- * model choosing a particular word, because a test that requires a specific sentence is a test of
- * the model rather than of this system.
- *
- * Two sections, because they are different claims. The first is a real completion through the
- * deployment's route. The second is a real model **driving an agent turn**: the same plugin stack
- * the runtime track mounts, with the real provider instead of a stub adapter, so the session ends
- * up holding an assistant message that a live model produced.
+ * The assertions are structural: a call was dispatched, the stream settled without an error, a
+ * non-empty text came back, and the turn ran from `turn/start` to `turn/end`. Nothing depends on the
+ * model choosing a particular word, because a check that requires one specific sentence tests the
+ * model rather than this system. The route itself — credentials, runtime, provider — lives in
+ * `llm-route.mjs`, so a probe whose subject is something else does not restate a provider table.
  *
  * This is deliberately **not** a gate: it needs the network and a credential, so a per-commit gate
- * would fail for reasons that have nothing to do with the change under test. It is evidence, run
- * on purpose.
+ * would fail for reasons that have nothing to do with the change under test. It is evidence, run on
+ * purpose.
  *
  * Run: node scripts/model-smoke.mjs
  *
@@ -30,10 +28,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { dshModule } from './dsh-control-runtime.mjs'
+import { ROUTE, realModel, mountRoute } from './llm-route.mjs'
 
-const PROVIDER = 'commandcode'
-const MODEL = 'deepseek/deepseek-v4.1-flash'
-const BASE_URL = 'https://api.commandcode.ai/provider/v1'
+const PROVIDER = ROUTE.provider
+const MODEL = ROUTE.model
 
 const failures = []
 const check = (label, condition, detail) => {
@@ -44,19 +42,16 @@ const check = (label, condition, detail) => {
   }
 }
 
-/** Mount the in-process runtime with the real provider registered, as the deployment does. */
+/** The runtime track's plugin stack, with the deployment's route in place of a stub adapter. */
 async function mountRealRuntime(root, cwd) {
   const { Context } = await dshModule('@deepseek-ai/cordis')
   const { default: JsonlSessionPersistence } = await dshModule('@deepseek-ai/dsh-session-persistence-jsonl')
   const { SessionStore } = await dshModule('@deepseek-ai/dsh-session')
   const { default: AgentRegistry } = await dshModule('@deepseek-ai/dsh-agent')
-  const { default: LlmRuntime } = await dshModule('@deepseek-ai/dsh-llm')
   const { default: ToolRuntime } = await dshModule('@deepseek-ai/dsh-tools')
   const { default: SystemPrompt } = await dshModule('@deepseek-ai/dsh-system-prompt')
   const { default: SessionProjectionRegistry } = await dshModule('@deepseek-ai/dsh-session-projection')
   const { default: AgentLoop } = await dshModule('@deepseek-ai/dsh-agent-loop')
-  const credentials = await dshModule('@deepseek-ai/dsh-credentials-local')
-  const piAi = await dshModule('@deepseek-ai/dsh-llm-pi-ai')
 
   const ctx = new Context()
   const mounted = []
@@ -68,77 +63,39 @@ async function mountRealRuntime(root, cwd) {
       mounted.push(`${label} FAILED(${error?.constructor?.name}: ${error?.message})`)
     }
   }
-
-  // Dependencies before the plugins that inject them; the route last, so its registry exists.
   await mount('session-persistence-jsonl', JsonlSessionPersistence, { root, compression: 'none' })
   await mount('sessions', SessionStore)
   await mount('agents', AgentRegistry)
-  await mount('llm', LlmRuntime)
   await mount('tools', ToolRuntime)
   await mount('systemPrompt', SystemPrompt)
   await mount('sessionProjections', SessionProjectionRegistry)
-  await mount('credentials', credentials.default ?? credentials, {})
-  await mount('llm-pi-ai', piAi, { providers: { [PROVIDER]: providerProfile() } })
   await mount('agentLoop', AgentLoop, { agents: [], maxParallelToolCalls: 1 })
-
+  // The route last, so its registry exists; it reports what it mounted the same way.
+  mounted.push(...(await mountRoute(ctx)))
   return { ctx, mounted }
 }
 
-function providerProfile() {
-  return {
-    displayName: 'commandcode',
-    apiKeyEnv: 'COMMANDCODE_API_KEY',
-    api: 'openai-completions',
-    baseURL: BASE_URL,
-    models: [{ id: MODEL, name: 'DeepSeek V4.1 Flash', contextWindow: 1000000 }],
-  }
-}
-
-/** One real completion: credentials, adapter, API, stream. */
+/** §1: one real completion, through the extracted route. */
 async function completion() {
-  const { Context } = await dshModule('@deepseek-ai/cordis')
-  const credentials = await dshModule('@deepseek-ai/dsh-credentials-local')
-  const { default: LlmRuntime } = await dshModule('@deepseek-ai/dsh-llm')
-  const piAi = await dshModule('@deepseek-ai/dsh-llm-pi-ai')
-
-  const ctx = new Context()
-  await ctx.plugin(credentials.default ?? credentials, {})
-  await ctx.plugin(LlmRuntime, {})
-  await ctx.plugin(piAi, { providers: { [PROVIDER]: providerProfile() } })
-
+  const model = await realModel()
   const started = Date.now()
-  const text = []
-  let chunks = 0
-  let settled = 0
+  let answer
   let failure
-  for await (const chunk of ctx.llm.stream({
-    provider: PROVIDER,
-    model: MODEL,
-    messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply with exactly one word: the sum of 2 and 2, spelled out.' }] }],
-    system: 'You are a smoke test. Answer in one word.',
-    temperature: 0,
-  })) {
-    chunks += 1
-    if (chunk.type === 'text-delta') text.push(chunk.text)
-    if (chunk.type === 'finish') {
-      settled += 1
-      if (chunk.reason?.kind === 'error') failure = chunk.reason.failure?.message ?? 'the stream failed'
-    }
+  try {
+    answer = await model.complete({
+      system: 'You are a smoke test. Answer in one word.',
+      prompt: 'Reply with exactly one word: the sum of 2 and 2, spelled out.',
+    })
+  } catch (error) {
+    failure = error.message
   }
-  const answer = text.join('').trim()
-
-  check(
-    '§1 a real completion was dispatched and its stream settled',
-    chunks > 0 && settled === 1 && failure === undefined,
-    `chunks=${chunks} settled=${settled}${failure === undefined ? '' : ` failure=${failure}`}`,
-  )
-  check('§1 the model returned a non-empty answer', answer.length > 0, JSON.stringify(answer.slice(0, 60)))
-  console.log(`  §1 ${PROVIDER}/${MODEL} answered in ${Date.now() - started}ms: ${JSON.stringify(answer.slice(0, 60))}`)
-
-  await ctx.fiber.dispose()
+  check('§1 a real completion was dispatched and its stream settled', failure === undefined, failure)
+  check('§1 the model returned a non-empty answer', (answer ?? '').length > 0, JSON.stringify((answer ?? '').slice(0, 60)))
+  console.log(`  §1 ${PROVIDER}/${MODEL} answered in ${Date.now() - started}ms: ${JSON.stringify((answer ?? '').slice(0, 60))}`)
+  await model.dispose()
 }
 
-/** One real agent turn: the model drives a session through the agent loop. */
+/** §2: one real agent turn, read out of the session the turn wrote. */
 async function turn() {
   const root = await mkdtemp(join(tmpdir(), 'singularity-model-smoke-'))
   const cwd = await mkdtemp(join(tmpdir(), 'singularity-model-cwd-'))
@@ -146,20 +103,18 @@ async function turn() {
     const { ctx, mounted } = await mountRealRuntime(root, cwd)
     const { SessionId } = await dshModule('@deepseek-ai/dsh-session')
     const { createUserMessage } = await dshModule('@deepseek-ai/dsh-llm')
-
     check('§2 the runtime mounted with the real route', mounted.every(entry => !entry.includes('FAILED')), mounted.filter(entry => entry.includes('FAILED')).join(', '))
 
-    const sessionId = SessionId('model-smoke-turn')
     const created = await ctx.agents.create({
-      sessionId,
+      sessionId: SessionId('model-smoke-turn'),
       meta: { cwd },
       agentOptions: { provider: PROVIDER, model: MODEL },
     })
     created.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Reply with exactly one word: the sum of 2 and 2, spelled out.' }], source: { kind: 'user' } }))
     await created.agent.whenIdle()
 
-    // Read the recorded facts, not a convenience accessor: the assistant message is an event, and
-    // what a reader sees must come from what is in the log.
+    // Read the recorded facts, not a convenience accessor: the assistant message is an event, and what
+    // a reader sees has to come from what is in the log.
     const snapshot = created.agent.session.snapshotEvents()
     const events = snapshot.map(event => event.type)
     const assistant = snapshot.filter(event => event.type === 'assistant/message').map(event => event.data?.message)
@@ -182,12 +137,8 @@ async function turn() {
   }
 }
 
-async function main() {
-  await completion()
-  await turn()
-}
-
-await main()
+await completion()
+await turn()
 
 if (failures.length > 0) {
   console.error(`\nmodel-smoke: ${failures.length} check(s) failed: ${failures.join(' | ')}`)

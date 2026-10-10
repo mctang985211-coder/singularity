@@ -1,26 +1,5 @@
 /**
  * The agent-session seams, unit by unit, without a full runtime.
- *
- * Every spec pins a decision this module makes on its own, so it can fail for its own reason:
- *
- * 1. **A missing seam is refused by name, at load.** A cordis service whose plugin was mounted
- *    without its `inject` dependency is silently `undefined`; the refusal must name *each* absent
- *    seam, and must not name a seam that is really there. One case mounts the real persistence
- *    plugin over a real cordis `Context` (`tests/control-store.spec.ts` technique) so the
- *    "present" half is a real service, not a stub.
- * 2. **The session id is derived, stably, and no two agent ids collide.** The collision witness is
- *    the plausible wrong implementation that made the id *path safe* by replacing `:`, which would
- *    map `task:7` and `task-7` onto one session. The control store's namespace, which shares the
- *    same persistence root, must stay disjoint for the same raw id.
- * 3. **Create and resume are distinguished by what the medium holds**, not by the caller's wish: a
- *    session that was never created is created (`resumed: false`), a persisted one is resumed
- *    (`resumed: true`), and a fresh create over persisted history is refused rather than overwrite.
- * 4. **Resume takes the write lease, and its failures keep an identity.** `SessionAlreadyOwnedError`
- *    becomes our `concurrent-writer`, and a bare repair `Error` — one `instanceof` cannot identify —
- *    still becomes a named refusal carrying the upstream text.
- * 5. **Close is ordered and idempotent.** The lease is released before `closeAgentSession` resolves,
- *    two concurrent closes dispose once, a failed close stays retryable, and a refused second claim
- *    — same context or another one — never costs the first claimant its lease.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -64,7 +43,6 @@ interface HarnessOptions {
 
 /**
  * A stubbed seam set. `dispose` takes a tick, so "the lease was released **before** close resolved"
- * is falsifiable: a close that did not await the teardown would see nothing disposed yet.
  */
 function harness(options: HarnessOptions = {}) {
   const calls: RecordedCall[] = []

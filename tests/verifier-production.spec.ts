@@ -1,16 +1,5 @@
 /**
  * The production verdict, driven with real files and real commands.
- *
- * Every test here writes a verifier program to disk, runs it through the real adapter
- * (`scripts/verifier-command.mjs`), and observes the bytes the run left behind. Nothing about the
- * execution is mocked: the verifier program records that it ran in a marker file, so "the
- * implementation actually ran" is a byte on disk rather than an assertion about a call, and each
- * refusal that must happen *before* execution is pinned by the marker's absence.
- *
- * The judge *port* is the only thing a test supplies, because execution is deliberately a port in
- * `src/` (`production.ts` runs nothing). In the tests where the subject is a production check —
- * digest lookup, input hashing, the identity of what ran — that port is still wired to the real
- * adapter, so the check refuses a real run rather than a fabricated answer.
  */
 
 import { execFile } from 'node:child_process'
@@ -42,8 +31,6 @@ const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(b
 
 /**
  * The verifier implementation itself, as real bytes on disk. It records the label it was run under
- * in a marker file, writes its input to the artifact, and exits non-zero when the input is bad —
- * so one program produces both verdicts, and its presence in either is observable.
  */
 const VERIFIER_SOURCE = `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 const [inputPath, artifactPath, markerPath, label] = process.argv.slice(2)
@@ -109,7 +96,6 @@ async function programDigest(): Promise<string> {
 
 /**
  * The real judge port: run the command through the real adapter, then report the digest of the
- * bytes that were executed. The digest is read from the program file, not accepted from the caller.
  */
 function realJudge(): RealJudge {
   return async (execution: ProductionExecution): Promise<JudgedVerdict> => {

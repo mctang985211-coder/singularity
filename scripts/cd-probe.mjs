@@ -1,61 +1,6 @@
 #!/usr/bin/env node
 /**
  * C+D together: one real measurement campaign, two explicit rounds, and one controlled release —
- * in one process, over one real control store, with the native approval seam mounted.
- *
- * Each slice has its own probe (`measure-probe`, `round-probe`, `release-probe`). What none of them
- * can show is the seam between them, which is what this probe exists for:
- *
- *   1. **A round with m >= 2 candidates from one incumbent.** Round 1 opens three slots against one
- *      incumbent and decides them; every slot carries its own evaluation. Nothing here uses the
- *      round-probe's stand-in measurement table: the numbers come from `src/measure/**`.
- *   2. **Every report has real trials.** Each trial goes through the measure slice's own
- *      `runMeasurement`: the implementation is resolved by the digest of its bytes, its selftest runs
- *      in both directions, the declared inputs are hashed **before** the programs start, real
- *      processes run, and the artifact is hashed **after** they ran. Two programs run per trial: the
- *      fixed selector runtime applies the revision's declared method and writes the artifact, and the
- *      meter — the implementation the metric names — prints the number it computed from that
- *      artifact and the reference list. The number in the log is the one the meter printed; no
- *      quality is typed into a payload, and swapping the method bytes changes the number.
- *   3. **Missing denominators are correct.** One candidate plans `trials: 2`, produces one
- *      observation and one explicitly recorded miss: the aggregate reports `denominator 2`,
- *      `quality = observed/2` and names the empty slot (R06's measured defect).
- *   4. **A high score out of bounds is refused before any argmax.** One candidate scores *higher*
- *      than the winner and fails a hard constraint checked by its own program; it does not win, its
- *      outcome names the constraint, and the release path cannot publish it.
- *   5. **Round two reads round one** (R04). Round 2's incumbent is the revision round 1 published,
- *      its `historyCutoff` sits after round 1's facts, its novelty is counted against the assets
- *      round 1 published, its frozen gain is relative to round 1's incumbent — and replaying the
- *      same cutoff after later facts reproduces the same decision.
- *   6. **The release path is controlled.** The winner is drafted, approved through the real
- *      `ctx.approval` (the fact carries the `approval/asked` id of the ask that produced it), and the
- *      head moves by compare-and-swap. An unapproved revision is refused, a stale approval is
- *      refused, a switch whose `expected` head moved is refused, and re-folding every recorded fact
- *      from scratch reproduces the same head and the same selections.
- *
- * **What is observed, and what is not.** The answerer composed here is a listener on the
- * deployment's `approval/request` waterfall, which is what a UI answerer is, so what is observed is
- * the *seam plumbing*: the real service issues the audit pair and our fact carries that id. It is
- * **not** observed that a human decided anything — no UI answerer and no human are in this process,
- * and that stays unobserved rather than simulated. The same discipline applies to the numbers: the
- * measurement *path* is real end to end, but the method files the programs read are written by this
- * probe, so what is observed is "the number in the log is the one a spawned program computed from
- * the bytes the revision declared", not "a model improved".
- *
- * **Isolation and comparability at once.** Every evaluation is measured in a run of its own with its
- * own bubble, and what the two rounds pool under is the *context* digest of that bubble — the model,
- * the tool digests, the conditions and the declared inputs (`contextDigestOf`) — never the run's
- * identity.
- * So candidates measured in different runs, under bubbles declaring the same model, the same tool
- * implementations and the same conditions, are decided together in one round. The limit is real too:
- * a candidate whose bubble declares another model, or whose run used a rebuilt tool, is not pooled at
- * all — the round refuses with `caliber-mismatch` and names the two sides. What differs between
- * candidates is the revision under test, which its manifest content-addresses; what must not differ
- * is the apparatus around it.
- *
- * Run: node scripts/cd-probe.mjs
- *
- * @module singularity-core/scripts/cd-probe
  */
 
 import { execFile } from 'node:child_process'
@@ -121,9 +66,6 @@ const WORDS = [...REFERENCE, ...NOISE]
 
 /**
  * One revision's method: the words it selects, in one real file on disk.
- *
- * A revision's manifest declares the *digest* of its method file, so a trial's number is bound to
- * the content the revision declared rather than to this probe's memory of what it wrote.
  */
 const METHODS = {
   r0001: REFERENCE.slice(0, 4), // 0.40 — the incumbent, measured A/A before round 1
@@ -139,15 +81,6 @@ const METHODS = {
 
 /**
  * The fixed apparatus, in three real programs.
- *
- * `selector-runtime.mjs` applies the *revision's* method — the words its manifest declares — to the
- * input and writes the artifact. It is the same bytes for every candidate, which is why every bubble
- * measured under one context declares one tool digest: what differs between candidates is the
- * revision under test, and the *apparatus* around it must not. `meter.mjs` is the implementation the
- * metric names: it computes the number from the artifact the selector wrote, and `mode = fail`
- * produces no number, so the adapter reports a miss rather than a zero. `selector-runtime-rebuilt`
- * is the same selection rule written differently — other bytes, so another tool identity — which is
- * what the second isolation round measures under.
  */
 const SELECTOR_SOURCE = [
   "import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'",
@@ -214,10 +147,6 @@ function runProcess(file, args) {
 
 /**
  * The refusal a step raised.
- *
- * A step that is **accepted** is reported as `no-refusal` instead of thrown: a mutated build must
- * fail the check that names the rule it broke, not abort the probe with a stack trace half way
- * through. This is the same reason every other check here accumulates instead of returning early.
  */
 async function asyncRefusalOf(step) {
   try {
@@ -456,10 +385,6 @@ async function main() {
 
     /**
      * The measure slice as one round reads it, folded at the cut it is handed.
-     *
-     * `entries` is the log itself: what counts as *accepted* in it is `publishedAssetsBelow`'s one
-     * derivation, not a convention invented here. An injected convention is how two wirings could
-     * disagree about one log, and novelty feeds selection, so that disagreement is two winners.
      */
     function sliceOf(cut) {
       const belowCut = (protocol, version, cutoff) => cut.entriesOf(protocol, version).filter(entry => entry.seq < cutoff)
@@ -636,10 +561,6 @@ async function main() {
 
     /**
      * One evaluation: its own run and bubble, its trials for real, its constraint for real.
-     *
-     * `context` is what the bubble declares (model, tools, conditions) and `runtime` is the selector
-     * build that run actually executes; the evaluation's context digest is read back from the run's
-     * bubble by the command, never passed in.
      */
     const measurementOf = async (evaluationId, revisionId, modes, options = {}) => {
       const runId = `run-${evaluationId}`

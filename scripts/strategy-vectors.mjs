@@ -1,23 +1,6 @@
 #!/usr/bin/env node
 /**
  * Differential harness for the RRSI decision-layer port (google-research/rrsi @ be50316, Apache-2.0).
- *
- * It puts the upstream rules and `src/strategy/decision.ts` on the same synthetic inputs and reports
- * agreement or divergence. Three things are checked, and each of them can fail on its own:
- *
- * 1. **The corpus is not trusted, it is checked.** Every vector's `expected` value must equal what
- *    the port actually answers, and its `reasonIncludes` substrings must appear in the port's reason
- *    strings. A hand-written expectation that the code contradicts fails here.
- * 2. **The upstream transcription is not trusted either.** The Python is never invoked — upstream is
- *    a specification, not a runtime dependency — so the upstream side is a transcription whose line
- *    numbers are cited at every function. Every vector that carries an `upstream.value` (measured by
- *    running the real checkout once, at extraction time) must be reproduced by the transcription.
- * 3. **Divergence is only allowed where the ledger says so.** `deterministic` and `upstream-native`
- *    vectors must agree with upstream; a `port-adapted` vector must differ, and its id must appear in
- *    `docs/divergence-ledger.md`. An unexplained divergence is a bug; an explained one is a decision.
- *
- * Prints `strategy-vectors: OK` on success. Wire it to a gate as a probe: it is the only check that
- * can see a port that is self-consistently wrong.
  */
 
 import { readFileSync } from 'node:fs'
@@ -96,8 +79,6 @@ function upstreamCostRule(deltaS, deltaC, novelty, delta, cfg) {
 
 /**
  * rrsi/selection.py:97-121 (`judge`: gate failure, then the S* floor, then the cost rule, then the
- * domain guards) and :124-137 (`select_round`: argmax of S' over the admissible set, `max` keeping
- * the first of equal scores).
  */
 function upstreamSelect(plan) {
   const cfg = { ...UPSTREAM_CFG, w_s: plan.weights.quality, w_c: plan.weights.cost }

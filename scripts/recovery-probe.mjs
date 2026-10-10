@@ -1,31 +1,6 @@
 #!/usr/bin/env node
 /**
  * S6 — SIGKILL at the execution and the settlement boundary, observed in real processes.
- *
- * Two boundaries are killed, one at a time, and each is checked by a successor process that has to
- * pick up the same work rather than start it again:
- *
- *   - **execution**: the attempt has started, its execution context is declared and its artifact
- *     exists, and the process dies before anything is decided about it;
- *   - **settlement**: the verdict has been recorded and the process dies before the run settles.
- *
- * What the successor must be able to establish, in both cases:
- *
- *   1. the write lease was released by the kernel, so it can take over immediately;
- *   2. it is the **same** control session, with the **same** committed facts - no half-written
- *      record, and nothing invented;
- *   3. the bindings survived: the same responsible agent, the same revision pin, the same declared
- *      inputs;
- *   4. the work is finished without duplication - re-delivering the command the dead process
- *      already committed returns that fact, and does not produce a second one.
- *
- * The holder is this same file run as a child, so both processes use byte-identical wiring. The
- * setup is re-driven by the successor with the same command ids, which is itself the point: a
- * command that was already committed replays instead of repeating.
- *
- * Run: node scripts/recovery-probe.mjs
- *
- * @module singularity-core/scripts/recovery-probe
  */
 
 import { createHash } from 'node:crypto'
@@ -127,7 +102,6 @@ const criterion = programDigest => ({
 
 /**
  * Every fact that makes up the attempt, emitted through the command boundary with fixed command
- * ids. Re-driving this in a successor replays what was already committed instead of repeating it.
  */
 async function bootstrap({ at, store, commands, programDigest }) {
   const { ENVIRONMENT_KINDS } = await import('../src/environment/protocol.ts')

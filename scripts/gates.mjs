@@ -867,8 +867,15 @@ function countClaimFindings(docs = readCorpus(), records = RECORD_DOCS, commits 
       const fence = FENCE.exec(line)
       if (fence !== null) {
         const delimiter = fence[1]
-        if (delimiter.length > 3)
+        // CommonMark 0.31.2 §4.5: the info string of a backtick fence may not hold a backtick, and of a
+        // tilde fence may not hold a tilde. Such a line is a paragraph, so it neither opens nor closes:
+        // honouring it is how the ninth review put a count back behind a fence.
+        const malformed = fence[2].includes(delimiter[0])
+        if (malformed)
+          findings.push(`${file}:${index + 1} opens a ${delimiter[0] === '`' ? 'backtick' : 'tilde'} fence whose info string holds a ${delimiter[0] === '`' ? 'backtick' : 'tilde'}; that line is a paragraph rather than a delimiter, so it quotes nothing and must not exempt what follows`)
+        else if (delimiter.length > 3)
           findings.push(`${file}:${index + 1} uses a ${delimiter.length}-character ${delimiter[0] === '`' ? 'backtick' : 'tilde'} fence; this tree quotes output with three, and a longer delimiter is what the seventh review hid a count behind, so spell it as three`)
+        if (malformed) return
         if (open === null) open = delimiter
         else if (delimiter[0] === open[0] && delimiter.length >= open.length && fence[2].trim() === '') open = null
         return
@@ -1646,6 +1653,10 @@ if (PROBE) {
     // Round eight's B1: two findings, one per indented delimiter, and the count between them is read.
     ['a balanced pair of indented fences round a count, which is a code block in every renderer', [{ file: 'docs/__probe.md', text: '    ```\n    gates: 11 gates over 42 files\n    ```\n' }], 3],
     ['a tab-indented fence delimiter, indented by the other character that does it', [{ file: 'docs/__probe.md', text: '\t```\ngates: 11 gates over 42 files\n```\n' }], 3],
+    // Round nine's B1: a backtick in the info string makes the line a paragraph, not a delimiter, so it
+    // neither opens nor closes and the count inside it is read. Two findings: the paragraph, and the count.
+    ['an info string holding a backtick, which CommonMark reads as a paragraph rather than a fence', [{ file: 'docs/__probe.md', text: '``` `x\ngates: 11 gates over 42 files\n```\n' }], 3],
+    ['an info string holding a tilde on a tilde fence, the same rule for the other delimiter', [{ file: 'docs/__probe.md', text: '~~~ ~x\ngates: 11 gates over 42 files\n~~~\n' }], 3],
     ['a declared record that names a commit this repository holds', [{ file: 'docs/__probe-review.md', text: 'measured at `e8c1c70`: 21 gates\n' }], 0],
     ['a declared record that names only a token no repository holds', [{ file: 'docs/__probe-review.md', text: 'measured at `deadbeefcafe1234`: 21 gates\n' }], 1],
     ['a declared record that names no commit at all', [{ file: 'docs/__probe-review.md', text: 'the tree had 21 gates\n' }], 2],

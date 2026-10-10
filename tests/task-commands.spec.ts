@@ -1,14 +1,5 @@
 /**
  * The command boundary: cross-entity preconditions checked inside the serial region.
- *
- * The property this spec exists for is atomicity. A precondition read outside the queue, or against
- * a cut taken earlier, is a check against a state that may already be gone — so the last case here
- * fires two commands at once against a budget of one and requires exactly one to succeed. A
- * boundary that checked first and queued afterwards would let both through.
- *
- * The rest is the set of conditions a per-subject reducer cannot decide: whether the revision a run
- * pins exists, whether the agent exists and has been opened, whether a plan allows the sub-task to
- * start, and whether the deployment holds the implementation that produced a verdict.
  */
 
 import { describe, expect, it } from 'vitest'

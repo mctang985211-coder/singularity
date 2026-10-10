@@ -153,7 +153,6 @@ function started(commandId: string): EmitInput {
 
 /**
  * A fact the task protocol accepts with no prior fact. This spec is about the storage boundary, so
- * its "second fact" must not also be testing the task protocol's responsibility rule.
  */
 function assignment(commandId: string): EmitInput {
   return { commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: TASK_ID, payload: { agentId: 'agent-1', agentIdentity: 'runtime-1' } }

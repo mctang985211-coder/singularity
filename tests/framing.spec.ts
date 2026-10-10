@@ -1,8 +1,5 @@
 /**
  * The append path, the fold engine and the envelope: what makes a recorded fact trustworthy.
- *
- * Covers append, fold, durability across reopen, tamper detection, chain linkage, a single
- * writer, the append cursor agreeing with a fresh fold, and the read projection's isolation.
  */
 
 

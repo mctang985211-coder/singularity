@@ -1,13 +1,5 @@
 /**
  * The production measurement, driven with real files, a real program and the real adapter.
- *
- * Every test writes a measurement program to disk, runs it through `scripts/measure-runner.mjs` in a
- * real process, and observes the bytes it left behind. Nothing is mocked: the program records that it
- * ran in a marker file, so "the implementation actually ran" is a byte on disk rather than a call, and
- * each refusal that must happen *before* it runs is pinned by the marker's absence.
- *
- * The measurement *port* is the only thing a test supplies: execution is deliberately a port in
- * `src/`, and where the subject is a measurement check, that port is still the real adapter.
  */
 
 import { execFile } from 'node:child_process'
@@ -39,8 +31,6 @@ const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(b
 
 /**
  * The measurement program itself, as real bytes on disk. It records the label it was run under in a
- * marker file, writes its artifact, prints its number, and exits non-zero for a `failing` label or a
- * BAD input — so one program produces a trial, a miss, and both selftest verdicts.
  */
 const PROGRAM_SOURCE = `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 const [inputPath, artifactPath, markerPath, label, quality, cost] = process.argv.slice(2)
@@ -106,7 +96,6 @@ async function programDigest(): Promise<string> {
 
 /**
  * The real measurement port: run the command through the real adapter, then report the digest of the
- * bytes that were executed. The digest is read from the program file, not accepted from a caller.
  */
 function realMeasurement(): RealMeasurement {
   return async (execution: ProductionExecution): Promise<MeasuredNumber | MissedMeasurement> => {

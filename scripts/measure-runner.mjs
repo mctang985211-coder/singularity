@@ -1,41 +1,6 @@
 #!/usr/bin/env node
 /**
  * The real measurement adapter: run one measurement program, read its number, and pin the bytes.
- *
- * This is the deployment-side half of the measurement split. `src/measure/execution.ts` holds the
- * pure path — resolve the implementation by content digest, run its selftest, hash the inputs,
- * accept the number only from the metric's implementation — and executes nothing. Here the program
- * is real: `node:child_process` runs it with a shell, and the artifact's bytes are hashed **after**
- * it ran, so the digest names what the number was actually formed on. Every declared input is read
- * from the path it names and hashed too, so a caller receives the digest of the bytes that are
- * there now rather than a digest it declared earlier.
- *
- * **The number.** The program prints its report as the last non-empty line of stdout: one JSON
- * object `{ quality, cost? }`. An absent `cost` means the program did not observe one, and it stays
- * absent in this adapter's answer — a missing cost that arrived as `0` would enter the cost rule as
- * a real measurement. Anything else the program prints is captured into the detail, so a program
- * may log freely.
- *
- * **A program that produced no number is a miss, not a failure of this adapter.** A non-zero exit,
- * or a command the shell cannot start, is reported as `{ missed: <reason> }` and this script still
- * exits 0: the attempt happened, and "it produced nothing" is its outcome. The caller records it as
- * `trial/missed`, which keeps the plan's slot named and the denominator intact. Reporting a zero
- * instead would be inventing a measurement nobody made.
- *
- * The request is `{ command, artifactPath, inputs: [{ name, digest, path }] }`, on argv[2] or on
- * stdin, where `path` is the absolute path of the input's bytes and `digest` is what the binding
- * declared. A declaration with no path names no bytes and cannot be hashed; an input is read, not
- * trusted.
- *
- * Usage:
- *   node scripts/measure-runner.mjs '{"command":"…","artifactPath":"…","inputs":[]}'
- *   printf '%s' "$request" | node scripts/measure-runner.mjs
- *
- * It prints one JSON object — `{ quality, cost?, artifactDigest, inputDigests, detail }` or
- * `{ missed, detail }` — then the line `measure-runner: OK`. The measured command's own output is
- * captured, never inherited, so it cannot be mistaken for this script's answer. The exit code is
- * non-zero **only** when this script could not measure at all: an unreadable artifact, an input
- * that names no bytes, or a program that exited 0 without printing a number.
  */
 
 import { spawn } from 'node:child_process'
@@ -79,9 +44,6 @@ function finiteNumber(value, field) {
 
 /**
  * The declared inputs, closed and read literally: an absent member stays absent, not invented.
- *
- * `path` is required, because an input nobody can read is a claim with no bytes behind it, and
- * hashing a declaration would only return the declaration.
  */
 function readInputs(raw) {
   if (raw === undefined) return []

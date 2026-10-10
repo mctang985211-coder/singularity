@@ -1,10 +1,5 @@
 /**
  * The measurement slice, driven through its own command boundary over a real control store.
- *
- * The subject is what the facts mean: the denominator is the plan's, an unknown cost stays unknown, a
- * hard constraint is not a number, and every cross-subject precondition refuses by name. What only a
- * reducer can refuse is emitted straight into the log; real programs are `measure-execution.spec.ts`.
- * The role table is the store's and no option carries one, which the executor checks rest on.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -328,6 +323,10 @@ describe('the measurement slice', () => {
     // copy in the reader: one more member in an input entry is refused by name.
     const widenedInput = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', inputDigests: [{ ...BUBBLE_INPUTS[0], note: 'extra' }] }))
     expect(widenedInput).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('note') })
+    // The plan's three shape members, each closed by the set the declaration hands its reader.
+    const opened = { baseline: REVISION, candidate: OTHER_REVISION, run: { taskId: TASK, runId: RUN }, metric: metric(), weights: { quality: 1, cost: 0.5 }, context: digestOf(BUBBLE), trials: 2, judgement: [bounds()] }
+    for (const widened of [{ metric: { ...metric(), note: 'x' } }, { weights: { quality: 1, cost: 0.5, note: 'x' } }, { run: { taskId: TASK, runId: RUN, note: 'x' } }])
+      expect(await asyncRefusalOf(() => instance.store.emit({ commandId: nextCommand(), protocol: MEASURE_PROTOCOL, version: MEASURE_VERSION, kind: MEASURE_KINDS.evaluationOpened, subject: OTHER, payload: { ...opened, ...widened } }))).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('note') })
   })
 
   it('refuses a plan that judges its own metric, repeats a criterion, or has no slots or quality weight', async () => {

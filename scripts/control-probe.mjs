@@ -1,25 +1,6 @@
 #!/usr/bin/env node
 /**
  * A5 — the control store across two processes, observed rather than assumed.
- *
- * Four things are checked; any one of them failing the exit code is non-zero:
- *
- *   1. a second process opening the same control session for `write` gets
- *      `SessionAlreadyOwnedError`;
- *   2. a `read` handle is unaffected while the write handle is held;
- *   3. after the holder is SIGKILLed, a successor takes over immediately (no waiting period) and
- *      the facts appended before the kill are still readable and still fold;
- *   4. a command whose reply was lost is recovered by re-delivering the same `commandId` — and,
- *      because that is only true inside one live store, the successor's re-delivery after a kill is
- *      observed and reported as a GAP (with the raw refusal or the duplicate it produced), never
- *      quietly omitted.
- *
- * Run: node scripts/control-probe.mjs
- *
- * The same file is the holder child (`--hold`), so the parent and the holder run byte-identical
- * wiring: same installed DSH build, same registry, same requests.
- *
- * @module singularity-core/scripts/control-probe
  */
 
 import { spawn } from 'node:child_process'
@@ -53,8 +34,6 @@ const CONTRACT = {
 const SUBJECTS = { scheduler: 'scheduler-1' }
 /**
  * How many facts the holder commits before it is killed: the contract, the responsibility, and the
- * run start whose reply the caller never receives. Named rather than repeated, because a check that
- * hard-codes a count silently becomes a lie when a fact is added.
  */
 const EXPECTED_FACTS = 3
 
@@ -328,9 +307,6 @@ async function probe() {
 
 /**
  * The rival writer: one attempt to open the same control session for write, reported as data.
- *
- * It is a separate process on purpose. Two handles in one process answer a different question -
- * whether this instance already owns the session - and the phase's claim is about processes.
  */
 async function claim(root, controlId) {
   const { ControlSessionStore } = await import('../src/control/session-store.ts')

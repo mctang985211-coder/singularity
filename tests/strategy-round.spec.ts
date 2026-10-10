@@ -1,12 +1,5 @@
 /**
  * The explicit round: its submission gate, the decision that closes it, and the projection that decides.
- *
- * Three groups, one per place a rule can live: the reducer (the round's own subject, inside the serial
- * region), the command boundary (the annealed budget, the recomputation against the cut the decision is
- * appended to, the cross-subject submission condition), and the projection (admissibility before any
- * argmax, frozen gains, the incumbent floor, the caliber that makes scores comparable). The measurement
- * inputs are a table whose historical reads the round's own cutoff bounds; `src/measure/**` owns the
- * projection they stand in for.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -87,7 +80,6 @@ const measuredAt = (table: MeasureTable, revision: RevisionRef, at: number, qual
 }
 /**
  * The slice the round reads: the historical aggregate honours the round's own cutoff, and the accepted
- * classes are folded out of `entries` by `publishedAssetsBelow`, which has one owner (E1).
  */
 const sliceOf = (table: MeasureTable, entries: readonly Envelope[]): MeasureSlice => ({
   entries,
@@ -211,6 +203,9 @@ describe('a decision still refuses a winner it does not admit, an empty reason a
     await expectRefusal(() => emitDecision(log, 'round-1', { winner: 1, outcomes: both }), 'illegal-transition', 'null means the incumbent stands')
     await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [...both, { slot: 2, admitted: true, reason: 'never declared' }] }), 'illegal-transition', 'does not declare')
     await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [{ ...both[0], reason: '' }, both[1]] }), 'malformed-payload', 'reason')
+    // The outcome shape is closed by `nested.outcomes`, the set the declaration hands that reader:
+    // widening that reader by one member leaves every other case in this file green (round eight's B2).
+    await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [{ ...both[0], note: 'x' }, both[1]] }), 'malformed-payload', 'note')
 
     const decided = emitDecision(log, 'round-1', { winner: 0, outcomes: both })
     expect([Object.keys(decided.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.decision?.winner]).toEqual([['calibration', 'outcomes', 'winner'], 0])

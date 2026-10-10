@@ -731,7 +731,8 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
 | 六条根因、三层架子、六实体落点 | `docs/blueprint.md` |
 | 第一轮审核与 K1/K2 检查点、阶段退出条件 | `docs/review.md` |
 | **八个出口各自是怎么被找到、又是怎么关的** | `docs/adversarial-review-2..8.md` |
-| **第八轮三条 blocking 的处理过程与还剩什么** | `docs/round-9-handoff.md`（交回材料，第九轮先读它） |
+| **第八轮三条 blocking 的处理过程与还剩什么** | `docs/round-9-handoff.md`（交回材料） |
+| **第一次真实模型驱动、指针真的移动的 RSI 回合** | `docs/live-campaign.md` + `docs/live-campaign.jsonl`（48 条原始事实） |
 | 写代码前必须读的行为纪律 | `docs/debugging.md`、`docs/spec-policy.md` |
 | 按缝切片的工作方式与已认的缝 | `docs/tdd-seams.md` |
 | RRSI 只移植决策层的边界与五处收紧 | `docs/adr/0001-rrsi-port-boundary.md` |

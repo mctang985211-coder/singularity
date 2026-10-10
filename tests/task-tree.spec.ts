@@ -1,9 +1,5 @@
 /**
  * The decomposition tree: readiness, named blockers, and how sub-tasks support the parent.
- *
- * The two properties this spec exists for: **only `verified` satisfies a dependency**, and **a
- * parent is never complete because its children ended**. Both are derived from the log, so both are
- * checkable without trusting a scheduler.
  */
 
 import { describe, expect, it } from 'vitest'

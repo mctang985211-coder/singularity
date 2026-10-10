@@ -164,6 +164,8 @@ describe('the execution context says what actually ran', () => {
     // Two tools under one name are one tool, and a repeated condition is stated once.
     expect(refusalOf(() => log.emit(bubbleWith({ tools: [BUBBLE_TOOLS[0], BUBBLE_TOOLS[0]] }))).code).toBe<RefusalCode>('malformed-payload')
     expect(refusalOf(() => log.emit(bubbleWith({ conditions: ['no-network', 'no-network'] }))).code).toBe<RefusalCode>('malformed-payload')
+    // The workspace is closed by `nested.workspace`, the set the declaration hands that reader.
+    expect(refusalOf(() => log.emit(bubbleWith({ workspace: { kind: 'git', ref: 'refs/heads/main', note: 'extra' } }))).code).toBe<RefusalCode>('malformed-payload')
     expect(log.entries()).toHaveLength(3)
   })
 

@@ -1,30 +1,6 @@
 #!/usr/bin/env node
 /**
  * S6 — the real root/child vertical slice, with a real verifier on a real artifact.
- *
- * Everything here executes for real: a control store over a real DSH session, a revision created
- * through the environment protocol, an agent node referencing a session, a parent that decomposes
- * into two children with a dependency and a budget, runs that produce an artifact by running a
- * program, a verifier that **spawns a process** to judge that artifact, verdicts recorded as facts
- * through the command boundary, a derived receipt, and the projections a reader sees.
- *
- * What it exists to prove, in the order it proves it:
- *
- *   1. a sub-task cannot start before the sub-task it depends on has verified, and the refusal
- *      quotes the plan;
- *   2. a verdict is produced by running the verifier, and the digest recorded is the digest of the
- *      program that actually ran — so replacing that program invalidates the criterion;
- *   3. swapping the artifact after the verdict does not leave the old pass standing;
- *   4. a budget is a real stop: the run that spends it ends the sub-task, and starting another is
- *      refused with the plan's own words;
- *   5. a parent is never complete because its children ended — the criterion the failed sub-task
- *      supported stays unsatisfied and is named;
- *   6. the receipt names the fact prefix it was derived from, reproduces from that prefix, and
- *      reports what was judged on the attempt's inputs as distinguished from what was only declared.
- *
- * Run: node scripts/slice-b.mjs
- *
- * @module singularity-core/scripts/slice-b
  */
 
 import { createHash } from 'node:crypto'

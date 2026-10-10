@@ -1,25 +1,6 @@
 #!/usr/bin/env node
 /**
  * `strategy@2` end to end, in a real process, over a real DSH session: a control store over a JSONL
- * session on disk, the round's facts through the command boundary, the publication through the release
- * boundary, and the state read back by reopening the store.
- *
- * It proves the round's own rules end to end: the explicit plan and its annealed budget, every
- * submission-gate refusal, admissibility (a violated constraint, an incomplete measurement, an
- * evaluation that does not fit its slot, two calibers, the incumbent's floor), a decision that covers
- * the plan's declared slots and is recomputed against the cut, and gains frozen against the cutoff.
- *
- * **Novelty, against a real publication.** `src/strategy/published-assets.ts` derives the accepted
- * classes from the head below the cutoff and the *elected* slot that proposed the published revision,
- * matched by content digest. So this probe publishes for real: draft and approve the content round 1's
- * elected revision holds, then move the head with `environment@2`'s compare-and-swap. The native
- * approval seam needs a DSH host and a person, so a scripted policy answerer stands in for it
- * (`scripts/release-probe.mjs` observes the real service); the approval fact is otherwise real.
- *
- * `src/measure/**` is another slice, so measurement results are recorded as facts under this probe's
- * own `probe-measure` protocol and handed to the round as §5.4's aggregate. Run: node scripts/round-probe.mjs
- *
- * @module singularity-core/scripts/round-probe
  */
 
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
@@ -84,10 +65,6 @@ const result = (evaluationId, candidate, caliberDigest, qualities, constraints =
 
 /**
  * A stand-in for the measure slice: one measurement result per fact, stored as recorded.
- *
- * `probe-measure@1` is probe-local. There is deliberately no `assets/published` kind here: *accepted*
- * has one owner (`src/strategy/published-assets.ts`), and a second convention is how two wirings come
- * to disagree about one word.
  */
 const MEASURE_PROTOCOL = 'probe-measure', MEASURE_ROLE = 'probe-measure', MEASURE_KIND = 'measurement/recorded'
 function declareProbeMeasure(registry) {
@@ -170,8 +147,6 @@ async function main() {
 
     /**
      * The measure slice as of one log position: the facts at that cut, plus the two reads the round
-     * makes. The historical read narrows to the round's own cutoff; the facts at the cut are what
-     * `publishedAssetsBelow` folds.
      */
     const sliceAt = cut => {
       const facts = store.load().entriesOf(MEASURE_PROTOCOL, 1).filter(fact => fact.seq < cut)
