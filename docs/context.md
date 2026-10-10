@@ -704,3 +704,16 @@ C 比 B 更依赖接口先定：四个工作流都要编译同一组类型。所
 一个既有用例从 pass 变成 skip 时这个数字不变，而"通过数"只有跑完整套件才知道——那是这条门禁刻意
 不付的代价（`pnpm verify` 里的 `vitest run` 才是那个读数）。要把它也纳入，就得让门禁跑测试套件，
 那会让每次 `pnpm gates` 多跑一遍全套；本条记在这里，不假装已经覆盖。
+
+**「一个来源」这个机制本身，现在也被变异账本攻击。** 第七轮审查指出：账本里没有一条声明
+针对品牌、冻结或任何一个嵌套读者，于是"它们是承重的"唯一证据只是门禁在**合成规则**上的自检腿。
+补上的三条是 `mutate:protocol-copied-rule-refused`、`mutate:protocol-nested-reader-widened`、
+`mutate:protocol-post-declare-push`——每一条都由**树里的** spec 抓住（`tests/gate.spec.ts` 的展开复制
+与事后 push、`tests/measure-slice.spec.ts` 的放宽嵌套读者），而不是由那条合成腿。
+`node scripts/mutate.mjs --all` 跑全部；每次 `pnpm gates` 只跑其中一条（账本里的 `commitClaim`），
+其余按下需运行——门禁不替你把整套变异跑一遍，这一点它自己会打印。
+
+**一处勘误（我记下的、被实现方纠正的）**：第七轮说"六份 declared record 里有三份没有命名本树的
+任何 commit"，用的是 `git cat-file -e`。实现方用 `rev-list --all` 加可达性重查，**六份都命名了本树的
+至少一个 commit**（`review.md` 命名了蓝图那次提交）。所以**那条 finding 成立**（豁免接受任何十六进制
+token 且不校验），**但它举的实例不成立**。实例被收回，规则按可达性收窄。
