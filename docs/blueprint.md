@@ -2,7 +2,8 @@
 
 > 单一入口。审查从这里开始。
 > 第一轮审核、补充遗漏与后续构建检查点：[review.md](review.md)。
-> 当前装配阶段（2026-10-10）：[质量审核](assembly-review.md)；[装配蓝图与框架](assembly-blueprint.md)。先完成 G0，下一次检查点为 G1 的真实 Web 单任务执行与恢复。
+> 当前装配阶段（2026-10-10）：[质量审核](assembly-review.md)；[装配蓝图与框架](assembly-blueprint.md)。先完成 G0，下一次检查点为 G1 的真实 Web 单任务执行与恢复。> 独立 DSH 环境（开发循环专用，不碰全局/harness 两个 home）：[standalone-dsh.md](standalone-dsh.md)。
+
 > 接手先读：[handoff.md](handoff.md)（一页纸）。跨轮工作记忆：[context.md](context.md)；已定决策：[adr/](adr/)；RRSI 上游逐行对照：[rrsi-upstream-reference.md](rrsi-upstream-reference.md)；当前阶段设计：[phase-b-design.md](phase-b-design.md)。
 > 证据基础：旧仓 `packages/singularity` @ `6a0edde` 的只读审计、DSH 源码与已装 `0.2.0-rc.2` 的实测、RRSI 上游 `be50316` 的逐行阅读、新骨架 `singularity-core`。
 > 历史工作件（按需查证）：`~/Documents/singularity-refactor-plan.md`（冗余总账）、`singularity-rrsi-diagnosis.md`（RSI 断点）、`singularity-s0-spine.md`（核心脉络）、`singularity-s0-correction.md`（对 DSH 的更正）、`singularity-probe-results.md`（实测）、`singularity-f1-design.md`。

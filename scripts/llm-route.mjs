@@ -34,7 +34,11 @@ export const ROUTE = {
   provider: process.env['SINGULARITY_LLM_PROVIDER'] ?? 'commandcode',
   model: process.env['SINGULARITY_LLM_MODEL'] ?? 'deepseek/deepseek-v4.1-flash',
   baseURL: process.env['SINGULARITY_LLM_BASE_URL'] ?? 'https://api.commandcode.ai/provider/v1',
-  apiKeyEnv: 'COMMANDCODE_API_KEY',
+  apiKeyEnv: process.env['SINGULARITY_LLM_API_KEY_ENV'] ?? 'COMMANDCODE_API_KEY',
+  /** The wire protocol the gateway speaks; the responses gateways need this named. */
+  api: process.env['SINGULARITY_LLM_API'] ?? 'openai-completions',
+  /** Thinking effort handed to the runtime, when the route declares one. */
+  reasoningEffort: process.env['SINGULARITY_LLM_REASONING'],
 }
 
 /** The provider entry `dsh-llm-pi-ai` needs: a display name, the key's env var, the wire API, models. */
@@ -42,9 +46,14 @@ export function providerProfile(route = ROUTE) {
   return {
     displayName: route.provider,
     apiKeyEnv: route.apiKeyEnv,
-    api: 'openai-completions',
+    api: route.api,
     baseURL: route.baseURL,
-    models: [{ id: route.model, name: route.model, contextWindow: 1000000 }],
+    models: [{
+      id: route.model,
+      name: route.model,
+      contextWindow: 1000000,
+      ...(route.reasoningEffort === undefined ? {} : { reasoningEfforts: { low: 'low', medium: 'medium', high: 'high', max: 'max' } }),
+    }],
   }
 }
 
@@ -103,6 +112,7 @@ export async function realModel(route = ROUTE) {
         for await (const chunk of ctx.llm.stream({
           provider: route.provider,
           model: route.model,
+          ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
           messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
           ...(system === undefined ? {} : { system }),
           temperature,

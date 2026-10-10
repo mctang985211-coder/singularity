@@ -904,6 +904,17 @@ method-driver 存在前没有消费者，审核原文自己也这么排）。
   **留作 G2 具名缺口**：已决轮的槽位明细（gain/Δ）仍按当前切片显示——"按决定时刻重放"需要切片
   暴露子 cut，那是 Web 读面板的第一个消费者，届时一并定接口。
 
+### 独立 DSH 环境（`singularity-next`）：开发循环与两个既有 home 脱钩
+
+装配讨论收敛出的运行形态：singularity-core 的开发**不经过** harness 启动器、不共享
+`~/.dsh`——单独 npm 安装 `@deepseek-ai/dsh@0.2.0-rc.2`（与全局、harness 三方同版本）、
+单独 home（`/home/ROXY/singularity-next/home`，凭据仅 YINGJUN）、一个 `env.sh` 接线点。
+模型路由走 Yingjun 的 **openai-responses**（max 思考），[llm-route.mjs](../scripts/llm-route.mjs)
+的 `SINGULARITY_LLM_*` 覆盖面补齐 `api`/`apiKeyEnv`/`reasoningEffort` 三项（默认行为不变）。
+端到端实测：`model-smoke` 在独立栈全过（responses + agent turn）；隔离三方核对无一处串写。
+细节与边界见 [standalone-dsh.md](standalone-dsh.md)。harness 的 `config.yml` 保留了同一
+yingjun 路由（供旧 singularity 实例），两边凭据各自独立副本。
+
 ### 不要重开的事（**代价已经付过**）
 
 - **声明而不是采样**成员集，是对的机制。
