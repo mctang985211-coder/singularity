@@ -386,6 +386,11 @@ const SCRIPT_GATES = [
   { name: 'release-probe', label: 'the release probe', script: 'scripts/release-probe.mjs', markers: ['release-probe: OK'] },
   { name: 'cd-probe', label: 'the C+D probe', script: 'scripts/cd-probe.mjs', markers: ['cd-probe: OK'] },
   { name: 'domain-comparison', label: 'the domain comparison probe', script: 'scripts/domain-probe.mjs', markers: ['domain-probe: OK'] },
+  // The two G2 evidence legs that need a real browser and a real profile. They are gates rather than
+  // notes because each one's subject is a claim nothing else can make: that a plan's sub-tasks are
+  // admitted tasks a session can run, and that the panel and the tools read one cut.
+  { name: 'panel-probe', label: 'the panel probe', script: 'scripts/panel-probe.mjs', markers: ['panel-probe: OK'] },
+  { name: 'subtask-probe', label: 'the sub-task probe', script: 'scripts/subtask-probe.mjs', markers: ['subtask-probe: OK'] },
 ]
 
 /** One detector per gate. Each takes the file list and the code-stripped texts. */

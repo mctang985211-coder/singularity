@@ -40,7 +40,7 @@
  * @module singularity-core/scripts/panel-probe
  */
 
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readlink } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +51,7 @@ import { chromium } from 'playwright'
 // imported rather than copied: a second copy of an app's accessors drifts the moment the app changes, and
 // only one of the copies is watched.
 import {
+  PROFILE,
   boot,
   dismissFirstRun,
   prepare,
@@ -389,6 +390,15 @@ async function main() {
     screenshot,
   }
   try {
+    // ---- which tree this run judged ------------------------------------------------------------
+    // The deployed profile links `assembly/` by absolute path, so a copy of this repository boots the
+    // *original* plugin: without this, a probe run in a stripped tree would still report OK, and a
+    // verdict that cannot depend on the tree it names is worth nothing. The guard is here rather than
+    // in the harness because only the probe knows which checkout it means.
+    const linked = await readlink(join(home, 'profiles', PROFILE, 'node_modules', '@dangosys', 'dsh-singularity-next')).catch(() => undefined)
+    const mounted = join(CHECKOUT, 'assembly')
+    if (linked !== mounted) throw new ProbeError(`the profile mounts ${linked ?? 'no plugin'}, not ${mounted}: a verdict about another tree is not evidence about this one`)
+
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
     const page = await context.newPage()
     await page.goto(server.url, { waitUntil: 'domcontentloaded' })

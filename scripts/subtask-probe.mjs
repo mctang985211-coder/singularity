@@ -24,7 +24,7 @@
  * @module singularity-core/scripts/subtask-probe
  */
 
-import { readFile, readdir, stat, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, readlink, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -159,6 +159,16 @@ async function main() {
   const browser = await chromium.launch()
   try {
     check('the profile boots over the probe overlay with every row active', !server.output.includes('did not activate') && !server.output.includes('skipping profile bundle'), server.output.trim().split('\n').slice(-3).join(' | '))
+
+    // Which tree this run actually judged. The deployed profile links `assembly/` by absolute path, so a
+    // copy of this repository boots the *original* plugin — which means a probe run in a stripped tree
+    // would still pass, and a verdict that cannot depend on the tree is worth nothing. So the probe
+    // asserts that the plugin it drove is the plugin beside it, and stops rather than reporting a pass
+    // it cannot stand behind.
+    const linked = await readlink(join(home, 'profiles', PROFILE, 'node_modules', '@dangosys', 'dsh-singularity-next')).catch(() => undefined)
+    const expected = join(process.cwd(), 'assembly')
+    check('the mounted plugin is this checkout, so the verdict is about the tree it names', linked === expected, `the profile links ${linked ?? 'nothing'}, and this probe is running from ${process.cwd()}`)
+    if (linked !== expected) throw new Error(`the profile mounts ${linked ?? 'no plugin'}, not ${expected}: a verdict about another tree is not evidence about this one`)
 
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
     const page = await context.newPage()
