@@ -60,11 +60,12 @@
     },
     {
       "protocol": "task",
-      "version": 4,
+      "version": 5,
       "subject": "the task id",
       "kinds": [
         "bubble/opened",
         "evidence/produced",
+        "method/consumed",
         "run/failed",
         "run/started",
         "run/verified",
@@ -74,7 +75,7 @@
         "task/reassigned"
       ],
       "producedBy": "src/task/commands.ts createTaskCommands (the only surface that produces task facts)",
-      "readBy": "src/task/view.ts projectTask/projectReceipt, src/task/tree.ts projectTree"
+      "readBy": "src/task/view.ts projectTask/projectReceipt, src/task/tree.ts projectTree, src/task/consumption.ts unconsumedMethods"
     }
   ]
 }
