@@ -1,7 +1,7 @@
 # K1 交回材料：逐条证据
 
 > 对应 [`review.md`](review.md) §6 的 K1 12 场景。每条的形态是**观测**，不是声明：给出跑什么、看到什么、证据在哪一行。
-> 复现命令：`pnpm verify`（tsc + 177 测试 + 11 门禁 + 门禁自检）、`node scripts/control-probe.mjs`、`node scripts/slice-b.mjs`、`node scripts/recovery-probe.mjs`。
+> 复现命令：`pnpm verify`（= `tsc --noEmit` + `vitest run` + `node scripts/gates.mjs` + `node scripts/gates.mjs --probe`；测试与门禁的**条数**由这两条命令自己打印，规模数字在 `tree-baseline.json`）、`node scripts/control-probe.mjs`、`node scripts/slice-b.mjs`、`node scripts/recovery-probe.mjs`。
 > 其中三条是**门禁**，不是"记得要跑"的脚本：`control-store-probe`、`root-child-slice`、`recovery-probe`；三条都各自有一个合成失败探针（`node scripts/gates.mjs --probe`）。
 > **尚未观测的项单列在最后，不混进已通过的条目。**
 

@@ -313,13 +313,15 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | **S0** | 核心脉络 spec：六实体、五关系、权威写入表、保证阶梯、53 种类 → 38 载荷 | 完成 |
 | **S0-C** | 对 DSH 的更正：`ignorable` 语义；`storageDomain` 是第二个持久面 | 完成 |
 | **E1** | 实测：`storageDomain` 跨进程无互斥且静默丢失更新；session 有 `flock` 租约 | 完成 |
-| **S1** | 协议框架：一个信封 + 一条追加路径 + 一个 fold 引擎 + 一个版本闸 + 一个拒绝契约 + 7 条门禁 | 完成（**存储层待换**） |
+| **S1** | 协议框架：一个信封 + 一条追加路径 + 一个 fold 引擎 + 一个版本闸 + 一个拒绝契约 + 随第一次提交落地的机械门禁（清单随每次提交变化，见 §13 的账本） | 完成（**存储层待换**） |
 | **S2** | 纵切：Task 契约 → Run → 独立判决 → 派生的 receipt → 唯一读投影 → agent/UI 同源 | 完成 |
 | **审核首轮修复** | E02/E03/E04/E06/E07/E08 全部修掉；门禁换成词法剥离 + 拒绝 default/namespace 导入 + **门禁自检** | 完成（`d849430`） |
 | **F01 承载实验** | DSH 事件词表是**仓内生成**的；仓外扩展事件运行时不可见；`ignorable` 是唯一机制且活跃缝设不了 → **控制 store 必须骑在"已知 log-only 类型"上** | 完成（结论见 [context.md](context.md) §4.1） |
 | **RRSI 独立复核** | E09–E12 与 R05/R06 确认，并对审核自身给出两处修正（E12 被高估、R06 需拆分） | 完成 |
 
-**当前实测**（阶段 B 进行中）：**103 测试** / **9 门禁 + 门禁自检**；`pnpm verify` 与 `node scripts/control-probe.mjs` 全绿；`src`/`tests` 共 26 个文件。
+**规模数字不在这里复述**（它们漂过三次，见 §12.1）：源文件 / spec 文件 / 测试 / 门禁四个数在
+`tree-baseline.json`，由门禁 `tree-inventory` 每次与实测比对；门禁自己的条数由 `node scripts/gates.mjs`
+每次运行打印。
 
 ## 待做（审核 §5 的顺序，每项含退出条件）
 
@@ -375,19 +377,22 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | E6 Human decision | 待建（DSH 原生审批 seam；旧仓 `method-publish` 是蓝本） | 待建 |
 | G4 派生层 | `src/task/view.ts`（`TaskView` + 派生 receipt + agent 渲染） | **已建**（S2） |
 
-## 6.3 `singularity-core` 现状（15 文件）
+## 6.3 `singularity-core` 的分工（规模数字见 `tree-baseline.json`）
 
-| 文件 | 行 | 拥有什么 |
-|---|---|---|
-| `src/protocol/envelope.ts` | 268 | 一个信封（闭合成员 + 摘要覆盖 body）+ 无损 JSON 域 + 闭合键规则 |
-| `src/protocol/log.ts` | 314 | 一条追加路径：**提交队列**（并发命令串行化）+ **命令结果识别** + 发射者由协议决定 + 写前 dry-run（**存储层待换**） |
-| `src/protocol/registry.ts` | 254 | 一个版本闸 + **可组合的保证词表** + 发射者纪律 + 声明原子性 + own-key 查询 |
-| `src/protocol/fold.ts` | 80 | 一个 fold 引擎（两个作用域：整库 fail-closed / 单 subject 隔离），装载时也走 kind 的解析器 |
-| `src/protocol/refusal.ts` | 88 | 一个拒绝契约（26 个具名 code） |
-| `src/task/contract.ts` | 152 | 契约：**shape（纯）与可用性（命令期）分开**；闭合契约与判据 |
-| `src/task/protocol.ts` | 334 | 5 种 kind + **三条写在 reducer 里的不变量** + 按 kind 闭合载荷 |
-| `src/task/view.ts` | 265 | 唯一读投影（含 `awaiting-run`）+ 派生 receipt（含验证器实现与产物摘要）+ agent 渲染 |
-| `scripts/gates.mjs` | 492 | **10 条门禁 + 自检**（`--probe` 先筛掉读真实树的门禁再跑，四条各有独立探针） |
+行数不复述：唯一的出处是 `tree-baseline.json`，由门禁 `tree-inventory` 每次与本次构建实测比对；
+本表只说"谁拥有什么"，因为这部分不随重构漂移。
+
+| 文件 | 拥有什么 |
+|---|---|
+| `src/protocol/envelope.ts` | 一个信封（闭合成员 + 摘要覆盖 body）+ 无损 JSON 域 + 闭合键规则 |
+| `src/protocol/memory-log.ts` | 一条追加路径：**提交队列**（并发命令串行化）+ **命令结果识别** + 发射者由协议决定；持久性归 DSH（原 `log.ts` 的文件存储已删除） |
+| `src/protocol/registry.ts` | 一个版本闸 + **可组合的保证词表** + 发射者纪律 + 声明原子性 + own-key 查询 |
+| `src/protocol/fold.ts` | 一个 fold 引擎（两个作用域：整库 fail-closed / 单 subject 隔离），装载时也走 kind 的解析器 |
+| `src/protocol/refusal.ts` | 一个拒绝契约（具名 code 逐个列出，不在这里数） |
+| `src/task/contract.ts` | 契约：**shape（纯）与可用性（命令期）分开**；闭合契约与判据 |
+| `src/task/protocol.ts` | 任务域的 kind + **三条写在 reducer 里的不变量** + 按 kind 闭合载荷 |
+| `src/task/view.ts` | 唯一读投影（含 `awaiting-run`）+ 派生 receipt（含验证器实现与产物摘要）+ agent 渲染 |
+| `scripts/gates.mjs` | 全部门禁 + `--probe` 自检（**条数由门禁每次运行打印**，边界在 `context.md` §13） |
 
 **三条不变量**（写在 reducer 里，不在提示词里）：
 

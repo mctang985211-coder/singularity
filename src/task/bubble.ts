@@ -70,12 +70,17 @@ const DIGEST = /^[0-9a-f]{64}$/
 /**
  * Read one closed list of named input digests. Names are unique; a repeat is refused, not merged.
  *
- * The closed set is a parameter, because the entry belongs to the kind that declares it: the parse
- * boundary hands `nested.inputs` (or `nested.inputDigests`) over, so the declaration is what closes
- * each element and a reader cannot widen the shape without the declaration changing. The default is
- * the one set this module owns for the request payloads it reads outside a kind's declaration.
+ * The closed set is a **required** parameter, because the entry belongs to the kind that declares it:
+ * the parse boundary hands `nested.inputs` (or `nested.inputDigests`) over, so the declaration is what
+ * closes each element and a reader cannot widen the shape without the declaration changing.
+ *
+ * It has no default. It used to default to `BUBBLE_INPUT_MEMBERS`, which is the declaration constant
+ * itself, so the two callers outside a kind's declaration — the verifier's and the measure adapter's
+ * request readers — closed the entry with the same set they would have named, and dropping the
+ * argument was a semantic no-op no check could see. Required, the declaration is named at every place
+ * that closes an entry, and a caller that means a different set has to say which one.
  */
-export function inputList(raw: unknown, where: string, members: MemberSet = BUBBLE_INPUT_MEMBERS): readonly BubbleInput[] {
+export function inputList(raw: unknown, where: string, members: MemberSet): readonly BubbleInput[] {
   if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of named inputs, got ${raw === null ? 'null' : typeof raw}`)
   const seen = new Set<string>()
   return raw.map((entry, index) => {

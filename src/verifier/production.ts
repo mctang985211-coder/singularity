@@ -49,8 +49,8 @@ import { readFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { refuse } from '../protocol/refusal.ts'
-import { inputList, type BubbleInput } from '../task/bubble.ts'
-import { assertCriterionShape, type AcceptanceCriterion } from '../task/contract.ts'
+import { BUBBLE_INPUT_MEMBERS, inputList, type BubbleInput } from '../task/bubble.ts'
+import { assertCriterionShape, CRITERION_MEMBERS, type AcceptanceCriterion } from '../task/contract.ts'
 import {
   assertVerifierRunnable,
   runVerifierSelftest,
@@ -199,10 +199,11 @@ function readImplementations(raw: unknown): readonly VerifierImplementation[] {
 /**
  * The bubble's declared inputs, read by the shape their owner declares, then resolved into the
  * workspace each one will be read from. The shape lives in `src/task/bubble.ts` because
- * `inputDigests` is a field of that protocol's own `evidence/produced` payload.
+ * `inputDigests` is a field of that protocol's own `evidence/produced` payload, and it is named here
+ * rather than defaulted there: a request's inputs are the bubble's, one declaration with no fallback.
  */
 function readInputs(raw: unknown, workspace: string): readonly ProductionInput[] {
-  return inputList(raw, 'request.inputs').map((entry, index) => ({
+  return inputList(raw, 'request.inputs', BUBBLE_INPUT_MEMBERS).map((entry, index) => ({
     ...entry,
     path: workspacePath(workspace, entry.name, `request.inputs[${index}].name`),
   }))
@@ -231,7 +232,7 @@ function readRequestShape(request: ProductionVerdictRequest): ResolvedRequest {
     // The criterion's shape is the contract owner's rule, read here by the same function the
     // contract's own admission uses. A second reader of the same shape is a second place for the
     // two to drift apart, and the drift is invisible until a log disagrees with itself.
-    criterion: assertCriterionShape(source['criterion'], 'request.criterion'),
+    criterion: assertCriterionShape(source['criterion'], 'request.criterion', CRITERION_MEMBERS),
     implementations: readImplementations(source['implementations']),
     inputs: readInputs(source['inputs'], workspace),
     workspace,

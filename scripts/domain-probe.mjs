@@ -330,24 +330,21 @@ async function main() {
 
   // The instrument's bytes are not frozen by the fixture, and this check does not pretend they are:
   // `frozenTools` below is built from the runtime digest, so a rebuilt meter moves both sides of the
-  // caliber comparison together. What *can* be shown, and is shown here, is that the number the
-  // instrument prints is a reading of the words in the file it is pointed at rather than of the
-  // probe's own naming. The reference is the task's own reference file, so the denominator is fixed
-  // at its four words, and the subjects are the reference itself, three of its words, two, one, none,
-  // and three of its words plus one word that wears the same naming convention but is in no
-  // reference at all.
+  // caliber comparison together. What *can* be shown is that the number it prints is a reading of the
+  // words in the file it is pointed at rather than of the probe's own naming. The reference is the
+  // task's own reference file, so the denominator is fixed at its four words.
   //
-  // That last subject is the discriminating one, and the reason is precise: the stray word still
-  // wears `-t<digits>`, so a counter of that naming convention counts **four** hits where a reader of
-  // the file counts three. The construction round four used — count the probe's `-t<N>` occurrences
-  // out of the artifact text, divide by a hardcoded 4 — therefore returns 1, 3/4, 1/2, 1/4, 0 and
-  // **1**, and fails here while passing every other check in this probe. A meter that reads the file
-  // returns 3/4 for that subject, for the same reason it returns 3/4 for the one before it.
+  // Two subjects carry that claim, because one spelling of the counter defeated the first version of
+  // this check. A stray word shaped like `…-t1absent` still contains `-t<digits>`, so a counter that
+  // looks for that naming anywhere reads four hits where a reader of the file reads three, and round
+  // four's construction fails here. Round six anchored the same idea — `/-t[0-9]+$/` — which is not
+  // fooled by `…-t1absent` and read every value below correctly; hence the seventh subject, **another
+  // task's** target: it ends in `-t<digits>`, so the anchored count still counts it (1/4) while a
+  // meter pointed at this task's reference finds it in no reference (0).
   //
-  // This is not a proof that the instrument's bytes are bound to the fixture — nothing here is. A
-  // counter that derived its divisor from the reference file's length, or that filtered its tokens
-  // through the reference, would agree with a real meter on all six numbers. The limit is recorded in
-  // `docs/f-evidence.md` rather than claimed as covered.
+  // Not a proof that the bytes are bound to the fixture: a counter that derived its divisor from the
+  // reference file's length, or filtered its tokens through the reference, would agree with a real
+  // meter on all seven numbers. `docs/f-evidence.md` §2 records that limit.
   const firstLayout = layouts[fixture.tasks[0].taskId]
   const referenceSubject = join(workspace, fixture.tasks[0].inputs[1])
   const subjectOf = async (name, words) => {
@@ -360,18 +357,21 @@ async function main() {
   const oneOfFour = await subjectOf('one-of-four', firstLayout.targets.slice(0, 1))
   const noneOfFour = await subjectOf('none-of-four', firstLayout.fillers)
   const absentWord = await subjectOf('absent', [...firstLayout.targets.slice(0, 3), `${firstLayout.targets[0]}absent`])
+  // Another task's target word: it ends in `-t<digits>` exactly as this task's do, and it is in no
+  // reference for this task, so naming and reading give different numbers and only reading gives 0.
+  const foreignTarget = await subjectOf('foreign-target', [TARGET(fixture.tasks[1].taskId)(1)])
   const qualityOfSubject = async subject => {
     const ran = await runProcess(process.execPath, [meterProgram, subject, referenceSubject, join(root, 'differential.log'), 'differential', 'measure'])
     if (ran.code !== 0) return null
     return JSON.parse(ran.stdout.trimEnd().split('\n')[0] ?? '{}').quality ?? null
   }
-  const differentialSubjects = [referenceSubject, threeOfFour, twoOfFour, oneOfFour, noneOfFour, absentWord]
+  const differentialSubjects = [referenceSubject, threeOfFour, twoOfFour, oneOfFour, noneOfFour, absentWord, foreignTarget]
   const differential = await Promise.all(differentialSubjects.map(qualityOfSubject))
-  const handDifferential = [1, 3 / 4, 2 / 4, 1 / 4, 0, 3 / 4]
+  const handDifferential = [1, 3 / 4, 2 / 4, 1 / 4, 0, 3 / 4, 0]
   check('the meter\'s number is a reading of the words in the file it is pointed at, not of the probe\'s own naming',
     differential.every(quality => quality !== null) &&
       differential.every((quality, index) => close(quality, handDifferential[index])),
-    `quality ${differential.join(' / ')} for the reference / three of its words / two / one / none / three of them plus one word in no reference; hand-computed ${handDifferential.join(' / ')}`)
+    `quality ${differential.join(' / ')} for the reference / three of its words / two / one / none / three of them plus one word in no reference / one word of another task's reference; hand-computed ${handDifferential.join(' / ')}`)
 
   const registry = new ProtocolRegistry()
   declareTaskProtocol(registry)
@@ -1104,6 +1104,29 @@ async function main() {
     // smaller number is better.
     const horizon = 'on the frozen solve set under the fixture\'s per-task calibers'
     const verb = direction === 'lower' ? 'is beaten by' : 'beats'
+    /**
+     * **The readout and the ordering must be one claim, and the direction is what makes them one.**
+     *
+     * `verb` is computed from `direction`; the ranking is `directionSign` applied to the two qualities.
+     * Written independently the two can disagree, and nothing compared them: round six's construction —
+     * the fixture flipped to `lower` with `directionSign` forced to the constant `1` — ran every other
+     * check green and printed `gain 0.7500 … → met true` directly above "the published method **is
+     * beaten by** H0", because every other check is written in terms of the same sign and so agreed
+     * with itself. The direction is not a probe-local value to be trusted here: `view.direction` is
+     * read back out of the folded log by `projectEvaluation` and is a member of the caliber digest, so
+     * the sign is read from the views, and the verb must be the one the ordering implies. A constant
+     * sign now contradicts the views it ranks, and a verb that outlives its own numbers is refused
+     * instead of printed in the marker.
+     */
+    const carriedDirections = [...new Set(planIds.map(planId => views[planId].direction))]
+    const signOfDirection = value => (value === 'lower' ? -1 : value === 'higher' ? 1 : undefined)
+    /** The one word a signed gain implies. A tie implies neither, and no verb is a claim about a tie. */
+    const verbOfGain = gain => (close(gain, 0) ? 'level with' : gain > 0 ? 'beats' : 'is beaten by')
+    check('every view carries the direction this readout is written in, and the sign is that direction\'s rather than a constant',
+      carriedDirections.length === 1 && carriedDirections[0] === direction &&
+        directionSign === signOfDirection(carriedDirections[0]) &&
+        verb === verbOfGain(solveAggregate.gain),
+      `views carry ${JSON.stringify(carriedDirections)}, fixture says ${JSON.stringify(direction ?? null)}, directionSign ${directionSign}, solve gain ${solveAggregate.gain}, verb ${JSON.stringify(verb)}`)
     console.log('')
     console.log(`  fixture ${computedDigest}`)
     console.log(`  tasks ${taskIds.length} (solve ${solveSet.length}, holdout ${holdoutSet.length}); trials per side ${fixture.frozen.trials}`)

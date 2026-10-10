@@ -97,12 +97,15 @@ function requireRecord(value: unknown, field: string): Record<string, unknown> {
 /**
  * Read one criterion's closed shape. Pure: it depends on nothing but the value.
  *
- * The closed set is a parameter, because the entry belongs to the kind that declares it: a parse
- * boundary that closes `judgement[]` hands `nested.judgement` over, so the declaration is what closes
- * each criterion rather than a copy the reader keeps beside it. The default is the set this module
- * owns for the shapes it declares itself.
+ * The closed set is a **required** parameter, because the entry belongs to the kind that declares it:
+ * a parse boundary that closes `judgement[]` hands `nested.judgement` over, so the declaration is what
+ * closes each criterion. It used to default to `CRITERION_MEMBERS` — the declaration constant itself —
+ * so a caller that dropped the argument was indistinguishable from one that named it, and the reader's
+ * own set could stand in for the declaration without a check noticing. Required, every caller names
+ * the set it means: a criterion inside a contract is closed by `CRITERION_MEMBERS`, and a metric's
+ * `measured` member by that same set, because that member *is* a criterion's shape.
  */
-export function assertCriterionShape(raw: unknown, field: string, members: MemberSet = CRITERION_MEMBERS): AcceptanceCriterion {
+export function assertCriterionShape(raw: unknown, field: string, members: MemberSet): AcceptanceCriterion {
   const record = requireRecord(raw, field)
   assertClosedKeys(record, members, field, 'malformed-contract')
   return {
@@ -121,7 +124,7 @@ export function assertCriterionShape(raw: unknown, field: string, members: Membe
  * unique, so a repeat is refused rather than merged — two entries under one id are two claims about
  * one criterion, and no reader could tell them apart afterwards.
  */
-export function criterionList(raw: unknown, where: string, members: MemberSet = CRITERION_MEMBERS): readonly AcceptanceCriterion[] {
+export function criterionList(raw: unknown, where: string, members: MemberSet): readonly AcceptanceCriterion[] {
   if (!Array.isArray(raw)) refuse('malformed-contract', `${where} must be an array of acceptance criteria, got ${raw === null ? 'null' : typeof raw}`)
   const seen = new Set<string>()
   return raw.map((entry, index) => {
@@ -136,11 +139,12 @@ export function criterionList(raw: unknown, where: string, members: MemberSet = 
  * Read one contract's closed shape. Pure, so a reducer may call it while replaying a log whose
  * verifiers are long gone.
  *
- * The closed set is a parameter for the same reason as the criterion reader's: `task/admitted`
- * declares `nested.contract`, hands it here, and that entry is what closes the contract. A shape
- * *inside* it — each `criteria[]` entry — belongs to the reader below, one level down.
+ * The closed set is required for the same reason as the criterion reader's: `task/admitted` declares
+ * `nested.contract`, hands it here, and that entry is what closes the contract. A shape *inside* it —
+ * each `criteria[]` entry — belongs to the reader above, and is closed with the criterion declaration
+ * this function names rather than with a set of its own.
  */
-export function assertContractShape(raw: unknown, field: string, members: MemberSet = CONTRACT_MEMBERS): TaskContract {
+export function assertContractShape(raw: unknown, field: string, members: MemberSet): TaskContract {
   const record = requireRecord(raw, field)
   assertClosedKeys(record, members, field, 'malformed-contract')
 
@@ -157,7 +161,7 @@ export function assertContractShape(raw: unknown, field: string, members: Member
   const criteria: AcceptanceCriterion[] = []
   const seen = new Set<string>()
   for (const [index, entry] of rawCriteria.entries()) {
-    const criterion = assertCriterionShape(entry, `${field}.criteria[${index}]`)
+    const criterion = assertCriterionShape(entry, `${field}.criteria[${index}]`, CRITERION_MEMBERS)
     if (seen.has(criterion.criterionId))
       refuse('malformed-contract', `${field}.criteria declares "${criterion.criterionId}" twice; a criterion id is stable and unique`)
     seen.add(criterion.criterionId)
@@ -173,7 +177,7 @@ export function assertContractShape(raw: unknown, field: string, members: Member
  * today is not an acceptance condition for a task starting today.
  */
 export function assertContract(raw: unknown, field: string, verifiers: VerifierRegistry): TaskContract {
-  const contract = assertContractShape(raw, field)
+  const contract = assertContractShape(raw, field, CONTRACT_MEMBERS)
   for (const [index, criterion] of contract.criteria.entries()) {
     if (!verifiers.has(criterion.verifierRef, criterion.verifierVersion, criterion.implementationDigest))
       refuse(

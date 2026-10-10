@@ -49,10 +49,15 @@ export function digest(source: Record<string, unknown>, key: string, where: stri
  * copy of the set until the fifth round made a member set a value: three copies of one shape is three
  * places a fourth member could appear in one and not the others. The digest is part of it because an
  * id alone can be re-pointed.
+ *
+ * The set is required rather than defaulted to `REVISION_MEMBERS`, for the reason the other shape
+ * readers lost their defaults: the default *was* the declaration, so a caller that dropped the
+ * argument closed the pin with the same set it would have named and no check could tell the two
+ * apart. Every caller names the declaration it means, and `plan.ts`'s incumbent names the same one.
  */
 export const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as const
 
-export function revisionRef(raw: unknown, where: string, members: readonly string[] = REVISION_MEMBERS): RevisionRef {
+export function revisionRef(raw: unknown, where: string, members: readonly string[]): RevisionRef {
   const source = record(raw, where)
   assertClosedKeys(source, members, where)
   return { environmentId: text(source, 'environmentId', where), revisionId: text(source, 'revisionId', where), digest: digest(source, 'digest', where) }

@@ -1,5 +1,5 @@
 {
-  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim (mutate:fw-direction-sign-ignored is the one). What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
+  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim. No row carries one today: `mutate:fw-direction-sign-ignored` was this ledger's one recorded miss, and it is a claim now that the probe checks its readout against the direction the views carry - the reproduction and the fix are in docs/f-evidence.md §5.2, and scripts/mutate.mjs prints the verdict rather than this file. What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
   "claims": [
     {
       "id": "fw-fixture-standard-moved",
@@ -357,7 +357,7 @@
     },
     {
       "id": "fw-direction-sign-ignored",
-      "rule": "the direction participates in the verdict, so a sign that is read and then ignored is caught",
+      "rule": "the readout is written in the direction the views carry, so a sign that is read and then ignored is caught",
       "doc": "docs/f-evidence.md",
       "edits": [
         {
@@ -387,9 +387,7 @@
           "scripts/domain-probe.mjs"
         ]
       },
-      "witness": "the solve set meets the fixture",
-      "expect": "missed",
-      "note": "REPRODUCED AND NOT CAUGHT. Every check in the probe is written in terms of the same `directionSign`, so forcing it constant keeps them self-consistent: with the fixture flipped to `lower` the probe still exits 0 and prints \"domain-probe: OK — the published method is beaten by H0 … and the frozen standards say so\" over a positive gain. The readout verb reads `direction` itself, so the marker contradicts its own numbers and nothing checks that. docs/f-evidence.md §5 recorded this mutation as caught with five failures; it is not, and the row now says so. What the fix does catch is the flipped fixture itself (mutate:fw-direction-flipped) and an inverted sign (mutate:fw-direction-sign-inverted)."
+      "witness": "every view carries the direction this readout is written in"
     },
     {
       "id": "fw-meter-never-reads-reference",

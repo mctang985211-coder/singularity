@@ -163,16 +163,18 @@ function maybeFinite(source: Record<string, unknown>, key: string, where: string
   return Object.hasOwn(source, key) ? finite(source, key, where) : undefined
 }
 
-function metricOf(raw: unknown, where: string, members: MemberSet = METRIC_MEMBERS): EvaluationMetric {
+function metricOf(raw: unknown, where: string, members: MemberSet): EvaluationMetric {
   const source = record(raw, where)
   assertClosedKeys(source, members, where)
   const direction = source['direction']
   if (direction !== 'higher' && direction !== 'lower')
     refuse('malformed-payload', `${where}.direction must be "higher" or "lower", got ${JSON.stringify(direction ?? null)}`)
-  return { measured: assertCriterionShape(source['measured'], `${where}.measured`), unit: text(source, 'unit', where), direction }
+  // `measured` is an acceptance criterion, so it is closed by the criterion shape's own declaration
+  // rather than by a set kept here: the kind that declares a metric declares no nested set for it.
+  return { measured: assertCriterionShape(source['measured'], `${where}.measured`, CRITERION_MEMBERS), unit: text(source, 'unit', where), direction }
 }
 
-function weightsOf(raw: unknown, where: string, members: MemberSet = WEIGHTS_MEMBERS): EvaluationWeights {
+function weightsOf(raw: unknown, where: string, members: MemberSet): EvaluationWeights {
   const source = record(raw, where)
   assertClosedKeys(source, members, where)
   const quality = finite(source, 'quality', where)

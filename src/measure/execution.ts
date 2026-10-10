@@ -42,8 +42,8 @@ import { readFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { refuse } from '../protocol/refusal.ts'
-import { inputList, type BubbleInput } from '../task/bubble.ts'
-import { assertCriterionShape, type AcceptanceCriterion } from '../task/contract.ts'
+import { BUBBLE_INPUT_MEMBERS, inputList, type BubbleInput } from '../task/bubble.ts'
+import { assertCriterionShape, CRITERION_MEMBERS, type AcceptanceCriterion } from '../task/contract.ts'
 import { digest, maybeText, record, text } from '../task/shape.ts'
 import { assertVerifierRunnable, runVerifierSelftest, type SelftestReport, type VerifierImplementation } from '../verifier/implementation.ts'
 import type { ProductionExecution, ProductionInput, VerifierCommand } from '../verifier/production.ts'
@@ -150,7 +150,7 @@ function readImplementations(raw: unknown): readonly VerifierImplementation[] {
 
 /** The run's declared inputs, resolved into the workspace each one will be read from. */
 function readInputs(raw: unknown, workspace: string): readonly ProductionInput[] {
-  return inputList(raw, 'request.inputs').map((entry, index) => ({
+  return inputList(raw, 'request.inputs', BUBBLE_INPUT_MEMBERS).map((entry, index) => ({
     ...entry,
     path: workspacePath(workspace, entry.name, `request.inputs[${index}].name`),
   }))
@@ -176,7 +176,7 @@ function readRequestShape(request: MeasurementRequest): ResolvedRequest {
   return {
     // The metric's shape is the contract owner's rule, read here by the same function the contract's
     // own admission uses: a second reader of the same shape is a second place for the two to drift.
-    metric: assertCriterionShape(source['metric'], 'request.metric'),
+    metric: assertCriterionShape(source['metric'], 'request.metric', CRITERION_MEMBERS),
     implementations: readImplementations(source['implementations']),
     inputs: readInputs(source['inputs'], workspace),
     workspace,

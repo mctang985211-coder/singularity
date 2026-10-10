@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 import {
   assertContract,
   assertContractShape,
+  CONTRACT_MEMBERS,
   foldSubject,
   MemoryLog,
   projectReceipt,
@@ -150,7 +151,7 @@ describe('replay never consults what this deployment can run today', () => {
     expect(refusalOf(() => assertContract(named, 'contract', current)).code).toBe<RefusalCode>('unregistered-verifier')
     // Explaining a recorded contract: pure shape, so history stays readable. The reviewer's
     // counterexample had this call refuse with an empty registry.
-    expect(assertContractShape(named, 'contract')).toEqual(named)
+    expect(assertContractShape(named, 'contract', CONTRACT_MEMBERS)).toEqual(named)
   })
 
   it('refuses a criterion whose implementation this deployment does not hold, at the same name and version', () => {
