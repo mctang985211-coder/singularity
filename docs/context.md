@@ -796,6 +796,25 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
    未知 run、未记录判据），并因它有了测试消费者，摘除了 `PUBLISHED_WITHOUT_CONSUMER`
    里它的豁免行——ratchet 只收紧。
 
+### B 批：分解 × 模型 × receipt 会合（K1"尚未观测"的最后一条，**关了**）
+
+`slice-b` 的"分解 → 依赖推进 → receipt 固定来源"与 `rsi-live` 的"模型 → 验证器 → 引用 → 指针"
+合成一条：`scripts/rsi-live.mjs` 的战役现在**住在计划里**。**零新协议、零新 kind、零 src 改动**——
+用的全是 task@5 已有的 `decomposed/assigned/runStarted/runVerified/runFailed` 与既有的投影：
+
+- **结构**：根任务持契约、自己跑基线 run；**两个受托子任务** `attempt-1`/`attempt-2` 都声明支持根的
+  `counted` 判据，`attempt-2` `dependsOn` `attempt-1`——依赖边是真的：第二轮的提示词带第一轮的
+  判决与读数。**模型在子任务的 run 里干活**，run 经 `forAgent` 命令面启动（就绪、预算、责任门全过），
+  随判决结算（verified ×3、failed ×1）。
+- **会合断言**（`rsi-live` 27 项检查全过，53 条事实在 `live-campaign.jsonl`）：`attempt-2` 在依赖
+  未验证时启动**被命令边界拒绝**（不是探针转述）；根判据 `satisfiedBy: attempt-1`；**每棵子树一条
+  receipt**，从**结算前缀**与**全量前缀**各推导一份，判据摘要、`consumption.basis: judged` 与输入
+  逐位可查；**receipt 的判据条目 = constraint 的 citation = `recordedVerdictDigest` 的再询问**——
+  同一条判决事实的三次阅读；重开会话后同一前缀推导出**同一 receipt 摘要**。
+- **读数**：incumbent 234/fail/0 → 模型 171/pass/1，指针 `r0000 → r0001`；第二轮模型换写法、
+  读数相同，没赢，指针不动。仍不观测的照旧：模型是否重复、是否普遍更优、是否"学会"。
+- **代价**：`rsi-live` +约 90 行（含头注释），src/tests/gates 无一行改动；evidence 预算余量足够。
+
 ### 第八轮 B2 的收尾：五处嵌套读者各有一条实验（**第九轮按审查者的构造改的**）
 
 第八轮指出 `workspace` / `metric` / `weights` / `run` / `outcomes` 五处嵌套读者可以被放宽而全套绿。

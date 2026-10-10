@@ -1,16 +1,22 @@
 #!/usr/bin/env node
 /**
- * The RSI loop, live, on one pipeline: a real model writes the artifact, a real verifier judges it,
- * the verdict is recorded once, and the pointer moves because the reading moved.
+ * The RSI loop, live, on one pipeline: a real model writes the artifact inside a decomposed sub-task,
+ * a real verifier judges it, the verdict is recorded once, the subtree's receipt and the measurement
+ * both cite that one fact, and the pointer moves because the reading moved.
  *
  * Every other probe stops one step short of this. `cd-probe.mjs` runs the whole C+D seam but its
  * method files are written by the probe, so what it measures is a program the probe wrote.
  * `model-smoke.mjs` observes a real model with no pipeline attached. `slice-b.mjs` runs the real
  * Task/Run/verdict/receipt path with a counting script as the worker — the apparatus is real and the
- * worker is not. Here the worker is the model.
+ * worker is not. Here the worker is the model, its runs start through the agent's own command surface
+ * inside a plan the campaign declared, and the receipt is derived on the model's own run.
  *
  * The shape of one round:
  *
+ *   0. the campaign declares its work structure once: the root holds the contract and runs the
+ *      library's own programs (the baselines), two delegated attempts support its criterion, and the
+ *      second depends on the first — round two's prompt carries round one's verdict and numbers, so
+ *      the plan states the order the work actually happens in;
  *   1. the model reads the task statement and answers with **the artifact itself** — a program, not a
  *      description of one — and this file writes what it answered to disk;
  *   2. that program runs on the real input and writes an output, which is the artifact everything is
@@ -23,7 +29,10 @@
  *      constraint, **citing that verdict's digest** rather than recording a second judgment;
  *   6. the round pools the candidate against one incumbent, elects it, the release path drafts it, the
  *      native `ctx.approval` seam approves the digest on the table, and `environment@2`'s
- *      compare-and-swap moves the head.
+ *      compare-and-swap moves the head;
+ *   7. the run settles as its verdict says, and the subtree's receipt — derived from the committed
+ *      prefix, which is the only source it has — reads the same verdict fact the constraint cited:
+ *      one judgment, one fact, two readers that cannot disagree.
  *
  * **Why the pipelines meet at evidence rather than at code.** The verdict belongs to the task
  * protocol, which is the only thing that knows what a criterion is; the number belongs to the measure
@@ -62,6 +71,8 @@ import { realModel } from './llm-route.mjs'
 const CONTROL = 'rsi-live'
 const ENVIRONMENT = 'library-live'
 const TASK = 'live-task'
+const ATTEMPT1 = 'attempt-1'
+const ATTEMPT2 = 'attempt-2'
 const AGENT = 'live-agent'
 const METER = 'meter'
 const BOUNDS = 'bounds'
@@ -202,6 +213,9 @@ async function main() {
   const { ProtocolRegistry } = await import('../src/protocol/registry.ts')
   const { foldSubjects } = await import('../src/protocol/fold.ts')
   const { declareTaskProtocol, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, recordedVerdictDigest, verifierRoleOf } = await import('../src/task/protocol.ts')
+  const { declareAgentProtocol, AGENT_KINDS, AGENT_PROTOCOL, AGENT_VERSION, AGENT_ROLE } = await import('../src/agent/protocol.ts')
+  const { projectReceipt, receiptDigest } = await import('../src/task/view.ts')
+  const { projectTree } = await import('../src/task/tree.ts')
   const { createTaskCommands } = await import('../src/task/commands.ts')
   const { runProductionVerdict } = await import('../src/verifier/production.ts')
   const env = await import('../src/environment/protocol.ts')
@@ -258,12 +272,14 @@ async function main() {
 
   const registry = new ProtocolRegistry()
   declareTaskProtocol(registry)
+  declareAgentProtocol(registry)
   declareMeasureProtocol(registry)
   declareStrategyProtocol(registry)
   declareReleaseProtocol(registry)
   env.declareEnvironmentProtocol(registry)
   const subjects = {
     scheduler: 'scheduler-service',
+    [AGENT_ROLE]: 'agent-runtime-service',
     [verifierRoleOf({ verifierRef: PRODUCER, verifierVersion: '1' })]: 'producer-verifier-service',
     [verifierRoleOf({ verifierRef: METER, verifierVersion: '1' })]: 'meter-service',
     [verifierRoleOf({ verifierRef: BOUNDS, verifierVersion: '1' })]: 'bounds-service',
@@ -320,8 +336,8 @@ async function main() {
     const pinOf = revisionId => ({ environmentId: ENVIRONMENT, revisionId, digest: environmentOf().revisions[revisionId].contentDigest })
     const measureStateOf = evaluationId => store.load().stateOf(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
     const roundStateOf = roundId => store.load().stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, roundId)
-    const taskStateOf = () => store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, TASK)
-    const bubbleOf = runId => taskStateOf().runs[runId]?.bubble
+    const stateOfTask = taskId => store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, taskId)
+    const bubbleIn = run => stateOfTask(run.taskId)?.runs[run.runId]?.bubble
     const lastSeq = () => store.load().entries().at(-1).seq
     await store.emit({
       commandId: nextId('point-at-r0000'), protocol: env.ENVIRONMENT_PROTOCOL, version: env.ENVIRONMENT_VERSION,
@@ -335,38 +351,56 @@ async function main() {
       store,
       registry,
       subjects,
+      agents: new Map([[AGENT, { identity: subjects.scheduler }]]),
       implementations: [{ ref: PRODUCER, version: '1', implementationDigest: verifierDigest }],
     })
+    const asAgent = commands.forAgent(AGENT)
     const metric = { measured: { criterionId: 'counted', statement: 'the report is the letter count the verifier confirmed', verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest }, unit: 'confirmed', direction: 'higher' }
     // The hard constraint is its own criterion, because a plan may not judge the criterion it measures
     // and it may not judge a criterion that is not in the metric's own contract either. What ties it to
     // the verdict is the **citation**: the check names the task criterion the verdict came from, and
     // the bytes it names are the bytes the verdict judged.
     const judgement = [{ criterionId: 'bounded', statement: 'the verifier passed the report', verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: boundsDigest }]
+    // The campaign's work structure: the root holds the contract and runs the library's own programs
+    // (the baselines), and each model answer is a delegated sub-task. The second attempt depends on
+    // the first because round two's prompt carries round one's verdict and numbers — the plan states
+    // the order the campaign actually works in.
+    const contractOf = () => ({
+      goal: 'report the number of letters in the input',
+      inputs: [INPUT_NAME],
+      criteria: [{ criterionId: 'counted', statement: metric.measured.statement, verifierRef: PRODUCER, verifierVersion: '1', implementationDigest: verifierDigest }],
+    })
     for (const [index, fact] of [
-      {
-        kind: TASK_KINDS.admitted,
-        payload: {
-          contract: {
-            goal: 'report the number of letters in the input',
-            inputs: [INPUT_NAME],
-            criteria: [{ criterionId: 'counted', statement: metric.measured.statement, verifierRef: PRODUCER, verifierVersion: '1', implementationDigest: verifierDigest }],
-          },
-        },
-      },
-      { kind: TASK_KINDS.assigned, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
+      { protocol: AGENT_PROTOCOL, version: AGENT_VERSION, kind: AGENT_KINDS.opened, subject: AGENT, payload: { agentId: AGENT, role: 'worker', sessionId: `singularity:agent:${AGENT}` } },
+      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.admitted, subject: TASK, payload: { contract: contractOf() } },
+      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.admitted, subject: ATTEMPT1, payload: { contract: contractOf() } },
+      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.admitted, subject: ATTEMPT2, payload: { contract: contractOf() } },
+      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.decomposed, subject: TASK, payload: { children: [
+        { taskId: ATTEMPT1, dependsOn: [], supports: ['counted'], maxRuns: 1 },
+        { taskId: ATTEMPT2, dependsOn: [ATTEMPT1], supports: ['counted'], maxRuns: 1 },
+      ] } },
+      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: TASK, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
+      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: ATTEMPT1, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
+      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: ATTEMPT2, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
     ].entries())
-      await store.emit({ commandId: nextId(`fixture-${index}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: TASK, ...fact })
+      await store.emit({ commandId: nextId(`fixture-${index}`), ...fact })
+
+    // The plan's own gate, live: the second attempt starts only after the first has verified, and the
+    // refusal quotes the plan the same sentence a projection would.
+    const tooEarly = await refusalOf(() => asAgent.startRun({ commandId: nextId('too-early'), taskId: ATTEMPT2, runId: 'run-early', revision: pinOf('r0000') }))
+    check('a sub-task cannot start before the attempt it depends on has verified', tooEarly.code === 'illegal-transition' && tooEarly.detail.includes(ATTEMPT1), tooEarly.code)
 
     const runOf = evaluationId => `run-${evaluationId}`
-    const beginRun = async evaluationId => {
+    // Runs start through the agent's own command surface, so the plan's readiness and budget gates
+    // and the responsibility check are the ones any agent's runs pass — not facts this file wrote.
+    const beginRun = async (evaluationId, host) => {
       const runId = runOf(evaluationId)
-      await store.emit({ commandId: nextId(`start-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runStarted, subject: TASK, payload: { runId, revision: pinOf(environmentOf().pointer) } })
-      await store.emit({
-        commandId: nextId(`bubble-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.bubbleOpened, subject: TASK,
-        payload: { runId, inputs: INPUTS, workspace: { kind: 'dir', ref: workspace }, ...CONTEXT },
+      await asAgent.startRun({ commandId: nextId(`start-${runId}`), taskId: host, runId, revision: pinOf(environmentOf().pointer) })
+      await asAgent.openBubble({
+        commandId: nextId(`bubble-${runId}`), taskId: host, runId, inputs: INPUTS,
+        workspace: { kind: 'dir', ref: workspace }, model: CONTEXT.model, tools: CONTEXT.tools, conditions: CONTEXT.conditions,
       })
-      return runId
+      return { taskId: host, runId }
     }
 
     /**
@@ -405,7 +439,8 @@ async function main() {
      * anything this file decided. The judged artifact is the program's *output*, which is what the
      * verifier and the measurement both name.
      */
-    const produce = async (runId, revisionId) => {
+    const produce = async (where, revisionId) => {
+      const { taskId: host, runId } = where
       const produced = await runProcess(process.execPath, [programPathOf(revisionId), inputPath])
       await writeFile(artifactPathOf(revisionId), produced.stdout, 'utf8')
       const judged = await runProductionVerdict({
@@ -431,7 +466,7 @@ async function main() {
       console.log(`  ..    ${revisionId}: program exited ${produced.code}, printed ${JSON.stringify(produced.stdout.trim().slice(0, 40))}, verifier said ${judged.verdict}`)
       await commands.recordVerdict({
         commandId: nextId(`verdict-${revisionId}`),
-        taskId: TASK,
+        taskId: host,
         verdict: {
           runId,
           criterionId: 'counted',
@@ -444,10 +479,16 @@ async function main() {
       })
       // The citation is the protocol's own answer, not this file's arithmetic: ask the task state which
       // verdict it holds for these bytes, and cite the digest it reports.
-      const evidenceDigest = recordedVerdictDigest(taskStateOf(), `${revisionId}'s verdict`, {
+      const evidenceDigest = recordedVerdictDigest(stateOfTask(host), `${revisionId}'s verdict`, {
         runId, criterionId: 'counted', artifactDigest: judged.artifactDigest,
       })
-      return { runId, verdict: judged.verdict, artifactDigest: judged.artifactDigest, evidenceDigest, detail: judged.detail }
+      // The run settles as its verdict says, the way slice-b settles a counted run: verification is the
+      // scheduler's settlement and the boundary carries no command for it, so the fact is emitted here
+      // and the reducer holds the rule — every criterion needs a pass, or the settlement is refused.
+      await store.emit(judged.verdict === 'pass'
+        ? { commandId: nextId(`settle-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runVerified, subject: host, payload: { runId } }
+        : { commandId: nextId(`settle-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runFailed, subject: host, payload: { runId, reason: `the verifier recorded ${judged.verdict}` } })
+      return { taskId: host, runId, verdict: judged.verdict, artifactDigest: judged.artifactDigest, evidenceDigest, detail: judged.detail }
     }
 
     const measure = createMeasureCommands({
@@ -460,7 +501,7 @@ async function main() {
     const measurementOf = async (evaluationId, revisionId, baselineId, judged) => {
       await measure.openEvaluation({
         commandId: nextId(`open-${evaluationId}`), evaluationId, baseline: pinOf(baselineId), candidate: pinOf(revisionId),
-        run: { taskId: TASK, runId: judged.runId }, metric, weights: WEIGHTS, trials: 2, judgement,
+        run: { taskId: judged.taskId, runId: judged.runId }, metric, weights: WEIGHTS, trials: 2, judgement,
       })
       for (const slot of [0, 1]) {
         const outcome = await runMeasurement({
@@ -533,10 +574,10 @@ async function main() {
 
     // ---------------------------------------------------------------- 3. round one
     console.log('\n== round one: the incumbent against the model\'s program')
-    const baselineVerdict = await produce(await beginRun('r1-baseline'), 'r0000')
+    const baselineVerdict = await produce(await beginRun('r1-baseline', TASK), 'r0000')
     const baseline = await measurementOf('r1-baseline', 'r0000', 'r0000', baselineVerdict)
     const baselineSeq = lastSeq()
-    const candidateVerdict = await produce(await beginRun('r1-c0'), 'r0001')
+    const candidateVerdict = await produce(await beginRun('r1-c0', ATTEMPT1), 'r0001')
     const candidate = await measurementOf('r1-c0', 'r0001', 'r0000', candidateVerdict)
     await strategy.openRound({
       commandId: nextId('open-round-1'), roundId: 'round-1', round: 1, incumbent: pinOf('r0000'), candidates: 1, explorationSlots: 0,
@@ -616,8 +657,8 @@ async function main() {
       return opened === undefined ? null : projectEvaluation(measureStateOf(opened.subject)).quality
     }
     const verdictHeld = revisionId => {
-      const run = revisionId === headBefore ? runOf('r1-baseline') : runOf('r1-c0')
-      return taskStateOf().runs[run]?.evidence.find(entry => entry.criterionId === 'counted')?.verdict
+      const where = revisionId === headBefore ? { taskId: TASK, runId: runOf('r1-baseline') } : { taskId: ATTEMPT1, runId: runOf('r1-c0') }
+      return stateOfTask(where.taskId)?.runs[where.runId]?.evidence.find(entry => entry.criterionId === 'counted')?.verdict
     }
     check('the revision the pointer now names was passed by the verifier and the one it replaced was not',
       verdictHeld(headAfter) === 'pass' && verdictHeld(headBefore) === 'fail', `${verdictHeld(headBefore)} -> ${verdictHeld(headAfter)}`)
@@ -626,7 +667,7 @@ async function main() {
     check('the constraint that admitted it cites the task protocol\'s own verdict digest for the bytes it measured',
       measureStateOf('r1-c0').checks[0].verdict.evidenceDigest === candidateVerdict.evidenceDigest &&
       measureStateOf('r1-c0').checks[0].verdict.artifactDigest === candidateVerdict.artifactDigest &&
-      measureStateOf('r1-c0').checks[0].verdict.evidenceDigest === recordedVerdictDigest(taskStateOf(), 'recheck', { runId: runOf('r1-c0'), criterionId: 'counted', artifactDigest: candidateVerdict.artifactDigest }))
+      measureStateOf('r1-c0').checks[0].verdict.evidenceDigest === recordedVerdictDigest(stateOfTask(ATTEMPT1), 'recheck', { runId: runOf('r1-c0'), criterionId: 'counted', artifactDigest: candidateVerdict.artifactDigest }))
     // The citation is a binding, so both ways of citing the wrong thing have to be refused. The legs
     // carry evidence where the citation is the only defect, and a subject with no plan on purpose: the
     // payload is parsed before any plan is read, so what refuses them is the citation rule itself.
@@ -660,10 +701,10 @@ async function main() {
       kind: env.ENVIRONMENT_KINDS.revisionCreated, subject: ENVIRONMENT,
       payload: { revisionId: 'r0002', manifest: { skills: [], tools: [PRODUCER], taskTemplates: [TASK], artifact: { file: 'artifacts/r0002.mjs', digest: sha256(await readFile(programPathOf('r0002'))) } } },
     })
-    const secondBaselineVerdict = await produce(await beginRun('r2-baseline'), headAfter)
+    const secondBaselineVerdict = await produce(await beginRun('r2-baseline', TASK), headAfter)
     const secondBaseline = await measurementOf('r2-baseline', headAfter, headAfter, secondBaselineVerdict)
     const secondBaselineSeq = lastSeq()
-    const secondVerdict = await produce(await beginRun('r2-c0'), 'r0002')
+    const secondVerdict = await produce(await beginRun('r2-c0', ATTEMPT2), 'r0002')
     const secondCandidate = await measurementOf('r2-c0', 'r0002', headAfter, secondVerdict)
     const roundOneDecisionSeq = store.load().entriesOf(STRATEGY_PROTOCOL, STRATEGY_VERSION).filter(entry => entry.subject === 'round-1' && entry.kind === 'round/decided')[0].seq
     await strategy.openRound({
@@ -679,7 +720,7 @@ async function main() {
       roundStateOf('round-2').plan.incumbent.revisionId === headAfter && roundStateOf('round-2').plan.historyCutoff > roundOneDecisionSeq && roundStateOf('round-2').plan.historyCutoff > secondBaselineSeq)
     check('the second program was judged the same way, under the same context and the same criterion',
       measureStateOf('r2-c0').baseline.revisionId === headAfter && measureStateOf('r2-c0').observed.length === 2 &&
-      contextDigestOf(bubbleOf(measureStateOf('r2-c0').run.runId)) === contextDigestOf(bubbleOf(measureStateOf('r1-c0').run.runId)))
+      contextDigestOf(bubbleIn(measureStateOf('r2-c0').run)) === contextDigestOf(bubbleIn(measureStateOf('r1-c0').run)))
     // What the round *should* do is the projection's answer, not this file's. A program the verifier
     // passed can still fail to clear the round's floor — a repeat that measures the same is not an
     // improvement — so "it passed, therefore it won" would be this file inventing a rule.
@@ -696,6 +737,38 @@ async function main() {
         environmentOf().pointer === 'r0002' && pointerFacts().length === 3, `${headAfter} -> ${environmentOf().pointer}`)
     } else check('round two kept the incumbent, so the head did not move a second time', pointerFacts().length === 2)
 
+    // ---------------------------------------------------------------- 5.5 the plan and the receipt
+    console.log('\n== the plan and the receipt: where the model worked, and what its run leaves behind')
+    const held = store.load().entries()
+    const tree = projectTree(foldSubjects(registry, held, TASK_PROTOCOL, TASK_VERSION)).find(view => view.parentTaskId === TASK)
+    check('the campaign ran inside a plan: two delegated attempts, the second depending on the first',
+      tree !== undefined && tree.children.map(child => child.taskId).join(',') === `${ATTEMPT1},${ATTEMPT2}` &&
+      tree.children[1].dependsOn.join(',') === ATTEMPT1 && tree.children[1].runsUsed === 1)
+    check('the root\'s criterion was satisfied by the first attempt\'s verified run, credited to the sub-task',
+      tree?.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy === ATTEMPT1,
+      String(tree?.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy))
+    // The receipt is derived twice from the committed prefix — once from the prefix that ends at the
+    // settlement (round two's facts are not in it) and once from the whole log — and both derivations
+    // read the same verdict fact the constraint cited. That is the merge this campaign exists for:
+    // one judgment, one fact, two readers that cannot disagree.
+    const settleAt = held.findIndex(entry => entry.kind === TASK_KINDS.runVerified && entry.subject === ATTEMPT1)
+    const settledPrefix = held.slice(0, settleAt + 1)
+    const receiptAtSettlement = projectReceipt(registry, settledPrefix, ATTEMPT1, runOf('r1-c0'))
+    const receipt = projectReceipt(registry, held, ATTEMPT1, runOf('r1-c0'))
+    check('the model\'s run settled inside its sub-task, and its receipt derives from the prefix that ends at the settlement',
+      receiptAtSettlement.status === 'verified' && receiptAtSettlement.cutoff === settledPrefix.length &&
+      receipt.status === 'verified' && receipt.cutoff === held.length)
+    check('the receipt and the constraint cite the same verdict: the same bytes, the same digest, one fact',
+      receiptAtSettlement.criteria[0].artifactDigest === candidateVerdict.artifactDigest &&
+      receiptAtSettlement.criteria[0].verdict === 'pass' &&
+      receiptAtSettlement.consumption.basis === 'judged' && JSON.stringify(receiptAtSettlement.consumption.inputs) === JSON.stringify(INPUTS) &&
+      measureStateOf('r1-c0').checks[0].verdict.artifactDigest === receiptAtSettlement.criteria[0].artifactDigest &&
+      measureStateOf('r1-c0').checks[0].verdict.evidenceDigest === recordedVerdictDigest(stateOfTask(ATTEMPT1), 'the receipt\'s verdict', { runId: runOf('r1-c0'), criterionId: 'counted', artifactDigest: receiptAtSettlement.criteria[0].artifactDigest }))
+    const secondReceipt = projectReceipt(registry, held, ATTEMPT2, runOf('r2-c0'))
+    check('each subtree holds one model run and one receipt, and the second reads the second verdict',
+      secondReceipt.status === (secondVerdict.verdict === 'pass' ? 'verified' : 'failed') &&
+      secondReceipt.criteria[0].artifactDigest === secondVerdict.artifactDigest)
+
     // ---------------------------------------------------------------- 6. the log explains itself
     console.log('\n== the log explains itself')
     await store.close()
@@ -705,12 +778,14 @@ async function main() {
       afterReopen.stateOf(env.ENVIRONMENT_PROTOCOL, env.ENVIRONMENT_VERSION, ENVIRONMENT).pointer === environmentOf().pointer &&
       afterReopen.stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, 'round-1').decision.winner === 0 &&
       afterReopen.stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, 'round-2').decision.winner === decisionTwo.winner)
+    check('reopening reproduces the receipt: the same prefix, the same digest',
+      receiptDigest(projectReceipt(registry, afterReopen.entries(), ATTEMPT1, runOf('r1-c0'))) === receiptDigest(receipt))
     check('every model answer came from the deployment\'s own route, and no answer is in the log',
       calls.every(call => /^[0-9a-f]{64}$/.test(call.digest)) &&
       !afterReopen.entries().some(entry => calls.some(call => JSON.stringify(entry.payload).includes(call.reply.slice(0, 40)))),
       `${calls.length} call(s) on ${model.route.provider}`)
     check('the verdict is recorded once, in the task protocol, and the measurement holds a citation of it',
-      taskStateOf().runs[runOf('r1-c0')].evidence.length === 1 &&
+      stateOfTask(ATTEMPT1).runs[runOf('r1-c0')].evidence.length === 1 &&
       measureStateOf('r1-c0').checks[0].verdict.evidenceDigest === candidateVerdict.evidenceDigest)
     await reopened.close()
   } finally {
@@ -726,7 +801,7 @@ async function main() {
     for (const label of failures) console.log(`  FAIL  ${label}`)
     process.exit(1)
   }
-  console.log('rsi-live: OK — a real model wrote the artifact, a real verifier judged it, and the pointer moved onto a revision that measured better')
+  console.log('rsi-live: OK — a real model wrote the artifact inside a decomposed sub-task, a real verifier judged it, the receipt and the measurement cite the same verdict, and the pointer moved onto a revision that measured better')
 }
 
 /**
