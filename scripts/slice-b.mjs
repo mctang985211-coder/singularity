@@ -385,13 +385,20 @@ async function main() {
     const named = held.slice(0, receipt.cutoff)
     const lastSeq = held.at(-1)?.seq ?? -1
 
-    // Reading one: where the facts this reader holds end, by the sequence numbers the facts carry
-    // themselves. A bound that overstates or understates what was read fails here even though it
-    // reproduces itself, because the number it would have to match is the log's, not this probe's.
+    // Reading one: the bound is a function of the facts, not of the array a caller chose. Three
+    // readings of the same number, none of which is the receipt's own: the log's last sequence
+    // number, the array's length, and the fact that this array is a prefix at all (its last fact's
+    // seq is its length - 1). Each fails alone: a projection that returned the array's length is
+    // caught by the first, one that returned a constant by all three.
     check(
       'the bound the receipt names is one past the last fact read, by the facts own sequence numbers',
       receipt.cutoff === lastSeq + 1,
       `the receipt names ${receipt.cutoff}, but the facts this reader holds end at seq ${lastSeq}`,
+    )
+    check(
+      'the bound is the array this reader holds, not a number beside it',
+      receipt.cutoff === held.length && held.at(-1)?.seq === held.length - 1,
+      `the receipt names ${receipt.cutoff} over ${held.length} fact(s) ending at seq ${held.at(-1)?.seq}`,
     )
     // Reading two: re-deriving from exactly the prefix the bound names must give this receipt. A
     // bound that is not the source of the receipt cannot reproduce it, and a projection that refuses
@@ -407,6 +414,25 @@ async function main() {
       rederived !== null && receiptDigest(rederived) === receiptDigest(receipt),
       `the receipt names ${receipt.cutoff} fact(s); re-deriving from those facts gives ${rederived === null ? 'no receipt' : `${receiptDigest(rederived).slice(0, 16)}…`} against ${receiptDigest(receipt).slice(0, 16)}…`,
     )
+    // Reading three, the shape a caller chooses instead of the log: the same run's facts with the
+    // other subjects' facts taken out. They are real facts, at real sequence numbers, so this array
+    // is not a prefix and cannot source a receipt - the one thing the projection must not do is
+    // re-bound it silently and hand back a receipt whose bound covers what it does not hold.
+    const foreign = held.filter(entry => entry.subject !== CHILD_COUNT)
+    check('the log this reader holds has other subjects in it, so filtering it is a real choice', foreign.length > 0, `${held.length} fact(s), all of "${CHILD_COUNT}"`)
+    let apart = null
+    let apartRefusal = null
+    try {
+      apart = projectReceipt(registry, held.filter(entry => entry.subject === CHILD_COUNT), CHILD_COUNT, 'run-count')
+    } catch (error) {
+      if (!(error instanceof ProtocolRefusal)) throw error
+      apartRefusal = error.refusal
+    }
+    check(
+      'a subject-filtered array derives no receipt rather than a different bound',
+      apart === null && apartRefusal?.code === 'unknown-run' && (apartRefusal.detail ?? '').includes('prefix'),
+      apart === null ? `${apartRefusal?.code}: ${apartRefusal?.detail}` : `it derived cutoff ${apart.cutoff} over ${held.filter(entry => entry.subject === CHILD_COUNT).length} fact(s)`,
+    )
     // What the attempt consumed, checked against the facts below that bound rather than against what
     // this probe passed in: the verdict fact for the run that was judged, and the bubble fact for the
     // run nothing judged. Both lists below come off the log, and the verdict's is the one the
@@ -415,6 +441,7 @@ async function main() {
     const verdictFact = named.find(
       entry => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.evidenceProduced && entry.subject === CHILD_COUNT,
     )
+    check('the prefix the receipt names holds the verdict fact for the run it accounts for', verdictFact !== undefined)
     check(
       'the verdict below the bound is the one the receipt reports, judged on the inputs it recorded',
       receipt.consumption.basis === 'judged' && JSON.stringify(receipt.consumption.inputs) === JSON.stringify(verdictFact?.payload.inputDigests),
@@ -434,7 +461,18 @@ async function main() {
       limitsReceipt.consumption.basis === 'declared' && JSON.stringify(limitsReceipt.consumption.inputs) === JSON.stringify(declaredBubble?.payload.inputs),
       `the receipt reads ${JSON.stringify(limitsReceipt.consumption)}; the bubble fact reads ${JSON.stringify(declaredBubble?.payload.inputs ?? null)}`,
     )
-    check('the receipt pins the artifact the verdict was formed on', receipt.criteria[0]?.artifactDigest === verdict.artifactDigest)
+    // The artifact the receipt pins, read from the verdict fact below its bound rather than from the
+    // verdict object this probe computed: a check against the probe's own value would be comparing
+    // the receipt to the argument it was built from.
+    let loggedArtifact = null
+    if (verdictFact !== undefined && typeof verdictFact.payload === 'object' && verdictFact.payload !== null)
+      loggedArtifact = verdictFact.payload.artifactDigest
+    check(
+      'the receipt pins the artifact the verdict fact below its bound records',
+      loggedArtifact !== null && receipt.criteria[0]?.artifactDigest === loggedArtifact,
+      `the receipt reads ${receipt.criteria[0]?.artifactDigest}; the verdict fact reads ${loggedArtifact}`,
+    )
+    check('the artifact the verdict fact records is the digest of the bytes on disk', loggedArtifact === sha256(await readFile(artifactPath)), loggedArtifact)
     check(
       'a reader holding fewer facts gets a different accounting',
       receiptDigest(projectReceipt(registry, held.slice(0, held.length - 1), CHILD_COUNT, 'run-count')) !== receiptDigest(receipt),

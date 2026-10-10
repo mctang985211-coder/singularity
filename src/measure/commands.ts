@@ -11,6 +11,18 @@
  * here, as the `require` step handed to the append that produces the fact, which means they read
  * the store's committed cut at the moment they decide rather than a cut taken earlier.
  *
+ * The identity an emitter role resolves to is asked of the store that stamps it (`identityOf`), never
+ * carried by this service: a table a caller could supply is a second copy of the deployment's trust
+ * decisions, free to leave a role out, and a comparison against a missing entry is silently false.
+ * The check that a run's executor did not report its own numbers therefore compares the very identity
+ * the append path is about to stamp, because there is only one place that identity comes from.
+ *
+ * That was executed, not argued: with a table handed to this service, one deployment's log accepted a
+ * self-reported trial and a self-reported constraint check — the service's copy simply left the
+ * metric's role out, the lookup returned nothing, and nothing compared the copy to the table the log
+ * stamps from. So no table is an option here: a caller that has one has nothing to hand this module,
+ * and a deployment that trusts no identity for a role records no fact under it at all.
+ *
  * The command fills the parts a caller must not. `verifierRef` and `verifierVersion` are copied from
  * the metric the plan froze — the same discipline `recordVerdict` uses for a criterion — the
  * evaluation's `context` is read from the bubble the run declared, and the digest a producer reports
@@ -67,14 +79,6 @@ export interface MeasureCommandOptions {
   readonly registry: ProtocolRegistry
   /** The implementations this deployment holds, by the digest of their own bytes. */
   readonly implementations: readonly { readonly ref: string; readonly version: string; readonly implementationDigest: string }[]
-  /**
-   * The identity the log stamps for each emitter role: the table the control store resolves roles
-   * from, which the store keeps private. A service that must compare that identity against the actor
-   * of another subject's run is handed it here. A role absent from the store's table is refused by
-   * the log before any check in this service runs, so this table is only ever consulted for roles
-   * that resolved.
-   */
-  readonly subjects: Readonly<Record<string, string>>
 }
 
 export interface MeasureCommands {
@@ -289,10 +293,19 @@ function requireHeldImplementation(options: MeasureCommandOptions, implementatio
     refuse('unregistered-verifier', `cannot ${action}: this deployment holds no implementation with digest ${implementationDigest.slice(0, 12)}…, so it cannot have produced this measurement`)
 }
 
-/** The executor of the run being measured never reports its numbers: the run's actor is refused. */
+/**
+ * The executor of the run being measured never reports its numbers: the run's actor is refused.
+ *
+ * The identity a role resolves to is asked of the store, never carried here. A second table is free
+ * to leave a role out, and a comparison against a missing entry is false — so the check would pass
+ * exactly when it matters (a deployment that binds the metric's role to the identity that ran the
+ * run), while the log stamped that identity on the fact and recorded it. Asking the store is what
+ * makes the check read the table the stamp comes from: a role it does not resolve never reaches this
+ * function, because the append path resolves the emitter role from the same table before it runs.
+ */
 function requireNotExecutor(options: MeasureCommandOptions, criterion: AcceptanceCriterion, run: RunState, action: string): void {
   const role = verifierRoleOf({ verifierRef: criterion.verifierRef, verifierVersion: criterion.verifierVersion })
-  const actor = options.subjects[role]
+  const actor = options.store.identityOf(role)
   if (actor === run.actor)
     refuse('self-reported-evidence', `cannot ${action}: "${actor}" (role ${role}) started run "${run.runId}" and cannot also measure its criterion "${criterion.criterionId}"`)
 }

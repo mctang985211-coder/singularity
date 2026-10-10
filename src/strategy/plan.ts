@@ -3,8 +3,8 @@
  *
  * The plan is one fact rather than a member on each kind because every part of it must be decided
  * **once, before any candidate exists**: the common incumbent, the slot count, the reserved
- * exploration slots, the annealed budget, the frozen history cutoff, the metric and weights — and
- * now the **caliber**, the digest of the measurement settings the round pools under.
+ * exploration slots, the annealed budget, the frozen history cutoff, the weights — and the
+ * **caliber**, the digest of the measurement settings the round pools under.
  *
  * Why the caliber is here and not only on the evaluations. Two candidates may be compared only if
  * they answer the same question (`docs/phase-cd-design.md` §5.4: equal `caliberDigestOf`). While the
@@ -46,18 +46,22 @@ export interface RoundPlan {
   readonly editBudget: number
   /** The frozen log position: this round reads only facts below it (R03). */
   readonly historyCutoff: number
-  /** The measurement settings every pooled candidate must have been measured under (§5.4). */
+  /**
+   * The measurement settings every pooled candidate must have been measured under (§5.4).
+   *
+   * The **direction** is one of them, and it is the measurement's: the caliber contains the metric,
+   * so a round pools only numbers that agree on which way is better. A plan-level direction was a
+   * second declaration, read by every comparison and compared to the measurement's by nothing — a
+   * round could rank in `higher` while its measurements said `lower` and elect the worse candidate.
+   */
   readonly caliber: string
-  /** Which way is better. The numbers compared are the round's own; a unit label had no reader. */
-  readonly metric: { readonly direction: 'higher' | 'lower' }
   readonly weights: { readonly quality: number; readonly cost: number }
 }
 
 const APPENDED = { appended: true } as const
 const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as const
-const METRIC_MEMBERS = ['direction'] as const
 const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
-const OPENED_MEMBERS = ['round', 'incumbent', 'candidates', 'explorationSlots', 'editBudget', 'historyCutoff', 'caliber', 'metric', 'weights'] as const
+const OPENED_MEMBERS = ['round', 'incumbent', 'candidates', 'explorationSlots', 'editBudget', 'historyCutoff', 'caliber', 'weights'] as const
 
 /** A non-negative integer. Absent, fractional, negative and non-numeric are all refusals. */
 export function count(source: Record<string, unknown>, key: string, where: string): number {
@@ -100,12 +104,6 @@ function openedPayload(raw: unknown, where: string): RoundPlan {
       `${where}.explorationSlots is ${explorationSlots} of ${candidates} slots; a reservation cannot exceed the plan it reserves from`,
     )
 
-  const metric = record(source['metric'], `${where}.metric`)
-  assertClosedKeys(metric, METRIC_MEMBERS, `${where}.metric`)
-  const direction = metric['direction']
-  if (direction !== 'higher' && direction !== 'lower')
-    refuse('malformed-payload', `${where}.metric.direction must be "higher" or "lower", got ${JSON.stringify(direction ?? null)}`)
-
   const weights = record(source['weights'], `${where}.weights`)
   assertClosedKeys(weights, WEIGHTS_MEMBERS, `${where}.weights`)
   const quality = weights['quality']
@@ -125,7 +123,6 @@ function openedPayload(raw: unknown, where: string): RoundPlan {
     editBudget: count(source, 'editBudget', where),
     historyCutoff: count(source, 'historyCutoff', where),
     caliber: digest(source, 'caliber', `${where}.caliber`),
-    metric: { direction },
     weights: { quality: quality as number, cost: cost as number },
   }
 }
@@ -134,7 +131,9 @@ function openedPayload(raw: unknown, where: string): RoundPlan {
  * The `round/opened` rule.
  *
  * One-shot: a round that later needs a different incumbent, cutoff, budget or caliber is a different
- * round, and the whole point of freezing them in one fact is that no later fact can move them.
+ * round, and the whole point of freezing them in one fact is that no later fact can move them. The
+ * direction is not here because it is not the round's to freeze: it comes with the measurement the
+ * round pools, and the caliber is what makes every pooled measurement agree on it.
  */
 export function openedKind(kind: string, emitter: string): KindRule<RoundState> {
   return defineKind<RoundState, RoundPlan>({

@@ -40,7 +40,6 @@ const SUBJECTS: Readonly<Record<string, string>> = {
   [PUBLISHER_ROLE]: 'publisher-service',
   [STRATEGY_ROLE]: 'strategy-service',
 }
-const METRIC = { direction: 'higher' } as const
 const WEIGHTS = { quality: 100, cost: 15 }
 const CALIBRATION = { floor: 0.1, source: 'measured' } as const
 const CALIBER = 'f'.repeat(64)
@@ -116,7 +115,6 @@ function elected(log: MemoryLog, roundId: string, election: Election): void {
       editBudget: 4,
       historyCutoff: 0,
       caliber: CALIBER,
-      metric: METRIC,
       weights: WEIGHTS,
     },
   })

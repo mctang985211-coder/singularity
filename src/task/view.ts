@@ -78,13 +78,15 @@ export interface ReceiptView {
   readonly contractDigest: string
   readonly revision: RevisionRef
   /**
-   * The committed read bound the receipt was derived from: the exclusive bound of the fact prefix
-   * this projection folded — one past the sequence number the last fact carries itself — and never
-   * a number a caller states beside those facts. A receipt therefore cannot name a bound that does
-   * not hold its own evidence: a prefix that stops before the run settled yields no receipt at all,
-   * and a bound past the last fact is not expressible. Two readers holding the same prefix agree on
-   * it, and re-deriving from that prefix reproduces the receipt, which is what makes "this receipt
-   * accounts for exactly these facts" a property a reader checks instead of one it assumes.
+   * The committed read bound the receipt was derived from: one past the sequence number the last
+   * fact of the folded prefix carries itself. It is computed **from those facts**, never from the
+   * array's length and never from a number a caller states beside them — the two come apart exactly
+   * when the array is not a log prefix, which is why such an array derives no receipt at all (see
+   * `projectReceipt`). A receipt therefore cannot name a bound that does not hold its own evidence:
+   * a prefix that stops before the run settled yields no receipt, and a bound past the last fact the
+   * array holds is refused rather than reported. Two readers holding the same prefix agree on the
+   * bound, and re-deriving from that prefix reproduces the receipt, which is what makes "this
+   * receipt accounts for exactly these facts" a property a reader checks instead of one it assumes.
    */
   readonly cutoff: number
   readonly executor: { readonly emitter: string; readonly actor: string }
@@ -94,22 +96,29 @@ export interface ReceiptView {
   /**
    * What the attempt consumed, and which of the two the receipt can honestly say it is.
    *
-   * `'declared'` means nothing has been judged yet: the list is the run's own statement of the
-   * inputs it would work on, and a receipt that reported it as read would be dressing a
-   * declaration as evidence. `'judged'` means a verdict was formed on exactly these inputs, and
-   * the list is read from that verdict's recorded `inputDigests` — the digests the production
-   * verifier hashed from the bytes it actually read, not from the bubble.
+   * `'declared'` means no verdict has been recorded yet: the list is the run's own statement of the
+   * inputs it would work on. `'judged'` means a verdict **fact** exists for this run, so the list is
+   * read from that verdict's recorded `inputDigests` rather than from the bubble.
    *
-   * The two lists are the same list by construction: `evidence/produced` is refused unless its
-   * inputs are exactly the run's declared ones (`assertInputsBound`), so no log can hold a run
-   * whose judged inputs differ from its declaration. The *distinction* is therefore the content
-   * here, not a second copy of the values.
+   * That one bit is the whole of what the log establishes, and it is worth stating exactly. The two
+   * lists are equal **by construction**: `evidence/produced` is refused unless its inputs are exactly
+   * the run's declared ones (`assertInputsBound`), so no log can hold a run whose judged inputs differ
+   * from its declaration. A verdict emitted with the bubble's digests and no bytes read at all is
+   * therefore indistinguishable, in the log and in this projection, from one whose inputs a verifier
+   * hashed from the bytes it actually read: nothing records the read, and a verifier's own digest
+   * claim is not independent testimony about itself. Do not read `'judged'` as "the bytes were read"
+   * — it means "a verdict was recorded against the declared inputs", and a reader that needs more
+   * than that needs evidence this stack does not hold.
+   *
+   * So the distinction is the content here, not a second copy of the values: what changes between
+   * the two bases is whether a verdict exists at all, and a consumer that treats `'declared'` as
+   * "not yet judged" is reading the one thing this field is entitled to say.
    *
    * The workspace has no judged counterpart — no fact records the directory anything actually read
    * — so it stays a declaration on both bases, and is reported as one.
    */
   readonly consumption: {
-    readonly basis: 'declared' | 'judged'
+    readonly basis: typeof DECLARED_BASIS | typeof JUDGED_BASIS
     readonly inputs: readonly BubbleInput[]
     readonly workspace: { readonly kind: string; readonly ref: string } | null
   }
@@ -123,6 +132,10 @@ export interface ReceiptView {
     readonly actor: string | null
   }[]
 }
+
+/** The two bases a receipt can report. Named once here, where the bit is decided. */
+const DECLARED_BASIS = 'declared'
+const JUDGED_BASIS = 'judged'
 
 function requireContract(state: TaskState): { contract: TaskContract; digest: string; by: string; at: string } {
   const { contract, contractDigest, admittedBy, admittedAt } = state
@@ -192,12 +205,20 @@ export function projectTask(state: TaskState): TaskView {
 /**
  * Derive one terminal run's execution receipt from the committed facts it is derived from.
  *
- * The facts are the whole input. The task state is folded from the prefix handed in, and the
- * receipt's `cutoff` is that prefix's exclusive bound — one past the sequence number the last fact
- * carries itself — so the two cannot disagree: the old shape took a state and a cutoff as
- * independent arguments, which let a caller pass a head state with `1` and get the seq-4 verdict
- * back under a one-fact claim. A parameter that can be wrong is a parameter that will be, so there
- * is none.
+ * The facts are the whole input, and they must be a **contiguous log prefix**: each fact's own
+ * sequence number has to be its position in the array, so the array is `seq 0…n-1` with nothing
+ * missing. The receipt's `cutoff` is then one past the last sequence number the array carries, which
+ * is the same number as its length — but derived from the facts rather than from the length, so a
+ * caller cannot choose it by choosing the array. A subject-filtered array (this task's facts with
+ * another subject's facts between them) fails that check and derives nothing: its facts are real,
+ * the ones between them are real too, so a bound over it would claim facts this receipt never saw.
+ * Both shapes below are refusals, not a re-labelled receipt. Only a prefix can say what a receipt
+ * has to say — "this bound accounts for exactly the facts I was folded from" — and a filtered array
+ * cannot.
+ *
+ * The old shape took a state and a cutoff as independent arguments, which let a caller pass a head
+ * state with `1` and get the seq-4 verdict back under a one-fact claim. A parameter that can be
+ * wrong is a parameter that will be, so there is none.
  *
  * Refuses a run that has not settled *within that prefix*: a receipt is what a terminal run leaves
  * behind, and deriving one for an attempt these facts still show running would be a completion
@@ -209,6 +230,16 @@ export function projectReceipt(
   taskId: string,
   runId: string,
 ): ReceiptView {
+  // The bound, from the facts: one past the last sequence number this array carries. `seq` is
+  // positional in the log, so an array that is a prefix ends at its own length - and one that is not
+  // does not, whatever its length. That difference is the whole guard below: the bound is derived
+  // from the facts, so a caller cannot choose it by choosing which facts to hand in.
+  const cutoff = 1 + (entries.at(-1)?.seq ?? 0)
+  if (cutoff !== entries.length)
+    refuse(
+      'unknown-run',
+      `the ${entries.length} fact(s) handed in are not a contiguous log prefix: the last carries seq ${entries.at(-1)?.seq}, so a receipt folded from them could only name a bound of ${cutoff} over facts it does not hold. A receipt is derived from the prefix a reader holds, never from an array a caller filtered`,
+    )
   const state = foldSubject<TaskState>(registry, entries, TASK_PROTOCOL, TASK_VERSION, taskId)
   const run = state?.runs[runId]
   if (state === undefined || run === undefined)
@@ -236,10 +267,10 @@ export function projectReceipt(
     runId,
     contractDigest: digest,
     revision: run.revision,
-    cutoff: entries.length,
+    cutoff,
     executor: { emitter: run.emitter, actor: run.actor },
     consumption: {
-      basis: judged === undefined ? 'declared' : 'judged',
+      basis: judged === undefined ? DECLARED_BASIS : JUDGED_BASIS,
       inputs: (judged?.inputDigests ?? declared).map(entry => ({ name: entry.name, digest: entry.digest })),
       workspace: run.bubble === undefined ? null : { kind: run.bubble.workspace.kind, ref: run.bubble.workspace.ref },
     },

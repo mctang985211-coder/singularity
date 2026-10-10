@@ -48,7 +48,7 @@
     },
     {
       "protocol": "strategy",
-      "version": 4,
+      "version": 5,
       "subject": "the round id",
       "kinds": [
         "candidate/submitted",
@@ -56,7 +56,7 @@
         "round/opened"
       ],
       "producedBy": "src/strategy/commands.ts createStrategyCommands (the submission gate is a precondition of candidate/submitted; the annealed budget is derived, never supplied)",
-      "readBy": "src/strategy/view.ts projectRound (each slot's aggregate, frozen gain and admissibility, then the selection), src/strategy/plan.ts (the round's frozen plan)"
+      "readBy": "src/strategy/view.ts projectRound (each slot's aggregate, frozen gain and admissibility, then the selection, reading the direction from measure's evaluation/opened.metric.direction), src/strategy/plan.ts (the round's frozen plan)"
     },
     {
       "protocol": "task",

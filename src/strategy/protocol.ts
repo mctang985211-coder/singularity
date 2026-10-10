@@ -1,5 +1,5 @@
 /**
- * `strategy@4` — the explicit round: a plan frozen in one fact, a submission gate that is a refusal
+ * `strategy@5` — the explicit round: a plan frozen in one fact, a submission gate that is a refusal
  * rather than a sentence in a prompt, and a decision that carries the basis it was made on.
  *
  * The previous system derived the round from the number of history entries and the candidate index
@@ -8,7 +8,7 @@
  * candidate was re-measured, and two candidates of one round could be drafted against different
  * incumbents and still be compared. A round here **carries its own number**, its common incumbent,
  * its slot count, its reserved exploration slots, its annealed budget, the log position its history
- * is frozen at, the caliber it pools under, and the metric and weights it is measured under.
+ * is frozen at, the caliber it pools under, and the weights it is measured under.
  *
  * What the reducer decides, on the round's own subject, and therefore inside the serial region that
  * produces the fact:
@@ -61,11 +61,22 @@
  * rule exists to record.
  *
  * **Version 4** removes `round/opened.metric.unit`. It was a required member no reader ever
- * consumed — the projection ranks on `metric.direction` and the round's own numbers, so the label
- * named a quantity nothing compared. Removing a required member changes the accepted shape exactly
+ * consumed — the projection ranks on a direction and the round's own numbers, and the *label* named
+ * a quantity nothing compared. Removing a required member changes the accepted shape exactly
  * as adding one does, so version 3 facts, which carry `unit`, are refused **by name** from the same
  * gate as versions 1 and 2, with no compatibility layer: this build cannot frame that payload, and
  * reading it as a round without a unit would be the silent reinterpretation the closed shape is for.
+ *
+ * **Version 5** removes `round/opened.metric` itself — the member version 4 kept when it dropped
+ * `metric.unit`: its `direction` was the last plan member a comparison read and nothing checked. A
+ * measurement declares its own direction (`measure@3`'s `evaluation/opened.metric.direction`, which
+ * the caliber includes), and the round reads it there, so the round has no second declaration to
+ * disagree with the measurement — the review executed exactly that disagreement, and it elected the
+ * candidate the measurement's own metric called worse. The member is gone rather than compared
+ * because a comparison of two declarations is a rule one of them can lose; one owner is not.
+ * Version 4 facts, which carry `metric`, are refused **by name** from the same gate as versions 1
+ * to 3, with no compatibility layer: a v4 payload cannot be framed by this build, and reading it as
+ * a round without a metric would drop the declaration without saying so.
  *
  * @module singularity-core/strategy/protocol
  */
@@ -86,13 +97,15 @@ export type { RoundPlan } from './plan.ts'
 
 export const STRATEGY_PROTOCOL = 'strategy'
 /**
- * 4: `round/opened` no longer carries `metric.unit`, a required member with no reader, so a version 3
+ * 5: `round/opened` no longer carries `metric`: the round ranks in the direction the measurement it
+ * pools declares, so a version 4 fact is refused by name instead of being re-read as a round whose
+ * second direction is dropped. 4: no `metric.unit`, a required member with no reader, so a version 3
  * fact is refused by name instead of being re-read as a round without a unit. 3: a decision's accepted
  * language — it accounts for every declared slot, not only the submitted ones, so an old decision is
  * refused by name rather than re-read as a complete one. 2: `round/opened` gained a required
  * `caliber`, and `round/decided` a required `calibration`.
  */
-export const STRATEGY_VERSION = 4
+export const STRATEGY_VERSION = 5
 
 /** The trusted role that freezes a round, receives its candidates and closes it. */
 export const STRATEGY_ROLE = 'strategy'
@@ -246,7 +259,7 @@ function decidedPayload(raw: unknown, where: string): Decided {
 }
 
 /**
- * Declare `strategy@4`. Call once at load. Nothing here reads another slice: the measure views and
+ * Declare `strategy@5`. Call once at load. Nothing here reads another slice: the measure views and
  * the frozen history arrive as inputs to the projection and to the command boundary.
  */
 export function declareStrategyProtocol(registry: ProtocolRegistry): void {

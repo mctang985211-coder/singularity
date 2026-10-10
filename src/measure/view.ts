@@ -57,6 +57,15 @@ export interface EvaluationView {
   readonly quality: number
   /** `null` when any observation left its cost unknown. Never 0. */
   readonly cost: number | null
+  /**
+   * Which way a better number goes, **from the plan's own metric** — the measurement's, not the
+   * reader's. A round that ranked candidates by a direction of its own elected the worse candidate
+   * whenever the two disagreed, and nothing compared them; the direction travels with the number it
+   * orients, so two directions that disagree are two calibers, which may not be pooled.
+   *
+   * `null` when no plan was opened: a measurement that is not one has no orientation to state.
+   */
+  readonly direction: 'higher' | 'lower' | null
   /** Every hard constraint of the plan, in judgement order. */
   readonly constraints: readonly ConstraintView[]
   readonly admissible: boolean
@@ -114,6 +123,9 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
     missing,
     quality: denominator === 0 ? 0 : observed.reduce((total, entry) => total + entry.quality, 0) / denominator,
     cost: costOf(observed),
+    // The metric is the plan's, so its direction is the plan's too — read from the one place the
+    // plan wrote it, never restated by a reader that would then be free to disagree with it.
+    direction: state.metric?.direction ?? null,
     constraints,
     admissible: reasons.length === 0,
     why: reasons.length === 0 ? null : reasons.join('; '),

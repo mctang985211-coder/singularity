@@ -89,7 +89,15 @@ export interface ControlStoreOptions {
   /** The supplied graph/environment id. The session id is derived from it, never passed in raw. */
   readonly controlId: string
   readonly registry: ProtocolRegistry
-  /** The trusted identity each emitter role resolves to. A role absent here cannot emit. */
+  /**
+   * The trusted identity each emitter role resolves to. A role absent here cannot emit.
+   *
+   * This is the **one** role table of a deployment: the store copies it at `open`, stamps every fact
+   * with the identity it resolves, and answers {@link ControlSessionStore.identityOf} from the same
+   * value. A service that must compare an identity against another subject's actor asks the store;
+   * it is never handed a table of its own, because a second table is free to leave a role out and a
+   * check that reads it then compares nothing while the log stamps the actor anyway.
+   */
   readonly subjects: Readonly<Record<string, string>>
   /** The instant one fact is stamped with. Injectable so a fold can be tested deterministically. */
   readonly now?: () => string
@@ -129,6 +137,8 @@ export interface ControlReadCut {
 export class ControlSessionStore {
   readonly #handle: SessionHandle
   readonly #sessionId: SessionId
+  /** The one role table this store stamps identities from, and the only one it answers with. */
+  readonly #subjects: Readonly<Record<string, string>>
   /** Exactly the facts whose durability and readback have been confirmed. */
   #log: MemoryLog
   /** The medium's next event sequence. The medium refuses a batch that does not continue it. */
@@ -138,11 +148,12 @@ export class ControlSessionStore {
   #uncertain = false
   #closing: Promise<void> | undefined
 
-  private constructor(handle: SessionHandle, log: MemoryLog, sessionId: SessionId, nextSeq: number) {
+  private constructor(handle: SessionHandle, log: MemoryLog, sessionId: SessionId, nextSeq: number, subjects: Readonly<Record<string, string>>) {
     this.#handle = handle
     this.#log = log
     this.#sessionId = sessionId
     this.#nextSeq = nextSeq
+    this.#subjects = subjects
   }
 
   /**
@@ -154,6 +165,9 @@ export class ControlSessionStore {
    */
   static async open(options: ControlStoreOptions): Promise<ControlSessionStore> {
     const sessionId = controlSessionIdOf(options.controlId)
+    // The deployment's role table, copied and frozen once: the log stamps from it and the store
+    // answers the port from it, so the two can never be two tables.
+    const subjects: Readonly<Record<string, string>> = Object.freeze({ ...options.subjects })
     let handle: SessionHandle
     try {
       handle = await options.persistence.open(sessionId, 'write')
@@ -181,8 +195,8 @@ export class ControlSessionStore {
       // link, sequence, declared kind and payload shape are all re-checked by the calls below. This
       // is the one place the whole log is replayed and copied; every later commit adds to it.
       const entries = structuredClone(stored.events.filter(isControlEvent).map(decodeControlEvent))
-      const log = MemoryLog.adopt(entries, options.registry, logOptionsOf(options))
-      return new ControlSessionStore(handle, log, sessionId, stored.events.length)
+      const log = MemoryLog.adopt(entries, options.registry, logOptionsOf(options, subjects))
+      return new ControlSessionStore(handle, log, sessionId, stored.events.length, subjects)
     } catch (error) {
       try {
         await handle.close()
@@ -196,6 +210,19 @@ export class ControlSessionStore {
   /** The session this store owns. Stable for the control id, separate from any agent transcript. */
   get sessionId(): SessionId {
     return this.#sessionId
+  }
+
+  /**
+   * The identity this deployment stamps for one emitter role, or `undefined` when it trusts none.
+   *
+   * The port a cross-subject check asks when it has to compare a role against the actor of another
+   * subject's fact — "is the identity that would report this the one that did the work" — because
+   * the identities a fact carries are this store's to resolve and nobody else's to restate. It
+   * answers from the table the log itself resolves with, so a check that asks cannot disagree with
+   * the stamp the append path is about to apply.
+   */
+  identityOf(role: string): string | undefined {
+    return this.#subjects[role]
   }
 
   /** A fixed committed read cut. The view has no writer and shares no mutable values with it. */
@@ -346,6 +373,6 @@ function decodeControlEvent(event: SessionEvent<typeof CONTROL_EVENT_TYPE>): Env
 }
 
 /** `LogOptions` with `now` present only when it was supplied: `exactOptionalPropertyTypes` is on. */
-function logOptionsOf(options: ControlStoreOptions): LogOptions {
-  return options.now === undefined ? { subjects: options.subjects } : { subjects: options.subjects, now: options.now }
+function logOptionsOf(options: ControlStoreOptions, subjects: Readonly<Record<string, string>>): LogOptions {
+  return options.now === undefined ? { subjects } : { subjects, now: options.now }
 }

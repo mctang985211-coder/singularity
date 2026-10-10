@@ -54,8 +54,6 @@ export interface OpenRoundInput {
   readonly historyCutoff: number
   /** The digest of the measurement settings every pooled candidate must have been measured under. */
   readonly caliber: string
-  /** Which way a larger measurement is better. The round's numbers carry no unit (version 4 removed it). */
-  readonly metric: { readonly direction: 'higher' | 'lower' }
   readonly weights: { readonly quality: number; readonly cost: number }
 }
 
@@ -121,7 +119,6 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
           editBudget: editBudgetFor(input.round, options.rounds, options.firstBudget, options.minimumBudget),
           historyCutoff: input.historyCutoff,
           caliber: input.caliber,
-          metric: input.metric,
           weights: input.weights,
         },
         () => {

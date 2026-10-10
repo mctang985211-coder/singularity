@@ -1,12 +1,12 @@
 /**
  * The explicit round: its submission gate, the decision that closes it, and the projection that decides.
  *
- * Three groups, one per place a rule can live: the reducer (rules needing only the round's own subject;
- * it runs inside the serial region), the command boundary (the annealed budget, the recomputation of a
- * decision against the cut it is appended to, and the submission condition that spans subjects), and
- * the projection (admissibility before any argmax, frozen gains, the incumbent floor, and the caliber
- * that makes scores comparable). The measurement inputs are a table whose historical reads are bounded
- * by the round's own cutoff; `src/measure/**` owns the projection they stand in for.
+ * Three groups, one per place a rule can live: the reducer (the round's own subject, inside the serial
+ * region), the command boundary (the annealed budget, the recomputation against the cut the decision is
+ * appended to, the cross-subject submission condition), and the projection (admissibility before any
+ * argmax, frozen gains, the incumbent floor, the caliber that makes scores comparable). The measurement
+ * inputs are a table whose historical reads the round's own cutoff bounds; `src/measure/**` owns the
+ * projection they stand in for.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -29,7 +29,6 @@ import { declareStrategyProtocol, STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_RO
 import { projectRound, type FrozenAggregate, type MeasureSlice, type RoundEvaluation } from '../src/strategy/view.ts'
 import { asyncRefusalOf } from './fixtures.ts'
 
-const METRIC = { direction: 'higher' } as const
 const WEIGHTS = { quality: 100, cost: 15 }
 const FLOOR: Calibration = { floor: 0.1, source: 'measured' }
 const CALIBER = 'f'.repeat(64)
@@ -59,7 +58,7 @@ const emit = (log: MemoryLog, kind: string, subject: string, payload: unknown): 
   log.emit({ commandId: nextId('emit'), protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind, subject, payload })
 const plan = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   round: 1, incumbent: INCUMBENT, candidates: 3, explorationSlots: 1,
-  editBudget: 2, historyCutoff: 0, caliber: CALIBER, metric: METRIC, weights: WEIGHTS,
+  editBudget: 2, historyCutoff: 0, caliber: CALIBER, weights: WEIGHTS,
   ...over,
 })
 const emitPlan = (log: MemoryLog, subject: string, over: Record<string, unknown> = {}): Envelope => emit(log, STRATEGY_KINDS.roundOpened, subject, plan(over))
@@ -70,7 +69,7 @@ const emitDecision = (log: MemoryLog, subject: string, over: Record<string, unkn
 /** One round's folded state as of the whole memory log. */
 const roundIn = (log: MemoryLog, subject: string): RoundState | undefined => log.stateAt<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, subject, log.count)
 
-/** One evaluation as the measure slice would project it. */
+/** One evaluation as the measure slice would project it, in its own metric's direction. */
 const evaluation = (evaluationId: string, over: Partial<RoundEvaluation> = {}): RoundEvaluation => ({
   evaluationId, caliberDigest: over.caliberDigest ?? CALIBER, baseline: over.baseline ?? INCUMBENT,
   candidate: over.candidate ?? CANDIDATE_A, denominator: over.denominator ?? 2,
@@ -78,6 +77,7 @@ const evaluation = (evaluationId: string, over: Partial<RoundEvaluation> = {}): 
   cost: over.cost === undefined ? 10 : over.cost,
   constraints: over.constraints ?? [{ criterionId: 'correctness', met: true }],
   admissible: over.admissible ?? true, why: over.why === undefined ? null : over.why,
+  direction: over.direction ?? 'higher',
 })
 
 type MeasureTable = { evaluations: Map<string, RoundEvaluation>; aggregates: Map<string, { at: number; aggregate: FrozenAggregate }[]> }
@@ -86,9 +86,8 @@ const measuredAt = (table: MeasureTable, revision: RevisionRef, at: number, qual
   table.aggregates.set(revision.revisionId, [...(table.aggregates.get(revision.revisionId) ?? []), { at, aggregate: { quality, cost } }])
 }
 /**
- * The slice the round reads: the historical aggregate honours the round's own cutoff, and the
- * accepted asset classes are no longer a convention here — they are folded out of `entries` by
- * `publishedAssetsBelow`, which has one owner (E1).
+ * The slice the round reads: the historical aggregate honours the round's own cutoff, and the accepted
+ * classes are folded out of `entries` by `publishedAssetsBelow`, which has one owner (E1).
  */
 const sliceOf = (table: MeasureTable, entries: readonly Envelope[]): MeasureSlice => ({
   entries,
@@ -125,7 +124,7 @@ async function openThrough(live: Live, over: Partial<OpenRoundInput> = {}): Prom
     commandId: nextId('open'), roundId, round: over.round ?? 1, incumbent: INCUMBENT,
     candidates: over.candidates ?? 2, explorationSlots: over.explorationSlots ?? 0,
     historyCutoff: over.historyCutoff ?? live.store.load().entries().length, caliber: over.caliber ?? CALIBER,
-    metric: METRIC, weights: WEIGHTS,
+    weights: WEIGHTS,
   })
   return roundId
 }
@@ -163,10 +162,10 @@ async function halfRound(live: Live, explorationSlots = 0): Promise<string> {
 }
 
 describe('round/opened freezes one explicit round', async () => {
-  it('carries the number, incumbent, plan, budget, cutoff, metric and weights — and opens once', async () => {
+  it('carries the number, incumbent, plan, budget, cutoff and weights — and opens once', async () => {
     const log = strategyLog()
     const opened = emitPlan(log, 'round-1')
-    expect([Object.keys(opened.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.plan?.round]).toEqual([['caliber', 'candidates', 'editBudget', 'explorationSlots', 'historyCutoff', 'incumbent', 'metric', 'round', 'weights'], 1])
+    expect([Object.keys(opened.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.plan?.round]).toEqual([['caliber', 'candidates', 'editBudget', 'explorationSlots', 'historyCutoff', 'incumbent', 'round', 'weights'], 1])
     await expectRefusal(() => emitPlan(log, 'round-1'), 'illegal-transition', 'a different round, and it gets a different subject')
     await expectRefusal(() => emitPlan(log, 'round-zero', { round: 0 }), 'malformed-payload', 'never a count of history entries')
     await expectRefusal(() => emitPlan(log, 'round-wide', { explorationSlots: 4 }), 'malformed-payload', 'cannot exceed')
@@ -191,8 +190,7 @@ describe('the submission gate is the reducer\u2019s, inside the commit region', 
     expect(roundIn(log, 'round-1')?.submissions.map(entry => [entry.slot, entry.exploratory])).toEqual([[2, true], [0, false]])
 
     const quiet = 'gain 0.05 is inside the noise band 0.1'
-    // Slot 1 is a reserved exploration slot nobody took: the decision covers it, and an empty slot is
-    // closed out with a reason of its own rather than omitted from the round's trajectory.
+    // Slot 1 is a reserved exploration slot nobody took, closed out with a reason of its own.
     emitDecision(log, 'round-1', { winner: null, outcomes: [{ slot: 0, admitted: false, reason: quiet }, { slot: 1, admitted: false, reason: 'no candidate was submitted to this slot' }, { slot: 2, admitted: false, reason: quiet }] })
     expect(roundIn(log, 'round-1')?.decision?.winner).toBe(null)
     await expectRefusal(() => emitSubmission(log, 'round-1', 1, { exploratory: true }), 'illegal-transition', 'after round 1 closed')
@@ -317,14 +315,13 @@ describe('the projection decides admissibility before any argmax', async () => {
     const mixed = await twoCandidateRound(live, { round: 2, e1: { caliberDigest: '0'.repeat(64) } })
     await expectRefusal(() => decideThrough(live, mixed), 'caliber-mismatch', 'may not be ranked together')
 
-    // One submission under a caliber the round did not freeze: there is no second candidate to differ
-    // from, so the round's own caliber is the only thing that can catch it.
+    // One submission under another caliber: with no second candidate to differ from, the round's own
+    // caliber is the only thing that can catch it.
     const odd = await twoCandidateRound(live, { round: 4, e0: { caliberDigest: '1'.repeat(64) }, e1: { caliberDigest: '1'.repeat(64) } })
     expect([project(live, odd).slots[0]?.admissible, project(live, odd).slots[0]?.reason ?? '']).toEqual([false, expect.stringMatching(/measured under caliber 111111111111.*round 4 pools only ffffffffffff/)])
     expect(winnerOf(await decideThrough(live, odd))).toBe(null)
 
-    // A submission recorded before its evaluation existed: the command boundary could not check the
-    // anchor then, so the projection is the only place this mismatch can be caught.
+    // A submission recorded before its evaluation existed: the projection is where it is caught.
     const later = await openThrough(live, { candidates: 1, historyCutoff: 5, round: 3 })
     await submitThrough(live, later, 0, { evaluationId: 'e-later' })
     live.table.evaluations.set('e-later', evaluation('e-later', { candidate: CANDIDATE_B }))
@@ -333,9 +330,8 @@ describe('the projection decides admissibility before any argmax', async () => {
 
   it('computes the gain and the novelty below the round\u2019s own cutoff, and breaks a tie by slot number', async () => {
     const live = await deployment()
-    // The incumbent was measured at 0.6 below the cutoff and 0.8 above it, so the frozen gain is
-    // +0.2 (R03). This log's history publishes no environment head below the cutoff, so nothing is
-    // accepted and the slot's one declared class is novel: novelty 1 (R05).
+    // The incumbent was measured at 0.6 below the cutoff and 0.8 above it, so the frozen gain is +0.2
+    // (R03); nothing is published below the cutoff, so the one declared class is novel: 1 (R05).
     const roundId = await twoCandidateRound(live, { e0: { quality: 0.8 }, e1: { quality: 0.8 }, edits0: [{ asset: 'tool', target: 'tokenizer' }] })
     measuredAt(live.table, INCUMBENT, 1, 0.6)
     measuredAt(live.table, INCUMBENT, 9, 0.8)
@@ -372,8 +368,7 @@ describe('the projection decides admissibility before any argmax', async () => {
     await submitThrough(live, roundId, 0, { evaluationId: 'e-0' })
 
     const deciding = decideThrough(live, roundId)
-    // The trial lands after the decision was composed and before it reaches the commit region: the
-    // round's own state never sees it, and the recomputation inside the region does.
+    // The trial lands between composing the decision and its commit region, where it is recomputed.
     live.table.evaluations.set('e-0', evaluation('e-0'))
     await expectRefusal(() => deciding, 'illegal-transition', 'recompute the decision against the current cut')
     expect(stateOf(live, roundId)?.decision).toBeUndefined()

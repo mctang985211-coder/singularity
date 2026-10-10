@@ -46,7 +46,15 @@ import {
   taskRegistry,
   UNIT_IMPLEMENTATION,
   UNIT_VERIFIER,
+  verified,
 } from './task-fixtures.ts'
+
+/**
+ * The two consumption bases, spelled here rather than imported: the projection names them once
+ * internally, and a spec that read that name back would be asserting the code against itself.
+ */
+const DECLARED_BASIS = 'declared'
+const JUDGED_BASIS = 'judged'
 
 /** Run the whole slice and fold it. */
 async function slice(): Promise<{ registry: ProtocolRegistry; log: MemoryLog; state: TaskState }> {
@@ -106,6 +114,82 @@ describe('the task slice', () => {
     ])
     // Both criteria were judged on the declared inputs, so the consumption is the judged one.
     expect(receipt.consumption).toEqual({ basis: 'judged', inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
+  })
+
+  it('refuses to derive a receipt from an array that is not the log prefix it names, and derives the same receipt from the genuine prefix', async () => {
+    const registry = taskRegistry()
+    const log = new MemoryLog(registry, { subjects: SUBJECTS })
+    // The slice's own facts, each followed by a fact about another task: the run's two verdicts land
+    // at seq 8 and 10 and its settlement at 12, so the shape below is the one the review executed.
+    for (const [index, fact] of sliceCommands().entries()) {
+      await log.emit(fact)
+      await log.emit({
+        commandId: `elsewhere-${index}`,
+        protocol: TASK_PROTOCOL,
+        version: TASK_VERSION,
+        kind: TASK_KINDS.admitted,
+        subject: `task-elsewhere-${index}`,
+        payload: { contract: contract() },
+      })
+    }
+    const held = log.entries()
+    const taskFacts = held.filter(entry => entry.subject === TASK_ID)
+    expect([held.length, taskFacts.map(entry => entry.seq)]).toEqual([14, [0, 2, 4, 6, 8, 10, 12]])
+
+    // The bound is a function of the facts this subject's run actually carries - one past the last of
+    // them - and not of the array's length, which on a filtered array is a smaller number the caller
+    // chose. Thirteen task facts would be needed to reach this bound; seven were handed in.
+    expect(projectReceipt(registry, held, TASK_ID, RUN_ID).cutoff).toBe(14)
+
+    // A filtered array is not the prefix the receipt would name: its own sequence numbers show the
+    // facts in between, and asking for a receipt from it asks for one whose bound covers facts it
+    // does not hold. That is refused rather than re-labelled, because a receipt *is* the claim that
+    // its bound accounts for exactly the facts it was folded from.
+    expect(refusalOf(() => projectReceipt(registry, taskFacts, TASK_ID, RUN_ID))).toMatchObject({
+      code: 'unknown-run',
+      detail: expect.stringContaining('prefix'),
+    })
+
+    // The genuine prefix - the run's own facts committed as a log of their own, so seq is again the
+    // position in the array - derives the receipt: same bound, same criteria, a different array from
+    // the whole log's, which is the other receipt the same run has.
+    const prefix = new MemoryLog(registry, { subjects: SUBJECTS })
+    for (const fact of taskFacts.map(entry => ({ ...entry, commandId: `prefix-${entry.seq}` }))) await prefix.emit(fact)
+    expect(projectReceipt(registry, prefix.entries(), TASK_ID, RUN_ID).cutoff).toBe(7)
+    expect(receiptDigest(projectReceipt(registry, prefix.entries(), TASK_ID, RUN_ID))).not.toBe(receiptDigest(projectReceipt(registry, held, TASK_ID, RUN_ID)))
+  })
+
+  it('reports judged as "a verdict exists", the one bit the log establishes, not as "bytes were read"', async () => {
+    const registry = taskRegistry()
+    const log = new MemoryLog(registry, { subjects: SUBJECTS })
+    await log.emit(admitted())
+    await log.emit(assigned())
+    // Two attempts at the same task, judged differently: the first is failed with nothing decided on
+    // it, the second is judged on the bubble's own input digests and settles verified.
+    await log.emit(started('run-unjudged'))
+    await log.emit(bubbleOpened('run-unjudged'))
+    await log.emit(failed('the attempt ended before anything was judged', 'run-unjudged'))
+    await log.emit(started('run-judged'))
+    await log.emit(bubbleOpened('run-judged'))
+    await log.emit(judged('correctness', UNIT_VERIFIER, 'pass', { runId: 'run-judged' }))
+    await log.emit(judged('limits', INTEGRATION_VERIFIER, 'pass', { runId: 'run-judged' }))
+    await log.emit(verified('run-judged'))
+
+    const declared = projectReceipt(registry, log.entries(), TASK_ID, 'run-unjudged')
+    const judgedReceipt = projectReceipt(registry, log.entries(), TASK_ID, 'run-judged')
+
+    // The inputs are the same list on both bases, because `assertInputsBound` refuses a verdict whose
+    // inputs are not exactly the run's declared ones. So the judged list cannot testify about bytes:
+    // it *is* the declaration, echoed back. What the two receipts differ by is the one bit.
+    expect(judgedReceipt.consumption.inputs).toEqual(declared.consumption.inputs)
+    expect(judgedReceipt.consumption).toEqual({ ...declared.consumption, basis: JUDGED_BASIS })
+    expect([declared.consumption.basis, judgedReceipt.consumption.basis]).toEqual([DECLARED_BASIS, JUDGED_BASIS])
+
+    // And the bit is the whole observable content: it is what tells a reader a verdict exists at all.
+    // Neither receipt says the digest was hashed from disk rather than copied from the declaration,
+    // which is exactly what the projection claims and no more.
+    expect(receiptDigest(judgedReceipt)).not.toBe(receiptDigest(declared))
+    expect(judgedReceipt.consumption.inputs).toEqual(BUBBLE_INPUTS)
   })
 
   it('derives no receipt from facts that stop before the run settled', async () => {
