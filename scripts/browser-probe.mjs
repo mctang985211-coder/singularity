@@ -37,27 +37,37 @@ import { existsSync } from 'node:fs'
 import { mkdir, readdir, stat } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { chromium } from 'playwright'
 
 /** The profile both legs boot. Deployed by `scripts/deploy.mjs`. */
-const PROFILE = 'singularity-next-web'
+export const PROFILE = 'singularity-next-web'
 /** The preset the assembly's preset row declares. */
-const PRESET_NAME = 'Singularity Next'
-/** The three tools the agent face registers. */
-const TOOLS = ['singularity_propose_task', 'singularity_submit_program', 'singularity_task_status']
-/** The text the agent counts letters in. Digits and punctuation make the criterion non-trivial. */
-const INPUT_TEXT = 'The quick brown fox jumps over 13 lazy dogs! 42'
+export const PRESET_NAME = 'Singularity Next'
+/**
+ * The tools the agent face registers, in the order a model reads them.
+ *
+ * Four, and the fourth is why G2 exists: a task can be planned into sub-tasks that run in their own
+ * sessions. The letter-count domain's tasks are one turn's work, so this probe still proves the
+ * single-task path — the sub-task path has its own probe.
+ */
+const TOOLS = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program', 'singularity_task_status']
 
-/** The default leg's one user message. It names the tool sequence, not the answer. */
+/**
+ * The default leg's one user message. It names the tool sequence, not the answer.
+ *
+ * It no longer passes the text to count: a task's input is protected material the deployment declares,
+ * not something a model supplies, so `singularity_propose_task` takes a goal only and the workspace it
+ * returns already holds the bytes the criterion reads.
+ */
 const FULL_PROMPT = [
-  'Use the singularity tools to count the ASCII letters (A-Z and a-z only) in the text below.',
+  'Use the singularity tools to count the ASCII letters (A-Z and a-z only) in the input this',
+  'deployment has prepared for the task.',
   '',
-  `TEXT: ${INPUT_TEXT}`,
-  '',
-  'Call singularity_propose_task with that exact text as `input`, then call singularity_submit_program',
-  'with a small Node program that prints only the count. The program is written to `program.mjs` and run',
-  'as `node program.mjs <input path>`: it is an ES module, so use `import`, not `require`. Then call',
+  'Call singularity_propose_task with a one-sentence goal, then call singularity_submit_program with a',
+  'small Node program that prints only the count. The program is written to `program.mjs` and run as',
+  '`node program.mjs <input path>`: it is an ES module, so use `import`, not `require`. Then call',
   'singularity_task_status for the same taskId and report the receipt status and the criterion verdict',
   'exactly as recorded.',
 ].join('\n')
@@ -65,7 +75,7 @@ const FULL_PROMPT = [
 /** The recovery leg's first message: admit a task and stop. */
 const PROPOSE_PROMPT = [
   'Call the singularity tool `singularity_propose_task` once to admit a task whose goal is to count',
-  `the ASCII letters (A-Z and a-z only) in the text below, passing this exact text as \`input\`: ${INPUT_TEXT}`,
+  'the ASCII letters in the input this deployment has prepared for it.',
   '',
   'Do not submit a program in this turn. Report the `taskId` the tool returned verbatim.',
 ].join('\n')
@@ -82,10 +92,10 @@ const submitPrompt = taskId =>
     'verdict exactly as recorded.',
   ].join('\n')
 
-const BOOT_TIMEOUT_MS = 120_000
+export const BOOT_TIMEOUT_MS = 120_000
 const TURN_TIMEOUT_MS = 900_000
 const SETTLE_MS = 5_000
-const URL_PATTERN = /http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+/
+export const URL_PATTERN = /http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+/
 
 /** A failure that already names its cause. Printed as one line; the stack would only add noise. */
 class ProbeError extends Error {}
@@ -94,7 +104,7 @@ class ProbeError extends Error {}
  * Boot one profile child and wait for the URL it prints.
  * @returns the child, its exit promise, and a reader for everything it has said so far.
  */
-async function boot(port) {
+export async function boot(port) {
   const command = `dsh --profile ${PROFILE} --host 127.0.0.1 --port ${port} --no-open`
   const child = spawn('dsh', ['--profile', PROFILE, '--host', '127.0.0.1', '--port', String(port), '--no-open'], {
     env: process.env,
@@ -130,7 +140,7 @@ async function waitForUrl(server) {
 }
 
 /** Open the app and wait until its session surface has painted. */
-async function openApp(context, url) {
+export async function openApp(context, url) {
   const page = await context.newPage()
   await page.goto(url, { waitUntil: 'domcontentloaded' })
   await page.getByRole('button', { name: 'New Session' }).first().waitFor({ timeout: 60_000 })
@@ -147,7 +157,7 @@ async function openApp(context, url) {
  * clicking once into a page that has not decided yet what to show.
  * @returns the labels it dismissed, in order.
  */
-async function dismissFirstRun(page) {
+export async function dismissFirstRun(page) {
   const dismissed = []
   let quiet = 0
   for (let attempt = 0; attempt < 60 && quiet < 3; attempt++) {
@@ -172,7 +182,7 @@ async function dismissFirstRun(page) {
 }
 
 /** Select the assembly's preset from the session header, and require the seat to show it. */
-async function selectPreset(page) {
+export async function selectPreset(page) {
   const seat = page.locator('button[title="Choose the agent preset for your new task"]')
   try {
     await seat.first().waitFor({ timeout: 30_000 })
@@ -194,7 +204,7 @@ async function selectPreset(page) {
 }
 
 /** The header's seat is the app's own statement of which preset the session carries. */
-async function expectSeat(page) {
+export async function expectSeat(page) {
   try {
     await page.waitForFunction(
       name =>
@@ -216,7 +226,7 @@ async function expectSeat(page) {
  * choice, so the picker is absent on a second run). The picker's own path field navigates on Enter and
  * then enables Open.
  */
-async function chooseWorkspace(page, home) {
+export async function chooseWorkspace(page, home) {
   const composer = composerOf(page)
   if ((await composer.count()) > 0) return
 
@@ -245,7 +255,7 @@ async function chooseWorkspace(page, home) {
 }
 
 /** Preset first, then workspace: the choice is the *new* session's preset, and the workspace names it. */
-async function prepare(page, home) {
+export async function prepare(page, home) {
   const dismissed = await dismissFirstRun(page)
   await selectPreset(page)
   await chooseWorkspace(page, home)
@@ -262,7 +272,7 @@ async function prepare(page, home) {
  * while Playwright re-checks an ordinary click's actionability — a landed send must not read as a
  * timeout, so the click is dispatched at the button and the wait below is what proves it happened.
  */
-async function send(page, prompt) {
+export async function send(page, prompt) {
   const composer = composerOf(page)
   await composer.waitFor({ timeout: 30_000 })
   await composer.fill(prompt)
@@ -284,7 +294,7 @@ async function send(page, prompt) {
 }
 
 /** Wait for the named tool rows to be present. */
-async function waitForTools(page, names) {
+export async function waitForTools(page, names) {
   for (const name of names) {
     try {
       await page.waitForFunction(
@@ -605,10 +615,22 @@ async function freePort() {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+/**
+ * Run only as a program, never on import.
+ *
+ * The panel probe imports this file's browser-driving steps — booting, preparing a session, sending a
+ * turn — rather than copying them, because a second copy of an app's accessors drifts the moment the app
+ * changes and only one of the copies is watched. That import has to be free of side effects, and running
+ * the legs is the largest side effect there is.
+ */
+const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+
 const home = process.env['DSH_HOME']
 const recovery = process.argv.includes('--recovery')
 const screenshotFlag = process.argv.indexOf('--screenshot')
-if (home === undefined || home === '')
+if (!invokedDirectly) {
+  // Imported: the steps above are the whole offering, and nothing below runs.
+} else if (home === undefined || home === '')
   process.stderr.write("browser-probe: DSH_HOME is not set; source the deployment's environment (env.sh) before probing\n")
 else if (screenshotFlag !== -1 && process.argv[screenshotFlag + 1] === undefined)
   process.stderr.write('browser-probe: --screenshot needs a path\n')

@@ -68,16 +68,25 @@ window.__ModuleLoader__.load({
     function useCut() {
       const [round, setRound] = useState(0)
       const [status, setStatus] = useState('reading')
+      const [reads, setReads] = useState(0)
       useEffect(() => {
         const controller = new AbortController()
-        readCut(controller.signal).then(next => setStatus(next), () => undefined)
+        readCut(controller.signal).then(
+          next => {
+            setStatus(next)
+            // A landed read, counted. A reader that has to know "did the click finish" cannot get it
+            // from the button alone: a fast route leaves no disabled frame to observe.
+            setReads(previous => previous + 1)
+          },
+          () => undefined,
+        )
         return () => controller.abort()
       }, [round])
       const refresh = useCallback(() => {
         setStatus('reading')
         setRound(previous => previous + 1)
       }, [])
-      return { status, refresh }
+      return { status, refresh, reads }
     }
 
     const panelStyle = {
@@ -188,13 +197,14 @@ window.__ModuleLoader__.load({
      * on an element, so a reader that needs to compare it against the route does not parse prose.
      */
     function TasksPanel() {
-      const { status, refresh } = useCut()
+      const { status, refresh, reads } = useCut()
       const reading = status === 'reading'
       const snapshot = reading ? undefined : status.snapshot
       const error = reading ? undefined : status.error
       return jsxs('div', {
         style: panelStyle,
         'data-panel': PANEL_ID,
+        'data-reads': String(reads),
         children: [
           jsxs('div', {
             style: { ...rowStyle, justifyContent: 'space-between' },

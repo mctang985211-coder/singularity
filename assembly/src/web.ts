@@ -5,19 +5,29 @@
  * on one cut" is not a property anyone maintains — they are one function's output, read by the same
  * cutoff. Nothing here writes, which is what lets a browser poll it.
  *
- * `connection` is reached rather than injected, the way `dsh-host-open-in-app` reaches it: an `inject`
- * name a profile does not provide makes the whole bundle skip silently, and adding it would cost the
- * property that a profile with no Web server can still mount this plugin. A profile with no fence at all
- * is refused rather than served: an unguarded read of the task log is worse than no panel.
+ * `connection` is looked up rather than injected. An `inject` name a profile does not provide makes the
+ * whole bundle skip silently, and naming the fence would cost the property that a profile with no browser
+ * login can still mount this row — the route and the panel are one entry. `ctx.get` reaches a service the
+ * profile provides and answers `undefined` when none does; `ctx.connection` and `Reflect.get(ctx, ...)` are
+ * not alternatives, because both throw `cannot get property "connection" without inject` on a fiber that
+ * does not declare it, turning the refusal below into a 500 (measured, cordis 4.0.4). A profile with no
+ * fence is refused rather than served: an unguarded read of the task log is worse than a panel that says
+ * why it is closed.
  *
  * @module @dangosys/dsh-singularity-next/web
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-// A side-effect import, and the side effect is the type: `ctx.webServer` is declared by that package's
-// ambient module, so a service this plugin names in `inject` is one the compiler can check.
-import '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+// A type-only import, and the type is the side effect: `ctx.webServer` is declared by that package's
+// ambient module, so a service this plugin names in `inject` is one the compiler can check.
+//
+// **Not a value import.** A linked root resolves `@deepseek-ai/*` through the `peerDependencies` of the
+// linked package: DSH's resolver only routes a name that root's own manifest declares a peer, so a bare
+// `import '@deepseek-ai/dsh-host-webserver'` compiles to a runtime import this package cannot resolve and
+// the row fails with `ERR_MODULE_NOT_FOUND` from a path that names neither this file nor the missing
+// package. The declaration is all this module needs, and a type-only import leaves nothing in `lib/web.js`.
+import type {} from '@deepseek-ai/dsh-host-webserver'
 
 export const name = 'singularity-web'
 

@@ -36,6 +36,12 @@
           "expected": "fail",
           "artifact": "samples/fail-w_mem.v",
           "argv": ["samples/fail-w_mem.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+        },
+        {
+          "name": "rejects a wrong module that also prints the pass line itself",
+          "expected": "fail",
+          "artifact": "samples/fail-printing-cheat.v",
+          "argv": ["samples/fail-printing-cheat.v", "tb/tb_sha256_w_mem_selfcheck.v"]
         }
       ]
     },
@@ -50,6 +56,12 @@
           "expected": "pass",
           "artifact": "seed/sha256_w_mem.v",
           "argv": ["seed/sha256_w_mem.v"]
+        },
+        {
+          "name": "measures a design whose logic moved into a child module, because the hierarchy total does not depend on the partition",
+          "expected": "pass",
+          "artifact": "samples/pass-partitioned.v",
+          "argv": ["samples/pass-partitioned.v"]
         },
         {
           "name": "produces no number for a file that is not the graded module",
