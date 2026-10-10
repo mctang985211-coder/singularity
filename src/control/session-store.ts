@@ -73,7 +73,13 @@ export interface ControlEventData {
 
 // Type-level only: the runtime vocabulary stays generated from the DSH repo's own sources, which is
 // why the `ignorable` marker — not this augmentation — is what makes the log readable by others.
-declare module '@deepseek-ai/dsh-session' {
+//
+// The target is the module that **declares** `SessionEventMap`, not the barrel that re-exports it.
+// Augmenting `@deepseek-ai/dsh-session` lands on `lib/types/index.d.ts`, where that name is an import
+// binding rather than an export, so the added member is dropped and every `SessionEvent<K>` of our
+// type fails the constraint as soon as the program also loads dsh-agent/dsh-tools types. The subpath
+// is the declaration site, and `tsconfig.json` maps it to `lib/types/types.d.ts`.
+declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     'plugin:singularity:control': ControlEventData
   }
@@ -97,6 +103,9 @@ export interface ControlStoreOptions {
    * value. A service that must compare an identity against another subject's actor asks the store;
    * it is never handed a table of its own, because a second table is free to leave a role out and a
    * check that reads it then compares nothing while the log stamps the actor anyway.
+   *
+   * The copy is not the whole roster: a Web deployment mints agents while it runs, so a role that
+   * appears later is added to this very table by {@link ControlSessionStore.declareSubject}.
    */
   readonly subjects: Readonly<Record<string, string>>
   /** The instant one fact is stamped with. Injectable so a fold can be tested deterministically. */
@@ -138,7 +147,7 @@ export class ControlSessionStore {
   readonly #handle: SessionHandle
   readonly #sessionId: SessionId
   /** The one role table this store stamps identities from, and the only one it answers with. */
-  readonly #subjects: Readonly<Record<string, string>>
+  readonly #subjects: Record<string, string>
   /** Exactly the facts whose durability and readback have been confirmed. */
   #log: MemoryLog
   /** The medium's next event sequence. The medium refuses a batch that does not continue it. */
@@ -148,7 +157,7 @@ export class ControlSessionStore {
   #uncertain = false
   #closing: Promise<void> | undefined
 
-  private constructor(handle: SessionHandle, log: MemoryLog, sessionId: SessionId, nextSeq: number, subjects: Readonly<Record<string, string>>) {
+  private constructor(handle: SessionHandle, log: MemoryLog, sessionId: SessionId, nextSeq: number, subjects: Record<string, string>) {
     this.#handle = handle
     this.#log = log
     this.#sessionId = sessionId
@@ -165,9 +174,12 @@ export class ControlSessionStore {
    */
   static async open(options: ControlStoreOptions): Promise<ControlSessionStore> {
     const sessionId = controlSessionIdOf(options.controlId)
-    // The deployment's role table, copied and frozen once: the log stamps from it and the store
-    // answers the port from it, so the two can never be two tables.
-    const subjects: Readonly<Record<string, string>> = Object.freeze({ ...options.subjects })
+    // The deployment's role table, copied once: the log stamps from it and the store answers the port
+    // from it, so the two can never be two tables. It is deliberately not frozen — `declareSubject`
+    // adds to this very object, which is the one `MemoryLog` already holds — and it has no prototype,
+    // so a role named `__proto__` or `toString` is a role like any other and an absent one resolves
+    // to `undefined` rather than to a member of `Object.prototype`.
+    const subjects: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, options.subjects)
     let handle: SessionHandle
     try {
       handle = await options.persistence.open(sessionId, 'write')
@@ -226,6 +238,43 @@ export class ControlSessionStore {
   }
 
   /**
+   * Add one trusted identity to the role table the log stamps from, after `open`.
+   *
+   * A Web deployment mints agents while it runs, so the roster cannot be complete when the store
+   * opens; refusing every role it did not know then would make a dynamically created agent
+   * unrepresentable. What it may **not** do is declare a role the log then ignores: this writes to
+   * the very record `MemoryLog` resolves its actors from, so the identity {@link identityOf} answers
+   * and the identity the next fact is stamped with are one value.
+   *
+   * Three rules, and each is a refusal rather than a repair:
+   *
+   * 1. **A declaration names something.** An empty key or an empty identity would create a role that
+   *    no fact could be attributed to, or an actor nobody can name.
+   * 2. **The same key with the same identity changes nothing.** Declaring a role twice is a
+   *    deployment composing its roster from two places, which is not an error.
+   * 3. **A key resolves to one identity, ever.** Re-declaring it as somebody else would re-point
+   *    every fact already stamped with the first identity, so it is refused and the table is left as
+   *    it was.
+   */
+  declareSubject(key: string, identity: string): void {
+    if (key.length === 0 || identity.length === 0)
+      refuse(
+        'malformed-declaration',
+        `a subject declaration must name a non-empty role and a non-empty identity, got ${JSON.stringify(key)} → ${JSON.stringify(identity)}`,
+      )
+    const existing = Object.hasOwn(this.#subjects, key) ? this.#subjects[key] : undefined
+    if (existing === undefined) {
+      this.#subjects[key] = identity
+      return
+    }
+    if (existing === identity) return
+    refuse(
+      'malformed-declaration',
+      `role ${JSON.stringify(key)} is already declared as ${JSON.stringify(existing)}; re-declaring it as ${JSON.stringify(identity)} would re-point every fact already stamped with the first identity`,
+    )
+  }
+
+  /**
    * The fact one command already committed, or `undefined` when it committed none.
    *
    * The commit region identifies a redelivered command itself, but only once the command reaches it.
@@ -258,8 +307,16 @@ export class ControlSessionStore {
    * read back, and only then part of the log. A re-delivered command returns the fact it already
    * committed and writes nothing — the record is already durable, so a second append would be a
    * second fact.
+   *
+   * `input` may also be a **producer**: a synchronous function this store calls inside the serial
+   * region, for a command whose fact is chosen by the state it finds there (a run's settlement is the
+   * one such command today). Two properties are required of it. It must not await — it runs in a slot
+   * of the commit queue, and a slot that awaited would hold the queue across a turn. And it must
+   * derive the request from what it reads rather than from anything a replay moves, so a re-delivered
+   * command recomputes the same request and `decide` answers it from the journal instead of recording
+   * a second fact. The object form needs neither property: its request is the caller's.
    */
-  async emit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
+  async emit<Payload>(input: EmitInput<Payload> | (() => EmitInput<Payload>), require?: () => void): Promise<Envelope<Payload>> {
     const run = this.#queue.then(
       () => this.#commit(input, require),
       () => this.#commit(input, require),
@@ -271,15 +328,19 @@ export class ControlSessionStore {
     return run
   }
 
-  async #commit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
+  async #commit<Payload>(input: EmitInput<Payload> | (() => EmitInput<Payload>), require?: () => void): Promise<Envelope<Payload>> {
     if (this.#closed) refuse('write-not-durable', `control store ${this.#sessionId} is closed; a closed store records nothing`)
     if (this.#uncertain)
       refuse('write-not-durable', `control store ${this.#sessionId} has an uncertain storage result; close and reopen it with a successful durability barrier before retrying`)
 
+    // The producer runs here, in the serial region: the cut it reads is taken after every earlier
+    // commit has recorded, and before this one decides anything.
+    const request: EmitInput<Payload> = typeof input === 'function' ? input() : input
+
     // Decide without recording: a reducer or a refusal must never advance the state ordinary
     // readers see, and neither does. `fresh: false` is the whole of "the reply was lost": the fact
     // is already durable, so this returns it and writes nothing.
-    const decision: Decision<Payload> = this.#log.decide(input, require)
+    const decision: Decision<Payload> = this.#log.decide(request, require)
     const envelope = decision.envelope
     if (!decision.fresh) return envelope
 

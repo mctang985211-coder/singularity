@@ -95,6 +95,7 @@ export {
   AGENT_VERSION,
   type AgentState,
 } from './agent/protocol.ts'
+export { createAgentNodeCommands, type AgentNodeCommands } from './agent/commands.ts'
 export {
   declareTaskProtocol,
   verifierRoleOf,
@@ -134,6 +135,7 @@ export {
   type EnvironmentState,
   type RevisionState,
 } from './environment/protocol.ts'
+export { createEnvironmentCommands, type EnvironmentCommands } from './environment/commands.ts'
 
 export {
   declareMeasureProtocol,
@@ -232,3 +234,11 @@ export {
   type VerifierSelftestSample,
   type VerifierVerdict,
 } from './verifier/implementation.ts'
+export {
+  runVerifierCommand,
+  type VerifierCommandInput,
+  type VerifierCommandRequest,
+  type VerifierCommandResult,
+  type VerifierInvocation,
+  type VerifierProcess,
+} from './verifier/command.ts'

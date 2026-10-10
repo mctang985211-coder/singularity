@@ -1,0 +1,49 @@
+# The deployment layer of the singularity-next-web profile.
+#
+# The bundle patch inserts the `singularity-assembly` host row with no config: a package cannot know
+# which control id, domain, or workspace a deployment owns. This layer is applied after every bundle
+# layer, and an id-targeted patch replaces the matched row's whole config — so the three keys below
+# are the deployment's complete answer, and a key missing here is a missing key, not an inherited one.
+#
+# @@CHECKOUT@@ / @@DSH_HOME@@ are materialisation tokens: scripts/deploy.mjs substitutes them when it
+# writes this profile and refuses to write a file in which one survives.
+#
+# domainDir is this checkout's domain material, never a copy: the task protocol's verifier program
+# lives there, so a profile that pointed somewhere else would run a different criterion.
+- id: singularity-assembly
+  config:
+    controlId: singularity-local
+    domainDir: '@@CHECKOUT@@/deployment/domain/letters'
+    workspaceRoot: '@@DSH_HOME@@/workspaces/singularity'
+
+# The deployment's model route, because the base layer mounts `llm-pi-ai` with no providers and
+# defaults every agent to `deepseek-official`, for which this machine holds no credential: a profile
+# that names no route composes a session in which no model call can happen. The route names an
+# environment variable, never a key — `YINGJUN_API_KEY` resolves per request through
+# `$DSH_HOME/.credentials.yaml`. `agent-default-model` is restated whole because an id-targeted patch
+# replaces the matched config, so every key it owns has to be here.
+- id: llm-pi-ai
+  config:
+    providers:
+      yingjun:
+        displayName: Yingjun
+        apiKeyEnv: YINGJUN_API_KEY
+        api: openai-responses
+        baseURL: https://yingjun.xyz/v1
+        models:
+          - id: deepseek-v4.1-flash
+            name: DeepSeek V4.1 Flash（Yingjun）
+            contextWindow: 1000000
+            maxTokens: 131072
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+              max: max
+
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: yingjun
+    model: deepseek-v4.1-flash
+    reasoningEffort: max

@@ -751,7 +751,12 @@
           "replace": "    reduce: (state, envelope, payload) => spec.reduce(state, envelope, payload as Payload),\n    [BUILT_BY_DEFINE_KIND]: true,\n  }\n  return Object.freeze(rule)"
         }
       ],
-      "run": { "kind": "vitest", "args": ["tests/gate.spec.ts"] },
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/gate.spec.ts"
+        ]
+      },
       "witness": "refuses a spread copy of a branded rule, because identity is not copyable"
     },
     {
@@ -765,7 +770,12 @@
           "replace": "    assertClosedKeys(source, [...members, 'note'], at)\n    const name = text(source, 'name', at)\n    const digest = text(source, 'digest', at)"
         }
       ],
-      "run": { "kind": "vitest", "args": ["tests/measure-slice.spec.ts"] },
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/measure-slice.spec.ts"
+        ]
+      },
       "witness": "refuses a plan with no run, no context or an old version, a trial before a plan, a second plan, an undeclared member"
     },
     {
@@ -779,10 +789,14 @@
           "replace": ""
         }
       ],
-      "run": { "kind": "vitest", "args": ["tests/gate.spec.ts"] },
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/gate.spec.ts"
+        ]
+      },
       "witness": "freezes the declared member set where defineKind built it, so nothing can widen it afterwards"
-    }
-,
+    },
     {
       "id": "protocol-nested-workspace-reader-widened",
       "rule": "the workspace reader closes each entry with `nested.workspace`, the set the declaration handed it, rather than one member wider",
@@ -896,5 +910,866 @@
         ]
       },
       "witness": "expected the step to refuse"
-    }  ]
+    },
+    {
+      "id": "core-declare-empty-accepted",
+      "rule": "a declaration must name a non-empty role and identity",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/control/session-store.ts",
+          "find": "if (key.length === 0 || identity.length === 0)",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/control-declaration.spec.ts"
+        ]
+      },
+      "witness": "refuses an empty key or an empty identity"
+    },
+    {
+      "id": "core-declare-conflict-overwrites",
+      "rule": "a key resolves to one identity, ever",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/control/session-store.ts",
+          "find": "    if (existing === identity) return\n    refuse(",
+          "replace": "    if (existing === identity) return\n    this.#subjects[key] = identity\n    refuse("
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/control-declaration.spec.ts"
+        ]
+      },
+      "witness": "refuses the same key with a different identity"
+    },
+    {
+      "id": "core-declare-same-identity-refused",
+      "rule": "declaring the same key with the identity it already has changes nothing",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/control/session-store.ts",
+          "find": "    if (existing === identity) return",
+          "replace": "    if (false) return"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/control-declaration.spec.ts"
+        ]
+      },
+      "witness": "is a no-op when the same key is declared again"
+    },
+    {
+      "id": "core-declare-not-shared-with-log",
+      "rule": "a declared role lands in the very table the log stamps from",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/control/session-store.ts",
+          "find": "logOptionsOf(options, subjects)",
+          "replace": "logOptionsOf(options, { ...subjects })"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/control-declaration.spec.ts"
+        ]
+      },
+      "witness": "resolves an identity declared after open"
+    },
+    {
+      "id": "core-settle-reads-status",
+      "rule": "settle derives the fact from the evidence, never from the run status, so a redelivery recomputes it",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "  const unadjudicated = unadjudicatedCriteria(task.contract, run)",
+          "replace": "  if (run.status !== 'running') refuse('illegal-transition', `run \"${input.runId}\" already settled ${run.status}`)\n  const unadjudicated = unadjudicatedCriteria(task.contract, run)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "answers a redelivered settle with the fact it already committed"
+    },
+    {
+      "id": "core-settle-missing-verdict-accepted",
+      "rule": "a criterion with no verdict from its own verifier refuses the settlement",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "  if (unadjudicated.length > 0)",
+          "replace": "  if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "refuses while a criterion has no verdict from its own verifier"
+    },
+    {
+      "id": "core-settle-verify-takes-caller-binding",
+      "rule": "the verified branch is emitted under the scheduler role, whatever binding the caller passes",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "  if (unmet.length === 0) return { ...common, kind: TASK_KINDS.runVerified, payload: { runId: input.runId } }",
+          "replace": "  if (unmet.length === 0) return { ...common, kind: TASK_KINDS.runVerified, payload: { runId: input.runId }, ...(as === undefined ? {} : { as }) }"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "settles the run verified under the scheduler, whatever binding"
+    },
+    {
+      "id": "core-settle-fail-drops-binding",
+      "rule": "the failed branch is emitted under the caller-supplied responsible binding",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "    kind: TASK_KINDS.runFailed,\n    payload: reason === undefined ? { runId: input.runId } : { runId: input.runId, reason },\n    ...(as === undefined ? {} : { as }),",
+          "replace": "    kind: TASK_KINDS.runFailed,\n    payload: reason === undefined ? { runId: input.runId } : { runId: input.runId, reason },"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "refuses a failed settle emitted under a binding that is not the responsible agent"
+    },
+    {
+      "id": "core-settle-fail-drops-detail",
+      "rule": "a failed settlement carries the failing verdict's detail",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "  const reason = failing?.detail",
+          "replace": "  const reason = undefined"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "settles the run failed under the responsible binding"
+    },
+    {
+      "id": "core-settle-unknown-run-accepted",
+      "rule": "a run the task never started refuses the settlement",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "  const run = task.runs[input.runId]\n  if (run === undefined) refuse('unknown-run', `cannot settle run \"${input.runId}\": task \"${input.taskId}\" never started it`)",
+          "replace": "  const run = task.runs[input.runId]\n  if (false) refuse('unknown-run', '')"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "refuses a run the task never started"
+    },
+    {
+      "id": "core-settle-verified-branch-is-failed",
+      "rule": "all criteria passing settles verified, not failed",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "  if (unmet.length === 0) return { ...common, kind: TASK_KINDS.runVerified, payload: { runId: input.runId } }",
+          "replace": "  if (unmet.length === 0) return { ...common, kind: TASK_KINDS.runFailed, payload: { runId: input.runId } }"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "settles the run verified under the scheduler"
+    },
+    {
+      "id": "core-verdict-lookup-broken",
+      "rule": "a settlement asks the run evidence which criterion is answered",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/run.ts",
+          "find": "  return run.evidence.find(",
+          "replace": "  return run.evidence.find(() => false) && run.evidence.find("
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "settles the run verified under the scheduler"
+    },
+    {
+      "id": "core-agent-open-subject-not-agent",
+      "rule": "one node is keyed by the agent id",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/agent/commands.ts",
+          "find": "        subject: input.agentId,",
+          "replace": "        subject: input.sessionId,"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/agent-commands.spec.ts"
+        ]
+      },
+      "witness": "opens one node keyed by the agent id"
+    },
+    {
+      "id": "core-environment-subject-not-environment",
+      "rule": "a revision is keyed by the environment id",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/environment/commands.ts",
+          "find": "        subject: input.environmentId,",
+          "replace": "        subject: input.revisionId,"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/environment-commands.spec.ts"
+        ]
+      },
+      "witness": "creates one revision whose content identity the reducer computes"
+    },
+    {
+      "id": "core-runner-verdict-always-pass",
+      "rule": "the verdict is the exit code",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/verifier/command.ts",
+          "find": "    verdict: outcome.exitCode === 0 ? 'pass' : 'fail',",
+          "replace": "    verdict: 'pass',"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/verifier-runner.spec.ts"
+        ]
+      },
+      "witness": "judges a non-zero exit as fail"
+    },
+    {
+      "id": "core-runner-no-exit-is-pass",
+      "rule": "a process that never started fails closed",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/verifier/command.ts",
+          "find": "    verdict: outcome.exitCode === 0 ? 'pass' : 'fail',",
+          "replace": "    verdict: outcome.exitCode === 0 || outcome.exitCode === null ? 'pass' : 'fail',"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/verifier-runner.spec.ts"
+        ]
+      },
+      "witness": "reads a process that never started as a failure"
+    },
+    {
+      "id": "core-runner-artifact-before-run",
+      "rule": "the artifact digest is read after the run",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/verifier/command.ts",
+          "find": "  const outcome = await runProcess(invocation)\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)",
+          "replace": "  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)\n  const outcome = await runProcess(invocation)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/verifier-runner.spec.ts"
+        ]
+      },
+      "witness": "judges an exit code of 0 as pass"
+    },
+    {
+      "id": "core-runner-inputs-before-run",
+      "rule": "the input digests are read after the run",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/verifier/command.ts",
+          "find": "  const outcome = await runProcess(invocation)\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)",
+          "replace": "  const inputDigests = await hashInputs(inputs)\n  const outcome = await runProcess(invocation)\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/verifier-runner.spec.ts"
+        ]
+      },
+      "witness": "judges a non-zero exit as fail"
+    },
+    {
+      "id": "core-runner-shells-an-argv",
+      "rule": "a string runs through a shell, an argv is spawned without one",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/verifier/command.ts",
+          "find": "  const invocation: VerifierInvocation = typeof command === 'string' ? { shell: true, command } : { shell: false, argv: command }",
+          "replace": "  const invocation: VerifierInvocation = { shell: true, command: typeof command === 'string' ? command : command.join(' ') }"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/verifier-runner.spec.ts"
+        ]
+      },
+      "witness": "decides the invocation from the command"
+    },
+    {
+      "id": "core-runner-missing-artifact-empty-success",
+      "rule": "a missing artifact is a named refusal, never an empty success",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/verifier/command.ts",
+          "find": "    refuse('evidence-input-mismatch', `${what} could not be read (${messageOf(error)}); a judgement cannot name bytes that are not there`)",
+          "replace": "    return ''"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/verifier-runner.spec.ts"
+        ]
+      },
+      "witness": "refuses an artifact that is not there"
+    },
+    {
+      "id": "core-settle-unreachable-from-foragent",
+      "rule": "settle is trusted-surface only, not reachable from forAgent",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "        failRun: input => commands.failRun(input, as),\n      }",
+          "replace": "        failRun: input => commands.failRun(input, as),\n        settle: input => commands.settle(input, as),\n      }"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-commands.spec.ts"
+        ]
+      },
+      "witness": "offers an agent no way to produce one"
+    },
+    {
+      "id": "core-settle-producer-outside-region",
+      "rule": "the fact a command is is produced inside the serial region, against the state the commit left",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "src/control/session-store.ts",
+          "find": "  async emit<Payload>(input: EmitInput<Payload> | (() => EmitInput<Payload>), require?: () => void): Promise<Envelope<Payload>> {\n    const run = this.#queue.then(\n      () => this.#commit(input, require),\n      () => this.#commit(input, require),\n    )",
+          "replace": "  async emit<Payload>(input: EmitInput<Payload> | (() => EmitInput<Payload>), require?: () => void): Promise<Envelope<Payload>> {\n    const decided = typeof input === 'function' ? input() : input\n    const run = this.#queue.then(\n      () => this.#commit(decided, require),\n      () => this.#commit(decided, require),\n    )"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-settle.spec.ts"
+        ]
+      },
+      "witness": "is decided inside the commit region"
+    },
+    {
+      "id": "assembly-m1-replay-guard",
+      "rule": "a redelivered submission answers from the committed record and re-runs nothing",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "if (recorded !== undefined && recorded.status !== 'running') return answerOf(apparatus, committed, runId)",
+          "replace": "if (false) return answerOf(apparatus, committed, runId)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "answers a redelivered call from the record and runs nothing again"
+    },
+    {
+      "id": "assembly-m2-verifier-digest-bytes",
+      "rule": "the verifier implementation digest is the digest of the declared program bytes",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/domain.ts",
+          "find": "implementationDigest: sha256(await readBytes(program, `${where}.program`)),",
+          "replace": "implementationDigest: sha256('a digest this package made up'),"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/domain.spec.ts"
+        ]
+      },
+      "witness": "reads every domain string from the declared file, digesting the verifier bytes"
+    },
+    {
+      "id": "assembly-m3-program-argv-input",
+      "rule": "the program is run for real with the declared input path as its argument",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "await writeFile(join(workspace, apparatus.domain.artifact), await runProgram(programPath, inputPath), 'utf8')",
+          "replace": "await writeFile(join(workspace, apparatus.domain.artifact), await runProgram(programPath, programPath), 'utf8')"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "records a verified run whose verdict comes from the domain verifier"
+    },
+    {
+      "id": "assembly-m4-anonymous-caller",
+      "rule": "a call with no live agent is refused rather than attributed",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/apparatus.ts",
+          "find": "if (agent === undefined)\n    refuse('unknown-emitter-role'",
+          "replace": "if (false)\n    refuse('unknown-emitter-role'"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "refuses a call that arrives with no agent, before it can name one"
+    },
+    {
+      "id": "assembly-m5-per-agent-key",
+      "rule": "one caller key per agent: a shared key would let one agent work another agent's task",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/apparatus.ts",
+          "find": "const key = `agent:${agentId}`",
+          "replace": "const key = 'agent:shared'"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "refuses one agent's submission to another agent's task, by name"
+    },
+    {
+      "id": "assembly-m6-repair-settles-recorded",
+      "rule": "an in-flight run with a recorded verdict is settled by the repair, not skipped",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/repair.ts",
+          "find": "if (run.status !== 'running') continue",
+          "replace": "if (true) continue"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/recovery.spec.ts"
+        ]
+      },
+      "witness": "settles a run whose verdict was recorded but whose settlement was lost"
+    },
+    {
+      "id": "assembly-m7-repair-artifact-gone",
+      "rule": "a run whose frozen artifact is gone is settled failed by name",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/repair.ts",
+          "find": "  if ((await digestOnDisk(join(workspace, apparatus.domain.artifact))) === undefined)",
+          "replace": "  if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/recovery.spec.ts"
+        ]
+      },
+      "witness": "settles a run whose frozen artifact is gone, failed by a name"
+    },
+    {
+      "id": "assembly-m8-closed-config",
+      "rule": "the deployment config is closed: an undeclared key is refused",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/index.ts",
+          "find": "assertClosedKeys(config, CONFIG_MEMBERS, 'the singularity-assembly config')",
+          "replace": "void CONFIG_MEMBERS"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/host-plugin.spec.ts"
+        ]
+      },
+      "witness": "refuses a config member the shape does not declare, by name"
+    },
+    {
+      "id": "assembly-m9-effect-owns-tools",
+      "rule": "every registration the agent face makes is owned by the effect it opened",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/agent.ts",
+          "find": "ctx.effect(() => () => {\n    for (const dispose of disposers) dispose()\n  })",
+          "replace": "ctx.effect(() => () => {})"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/agent-face.spec.ts"
+        ]
+      },
+      "witness": "owns every registration through the effect it opened"
+    },
+    {
+      "id": "assembly-m10-fail-uses-responsible-binding",
+      "rule": "a failing verdict settles the run failed through the responsible binding",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "await apparatus.tasks.settle({ commandId: `settle:${request.taskId}/${runId}`, taskId: request.taskId, runId }, key)",
+          "replace": "await apparatus.tasks.settle({ commandId: `settle:${request.taskId}/${runId}`, taskId: request.taskId, runId })"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "records a wrong answer as a fail rather than a success"
+    },
+    {
+      "id": "assembly-m11-revision-digest-read-back",
+      "rule": "the run pin carries the digest the environment holds, never an invented one",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "digest: revisionDigestOf(apparatus, revisionId)",
+          "replace": "digest: ''"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "records a verified run whose verdict comes from the domain verifier"
+    },
+    {
+      "id": "assembly-m12-one-input",
+      "rule": "a domain declares exactly one input, and a different count is refused by name",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/domain.ts",
+          "find": "if (inputPath === undefined || inputs.length !== 1)",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/domain.spec.ts"
+        ]
+      },
+      "witness": "refuses a domain that does not declare exactly one input, by name"
+    },
+    {
+      "id": "assembly-m13-effect-owns-section",
+      "rule": "the prompt section, not only the tools, is released by the owning effect",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/agent.ts",
+          "find": "for (const dispose of disposers) dispose()",
+          "replace": "for (const dispose of disposers.slice(0, 3)) dispose()"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/agent-face.spec.ts"
+        ]
+      },
+      "witness": "owns every registration through the effect it opened"
+    },
+    {
+      "id": "assembly-m14-read-holder-only",
+      "rule": "a read of a task the caller is not responsible for is refused by name",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/driver.ts",
+          "find": "if (state.responsibility?.agentId !== caller.agentId)",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "refuses a read of a task the caller is not responsible for, by name"
+    },
+    {
+      "id": "assembly-m15-frozen-input-drift",
+      "rule": "a frozen input whose bytes changed settles the run failed by name",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/repair.ts",
+          "find": "if (digest !== declared.digest)",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/recovery.spec.ts"
+        ]
+      },
+      "witness": "settles a run whose frozen input changed, failed by a name, and still completes the mount"
+    },
+    {
+      "id": "assembly-m16-placeholders-closed",
+      "rule": "a command template may name only the placeholders this version fills",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/domain.ts",
+          "find": "if (unfillable.length > 0)",
+          "replace": "if (unfillable.length > 1)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/domain.spec.ts"
+        ]
+      },
+      "witness": "refuses a command template naming a placeholder this version cannot fill"
+    },
+    {
+      "id": "assembly-m17-bubble-names-what-ran",
+      "rule": "the bubble names the model route and the toolchain that actually ran",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "const toolchainDigest = (): Promise<string> => (toolchain ??= digestOf(process.execPath, 'the node toolchain'))",
+          "replace": "const toolchainDigest = (): Promise<string> => Promise.resolve(sha256('not the interpreter'))"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "records the model route and the toolchain that actually ran in the bubble"
+    },
+    {
+      "id": "assembly-m18-frozen-name-not-declared",
+      "rule": "a run frozen against an input this deployment no longer declares settles failed by name",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/repair.ts",
+          "find": "if (declared.name !== apparatus.domain.inputPath)",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/recovery.spec.ts"
+        ]
+      },
+      "witness": "settles a run frozen against an input this deployment no longer declares, and still opens"
+    },
+    {
+      "id": "assembly-m19-frozen-input-compared-to-disk",
+      "rule": "the frozen input is compared against the bytes on disk, not against its own claim",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/repair.ts",
+          "find": "const digest = await digestOnDisk(join(workspace, apparatus.domain.inputPath))",
+          "replace": "const digest = declared.digest"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/recovery.spec.ts"
+        ]
+      },
+      "witness": "settles a run whose frozen input changed, failed by a name, and still completes the mount"
+    },
+    {
+      "id": "assembly-m20-tool-tells-how-program-runs",
+      "rule": "the submit tool tells the model how its program is run: as an ES module, judged on standard output",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/agent.ts",
+          "find": "run as an ES module of node with the input path as its only argument; only what it prints to standard output is judged",
+          "replace": "run with the input path as its only argument; what it prints is judged"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/agent-face.spec.ts"
+        ]
+      },
+      "witness": "tells the model how its program will be run, rather than leaving it to guess"
+    },
+    {
+      "id": "assembly-m21-inflight-redelivery-refused",
+      "rule": "a redelivery whose run is still in flight is refused, not re-executed",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "  if (recorded !== undefined)\n    refuse(\n      'illegal-transition',\n      `run \"${runId}\" of task \"${request.taskId}\" is still running for this call; its attempt ends when it settles, and the next boot's repair settles an attempt this process left behind`,\n    )",
+          "replace": "  if (false)\n    refuse('illegal-transition', 'unreachable')"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "refuses a redelivery whose run is still in flight instead of running the program again"
+    },
+    {
+      "id": "assembly-m22-revision-names-the-request",
+      "rule": "the run revision is derived from the request, never from bytes a program can rewrite",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "const basis = sha256(`${apparatus.domain.templateDigest}\\u0000${request.taskId}`)",
+          "replace": "const basis = sha256(`${apparatus.domain.templateDigest}\\u0000${declared.digest}`)"
+        },
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "manifest: { taskTemplate: apparatus.domain.templateDigest, task: request.taskId },",
+          "replace": "manifest: { taskTemplate: apparatus.domain.templateDigest, inputs: [declared] },"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "freezes the revision against the request, not against bytes a program can rewrite"
+    },
+    {
+      "id": "assembly-m23-holder-checked-before-writing",
+      "rule": "a caller that is not the holder is refused before anything is written",
+      "doc": "docs/assembly-g1.md",
+      "edits": [
+        {
+          "file": "assembly/src/submission.ts",
+          "find": "  if (committed.responsibility?.agentId !== caller.agentId)\n    refuse(\n      'not-responsible',\n      `task \"${request.taskId}\" is the responsibility of agent \"${committed.responsibility?.agentId ?? 'nobody'}\", so agent \"${caller.agentId}\" cannot submit to it`,\n    )\n  const key = await bindCaller(apparatus, caller)",
+          "replace": "  const key = await bindCaller(apparatus, caller)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "writes nothing at all for a caller that is not the holder"
+    }
+  ]
 }

@@ -1,0 +1,36 @@
+{
+  "inputs": ["in/source.txt"],
+  "workspace": {
+    "program": "program.mjs",
+    "artifact": "report.txt"
+  },
+  "criteria": [
+    {
+      "criterionId": "letters",
+      "statement": "the report is the number of ASCII letters in the input",
+      "verifier": "letters"
+    }
+  ],
+  "verifiers": [
+    {
+      "ref": "letters",
+      "version": "1",
+      "program": "verifier.mjs",
+      "args": ["{artifact}", "{input}"],
+      "selftest": [
+        {
+          "name": "accepts the true count",
+          "expected": "pass",
+          "artifact": "samples/pass-report.txt",
+          "argv": ["samples/pass-report.txt", "samples/source.txt"]
+        },
+        {
+          "name": "rejects a count that is not the input's",
+          "expected": "fail",
+          "artifact": "samples/fail-report.txt",
+          "argv": ["samples/fail-report.txt", "samples/source.txt"]
+        }
+      ]
+    }
+  ]
+}

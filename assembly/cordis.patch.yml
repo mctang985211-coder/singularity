@@ -1,0 +1,14 @@
+# The assembly layer's patch: one plugin row, mounted after the tools runtime it registers into and
+# before any app that creates an agent.
+#
+# The row carries no config. The host plugin requires `controlId`, `domainDir` and `workspaceRoot`,
+# and a package cannot know which control, which domain, or which workspace a deployment owns. The
+# deployment supplies all three in its own profile layer (`<profile>/cordis.patch.yml`, applied after
+# every bundle layer); that layer targets this row by id, and an id-targeted patch replaces the whole
+# config — so the profile's three keys are the complete answer. A profile that stacks this bundle and
+# never adds that layer mounts a row with an empty config, which the plugin's schema refuses at load
+# rather than inventing a default.
+- insert:
+    - id: singularity-assembly
+      name: '@dangosys/dsh-singularity-next'
+      config: {}

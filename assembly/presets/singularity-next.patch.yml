@@ -1,0 +1,26 @@
+# The `singularity-next` agent preset: the composition one session gets when this preset is selected.
+#
+# Two rows, because those are the two things this deployment adds to an agent and nothing else is
+# missing: the persona names the agent, and the agent face (`./agent`) installs the task tools over
+# the `singularity` service the host row provides. The base and web layers already mount the model,
+# the session, the prompt registry and their own tool rows, so a preset that restated them would be a
+# second copy of the host's catalog — note `{{model}}` and `{{cwd}}` are host variables, not ours.
+- insert:
+    - id: preset-singularity-next
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: singularity-next
+        name: Singularity Next
+        description: Drive the singularity-core task pipeline through the assembly's tools.
+        order: 0
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a Singular agent driving the singularity-core task pipeline. Work only through
+                the task tools: read the task, write the program, submit the artifact, run the
+                verifier, and read back the recorded receipt. A step that no tool call recorded did
+                not happen, so never report one as done.
+          - id: singularity-agent
+            name: '@dangosys/dsh-singularity-next/agent'

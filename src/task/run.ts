@@ -35,6 +35,7 @@
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import { assertInputsBound, BUBBLE_INPUT_MEMBERS, inputList, type Bubble, type BubbleInput } from './bubble.ts'
+import type { AcceptanceCriterion, TaskContract } from './contract.ts'
 import { requireResponsible } from './responsibility.ts'
 import { digest, maybeText, record, requireContractOf, requireRun, revisionRef, REVISION_MEMBERS, sameRevision, settled, text } from './shape.ts'
 import type { RevisionRef, TaskState } from './protocol.ts'
@@ -98,6 +99,38 @@ const RUN_STARTED_MEMBERS = ['runId', 'revision'] as const
 const RUN_VERIFIED_MEMBERS = ['runId'] as const
 const RUN_FAILED_MEMBERS = ['runId', 'reason'] as const
 const EVIDENCE_PRODUCED_MEMBERS = ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'inputDigests', 'detail'] as const
+
+/**
+ * The verdict one criterion's **own** verifier recorded for one run, or `undefined` when it recorded
+ * none.
+ *
+ * "Its own" is the whole of the lookup: a criterion names a ref and a version, so only an entry
+ * carrying both is a verdict *on that criterion*. One implementation deciding under another
+ * criterion's id is not a judgement of it, and reading the evidence by `criterionId` alone would
+ * accept it.
+ *
+ * This is the one owner of that matching. The `run/verified` reducer and the settlement command both
+ * ask it, so the two cannot disagree about which criteria a run has answered — a disagreement would
+ * be a run the command verifies and the fold refuses, or the reverse.
+ */
+export function verdictFor(run: RunState, criterion: AcceptanceCriterion): EvidenceRecord | undefined {
+  return run.evidence.find(
+    entry =>
+      entry.criterionId === criterion.criterionId &&
+      entry.verifierRef === criterion.verifierRef &&
+      entry.verifierVersion === criterion.verifierVersion,
+  )
+}
+
+/** The criteria this run holds **no verdict at all** for, from each criterion's own verifier. */
+export function unadjudicatedCriteria(contract: TaskContract, run: RunState): readonly AcceptanceCriterion[] {
+  return contract.criteria.filter(criterion => verdictFor(run, criterion) === undefined)
+}
+
+/** The criteria this run holds **no passing** verdict for: a missing verdict and a failing one alike. */
+export function unmetCriteria(contract: TaskContract, run: RunState): readonly AcceptanceCriterion[] {
+  return contract.criteria.filter(criterion => verdictFor(run, criterion)?.verdict !== 'pass')
+}
 
 /** `run/started`: one attempt at a task, pinned to the revision it will be judged against. */
 export function runStartedKind(kind: string, emitter: string): KindRule<TaskState> {
@@ -277,17 +310,9 @@ export function runVerifiedKind(kind: string, emitter: string): KindRule<TaskSta
       if (run.status !== 'running')
         refuse('illegal-transition', `${where} settles run "${payload.runId}" again; it is already ${run.status}`)
 
-      // Invariant 3: every criterion needs a passing verdict from its own implementation.
-      const unanswered = contract.criteria.filter(
-        criterion =>
-          !run.evidence.some(
-            entry =>
-              entry.criterionId === criterion.criterionId &&
-              entry.verdict === 'pass' &&
-              entry.verifierRef === criterion.verifierRef &&
-              entry.verifierVersion === criterion.verifierVersion,
-          ),
-      )
+      // Invariant 3: every criterion needs a passing verdict from its own implementation. Which
+      // verdict counts as a criterion's is `verdictFor`'s rule, asked here rather than restated.
+      const unanswered = unmetCriteria(contract, run)
       if (unanswered.length > 0)
         refuse(
           'unadjudicated-criterion',

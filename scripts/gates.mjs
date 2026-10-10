@@ -22,7 +22,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { register } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, normalize, relative, sep } from 'node:path'
@@ -517,6 +517,24 @@ const DETECTORS = [
     },
   },
   {
+    name: 'assembly-budget',
+    /** Its subject is its own package and its synthetic leg is below, because `sourceFiles()` is not its file set. */
+    probeSeparately: true,
+    detect: () => assemblyBudgetFindings(assemblySources()),
+  },
+  {
+    name: 'assembly-domain-free',
+    /** Its findings come from the deployment's own declaration, so its synthetic leg is below. */
+    probeSeparately: true,
+    detect: () => assemblyDomainFindings(assemblySources()),
+  },
+  {
+    name: 'assembly-built',
+    /** It compares the real bundle's mtime with the real sources, and its synthetic leg is below. */
+    probeSeparately: true,
+    detect: () => assemblyArtifactFindings(),
+  },
+  {
     name: 'single-conditional-owner',
     detect: (files, views) => {
       const claims = []
@@ -658,13 +676,164 @@ function unchargedFiles() {
 function evidenceFiles() {
   const paths = new Set(sourceFiles().filter(file => file.startsWith('tests/')))
   for (const file of treeFiles(join(ROOT, 'tests', 'fixtures'))) paths.add(`tests/fixtures/${file}`)
+  // The plugin's own specs are evidence too: they lock behaviour exactly as the stack's do, and leaving
+  // them uncharged would make the package's cost invisible to the one budget that measures cost.
+  for (const file of treeFiles(join(ROOT, 'assembly', 'tests'))) paths.add(`assembly/tests/${file}`)
   for (const file of scriptFiles()) paths.add(file)
   return [...paths].sort().map(file => ({ file, lines: readFileSync(join(ROOT, file), 'utf8').split('\n').length }))
 }
 
+/**
+ * The assembly package's authored sources, read from its own directory.
+ *
+ * `sourceFiles()` covers the stack's `src/` and `tests/`, and the assembly is neither: it is a plugin a
+ * DSH profile loads, so without this read its whole surface would sit in no budget at all — which is
+ * how the first draft of it reached 366 lines in one file with nothing reporting that.
+ *
+ * The extension set is the one `sourceFiles()` uses, because a budget or a name scan that asked only
+ * for `.ts` would leave the same rules unenforced in a file somebody called `.mts`.
+ */
+const ASSEMBLY_SOURCE_EXTENSIONS = /\.(ts|mts|tsx)$/
+
+function assemblySources() {
+  return treeFiles(join(ROOT, 'assembly', 'src'))
+    .filter(file => ASSEMBLY_SOURCE_EXTENSIONS.test(file))
+    .map(file => ({ file: `assembly/src/${file}`, text: readFileSync(join(ROOT, 'assembly', 'src', file), 'utf8') }))
+    .sort((left, right) => left.file.localeCompare(right.file))
+}
+
+/**
+ * A plugin's authored source budget: one responsibility per file, and a package small enough to read.
+ *
+ * The total moved from 750 to 800 when the plugin's own recovery was split out of `submission.ts` for
+ * the per-file rule. That split is what the budget is for, and it costs lines rather than saving them —
+ * a module header, its imports and its exports — so the alternative was a 215-line file or a rule that
+ * could not fit. Both hard-won rules stay: the plugin refuses a redelivery whose run is still in
+ * flight, and it freezes a revision against the request rather than against bytes the submitted program
+ * can rewrite. The file budget stays 200 and every file is under it. Compression came first: the
+ * package is 14% comment and the rest is the rules themselves.
+ */
+const ASSEMBLY_FILE_BUDGET = 200
+const ASSEMBLY_TOTAL_BUDGET = 800
+
+/** The split rule and the package budget, measured on the plugin's own files. */
+function assemblyBudgetFindings(sources) {
+  const findings = []
+  for (const { file, text } of sources) {
+    const lines = text.split('\n').length
+    if (lines > ASSEMBLY_FILE_BUDGET)
+      findings.push(
+        `${file} is ${lines} lines; a plugin source file's budget is ${ASSEMBLY_FILE_BUDGET} — split at a responsibility boundary, never at a line count`,
+      )
+  }
+  const total = sources.reduce((sum, { text }) => sum + text.split('\n').length, 0)
+  if (total > ASSEMBLY_TOTAL_BUDGET)
+    findings.push(
+      `assembly/src is ${total} lines; the plugin's budget is ${ASSEMBLY_TOTAL_BUDGET} — the excess is indirection that only exists because it was convenient`,
+    )
+  return findings
+}
+
+/**
+ * The keys whose string values *name* a domain. Prose keys (`statement`, and a sample's `name`) are
+ * deliberately not collected: a statement is text a person reads, while a criterion id, a verifier ref
+ * or a workspace path is a name the assembly would be restating if it appeared in code. `args` is not
+ * collected either — `{artifact}` and `{input}` are the placeholder vocabulary the two sides share, not
+ * a name that belongs to one domain.
+ */
+const DOMAIN_IDENTITY_KEYS = new Set(['criterionId', 'verifier', 'ref', 'path', 'program', 'artifact', 'inputs'])
+
+/** Every name a domain declaration uses, wherever it sits in the document. */
+function domainIdentityLiterals(node, found = new Set()) {
+  if (Array.isArray(node)) {
+    for (const item of node) domainIdentityLiterals(item, found)
+    return found
+  }
+  if (node === null || typeof node !== 'object') return found
+  for (const [key, value] of Object.entries(node)) {
+    if (typeof value === 'string' && DOMAIN_IDENTITY_KEYS.has(key)) found.add(value)
+    else if ((key === 'inputs' || key === 'argv') && Array.isArray(value)) {
+      for (const item of value) if (typeof item === 'string') found.add(item)
+    } else domainIdentityLiterals(value, found)
+  }
+  return found
+}
+
+/** The domain declarations this deployment ships, by directory-relative path. */
+function domainDeclarations() {
+  return treeFiles(join(ROOT, 'deployment', 'domain')).filter(file => file.endsWith('task.json'))
+}
+
+/**
+ * A domain reaches the assembly as **loaded data**. Every string the declaration uses to name something
+ * lives in `deployment/domain/`, and a copy of one inside the package is how a criterion id, an input
+ * path or a verifier ref starts drifting from the declaration the profile points at.
+ */
+function assemblyDomainFindings(sources) {
+  const declarations = domainDeclarations()
+  if (declarations.length === 0) return ['no domain declaration under deployment/domain is scanned, so the assembly is checked against nothing']
+  const named = new Set()
+  for (const file of declarations) {
+    const path = join(ROOT, 'deployment', 'domain', file)
+    try {
+      for (const literal of domainIdentityLiterals(JSON.parse(readFileSync(path, 'utf8')))) named.add(literal)
+    } catch (error) {
+      return [`deployment/domain/${file} could not be read as a domain declaration (${error instanceof Error ? error.message : String(error)})`]
+    }
+  }
+  const findings = []
+  for (const { file, text } of sources)
+    for (const literal of named)
+      if (text.includes(literal))
+        findings.push(
+          `${file} names the domain literal ${JSON.stringify(literal)}; a domain is loaded data, and deployment/domain/ is the only place its names may be written`,
+        )
+  return findings
+}
+
+/** When a shipped file was written, or `undefined` when the build never produced it. */
+function shippedAt(path) {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return undefined
+  }
+}
+
+/** The plugin's faces, as its manifest promises them: the files a profile mounts. */
+function assemblyBuildArtifacts(packageDir = join(ROOT, 'assembly'), ships = shippedAt, sources = assemblySources()) {
+  const manifest = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'))
+  return ['.', './agent'].map(face => {
+    const exported = manifest.exports?.[face]
+    const artifact = typeof exported === 'string' ? exported : exported?.default
+    const named = typeof artifact === 'string' ? `assembly${artifact.replace(/^\./, '')}` : `assembly/package.json exports ${face}`
+    if (typeof artifact !== 'string')
+      return { face, file: named, stale: true, reason: `the manifest does not export ${face}` }
+    const shipped = ships(join(packageDir, artifact))
+    if (shipped === undefined) return { face, file: named, stale: true, reason: 'the face the manifest exports is not built' }
+    const stale = sources.find(source => statSync(join(ROOT, source.file)).mtimeMs > shipped)
+    return {
+      face,
+      file: named,
+      stale: stale !== undefined,
+      reason: stale === undefined ? '' : `${stale.file} is newer than the bundle a profile would mount`,
+    }
+  })
+}
+
+/** What a real deployment resolves, checked for one thing no other gate can see: is it the current build? */
+function assemblyArtifactFindings(artifacts = assemblyBuildArtifacts()) {
+  return artifacts
+    .filter(artifact => artifact.stale)
+    .map(artifact => `${artifact.file} is not the current build for ${artifact.face}: ${artifact.reason}; run 'node assembly/build.mjs'`)
+}
+
 /** The evidence's size against the source's, over the same file set the other gates see. */
-function evidenceBudgetFindings(files, views, evidence) {
-  const source = files.filter(file => file.startsWith('src/')).reduce((total, file) => total + views.raw.get(file).split('\n').length, 0)
+function evidenceBudgetFindings(files, views, evidence, pluginSources = assemblySources()) {
+  const stack = files.filter(file => file.startsWith('src/')).reduce((total, file) => total + views.raw.get(file).split('\n').length, 0)
+  // The plugin's authored source is source: a budget that charged for its specs while calling none of
+  // its code the thing they lock would weigh the package's evidence against the stack's size alone.
+  const source = stack + pluginSources.reduce((total, { text }) => total + text.split('\n').length, 0)
   if (source === 0) return []
   const charged = evidence.reduce((total, entry) => total + entry.lines, 0)
   const ratio = charged / source
@@ -745,7 +914,7 @@ function treeInventoryFindings(ledger, measured) {
 }
 
 /** The two documents that state mutation results, which `mutation-claims` reads by name. */
-const CLAIM_DOCS = ['docs/context.md', 'docs/f-evidence.md']
+const CLAIM_DOCS = ['docs/context.md', 'docs/f-evidence.md', 'docs/assembly-g1.md']
 
 function readDocs() {
   return CLAIM_DOCS.map(file => {
@@ -1454,7 +1623,10 @@ function alignmentFindingsWith(baseline) {
   }
   for (const file of ['vitest.config.ts', 'scripts/dsh-control-runtime.mjs']) {
     const source = readFileSync(join(ROOT, file), 'utf8')
-    const paths = source.match(/\/[A-Za-z0-9_./-]*node_modules\/@deepseek-ai\/dsh\/node_modules\/@deepseek-ai/g) ?? []
+    // Any absolute path into a `node_modules/@deepseek-ai` scope, whatever its parent layout: the
+    // baseline root is the private environment (`docs/standalone-dsh.md`), a plain npm install that
+    // does not carry the global install's `@deepseek-ai/dsh/node_modules` nesting.
+    const paths = source.match(/\/[A-Za-z0-9_./-]*node_modules\/@deepseek-ai/g) ?? []
     if (paths.length === 0) findings.push(`${file} names no DSH install path; it cannot be aligned to ${baseline.dshVersion}`)
     for (const path of new Set(paths)) {
       if (path !== declaredRoot) findings.push(`${file} points at ${path}, not the baseline install root ${declaredRoot}`)
@@ -1643,7 +1815,7 @@ if (PROBE) {
   ]) {
     const detect = DETECTORS.find(detector => detector.name === name).detect
     const findings = name === 'evidence-budget'
-      ? evidenceBudgetFindings(files, { raw, code: new Map([...raw].map(([file, text]) => [file, codeOnly(text)])) }, evidence)
+      ? evidenceBudgetFindings(files, { raw, code: new Map([...raw].map(([file, text]) => [file, codeOnly(text)])) }, evidence, [])
       : detect(files, { raw, code: new Map([...raw].map(([file, text]) => [file, codeOnly(text)])) })
     if (findings.length === 0) {
       missed += 1
@@ -1652,6 +1824,66 @@ if (PROBE) {
       console.log(`  ok    ${name} fired (${findings.length} findings)`)
     }
   }
+
+  // The plugin package's two rules, on file sets that break them: a padded file over its own budget,
+  // and a source naming a name the deployment's own declaration uses. The second leg takes its literal
+  // from the real declaration, so it cannot drift from the file the profile points at.
+  const paddedPluginFile = Array.from({ length: ASSEMBLY_FILE_BUDGET + 5 }, (_, index) => `// padding ${index}`).join('\n')
+  const declaredDomainNames =
+    domainDeclarations().length === 0
+      ? []
+      : [...domainIdentityLiterals(JSON.parse(readFileSync(join(ROOT, 'deployment', 'domain', domainDeclarations()[0]), 'utf8')))]
+  for (const [name, findings] of [
+    [
+      'assembly-budget',
+      assemblyBudgetFindings([
+        { file: 'assembly/src/__probe.ts', text: paddedPluginFile },
+        { file: 'assembly/src/__probe_two.ts', text: paddedPluginFile },
+        { file: 'assembly/src/__probe_three.ts', text: paddedPluginFile },
+        { file: 'assembly/src/__probe_four.ts', text: paddedPluginFile },
+      ]),
+    ],
+    [
+      'assembly-domain-free',
+      declaredDomainNames.length === 0
+        ? []
+        : assemblyDomainFindings([{ file: 'assembly/src/__probe.ts', text: `const named = ${JSON.stringify(declaredDomainNames[0])}\n` }]),
+    ],
+  ]) {
+    if (findings.length === 0) {
+      missed += 1
+      console.log(`  FAIL  ${name} did not fire on a file set that breaks it`)
+    } else {
+      console.log(`  ok    ${name} fired (${findings.length} findings)`)
+    }
+  }
+
+  // The plugin's build check, on three file sets that break it: a manifest with no such export, an
+  // export the build never produced, and a bundle older than a source it was built from. Each leg is
+  // the real detector, so a detector that stopped firing fails here rather than passing quietly.
+  const buildProbe = mkdtempSync(join(tmpdir(), 'gates-built-'))
+  mkdirSync(join(buildProbe, 'lib'), { recursive: true })
+  writeFileSync(join(buildProbe, 'lib', 'index.js'), 'export const x = 1\n')
+  // The stale leg needs a bundle older than the source it claims to have been built from.
+  utimesSync(join(buildProbe, 'lib', 'index.js'), new Date(0), new Date(0))
+  const sourcePath = join(ROOT, 'assembly', 'src', 'ids.ts')
+  const newer = () => statSync(sourcePath).mtimeMs + 60000
+  writeFileSync(join(buildProbe, 'package.json'), `${JSON.stringify({ exports: { '.': { default: './lib/index.js' }, './agent': { default: './lib/missing.js' } } })}\n`)
+  const bounded = [{ face: '.', file: 'x', stale: true, reason: 'r' }]
+  for (const [label, artifacts] of [
+    ['a manifest whose face is not built', assemblyBuildArtifacts(buildProbe, path => (path.endsWith('missing.js') ? undefined : statSync(path).mtimeMs), [])],
+    ['a bundle older than a source it was built from', assemblyBuildArtifacts(buildProbe, () => statSync(join(buildProbe, 'lib', 'index.js')).mtimeMs, [{ file: 'assembly/src/ids.ts', text: 'a source the bundle predates' }])],
+    ['a synthetic stale pair, so the filter itself is exercised', bounded],
+  ]) {
+    const findings = assemblyArtifactFindings(artifacts)
+    if (findings.length === 0) {
+      missed += 1
+      console.log(`  FAIL  assembly-built did not fire on ${label}`)
+    } else {
+      console.log(`  ok    assembly-built fired (${findings.length} findings)`)
+    }
+  }
+  rmSync(buildProbe, { recursive: true, force: true })
 
   // The tree ledger and the prose scan, one leg per boundary, watched either firing or staying silent.
   const treeMeasured = { sourceFiles: 2, specFiles: 1, tests: 5, gates: 2 }
@@ -2161,8 +2393,10 @@ void HIDDEN.kindsOf('hidden', 1)
   const verified = records.filter(file => namesHeldCommit(readFileSync(join(ROOT, file), 'utf8'), commits))
   console.log(`  note  tree-inventory scans ${corpus.length} document(s) — every markdown file under docs/ and README.md — for count claims, minus ${verified.length} record(s) of past commits, each anchored by the first commit it names and checked against git to be one this repository holds — a held token later in the text anchors nothing${verified.length === records.length ? '' : ` (${records.length - verified.length} declared entry/entries anchor on nothing this tree holds and are read as this tree's)`}; a fenced block is quoted output, a fence delimiter is three backticks or three tildes and a longer or unclosed one is a finding, a count on a line carrying a commit-shaped token is that line's record (the token is not verified against git, so a fabricated one buys the same exemption), and a bare file count is read as this tree's only where the line names this tree`)
   const charge = evidenceFiles().reduce((total, entry) => total + entry.lines, 0)
-  const sourceLines = files.filter(file => file.startsWith('src/')).reduce((total, file) => total + raw.get(file).split('\n').length, 0)
-  console.log(`  note  evidence-budget charges ${charge} lines of evidence against ${sourceLines} of source (${(charge / sourceLines).toFixed(4)}, ratchet ${EVIDENCE_BUDGET}, ${Math.floor(EVIDENCE_BUDGET * sourceLines) - charge} whole line(s) of headroom): every file under scripts/ at any depth whatever it is called, every .ts under tests/ and every file under tests/fixtures/`)
+  const sourceLines =
+    files.filter(file => file.startsWith('src/')).reduce((total, file) => total + raw.get(file).split('\n').length, 0) +
+    assemblySources().reduce((total, entry) => total + entry.text.split('\n').length, 0)
+  console.log(`  note  evidence-budget charges ${charge} lines of evidence against ${sourceLines} of source (${(charge / sourceLines).toFixed(4)}, ratchet ${EVIDENCE_BUDGET}, ${Math.floor(EVIDENCE_BUDGET * sourceLines) - charge} whole line(s) of headroom): every file under scripts/ at any depth whatever it is called, every .ts under tests/ and assembly/tests/, and every file under tests/fixtures/ — against the stack's src/ plus the plugin's assembly/src`)
   const uncharged = unchargedFiles()
   console.log(`  note  evidence-budget does not charge ${uncharged.length} file(s), ${uncharged.reduce((total, entry) => total + entry.lines, 0)} lines — ${uncharged.map(entry => `${entry.file} (${entry.lines})`).join(', ')} — because prose is not the lane round four's pattern found work moving to, and a ledger, a vector corpus or a manifest is an input a gate compares rather than a check the budget weighs; this list is walked rather than restated, so a file cannot be left off it`)
   const ledger = readMutationLedger()

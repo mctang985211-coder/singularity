@@ -150,6 +150,17 @@ describe('the verifier command adapter', () => {
     expect(judgement.detail).toContain(sha256('stale').slice(0, 12))
   })
 
+  it('spawns an argv without a shell, so a shell operator in an argument stays an argument', async () => {
+    await writeFile(artifact, 'argv', 'utf8')
+
+    // `true ; false` through a shell exits 1; as an argv it is `true` with two arguments, which exits
+    // 0. The runner decides this from the command's shape; this is the real spawn behind it.
+    const result = await invoke({ command: ['true', ';', 'false'], artifactPath: artifact, inputs: [] })
+
+    const { judgement, ok } = readJudgement(result.stdout)
+    expect([ok, judgement.verdict]).toEqual([true, 'pass'])
+  })
+
   it('reads a request from stdin when argv carries none', async () => {
     await writeFile(artifact, 'from stdin', 'utf8')
 

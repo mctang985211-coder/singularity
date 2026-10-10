@@ -1,7 +1,7 @@
 {
-  "note": "The one DSH baseline this repo targets. Nothing here is installed: the host DSH profile provides these packages at runtime. Alignment is enforced by the dsh-alignment gate; this comment enforces nothing.",
+  "note": "The one DSH baseline this repo targets. Nothing here is installed into this repo: the host DSH profile provides these packages at runtime. The root below is the private environment of docs/standalone-dsh.md — the development loop resolves its DSH packages there and nowhere else. Alignment is enforced by the dsh-alignment gate; this comment enforces nothing.",
   "dshVersion": "0.2.0-rc.2",
-  "installRoot": "/home/ROXY/.local/node-v22.23.3-linux-x64/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai",
+  "installRoot": "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai",
   "packages": [
     {
       "name": "@deepseek-ai/cordis",

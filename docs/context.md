@@ -12,10 +12,13 @@
 > 仍然可应用、以及本文件里的结果声明是否点到了一个可跑的 id。**规模数字写进散文也会被检查**：
 > `tree-inventory` 现在扫 `README.md` 与 `docs/` 下**每一个** markdown 文件的计数声明（边界见 §13），
 > 所以"写进散文没人管"从第六轮起是假的；散文里唯一还受保护的是**点了提交号的过去测量**。
-> 上一轮更新：2026-10-09（A 提交边界纠正；B 部分实现，剩余动作见 §11/§12）。
-> 本轮更新：控制路径收敛（一条决定/记录路径、一个队列、O(1) 提交），六处报告的缺陷逐条确认并修掉；
-> 第四轮审查点名的两笔债各变成一个被门禁比对的账本；第六轮 D2/D3（文档账本只覆盖两份、证据预算只差
-> 一个 `mkdir`）在这一轮关掉。
+> 前两轮更新：2026-10-09（A 提交边界纠正；B 部分实现，剩余动作见 §11/§12）；随后一轮把控制路径收敛成
+> 一条决定/记录路径、一个队列、O(1) 提交，把那轮报告的六处缺陷逐条确认并修掉，第四轮审查点名的两笔债
+> 各变成一个被门禁比对的账本（第六轮 D2/D3：文档账本只覆盖两份、证据预算只差一个 `mkdir`）也在那轮关掉。
+> 本轮更新（2026-10-11）：**装配层落地（G1）**——`assembly/` 按规格重写成宿主插件 + agent 面孔两个入口，
+> 核心补齐 `settle`/`declareSubject`/agent 节点/环境修订四个事实所有者与通用 verifier 运行器（进程执行是端口），
+> 领域材料搬进 `deployment/domain/letters/`，profile/preset 与真实 Chromium 证据落地；详见
+> [assembly-g1.md](assembly-g1.md) 与本文 §16。
 
 ---
 
@@ -923,3 +926,89 @@ yingjun 路由（供旧 singularity 实例），两边凭据各自独立副本�
 - **提交是单独串行的一步**，长命令不许和 `git add -A` 串在一起（三个实例）。
 - **一条规则对、例子错的 finding，两件事都要记**：例子错会让下一个人不再相信规则。
 - **记录里不许出现跑不起来的声明**：要么点名 `mutate:<id>`，要么写进账本。
+
+---
+
+## 16. 装配层落地（G1）：两个入口、四个所有者、一个域目录
+
+**这一节的用途**：下一轮（G2/G3）开工前必须知道的接线面。完整证据与边界见 [assembly-g1.md](assembly-g1.md)；
+这里只写"丢了会走错路"的东西。
+
+### 16.1 形态：一个包，两个插件入口
+
+- **宿主入口**（`.`，`assembly/src/index.ts`）：`inject: ['sessionPersistence']`，`Config` 是 schemastery
+  对象 + `assertClosedKeys` 三成员 `{controlId, domainDir, workspaceRoot}`；`apply` 装载领域、开驱动器、跑恢复、
+  提供 `singularity` 服务，生命周期由 `ctx.effect` 拥有。**不注册任何全局工具**。
+- **agent 面孔**（`./agent`，`assembly/src/agent.ts`）：`inject: ['singularity','tools','systemPrompt']`，
+  作为 preset `singularity-next` 的子行挂载，把三个工具与一段 prompt 注册进**它被挂载的那个作用域**；
+  disposer 由同一个 effect 拥有（工具与 prompt 段都在同一个数组里）。
+- **调用者只从 `exec.agent` 来**：键 `agent:<agentId>`、身份 `<control>:agent:<agentId>`（由 agent id 单射派生），
+  经 `store.declareSubject` 声明（Web 的 agent 是运行时铸造的，名册不可能在 open 时齐全）；agent 节点经核心命令
+  开一次。工具 schema 里没有任何身份字段。
+- **稳定 id**：`taskId` 由 control+agent+goal 派生，`runId` 由 control+session+`exec.callId` 派生，每条命令的
+  `commandId` 由它们派生。**丢答复重投**在跑任何副作用之前先读已提交事实并返回记录里的结果。
+
+### 16.2 核心的四个所有者与一条端口
+
+| 需要的事实 | 所有者 | 关键规则 |
+|---|---|---|
+| `agent/opened` | `src/agent/commands.ts` | emitter 是 runtime 角色，subject 是 agent id，一个节点只开一次 |
+| `revision/created` | `src/environment/commands.ts` | reducer 自己算 `contentDigest`，同 id 同内容幂等、异内容 `revision-conflict` |
+| run 收尾 | `TaskCommands.settle(input, as?)` | 生产者**同步**、在 store 串行区内解析、**只看证据不看 run 状态**（所以重投重算出同一请求、由 store 的命令识别回放）；全绿发 `run/verified`（scheduler 身份），否则发 `run/failed` 且**必须**带 responsible agent 的绑定——`run/failed` 的责任检查就是这条规则的唯一所有者 |
+| 进程执行 | `src/verifier/command.ts`（端口） | 判据（退出码即判决、产物摘要取自运行之后、缺字节具名拒绝）在核心里；`spawn` 由部署侧实现（`assembly/src/submission.ts` 的 `spawnProcess`），因为 `src/` 不许点名 `node:child_process` |
+
+`ControlSessionStore.emit` 现在接受 `EmitInput | (() => EmitInput)`：生产者只在串行区内被调用，这条缝是
+`settle` 需要的（kind 取决于提交那一刻的证据），不要用它做别的延迟求值。
+
+### 16.3 恢复：一条 run 修不好，不许让宿主起不来
+
+挂载时先显式开 store（它自己 adopt 已提交事实），再把在飞 run 逐条收掉：有裁决的按裁决收尾、冻结产物与输入
+仍在的重新判决、其余（输入改名、输入字节变了、产物没了、声明不完整）一律**具名 `failRun`**，由责任 agent 的绑定发出。
+实测：旧域形状遗留的三条 run 在新构建启动时全部以名字收尾，`did not activate` 0 行。
+**只有 store/日志本身的失败才允许冒泡到 `apply`。**
+
+### 16.4 领域：`deployment/domain/letters/` 是唯一写名字的地方
+
+`task.json`（`inputs` 是工作区相对路径的列表、`workspace.program/artifact`、一条 `criteria`、一条 `verifiers`：
+`program`/`args`/`selftest`）+ `verifier.mjs` + `samples/`。实现摘要按 `verifier.mjs` 的真实字节算，
+自检样本来自声明（真产物、真摘要，没有造出来的 digest）。`Config` 只多一个 `domainDir`；
+`assembly/src` 里**一个领域字面量都不许有**，门禁 `assembly-domain-free` 每次检查，`assembly-budget` 管每文件 200、整包 800（上限抬高时把理由写进了门禁本身）。
+v1 只承载**一条判据、一个输入**：声明别的数量在装载时具名拒绝（不静默截断）。
+
+### 16.5 部署：生成物，不是手写的目录
+
+`node assembly/build.mjs` → `lib/index.js` + `lib/agent.js`（vite 在根 devDependencies，两个入口，`@deepseek-ai/*`
+与 `node:*` external）。`node scripts/deploy.mjs` → `$DSH_HOME/profiles/singularity-next-web/`（manifest + 部署补丁 +
+指向本 checkout `assembly/` 的 linked root），**离线、不经 pnpm**；profile 是生成物，每次整目录重写。
+模型路由写在 `deployment/profile/cordis.patch.yml`（`apiKeyEnv` 只引用名字，凭据在 `$DSH_HOME/.credentials.yaml`）。
+**linked root 的 peer 规则**：插件自己 `peerDependencies` 里没有的 `@deepseek-ai/*` 解析不到；漏一个则**整包被跳过**，
+stderr 只有一行 `skipping profile bundle`——dump-config 的验收必须 grep 这一行。
+
+### 16.6 证据命令与三个操作陷阱
+
+```sh
+. /home/ROXY/singularity-next/env.sh
+pnpm verify                              # 构建 + 测试 + 门禁 + 门禁自检
+node assembly/build.mjs && node scripts/deploy.mjs
+node scripts/browser-probe.mjs           # 真实 Chromium + 真实模型：三个工具、判决、receipt
+node scripts/browser-probe.mjs --recovery # SIGKILL → 同端口重启 → 同会话 → 同一个 task 的 receipt
+node scripts/assembly-repair-probe.mjs   # 在飞 run 的收尾（探针自己的 control，不污染部署）
+```
+
+- **`dsh --profile <name> --help` 是真挂载**（插件 `apply` 与恢复都会跑，只是不绑端口），这是测恢复最便宜的方式；
+  `--dump-config` 不 import 模块，看不到运行时错误。
+- **私有 home 的会话是 zstd**（`session.v4.jsonl.zstd`），读日志用 `zstd -dc`；Node 的 zstd 解码器只读第一帧，
+  整份日志读不全。control 会话在 `$DSH_HOME/sessions/<project>/singularity~003Acontrol~003A<controlId>`。
+- **profile 的 header 里 `agentPreset` 是建会话时的默认值**，会话里真正选的是 `agent-preset/selected` 事件；
+  判"用户选了哪个 preset"要读事件，不要读 header。
+
+### 16.7 具名缺口（别当成已解决）
+
+- **G2**：任务树/读面板、父子调度与父子读规则（今天的读只给持有者）；child 会话的创建/恢复与工具限制。
+- **G3**：A03 的 `draftFromDecision`/`requestPublish`、A05 的累计采用历史入 proposer、真实领域任务（`f-domain` 三任务）；
+  G1 的验收变量只用 letters。
+- **一个 control 一个 Environment**：多会话共享同一份事实与指针；按项目分库是 G3 的部署问题。
+- **构造期的「一键一执行者」检查不覆盖后加入的 agent**：装配层派生的键/身份是 agent id 的单射函数，两个 agent
+  不可能共享一键；这条检查在动态名册下不会被触发，是限制不是漏洞。
+- **模型会写错程序**：契约（工具描述与 prompt）已写明"写进工作区、作为 node 的 ES module 运行、只判 stdout"，
+  崩溃或空产物是记录下来的 fail；记录里的 `detail` 永远是判据 verifier 的原话。

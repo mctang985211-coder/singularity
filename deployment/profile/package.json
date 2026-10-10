@@ -1,0 +1,14 @@
+{
+  "name": "singularity-next-web",
+  "private": true,
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "@dangosys/dsh-singularity-next"
+      ]
+    }
+  }
+}

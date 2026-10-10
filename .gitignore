@@ -1,2 +1,4 @@
 node_modules/
 *.log
+# The assembly is bundled from source by `node assembly/build.mjs`; the artifact is never committed.
+assembly/lib/

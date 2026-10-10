@@ -35,12 +35,14 @@
 
 import type { ControlReadCut, ControlSessionStore } from '../control/session-store.ts'
 import type { Envelope } from '../protocol/envelope.ts'
+import type { EmitInput } from '../protocol/memory-log.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../agent/protocol.ts'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../environment/protocol.ts'
 import { assertPinnedRevision } from '../environment/binding.ts'
 import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from './protocol.ts'
+import { unadjudicatedCriteria, unmetCriteria, verdictFor } from './run.ts'
 import { projectTree } from './tree.ts'
 import type { BubbleInput, BubbleTool } from './bubble.ts'
 import type { DecompositionChild } from './decomposition.ts'
@@ -119,6 +121,21 @@ export interface AgentCommands {
 }
 
 export interface TaskCommands extends AgentCommands {
+  /**
+   * Settle one run from the evidence it holds: verified when every criterion has a passing verdict
+   * from its own verifier, failed (carrying the failing verdict's detail) when one did not pass, and
+   * refused while a criterion has no verdict at all.
+   *
+   * Not reachable from `forAgent`: a settlement is the apparatus's act, not a candidate's. The
+   * **failed** branch is emitted under the caller-supplied `as`, which is the subjects-table key of
+   * the run's responsible agent, because `task/run/failed` is the responsible agent's own fact and
+   * the reducer checks that; the verified branch is the apparatus's and is emitted under the
+   * scheduler's declared role.
+   */
+  settle(
+    input: { readonly commandId: string; readonly taskId: string; readonly runId: string },
+    as?: string,
+  ): Promise<Envelope>
   /** Not reachable from `forAgent`: producing a verdict is a verifier's act, not an agent's. */
   recordVerdict(input: { readonly commandId: string; readonly taskId: string; readonly verdict: VerdictInput }): Promise<Envelope>
   /**
@@ -235,6 +252,11 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         input.reason === undefined ? { runId: input.runId } : { runId: input.runId, reason: input.reason },
         as,
       ),
+
+    // The one command whose *kind* is the state's to choose, so its request is produced inside the
+    // store's serial region rather than before the queue: `settleRequest` reads the evidence there
+    // and returns the fact that evidence is.
+    settle: (input, as) => options.store.emit(() => settleRequest(options, input, as)) as Promise<Envelope>,
 
     recordVerdict: input => {
       // Who judged is filled from the criterion rather than passed in. The criterion cannot change
@@ -379,6 +401,60 @@ function requireCriterion(cut: Cut, taskId: string, criterionId: string) {
   const criterion = task.contract.criteria.find(entry => entry.criterionId === criterionId)
   if (criterion === undefined) refuse('unknown-criterion', `task "${taskId}" does not declare criterion "${criterionId}", so nothing decides it`)
   return criterion
+}
+
+/**
+ * The fact one settlement is, produced inside the commit region from the evidence the run holds.
+ *
+ * **Why the producer reads evidence and never status.** A re-delivered command has to recompute the
+ * very request it committed, because the journal matches a command by the shape of its fact and a
+ * lost reply is answered from that fact. The run's status has moved by then — it is exactly what the
+ * first settlement changed — so a producer that branched on it would compute a different fact, or
+ * refuse, and the replay would become an `illegal-transition` instead of the answer it already has.
+ * The evidence cannot move the other way: a criterion holds one verdict, so the same command
+ * recomputes the same kind, subject and payload. A genuinely *different* command reaches the
+ * reducers, and they refuse a second settlement in their own words.
+ *
+ * The checks are the ways a settlement is not yet decided: a run nobody started, and a criterion
+ * nobody judged. A criterion that was judged and did not pass is not a missing check — it is the
+ * failure this command records.
+ */
+function settleRequest(
+  options: TaskCommandOptions,
+  input: { readonly commandId: string; readonly taskId: string; readonly runId: string },
+  as?: string,
+): EmitInput {
+  const cut = cutOf(options)
+  const task = cut.task(input.taskId)
+  if (task === undefined || task.contract === undefined)
+    refuse('unknown-run', `cannot settle run "${input.runId}" of task "${input.taskId}": it has no admitted contract, so it never started a run`)
+  const run = task.runs[input.runId]
+  if (run === undefined) refuse('unknown-run', `cannot settle run "${input.runId}": task "${input.taskId}" never started it`)
+
+  const unadjudicated = unadjudicatedCriteria(task.contract, run)
+  if (unadjudicated.length > 0)
+    refuse(
+      'unadjudicated-criterion',
+      `cannot settle run "${input.runId}": ${unadjudicated
+        .map(criterion => `"${criterion.criterionId}" has no verdict from ${criterion.verifierRef}@${criterion.verifierVersion}`)
+        .join('; ')}; a run settles only once every criterion has been decided`,
+    )
+
+  const common = { commandId: input.commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: input.taskId }
+  const unmet = unmetCriteria(task.contract, run)
+  if (unmet.length === 0) return { ...common, kind: TASK_KINDS.runVerified, payload: { runId: input.runId } }
+
+  // Every criterion without a passing verdict holds a failing one — the unadjudicated were refused
+  // above — so the settlement carries the first failure's own words rather than a summary of them.
+  // A failing verdict with no detail stays without one: the view reports "none recorded".
+  const failing = unmet.map(criterion => verdictFor(run, criterion)).find(evidence => evidence !== undefined)
+  const reason = failing?.detail
+  return {
+    ...common,
+    kind: TASK_KINDS.runFailed,
+    payload: reason === undefined ? { runId: input.runId } : { runId: input.runId, reason },
+    ...(as === undefined ? {} : { as }),
+  }
 }
 
 /**

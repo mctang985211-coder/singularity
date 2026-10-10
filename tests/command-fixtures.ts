@@ -17,15 +17,13 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach } from 'vitest'
 
 import {
-  AGENT_KINDS,
-  AGENT_PROTOCOL,
   AGENT_ROLE,
-  AGENT_VERSION,
+  createAgentNodeCommands,
+  createEnvironmentCommands,
   createTaskCommands,
   declareAgentProtocol,
   declareEnvironmentProtocol,
   declareTaskProtocol,
-  ENVIRONMENT_KINDS,
   ENVIRONMENT_PROTOCOL,
   ENVIRONMENT_ROLE,
   ENVIRONMENT_VERSION,
@@ -35,7 +33,7 @@ import {
   type EnvironmentState,
 } from '../src/index.ts'
 import { ControlSessionStore } from '../src/control/session-store.ts'
-import { contract as parentContract, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER } from './task-fixtures.ts'
+import { contract as parentContract, INTEGRATION_VERIFIER, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER } from './task-fixtures.ts'
 
 export const PARENT = 'task-parent'
 export const CHILD = 'task-child'
@@ -50,6 +48,7 @@ const SUBJECTS: Readonly<Record<string, string>> = {
   [ENVIRONMENT_ROLE]: 'environment-service',
   [AGENT_ROLE]: 'runtime-service',
   [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'unit-verifier-service',
+  [verifierRoleOf({ verifierRef: INTEGRATION_VERIFIER, verifierVersion: '1' })]: 'integration-verifier-service',
 }
 
 export function registry(): ProtocolRegistry {
@@ -77,7 +76,7 @@ afterEach(async () => {
 })
 
 /** One live control store over a real JSONL session, with its three protocols declared. */
-export async function deployment(): Promise<Deployment> {
+export async function deployment(subjects: Readonly<Record<string, string>> = SUBJECTS): Promise<Deployment> {
   const root = await mkdtemp(join(tmpdir(), 'singularity-commands-'))
   const context = new Context()
   await context.plugin(JsonlSessionPersistence, { root, compression: 'none' })
@@ -87,32 +86,28 @@ export async function deployment(): Promise<Deployment> {
     persistence: context.sessionPersistence,
     controlId: 'commands',
     registry: made,
-    subjects: SUBJECTS,
+    subjects,
   })
   return { store, persistence: context.sessionPersistence, root, context, registry: made }
 }
 
-/** The revision the run pins, created through the environment protocol's own fact. */
+/** The revision the run pins, created through the environment protocol's own command owner. */
 export async function createRevision(live: Deployment): Promise<void> {
-  await live.store.emit({
+  await createEnvironmentCommands({ store: live.store, registry: live.registry }).createRevision({
     commandId: 'revision',
-    protocol: ENVIRONMENT_PROTOCOL,
-    version: ENVIRONMENT_VERSION,
-    kind: ENVIRONMENT_KINDS.revisionCreated,
-    subject: ENVIRONMENT,
-    payload: { revisionId: REVISION, manifest: MANIFEST },
+    environmentId: ENVIRONMENT,
+    revisionId: REVISION,
+    manifest: MANIFEST,
   })
 }
 
-/** The agent node the assignment needs, recorded by the runtime's own role. */
+/** The agent node the assignment needs, recorded by the runtime's own command owner. */
 export async function openAgent(live: Deployment): Promise<void> {
-  await live.store.emit({
+  await createAgentNodeCommands({ store: live.store, registry: live.registry }).open({
     commandId: 'agent',
-    protocol: AGENT_PROTOCOL,
-    version: AGENT_VERSION,
-    kind: AGENT_KINDS.opened,
-    subject: AGENT,
-    payload: { agentId: AGENT, role: 'worker', sessionId: `singularity:agent:${AGENT}` },
+    agentId: AGENT,
+    sessionId: `singularity:agent:${AGENT}`,
+    role: 'worker',
   })
 }
 

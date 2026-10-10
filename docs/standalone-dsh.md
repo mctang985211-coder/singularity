@@ -38,7 +38,18 @@ cd /home/ROXY/code/singularity-core
 pnpm verify                 # 测试+门禁，无需网络
 node scripts/model-smoke.mjs        # 真实模型冒烟（yingjun，已实测通过）
 node scripts/rsi-live.mjs           # 全流程 RSI 回合（真实模型，消耗额度）
+
+# 装配层的产品路径（G1）：构建 → 落 profile → 真机验证
+node assembly/build.mjs && node scripts/deploy.mjs
+node scripts/browser-probe.mjs            # 真实 Chromium + 真实模型：工具、判决、receipt
+node scripts/browser-probe.mjs --recovery # SIGKILL 后同会话恢复
+node scripts/assembly-repair-probe.mjs    # 崩溃窗口里在飞 run 的收尾（探针自己的 control）
+dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open   # 手动点一次
 ```
+
+部署出来的 profile 在 `home/profiles/singularity-next-web/`（`scripts/deploy.mjs` 整目录重写；linked root
+指向本 checkout 的 `assembly/`）。模型路由与领域目录都写在 `deployment/profile/cordis.patch.yml`，
+凭据仍只在本 home 的 `.credentials.yaml`。
 
 ## 已验证（2026-10-11）
 
