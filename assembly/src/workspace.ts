@@ -1,13 +1,10 @@
 /**
- * Preparing a task's workspace: the protected material a run is judged against, and the starting point
- * it is judged on.
+ * Preparing a task's workspace: the protected material a run is judged against, and the starting point it
+ * is judged on.
  *
- * The bytes come from the loader, never from a path. `Domain.inputs[].digest` and `Domain.initial` are
- * computed over the domain's own bytes at load and the run is bound to those digests, so staging by
- * re-reading the source would let a file that changed under a running deployment produce a workspace
- * that does not hash to what the run declares — a mismatch discovered later, at judgement time, as if
- * the workspace were at fault. Enforcing the submission shape is the caller's rule: this module only
- * guarantees that what the domain declares is on disk before work starts.
+ * The bytes come from the loader, never from a path: the digests the run is bound to were computed over
+ * those bytes at load, so re-reading the source could stage something that does not hash to what the run
+ * declares — a mismatch found later, at judgement time, as if the workspace were at fault.
  *
  * @module @dangosys/dsh-singularity-next/workspace
  */
@@ -24,10 +21,9 @@ export const workspacePathOf = (workspace: string, relative: string): string => 
 /**
  * Stage a task's workspace: every declared input, then the initial source of a `source` submission.
  *
- * Idempotent, because a boot re-prepares the workspaces of tasks whose runs are still in flight
- * (`repair`), and rewriting identical bytes is not a change. A submission that already replaced the
- * initial source is **not** overwritten: the artifact the run was judged on is the one on disk, and
- * restoring the seed under it would make a settled attempt's artifact disagree with its own digest.
+ * Idempotent, because a boot re-prepares the workspaces of in-flight runs and rewriting identical bytes
+ * is not a change — but a submission that already replaced the initial source is *not* overwritten:
+ * restoring the seed would make a settled attempt's artifact disagree with its own digest.
  */
 export async function prepareWorkspace(domain: Domain, workspace: string): Promise<void> {
   for (const input of domain.inputs) {

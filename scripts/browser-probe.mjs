@@ -104,12 +104,13 @@ class ProbeError extends Error {}
  * Boot one profile child and wait for the URL it prints.
  * @returns the child, its exit promise, and a reader for everything it has said so far.
  */
-export async function boot(port) {
-  const command = `dsh --profile ${PROFILE} --host 127.0.0.1 --port ${port} --no-open`
-  const child = spawn('dsh', ['--profile', PROFILE, '--host', '127.0.0.1', '--port', String(port), '--no-open'], {
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+export async function boot(port, extra = []) {
+  // An overlay goes before the host flags, which is where the CLI accepts it: `--patch` after `--port`
+  // is refused as an unknown option, and a probe that guessed the order would fail as a boot error
+  // rather than as the thing it was probing.
+  const argv = ['--profile', PROFILE, ...extra, '--host', '127.0.0.1', '--port', String(port), '--no-open']
+  const command = `dsh ${argv.join(' ')}`
+  const child = spawn('dsh', argv, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
   const server = { command, child, output: '' }
   child.stdout.on('data', chunk => (server.output += chunk))
   child.stderr.on('data', chunk => (server.output += chunk))

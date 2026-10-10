@@ -716,20 +716,24 @@ function assemblySources() {
  * flight, and it freezes a revision against the request rather than against bytes the submitted program
  * can rewrite.
  *
- * It moved from 800 to 1500 for G2, which added five responsibilities that are each a real boundary —
+ * It moved 800 → 1500 → 1550 across G2, which added six responsibilities that are each a real boundary —
  * the read route (`web.ts`), child-session scheduling (`scheduler.ts`), workspace preparation
- * (`workspace.ts`), the declaration readers (`shape.ts`, `verifiers.ts`) and the read projection
- * (`snapshot.ts`) — and the user chose this over splitting a second package, which would have cost the
- * budget and the domain-free scan their reach over the new files. The move was first estimated at 1000
- * and that estimate was wrong: the realised count is 1414, and the record says so rather than the
- * estimate. The per-file rule stays 200 and it is what actually forced the design: `domain.ts` and
- * `driver.ts` were split at the read/write and call/read seams when they reached it, and every file is
- * under the limit. What the number is not: a target. A package that reaches it is the moment to ask
- * which of its responsibilities has a second consumer, not a reason to keep going — the two splits above
- * are what happened the last two times this number was the wrong size.
+ * (`workspace.ts`), the declaration readers (`shape.ts`, `verifiers.ts`), the read projection
+ * (`snapshot.ts`) and the caller's own operations (`surfaces.ts`). The user chose raising the total over
+ * splitting a second package, which would have cost the budget and the domain-free scan their reach over
+ * the new files. Every raise is recorded with the **realised** count rather than the estimate it was
+ * granted on, because the estimate was wrong both times: 1000 predicted 1414, and 1500 predicted 1517.
+ *
+ * The per-file rule stays 200 and it is what actually forced the design: `domain.ts`, `driver.ts` and
+ * `root.ts` were each split at a real seam when they reached it — declaration readers out of the domain,
+ * the caller's operations out of the driver — and every file is under the limit.
+ *
+ * **The next person should split the package, not raise this again.** The number is a ceiling, not a
+ * target, and a fourth raise would mean the package has grown a second consumer for one of the six
+ * capabilities above rather than a seventh thing to hold.
  */
 const ASSEMBLY_FILE_BUDGET = 200
-const ASSEMBLY_TOTAL_BUDGET = 1500
+const ASSEMBLY_TOTAL_BUDGET = 1550
 
 /** The split rule and the package budget, measured on the plugin's own files. */
 function assemblyBudgetFindings(sources) {

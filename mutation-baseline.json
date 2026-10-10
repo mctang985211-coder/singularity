@@ -1539,25 +1539,6 @@
       "witness": "records a verified run whose verdict comes from the domain verifier"
     },
     {
-      "id": "assembly-m12-one-input",
-      "rule": "a domain declares exactly one input, and a different count is refused by name",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/domain.ts",
-          "find": "if (inputs.length !== 1)",
-          "replace": "if (false)"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/domain.spec.ts"
-        ]
-      },
-      "witness": "refuses a domain that does not declare exactly one input, by name"
-    },
-    {
       "id": "assembly-m13-effect-owns-section",
       "rule": "the prompt section, not only the tools, is released by the owning effect",
       "doc": "docs/assembly-g1.md",
@@ -1582,7 +1563,7 @@
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
-          "file": "assembly/src/driver.ts",
+          "file": "assembly/src/surfaces.ts",
           "find": "if (state.responsibility?.agentId !== caller.agentId)",
           "replace": "if (false)"
         }

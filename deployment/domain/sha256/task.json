@@ -48,6 +48,12 @@
           "expected": "fail",
           "artifact": "samples/fail-early-finish.v",
           "argv": ["samples/fail-early-finish.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+        },
+        {
+          "name": "rejects a module that prints the pass line and ends the simulation in the same block, which exits zero with the line on stdout and nothing compared",
+          "expected": "fail",
+          "artifact": "samples/fail-print-and-finish.v",
+          "argv": ["samples/fail-print-and-finish.v", "tb/tb_sha256_w_mem_selfcheck.v"]
         }
       ]
     },

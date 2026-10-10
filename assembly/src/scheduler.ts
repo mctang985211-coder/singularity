@@ -2,8 +2,8 @@
  * Scheduling: an admitted plan's ready sub-tasks, each run by a real DSH child session, so a sub-task's
  * run is attributable to the agent that did it rather than to the parent that planned it.
  *
- * It never decides that a sub-task is startable: `ready` is `projectTree`'s verdict and the command
- * boundary refuses the others anyway. What it owns is *when* to act — nothing here runs on a timer.
+ * It never decides that a sub-task is startable — `ready` is `projectTree`'s verdict and the command
+ * boundary refuses the others anyway. What it owns is *when* to act: nothing here runs on a timer.
  *
  * @module @dangosys/dsh-singularity-next/scheduler
  */
@@ -68,9 +68,9 @@ export interface Scheduler {
 /**
  * How one child session is actually opened.
  *
- * A port, because "when a session is opened and what it is told" is this module's rule and *how* a DSH
- * child agent is created is the runtime's business: a spec that had to construct a real agent session to
- * assert the first would be asserting the second instead.
+ * A port, because *when* a session is opened and *what* it is told are this module's rules, while how a
+ * DSH child agent is created is the runtime's business — and a spec that had to build a real agent
+ * session to assert the rules would be asserting the runtime instead.
  */
 export type OpenChild = (request: ChildSessionRequest) => Promise<ChildSession>
 

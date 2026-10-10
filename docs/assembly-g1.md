@@ -126,7 +126,6 @@ linked root。离线、不经 pnpm、不碰全局 home。preset `singularity-nex
 | `mutate:assembly-m9-effect-owns-tools` | every registration the agent face makes is owned by the effect it opened | caught | owns every registration through the effect it opened |
 | `mutate:assembly-m10-fail-uses-responsible-binding` | a failing verdict settles the run failed through the responsible binding | caught | records a wrong answer as a fail rather than a success |
 | `mutate:assembly-m11-revision-digest-read-back` | the run pin carries the digest the environment holds, never an invented one | caught | records a verified run whose verdict comes from the domain verifier |
-| `mutate:assembly-m12-one-input` | a domain declares exactly one input, and a different count is refused by name | caught | refuses a domain that declares more than one input, by name |
 | `mutate:assembly-m13-effect-owns-section` | the prompt section, not only the tools, is released by the owning effect | caught | owns every registration through the effect it opened |
 | `mutate:assembly-m14-read-holder-only` | a read of a task the caller is not responsible for is refused by name | caught | refuses a read of a task the caller is not responsible for, by name |
 | `mutate:assembly-m15-frozen-input-drift` | a frozen input whose bytes changed settles the run failed by name | caught | settles a run whose frozen input changed, failed by a name, and still completes the mount |

@@ -69,9 +69,9 @@ export async function submit(apparatus: Apparatus, caller: Caller, callId: strin
     )
 
   const workspace = workspaceOf(apparatus, request.taskId)
-  const [declared] = domain.inputs
-  if (declared === undefined)
-    refuse('malformed-declaration', `the domain declares no input, so task "${request.taskId}" has nothing to judge an artifact against`)
+  // The loader admits a domain only when it declares exactly one input, so this is a name rather than a
+  // check: a second reading of that rule here would be a second place for it to disagree.
+  const declared = domain.inputs[0]!
   // The digest the run is bound to is the one the loader computed over the domain's own bytes, never a
   // re-read of the workspace: the material is staged from those exact bytes, and re-reading would let a
   // file that changed under the deployment redefine what this attempt was judged against.

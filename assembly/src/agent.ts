@@ -92,7 +92,9 @@ export function apply(ctx: Context): void {
             await attempt(() =>
               ctx.singularity.forCall(exec).decompose({
                 taskId: args.taskId,
-                children: args.children.map(child => ({ taskId: child.key, dependsOn: child.dependsOn, supports: child.supports, maxRuns: child.maxRuns })),
+                // Passed as planned: the key and the goal are the caller's, and the identity and the
+                // contract are assembled by the driver, which is the layer that knows this deployment.
+                children: args.children.map(child => ({ key: child.key, goal: child.goal, dependsOn: child.dependsOn, supports: child.supports, maxRuns: child.maxRuns })),
               }),
             ),
           ),

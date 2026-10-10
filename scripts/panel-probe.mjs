@@ -337,8 +337,10 @@ const panelState = page =>
       taskIds: [...panel.querySelectorAll('[data-task]')].map(node => node.getAttribute('data-task')),
       planIds: [...panel.querySelectorAll('[data-plan]')].map(node => node.getAttribute('data-plan')),
       childIds: [...panel.querySelectorAll('[data-child]')].map(node => node.getAttribute('data-child')),
-      childStatus: Object.fromEntries(
-        [...panel.querySelectorAll('[data-child]')].map(node => [node.getAttribute('data-child'), node.getAttribute('data-status')]),
+      // Pairs, not a map: a child id is derived from its key, so two plans' children can carry one name —
+      // a map would silently keep the last and hide a row the panel rendered.
+      childPairs: [...panel.querySelectorAll('[data-child]')].map(
+        node => `${node.getAttribute('data-child')}:${node.getAttribute('data-status')}`,
       ),
       text: (panel.textContent ?? '').trim(),
     }
@@ -443,6 +445,7 @@ async function main() {
       return { status: response.status, allow: response.headers.get('allow') }
     }, TASKS_ROUTE)
     evidence.postStatus = posted.status
+    evidence.postAllow = posted.allow
     check('(a) a non-GET on the read route is 405, not 200 or 204', posted.status === 405, `status ${posted.status}`)
     check("(a) the 405 names the method it allows", (posted.allow ?? '').toUpperCase().includes('GET'), `allow: ${JSON.stringify(posted.allow)}`)
 
@@ -500,25 +503,37 @@ async function main() {
     )
     // The panel's sub-task rows belong to a plan: every child id it lists must be one the route listed,
     // with the status the route recorded. This is the "each plan's sub-tasks, with statuses" leg.
-    const routeChildren = new Map(
-      served.body.plans.flatMap(plan => plan.children.map(child => [child.taskId, child.status])),
-    )
-    evidence.planChildren = [...routeChildren].map(([taskId, status]) => `${taskId}:${status}`)
-    evidence.panelChildren = Object.entries(opened.childStatus).map(([taskId, status]) => `${taskId}:${status}`)
+    //
+    // The panel renders **every** plan the control holds, not only the one this turn declared — a control
+    // accumulates plans across runs, and a child id is derived from its key, so the same key in two plans is
+    // two different sub-tasks carrying one name. So the check is over the pairs: every (child, status) the
+    // panel listed must be a pair some plan's child carries. The agent's own sub-task is checked separately,
+    // because "the panel listed rows" would pass without this run's plan having been rendered at all.
+    const ownPlan = served.body.plans.find(plan => plan.parentTaskId === agentTaskId)
+    const routePairs = new Set(served.body.plans.flatMap(plan => plan.children.map(child => `${child.taskId}:${child.status}`)))
+    evidence.ownPlan = ownPlan ?? null
+    evidence.ownPlanChildren = (ownPlan?.children ?? []).map(child => `${child.taskId}:${child.status}`)
+    evidence.routePairCount = routePairs.size
+    evidence.panelChildren = opened.childPairs
     check(
-      '(c) the panel shows the plan its task belongs to',
-      opened.planIds.length > 0,
-      `the route listed ${String(served.body.plans.length)} plan(s), the panel showed ${JSON.stringify(opened.planIds)}`,
+      '(c) the route carries the plan the agent declared in its second turn',
+      ownPlan !== undefined && ownPlan.children.length > 0,
+      `the route's plans are ${JSON.stringify(served.body.plans.map(plan => plan.parentTaskId))}, the agent declared one for ${agentTaskId}`,
     )
     check(
-      '(c) every sub-task the panel listed is one the route listed',
-      opened.childIds.length > 0 && opened.childIds.every(childId => routeChildren.has(childId)),
-      `the panel listed ${JSON.stringify(opened.childIds)}, the route lists ${JSON.stringify(evidence.planChildren)}`,
+      '(c) the panel shows that plan',
+      opened.planIds.includes(agentTaskId),
+      `the panel showed ${JSON.stringify(opened.planIds)}, the agent's plan is ${agentTaskId}`,
     )
     check(
-      '(c) the panel shows each sub-task with the status the route recorded',
-      opened.childIds.every(childId => opened.childStatus[childId] === routeChildren.get(childId)),
-      `the panel said ${JSON.stringify(evidence.panelChildren)}, the route said ${JSON.stringify(evidence.planChildren)}`,
+      "(c) the panel shows this run's sub-task, with the status the route recorded",
+      evidence.ownPlanChildren.length > 0 && evidence.ownPlanChildren.some(pair => evidence.panelChildren.includes(pair)),
+      `the route's children for that plan are ${JSON.stringify(evidence.ownPlanChildren)}, the panel showed ${JSON.stringify(evidence.panelChildren)}`,
+    )
+    check(
+      '(c) every sub-task the panel listed is a child some plan carries, at the status the route recorded',
+      opened.childPairs.length > 0 && opened.childPairs.every(pair => routePairs.has(pair)),
+      `the panel said ${JSON.stringify(evidence.panelChildren)}; the route's ${String(routePairs.size)} (child,status) pair(s) are ${JSON.stringify([...routePairs])}`,
     )
 
     // ---- (d) reading the panel commits no facts ----------------------------------------------

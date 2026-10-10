@@ -64,6 +64,34 @@ describe('one caller through the host plugin', () => {
     expect([second.taskId, medium.events.length]).toEqual([first.taskId, committed])
   })
 
+  it('admits every sub-task a plan names, so the plan can actually run', async () => {
+    const { surface, medium } = await mounted()
+    const agent = agentFor('agent-7', 'session-9')
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'count the letters' })
+    // This deployment mounts no preset registry, so the plan commits and then the *session* is refused by
+    // name. That is the split this case is about: the plan is a fact either way, and only starting it needs
+    // a runtime that can compose a child.
+    await asyncRefusalOf(() =>
+      surface.forCall(execFor(agent, 'call-2')).decompose({
+        taskId: proposal.taskId,
+        children: [
+          { key: 'first', goal: 'count them', dependsOn: [], supports: ['letters'], maxRuns: 1 },
+          { key: 'second', goal: 'check the count', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
+        ],
+      }),
+    )
+    // A plan whose children were never admitted declares work that can never start: the tree shows them
+    // `missing`, never `ready`, and the plan sits there looking like a decision. So every child the plan
+    // names has its own admitted, assigned task — and the ids are derived from the keys, not the keys.
+    const admitted = factsOf(medium).filter(fact => fact.kind === TASK_KINDS.admitted).map(fact => fact.subject)
+    const assigned = factsOf(medium).filter(fact => fact.kind === TASK_KINDS.assigned).map(fact => fact.subject)
+    expect([admitted.length, admitted.every(id => id.startsWith('task-')), admitted.includes('first'), assigned.length]).toEqual([3, true, false, 3])
+    // The plan's dependency names the derived id of the sibling it means, never the batch-local key.
+    const plan = factsOf(medium).find(fact => fact.kind === TASK_KINDS.decomposed)
+    const children = (plan?.payload as { children: readonly { taskId: string; dependsOn: readonly string[] }[] }).children
+    expect([children[1]?.dependsOn, children[0]?.taskId !== 'first']).toEqual([[children[0]?.taskId], true])
+  })
+
   it('records a verified run whose verdict comes from the domain verifier', async () => {
     const { surface, medium } = await mounted()
     const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')

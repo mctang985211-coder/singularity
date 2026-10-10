@@ -46,6 +46,11 @@ export interface ChildSessionSeams {
   readonly sessions?: SessionStore | undefined
   readonly agents?: AgentRegistry | undefined
   readonly agentLoop?: unknown
+  /**
+   * The preset registry, read through `ctx.get` rather than as a property: a cordis context throws on a
+   * property access for a service its plugin did not `inject`, and an optional seam that throws instead
+   * of reading `undefined` is not optional.
+   */
   readonly agentPresets?: { composeFrom(ctx: unknown, parent: unknown): void } | undefined
 }
 
@@ -98,12 +103,17 @@ export interface ChildSession extends OpenedAgentSession {
  * upstream lease error.
  */
 export async function openChildSession(seams: ChildSessionSeams, request: ChildSessionRequest): Promise<ChildSession> {
-  if (seams.agentPresets === undefined)
+  // Read through `get`, never as a property. A cordis context refuses a *property* access for a service
+  // the accessing plugin did not declare in `inject` — `cannot get property "agentPresets" without
+  // inject` — which is a throw, not the `undefined` an optional seam is supposed to look like. `get`
+  // asks the same question without that trap, so a deployment with no preset registry gets the named
+  // refusal below instead of a crash from a line that never expected to run.
+  const presets = (seams as { get?(name: string): unknown }).get?.('agentPresets') as { composeFrom(ctx: unknown, parent: unknown): void } | undefined
+  if (presets === undefined)
     refuse(
       'malformed-declaration',
       `cannot open child session "${request.agentId}": this deployment mounts no agent-preset registry, and a child that joins no preset sees an empty tool registry — it could not do the work it is being opened for`,
     )
-  const presets = seams.agentPresets
   const opened = await openAgentSession(seams as Parameters<typeof openAgentSession>[0], {
     agentId: request.agentId,
     resume: true,

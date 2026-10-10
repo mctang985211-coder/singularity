@@ -9,24 +9,18 @@
  * @module @dangosys/dsh-singularity-next/driver
  */
 
-import { mkdir } from 'node:fs/promises'
-
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
-import { refuse } from '../../src/protocol/refusal.ts'
-import type { DecompositionChild } from '../../src/task/decomposition.ts'
-import { projectReceipt, projectTask, type ReceiptView, type TaskView } from '../../src/task/view.ts'
-import { bindCaller, callerOf, openApparatus, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
-import { snapshotOf, type ControlSnapshot } from './snapshot.ts'
+import type { ReceiptView, TaskView } from '../../src/task/view.ts'
+import { callerOf, openApparatus } from './apparatus.ts'
 import type { Domain } from './domain.ts'
-import { taskIdOf } from './ids.ts'
 import { repair } from './repair.ts'
-import { createScheduler, type Scheduler } from './scheduler.ts'
-import { submit, workspaceOf, type Submission } from './submission.ts'
-import { prepareWorkspace } from './workspace.ts'
+import { createScheduler } from './scheduler.ts'
+import { snapshotOf, type ControlSnapshot } from './snapshot.ts'
+import { decompose, propose, status, submitTo, type Submission } from './surfaces.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -43,9 +37,24 @@ export interface TaskService {
 export interface AgentTaskSurface {
   propose(input: { readonly goal: string }): Promise<Proposal>
   /** Declare a plan for a task the caller holds, then open what it made ready. */
-  decompose(input: { readonly taskId: string; readonly children: readonly DecompositionChild[] }): Promise<PlanRecord>
+  decompose(input: { readonly taskId: string; readonly children: readonly PlannedChild[] }): Promise<PlanRecord>
   submit(input: { readonly taskId: string; readonly program: string }): Promise<Submission>
   status(input: { readonly taskId: string }): Promise<Status>
+}
+
+/**
+ * One sub-task as the caller plans it.
+ *
+ * `key` is a name local to the plan, and `goal` is what the sub-task is for; neither is an identity. The
+ * task id is derived from the key, and the contract is assembled from this deployment's own criterion,
+ * because what a sub-task is judged against is the domain's decision rather than the model's.
+ */
+export interface PlannedChild {
+  readonly key: string
+  readonly goal: string
+  readonly dependsOn: readonly string[]
+  readonly supports: readonly string[]
+  readonly maxRuns: number
 }
 
 export interface PlanRecord {
@@ -95,7 +104,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       return {
         propose: input => propose(apparatus, caller, input),
         decompose: input => decompose(apparatus, scheduler, caller, exec.agent, input),
-        submit: input => submit(apparatus, caller, callId, input),
+        submit: input => submitTo(apparatus, caller, callId, input),
         status: input => status(apparatus, caller, input),
       }
     },
@@ -107,66 +116,5 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       await scheduler.close()
       await apparatus.store.close()
     },
-  }
-}
-
-/**
- * Record a plan and start what it made ready.
- *
- * The plan is committed first, the sessions second: a plan whose sub-tasks never started is a readable
- * fact an operator can act on, while a session whose task nobody admitted would be work the log cannot
- * attribute. A failure to open one does not undo the plan — `advance` is idempotent, so the next advance
- * retries exactly the children that have no session yet.
- */
-async function decompose(
-  apparatus: Apparatus,
-  scheduler: Scheduler,
-  caller: Caller,
-  parent: Agent | undefined,
-  input: { readonly taskId: string; readonly children: readonly DecompositionChild[] },
-): Promise<PlanRecord> {
-  await bindCaller(apparatus, caller)
-  await apparatus.tasks.forAgent(caller.agentId).decompose({ commandId: `decompose:${input.taskId}`, parentTaskId: input.taskId, children: input.children })
-  return { taskId: input.taskId, opened: await scheduler.advance(parent) }
-}
-
-/**
- * Admit one task for the caller and assign it to them: both run through `forAgent`, so responsibility
- * is the identity the live agent resolves to.
- *
- * The workspace is prepared from the domain's own material before the task is admitted, so a refusal to
- * stage happens before any fact claims the task exists. Both submissions start from the same bytes: a
- * `program` shape has only its protected input staged, and a `source` shape additionally has its seed.
- */
-async function propose(apparatus: Apparatus, caller: Caller, input: { readonly goal: string }): Promise<Proposal> {
-  await bindCaller(apparatus, caller)
-  const taskId = taskIdOf(apparatus.controlId, caller.agentId, input.goal)
-  const workspace = workspaceOf(apparatus, taskId)
-  await mkdir(workspace, { recursive: true })
-  await prepareWorkspace(apparatus.domain, workspace)
-  const [declared] = apparatus.domain.inputs
-  if (declared === undefined)
-    refuse('malformed-declaration', 'the domain declares no input, so a task proposed here would have nothing to be judged against')
-  const commands = apparatus.tasks.forAgent(caller.agentId)
-  await commands.admit({
-    commandId: `admit:${taskId}`,
-    taskId,
-    contract: { goal: input.goal, inputs: [declared.path], criteria: [apparatus.domain.criterion] },
-  })
-  await commands.assign({ commandId: `assign:${taskId}`, taskId, agentId: caller.agentId })
-  return { taskId, workspace, criterionId: apparatus.domain.criterion.criterionId, phase: projectTask(taskStateOf(apparatus, taskId)).phase }
-}
-async function status(apparatus: Apparatus, caller: Caller, input: { readonly taskId: string }): Promise<Status> {
-  const state = taskStateOf(apparatus, input.taskId)
-  // A read is still a read of somebody's task: the holder's, and nobody else's. It commits nothing.
-  if (state.responsibility?.agentId !== caller.agentId)
-    refuse('not-responsible', `task "${input.taskId}" is the responsibility of agent "${state.responsibility?.agentId ?? 'nobody'}", so agent "${caller.agentId}" cannot read it`)
-  const view = projectTask(state)
-  const latest = view.runs.at(-1)
-  if (latest === undefined || latest.status === 'running') return { phase: view.phase, runs: view.runs.length, receipt: null }
-  return {
-    phase: view.phase,
-    runs: view.runs.length,
-    receipt: projectReceipt(apparatus.registry, apparatus.store.load().entries(), input.taskId, latest.runId),
   }
 }
