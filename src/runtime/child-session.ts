@@ -47,11 +47,13 @@ export interface ChildSessionSeams {
   readonly agents?: AgentRegistry | undefined
   readonly agentLoop?: unknown
   /**
-   * The preset registry, read through `ctx.get` rather than as a property: a cordis context throws on a
-   * property access for a service its plugin did not `inject`, and an optional seam that throws instead
-   * of reading `undefined` is not optional.
+   * The preset registry, read through `ctx.get` rather than as a property: a cordis plugin context
+   * throws on a property access for a service it did not `inject`, and an optional seam that throws
+   * instead of reading `undefined` is not optional.
    */
   readonly agentPresets?: { composeFrom(ctx: unknown, parent: unknown): void } | undefined
+  /** Resolve one service without that trap. See {@link ChildSessionSeams.agentPresets}. */
+  get?(name: string): unknown
 }
 
 /** What one child session is opened for: who it is, whose it is, and what it must be told. */
@@ -108,7 +110,7 @@ export async function openChildSession(seams: ChildSessionSeams, request: ChildS
   // inject` — which is a throw, not the `undefined` an optional seam is supposed to look like. `get`
   // asks the same question without that trap, so a deployment with no preset registry gets the named
   // refusal below instead of a crash from a line that never expected to run.
-  const presets = (seams as { get?(name: string): unknown }).get?.('agentPresets') as { composeFrom(ctx: unknown, parent: unknown): void } | undefined
+  const presets = seams.get?.('agentPresets') as { composeFrom(ctx: unknown, parent: unknown): void } | undefined
   if (presets === undefined)
     refuse(
       'malformed-declaration',
@@ -138,7 +140,9 @@ export async function openChildSession(seams: ChildSessionSeams, request: ChildS
       await opened.agent.whenIdle()
       // The loop does not flush at turn boundaries — the durability checkpoint is another service's
       // — so a caller that means to read the log afterwards flushes here rather than hoping.
-      await seams.sessions?.flush(opened.agent.session)
+      // Resolved, not read as a property: the same cordis trap that `agentPresets` above avoids applies
+      // to this name, and `openAgentSession` has already proven it present by this point.
+      await (seams.get?.('sessions') as { flush(session: unknown): Promise<void> } | undefined)?.flush(opened.agent.session)
     },
     stop: () => opened.agent.cancel({ kind: 'parent' }, { keepInbox: true }),
   }

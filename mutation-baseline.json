@@ -1860,6 +1860,44 @@
         ]
       },
       "witness": "stages the bytes it digested even when the declared source has changed since"
+    },
+    {
+      "id": "runtime-m30-seams-resolve-through-get",
+      "rule": "every optional runtime seam is resolved through ctx.get, because a cordis plugin context throws on a property read of a service it did not inject",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "src/runtime/agent-session.ts",
+          "find": "return ctx.get === undefined ? ctx[name] : ctx.get(name)",
+          "replace": "return ctx[name]"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/runtime-agent-session.spec.ts"
+        ]
+      },
+      "witness": "throws on a property read, and answers undefined through get"
+    },
+    {
+      "id": "assembly-m31-children-own-their-tasks",
+      "rule": "a planned sub-task is assigned to the child agent that will do it, not to the parent that planned it",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "assembly/src/surfaces.ts",
+          "find": "agentId: agentOf.get(entry.taskId)!",
+          "replace": "agentId: caller.agentId"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "admits every sub-task a plan names, so the plan can actually run"
     }
   ]
 }

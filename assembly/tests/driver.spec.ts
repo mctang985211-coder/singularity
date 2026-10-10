@@ -90,6 +90,24 @@ describe('one caller through the host plugin', () => {
     const plan = factsOf(medium).find(fact => fact.kind === TASK_KINDS.decomposed)
     const children = (plan?.payload as { children: readonly { taskId: string; dependsOn: readonly string[] }[] }).children
     expect([children[1]?.dependsOn, children[0]?.taskId !== 'first']).toEqual([[children[0]?.taskId], true])
+
+    // Each sub-task belongs to the child that will do it, and that child has its own agent node.
+    //
+    // Assigning them to the *parent* is what made a sub-task unstartable in the real profile: the parent
+    // could submit to work it had delegated while the session doing the work was refused with
+    // `not-responsible` when it tried to submit its own artifact. The identity a child presents is the
+    // session id derived from its task id — DSH sets an agent's `id` to the session it runs on — so the
+    // assignment has to name that string, not the task id and not the parent.
+    const facts = factsOf(medium)
+    const openedNodes = facts.filter(fact => fact.kind === 'agent/opened').map(fact => fact.subject)
+    // The parent's identity comes from the live agent, so everything else that was opened is a child.
+    const parentNode = openedNodes.find(id => id.includes('agent-7'))
+    const childNodes = openedNodes.filter(id => id !== parentNode)
+    const holders = facts.filter(fact => fact.kind === TASK_KINDS.assigned).map(fact => (fact.payload as { agentId: string }).agentId)
+    expect([holders.length, parentNode !== undefined, holders.filter(holder => holder === parentNode).length]).toEqual([3, true, 1])
+    // Every holder other than the parent is a child node that was opened under its own identity, so the
+    // session presenting it can act on the task it was given.
+    expect(holders.filter(holder => holder !== parentNode).every(holder => childNodes.includes(holder))).toBe(true)
   })
 
   it('records a verified run whose verdict comes from the domain verifier', async () => {

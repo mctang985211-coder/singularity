@@ -24,7 +24,7 @@
  * @module singularity-core/scripts/subtask-probe
  */
 
-import { mkdtemp, readFile, readdir, readlink, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -140,6 +140,47 @@ async function controlFacts(home) {
   return facts
 }
 
+/**
+ * The child sessions this run opened, read from their own logs.
+ *
+ * A child's session lives under a directory named for the *cwd* it was created in, and the scheduler
+ * gives each child its own workspace — so a child's directory carries its task id. That is how a child
+ * session is told apart from the control's, without asking the deployment to describe itself.
+ */
+async function childSessionsOf(home, taskIds) {
+  const root = join(home, 'sessions')
+  const found = []
+  for (const entry of await readdir(root).catch(() => [])) {
+    for (const name of await readdir(join(root, entry)).catch(() => [])) {
+      const taskId = taskIds.find(id => name.includes(id) && entry.includes(id))
+      if (taskId === undefined) continue
+      const decoded = await decode(join(root, entry, name, 'session.v4.jsonl.zstd'))
+      if (decoded === undefined) continue
+      const calls = []
+      const refusals = []
+      let instruction
+      for (const line of decoded.split('\n')) {
+        if (line.trim() === '') continue
+        let event
+        try {
+          event = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (event.type === 'tool/call') calls.push(event.data?.name)
+        if (event.type === 'user/message' && instruction === undefined)
+          instruction = (event.data?.content ?? []).map(part => part.text ?? '').join('')
+        if (event.type === 'tool/result') {
+          const text = (event.data?.message?.content ?? []).map(part => part.text ?? '').join('')
+          if (text.includes('"refused"')) refusals.push(text)
+        }
+      }
+      found.push({ taskId, dir: entry, instruction, calls, refusals })
+    }
+  }
+  return found
+}
+
 /** One zstd log, decompressed. The host writes these compressed; nothing here re-implements it. */
 async function decode(file) {
   const { execFileSync } = await import('node:child_process')
@@ -150,10 +191,36 @@ async function decode(file) {
   }
 }
 
+/**
+ * Remove this probe's own control from the last run, so one run's log is one run's facts.
+ *
+ * The assertions here are exact — "the plan names two children", "a session per ready sub-task" — and
+ * they are read from the control's log, which accumulates across runs. Without this, a second run reads
+ * the first run's decompositions and child sessions alongside its own, and the probe reports the wrong
+ * plan and a child that was refused for a task belonging to a run that had already finished. That is
+ * what happened here first.
+ *
+ * It is safe because the control id is this probe's own invention, and the guard states it: only paths
+ * that *contain* that id are touched, never the deployment's own control or its workspaces.
+ */
+async function resetControl(home) {
+  const root = join(home, 'sessions')
+  for (const entry of await readdir(root).catch(() => [])) {
+    if (!entry.includes(CONTROL)) continue
+    await rm(join(root, entry), { recursive: true, force: true })
+  }
+  const workspaces = join(home, 'workspaces')
+  for (const entry of await readdir(workspaces).catch(() => [])) {
+    if (!entry.includes(CONTROL)) continue
+    await rm(join(workspaces, entry), { recursive: true, force: true })
+  }
+}
+
 async function main() {
   const home = process.env['DSH_HOME']
   if (home === undefined || home === '') throw new Error("DSH_HOME is not set; source the deployment's environment before probing")
 
+  await resetControl(home)
   const overlay = await probeOverlay(home)
   const server = await boot(await freePort(), ['--patch', overlay.file])
   const browser = await chromium.launch()
@@ -177,7 +244,12 @@ async function main() {
     await prepare(page, home)
     await send(page, PLAN_PROMPT)
     await waitForTools(page, ['singularity_propose_task', 'singularity_decompose_task'])
-    await sleep(10_000)
+    // `decompose` does not answer until it has opened the sessions its plan made ready — opening a child
+    // composes an agent and delivers its first instruction, which is a turn — so the turn is waited out
+    // rather than slept over. A fixed sleep was enough for the plan to commit and not for the children to
+    // start, which made this probe report "no child session" for a run that was still opening them.
+    await page.waitForFunction(() => document.querySelector('button[aria-label="Stop generating"]') === null, undefined, { timeout: 900_000 })
+    await sleep(5_000)
 
     const toolText = await page.evaluate(() => [...document.querySelectorAll('[data-tool]')].map(node => node.textContent ?? '').join('\n'))
     const taskId = /"taskId":"(task-[0-9a-f]+)"/.exec(toolText)?.[1] ?? /\b(task-[0-9a-f]{8,})\b/.exec(toolText)?.[1]
@@ -215,6 +287,23 @@ async function main() {
       // One child depends on the other, so exactly one of them is startable at this cut: the gate is the
       // plan's verdict, and a sub-task that is waiting is never `running`.
       check('a sub-task is not running until the one it depends on has verified', plan.children.some(child => child.status !== 'running') || plan.children.every(child => child.status === 'verified'), JSON.stringify(plan.children.map(child => ({ taskId: child.taskId, status: child.status }))))
+
+      // --- the child ran, in a session of its own ------------------------------------------------
+      //
+      // Asserted on the child's *own session log*, not on the plan: a plan can name two children and
+      // open nothing, which is exactly the defect this probe caught the first time it ran. What makes
+      // "each sub-task runs in its own DSH session" true is a session on disk whose dir is the child's
+      // workspace, holding the instruction the scheduler composed and a tool call the child made.
+      const childSessions = await childSessionsOf(home, plan.children.map(child => child.taskId))
+      check('the deployment opened a session per ready sub-task, and not for the waiting one', childSessions.length === 1, `${childSessions.length} child session(s): ${JSON.stringify(childSessions.map(session => session.taskId))}`)
+      if (childSessions.length > 0) {
+        const child = childSessions[0]
+        check('the child session carries the instruction the deployment composed', (child.instruction ?? '').includes('You are the agent responsible for the sub-task'), (child.instruction ?? '(no instruction delivered)').slice(0, 160))
+        check('the child session ran a turn and called a tool of its own', child.calls.length > 0, `tool calls: ${JSON.stringify(child.calls)}`)
+        // The identity the child presents is the session id derived from its task id, and its own task
+        // must be the one it can act on. A refusal here is the defect where the parent held the task.
+        check('the child could act on the task it was given, with no refusal naming responsibility', child.refusals.filter(refusal => refusal.includes('not-responsible')).length === 0, JSON.stringify(child.refusals.slice(0, 3)))
+      }
     }
 
     const screenshotFlag = process.argv.indexOf('--screenshot')

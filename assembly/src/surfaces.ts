@@ -13,7 +13,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 
 import { refuse } from '../../src/protocol/refusal.ts'
 import { projectReceipt, projectTask } from '../../src/task/view.ts'
-import { bindCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
+import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
+import { bindCaller, declareCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import type { PlanRecord, PlannedChild, Proposal, Status } from './driver.ts'
 import { taskIdOf } from './ids.ts'
 import type { Scheduler } from './scheduler.ts'
@@ -58,13 +59,36 @@ export async function decompose(
       return { taskId, contract: { goal: child.goal, inputs: [declared.path], criteria: [apparatus.domain.criterion] }, child }
     }),
   )
+  // What identity the child will present, and therefore who its task belongs to.
+  //
+  // DSH sets an agent's `id` to the id of the session it was created for, and the child's session is
+  // the one derived from its task id — so the id it stamps on its own facts is `agentSessionIdOf(taskId)`,
+  // not the task id. Assigning the sub-task to the *parent* instead is what made a sub-task unstartable:
+  // the parent could submit to work it had delegated while the child doing the work could not submit to
+  // it at all, which the sub-task probe caught as `not-responsible` from the child's own would-be
+  // identity. Each child is therefore declared as a held agent and given its node here, before any plan
+  // names it, so the identity exists by the time the session that presents it opens.
+  const agentOf = new Map<string, string>()
+  for (const entry of named) {
+    const childAgentId = String(agentSessionIdOf(entry.taskId))
+    agentOf.set(entry.taskId, childAgentId)
+    declareCaller(apparatus, childAgentId)
+    await apparatus.agents.open({
+      commandId: `agent:${childAgentId}`,
+      agentId: childAgentId,
+      // The node records the session to resume, which is the one the child runs on. It is the same
+      // string as the agent id because that is exactly how DSH derives one from the other.
+      sessionId: childAgentId,
+      role: 'child',
+    })
+  }
   // The children may depend on each other by key, so the dependency set is translated through the same
   // mapping that named them: a plan that kept the model's keys would declare dependencies on tasks that
   // do not exist, which is the defect this whole function exists to avoid.
   const byKey = new Map(input.children.map((child, index) => [child.key, named[index]!.taskId]))
   for (const entry of named) {
     await commands.admit({ commandId: `admit:${entry.taskId}`, taskId: entry.taskId, contract: entry.contract })
-    await commands.assign({ commandId: `assign:${entry.taskId}`, taskId: entry.taskId, agentId: caller.agentId })
+    await commands.assign({ commandId: `assign:${entry.taskId}`, taskId: entry.taskId, agentId: agentOf.get(entry.taskId)! })
   }
   await commands.decompose({
     commandId: `decompose:${input.taskId}`,

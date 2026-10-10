@@ -12,6 +12,7 @@ import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { ProtocolRefusal } from '../src/protocol/refusal.ts'
 import { controlSessionIdOf } from '../src/control/session-store.ts'
 import type { RefusalCode } from '../src/index.ts'
 import {
@@ -119,6 +120,62 @@ describe('the load-time seam assertion', () => {
     const refusal = refusalOf(() => assertRuntimeSeams(context))
     for (const name of ['ctx.sessions', 'ctx.agents', 'ctx.agentLoop']) expect(refusal.detail).toContain(name)
     expect([refusal.code, refusal.detail.includes('ctx.sessionPersistence')]).toEqual(['malformed-declaration', false])
+  })
+})
+
+describe('a seam read inside a plugin that did not inject it', () => {
+  /**
+   * The trap this pins, reproduced the way it actually happened.
+   *
+   * A cordis plugin context **throws** on a property read of a service the plugin did not declare in
+   * `inject` — `cannot get property "sessions" without inject` — so `ctx.sessions` is not "the service
+   * or undefined", it is the service or an exception. The assertion above passed anyway, because a
+   * bare `Context` and a plain object both lack the proxy that enforces it: only a context *inside a
+   * plugin whose inject list omits the name* behaves this way, which is exactly the deployment the
+   * assembly runs in. The sub-task probe found this in a real profile (five `without inject` results in
+   * one session), which is why the check now reads through `ctx.get` and why this witness exists.
+   */
+  it('throws on a property read, and answers undefined through get', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'singularity-seam-trap-'))
+    const parent = new Context()
+    await parent.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    deployments.push({ root, context: parent })
+
+    const inside: Record<string, unknown> = {}
+    // A plugin that provides nothing and injects nothing: the shape every optional-seam reader runs in.
+    await parent.plugin({
+      name: 'seam-trap-probe',
+      apply: (pluginCtx: Context) => {
+        inside['property'] = (() => {
+          try {
+            return { value: (pluginCtx as unknown as Record<string, unknown>)['sessions'] }
+          } catch (error) {
+            return { threw: error instanceof Error ? error.message : String(error) }
+          }
+        })()
+        inside['get'] = { value: (pluginCtx as unknown as { get(name: string): unknown }).get('sessions') }
+      },
+    })
+
+    // The property read is the trap; `get` is the question this module now asks.
+    expect(inside['property']).toMatchObject({ threw: expect.stringContaining('without inject') })
+    expect(inside['get']).toEqual({ value: undefined })
+
+    // And the module's own check reaches its named refusal rather than letting that throw escape.
+    await parent.plugin({
+      name: 'seam-trap-assert',
+      apply: (pluginCtx: Context) => {
+        inside['refusal'] = (() => {
+          try {
+            assertRuntimeSeams(pluginCtx as unknown as Seams)
+            return undefined
+          } catch (error) {
+            return error instanceof ProtocolRefusal ? error.refusal : { code: 'not-a-refusal', detail: String(error) }
+          }
+        })()
+      },
+    })
+    expect(inside['refusal']).toMatchObject({ code: 'malformed-declaration', detail: expect.stringContaining('ctx.sessions') })
   })
 })
 

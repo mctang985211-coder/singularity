@@ -49,6 +49,16 @@ interface RuntimeSeams {
   readonly sessions?: SessionStore | undefined
   readonly agents?: AgentRegistry | undefined
   readonly agentLoop?: unknown
+  /**
+   * Resolve one service without the property trap.
+   *
+   * A cordis plugin context **throws** on a property read of a service its plugin did not `inject` —
+   * `cannot get property "sessions" without inject` — so `ctx.sessions` is not "the service or
+   * undefined", it is the service or an exception. Every optional seam below is therefore read through
+   * this, and a deployment that provides no child-session runtime gets the named refusal this module
+   * already has rather than a `TypeError` reaching a tool result.
+   */
+  get?(name: string): unknown
 }
 
 /** The seams this module drives, each proven present. */
@@ -70,16 +80,40 @@ export function assertRuntimeSeams(ctx: RuntimeSeams): void {
   requiredSeams(ctx)
 }
 
+/**
+ * Resolve one seam, by name, without the property trap.
+ *
+ * A cordis plugin context **throws** on a property read of a service the plugin did not `inject`:
+ * `ctx.sessions` is not "the service or undefined", it is the service or
+ * `cannot get property "sessions" without inject`. `ctx.get` asks the same question and answers
+ * `undefined`, so every seam is read through it when it exists — which is what makes this module's
+ * promise ("a missing seam is a named refusal") true rather than merely written down. Measured: a
+ * deployment without `sessions` in its inject list used to fail with the proxy's error reaching a
+ * tool result, which is exactly the far-from-cause bug this check exists to prevent.
+ */
+function seamOf(ctx: RuntimeSeams, name: (typeof SEAM_NAMES)[number]): unknown {
+  return ctx.get === undefined ? ctx[name] : ctx.get(name)
+}
+
 /** The check `assertRuntimeSeams` performs, narrowed for the callers below. */
 function requiredSeams(ctx: RuntimeSeams): PresentSeams {
-  const absent = SEAM_NAMES.filter(name => ctx[name] === undefined || ctx[name] === null).map(name => `ctx.${name}`)
+  const absent = SEAM_NAMES.filter(name => {
+    const found = seamOf(ctx, name)
+    return found === undefined || found === null
+  }).map(name => `ctx.${name}`)
   if (absent.length > 0)
     refuse(
       'malformed-declaration',
       `the DSH runtime seams this module drives are absent: ${absent.join(', ')}; a plugin mounted without its inject dependency is silently absent, so a missing seam is refused here at load rather than met as an undefined at runtime`,
     )
-  // Exactly the claim the check above establishes: every named seam resolved to a service.
-  return ctx as PresentSeams
+  // The *resolved* services, not the context: returning `ctx as PresentSeams` would make every later
+  // `const { agents } = seams` a property read again, which is the trap this function just avoided, and
+  // the check would be decoration in front of the same throw.
+  return {
+    sessionPersistence: seamOf(ctx, 'sessionPersistence') as SessionPersistence,
+    sessions: seamOf(ctx, 'sessions') as SessionStore,
+    agents: seamOf(ctx, 'agents') as AgentRegistry,
+  }
 }
 
 /** What a caller asks for: one supplied agent id, and whether persisted history is expected. */
@@ -281,7 +315,7 @@ async function resumeAgent(agents: AgentRegistry, sessionId: SessionId, request:
  * id into one path segment injectively over every JS string, so even `../` in an agent id addresses
  * a directory under the session root rather than escaping it.
  */
-function agentSessionIdOf(agentId: string): SessionId {
+export function agentSessionIdOf(agentId: string): SessionId {
   if (agentId.length === 0)
     refuse('malformed-declaration', 'an agent id must be a non-empty string; it names the session that will carry the agent')
   return SessionId(`singularity:agent:${agentId}`)
