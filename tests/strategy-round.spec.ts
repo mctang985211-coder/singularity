@@ -1,13 +1,12 @@
 /**
- * `strategy@1` — the explicit round, its submission gate, and the projection that decides.
+ * The explicit round: its submission gate, the decision that closes it, and the projection that decides.
  *
- * Three groups, one per place a rule can live: the reducer (rules needing only the round's own
- * subject; it runs inside the serial region), the command boundary (the annealed budget, the
- * recomputation of a decision against the cut it is appended to, and the submission condition that
- * spans subjects), and the projection (admissibility before any argmax, frozen gains, the incumbent
- * floor, and the caliber that makes scores comparable). The measurement inputs are a table, not a log
- * fold: `src/measure/**` owns that projection, and the table reads both historical values **below
- * the round's history cutoff**.
+ * Three groups, one per place a rule can live: the reducer (rules needing only the round's own subject;
+ * it runs inside the serial region), the command boundary (the annealed budget, the recomputation of a
+ * decision against the cut it is appended to, and the submission condition that spans subjects), and
+ * the projection (admissibility before any argmax, frozen gains, the incumbent floor, and the caliber
+ * that makes scores comparable). The measurement inputs are a table whose historical reads are bounded
+ * by the round's own cutoff; `src/measure/**` owns the projection they stand in for.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -154,6 +153,14 @@ async function twoCandidateRound(
   await submitThrough(live, roundId, 1, { evaluationId: 'e-1', revision: CANDIDATE_B })
   return roundId
 }
+/** A round that declared two slots, was offered one measured candidate in slot 0, and nothing in slot 1. */
+async function halfRound(live: Live, explorationSlots = 0): Promise<string> {
+  const roundId = await openThrough(live, { candidates: 2, explorationSlots, historyCutoff: 5 })
+  measuredAt(live.table, INCUMBENT, 0, 0.4)
+  live.table.evaluations.set('e-0', evaluation('e-0', { candidate: CANDIDATE_A }))
+  await submitThrough(live, roundId, 0, { evaluationId: 'e-0' })
+  return roundId
+}
 
 describe('round/opened freezes one explicit round', async () => {
   it('carries the number, incumbent, plan, budget, cutoff, metric and weights — and opens once', async () => {
@@ -184,31 +191,63 @@ describe('the submission gate is the reducer\u2019s, inside the commit region', 
     expect(roundIn(log, 'round-1')?.submissions.map(entry => [entry.slot, entry.exploratory])).toEqual([[2, true], [0, false]])
 
     const quiet = 'gain 0.05 is inside the noise band 0.1'
-    emitDecision(log, 'round-1', { winner: null, outcomes: [{ slot: 0, admitted: false, reason: quiet }, { slot: 2, admitted: false, reason: quiet }] })
+    // Slot 1 is a reserved exploration slot nobody took: the decision covers it, and an empty slot is
+    // closed out with a reason of its own rather than omitted from the round's trajectory.
+    emitDecision(log, 'round-1', { winner: null, outcomes: [{ slot: 0, admitted: false, reason: quiet }, { slot: 1, admitted: false, reason: 'no candidate was submitted to this slot' }, { slot: 2, admitted: false, reason: quiet }] })
     expect(roundIn(log, 'round-1')?.decision?.winner).toBe(null)
     await expectRefusal(() => emitSubmission(log, 'round-1', 1, { exploratory: true }), 'illegal-transition', 'after round 1 closed')
   })
 })
 
-describe('a decision closes every submitted slot out with a named reason', async () => {
-  it('refuses an unaccounted slot, an invented one, an unadmitted winner, an empty reason and a second decision', async () => {
+describe('a decision still refuses a winner it does not admit, an empty reason and a second decision', async () => {
+  it('refuses an unadmitted winner, an outcome outside the plan, a blank reason and a second decision', async () => {
     const log = strategyLog()
-    emitPlan(log, 'round-1')
+    emitPlan(log, 'round-1', { candidates: 2, explorationSlots: 0 })
     emitSubmission(log, 'round-1', 0)
     emitSubmission(log, 'round-1', 1)
-    const one = [{ slot: 0, admitted: true, reason: 'best aggregate' }]
-    const both = [...one, { slot: 1, admitted: false, reason: 'in the noise band' }]
+    const both = [{ slot: 0, admitted: true, reason: 'the best aggregate of this round' }, { slot: 1, admitted: false, reason: 'in the noise band' }]
 
-    await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: one }), 'illegal-transition', 'without an outcome for submitted slot 1')
-    await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [...both, { slot: 2, admitted: true, reason: 'never submitted' }] }), 'illegal-transition', 'has no submission for')
     await expectRefusal(() => emitDecision(log, 'round-1', { winner: 1, outcomes: both }), 'illegal-transition', 'null means the incumbent stands')
-    await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [{ ...one[0], reason: '' }, both[1]] }), 'malformed-payload', 'reason')
+    await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [...both, { slot: 2, admitted: true, reason: 'never declared' }] }), 'illegal-transition', 'does not declare')
+    await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [{ ...both[0], reason: '' }, both[1]] }), 'malformed-payload', 'reason')
 
     const decided = emitDecision(log, 'round-1', { winner: 0, outcomes: both })
     expect([Object.keys(decided.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.decision?.winner]).toEqual([['calibration', 'outcomes', 'winner'], 0])
     await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: both }), 'illegal-transition', 'decides round 1 again')
   })
+})
 
+describe('a decision covers the declared slots, not the submitted ones', async () => {
+  it('refuses a decision that leaves a declared slot with no submission unaccounted, naming the slot', async () => {
+    const log = strategyLog()
+    emitPlan(log, 'round-1', { candidates: 2, explorationSlots: 0 })
+    emitSubmission(log, 'round-1', 0)
+    const closed = [{ slot: 0, admitted: true, reason: 'the best aggregate of this round' }]
+    await expectRefusal(() => emitDecision(log, 'round-1', { winner: 0, outcomes: closed }), 'illegal-transition', 'declared slot 1')
+  })
+
+  it('closes a round whose outcomes cover every declared slot, the empty ones included', async () => {
+    const live = await deployment()
+    const roundId = await halfRound(live)
+    await decideThrough(live, roundId)
+    expect(stateOf(live, roundId)?.decision?.outcomes.map(outcome => outcome.slot)).toEqual([0, 1])
+  })
+
+  it('never admits a declared slot nobody submitted to, so only a submitted slot can be a winner', async () => {
+    const log = strategyLog()
+    emitPlan(log, 'round-1', { candidates: 2, explorationSlots: 0 })
+    emitSubmission(log, 'round-1', 0)
+    const invented = [{ slot: 0, admitted: false, reason: 'in the noise band' }, { slot: 1, admitted: true, reason: 'a candidate nobody offered' }]
+    await expectRefusal(() => emitDecision(log, 'round-1', { winner: 1, outcomes: invented }), 'illegal-transition', 'only a submitted slot can be a winner')
+  })
+
+  it('does not refuse a round for leaving a reserved exploration slot empty, and records it', async () => {
+    const live = await deployment()
+    const roundId = await halfRound(live, 1)
+    await decideThrough(live, roundId)
+    const reserved = stateOf(live, roundId)?.decision?.outcomes.find(outcome => outcome.slot === 1)
+    expect([reserved?.admitted, reserved?.reason]).toEqual([false, expect.stringContaining('no candidate was submitted to this slot')])
+  })
 })
 
 describe('the round command service', async () => {

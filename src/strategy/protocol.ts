@@ -1,5 +1,5 @@
 /**
- * `strategy@2` — the explicit round: a plan frozen in one fact, a submission gate that is a refusal
+ * `strategy@3` — the explicit round: a plan frozen in one fact, a submission gate that is a refusal
  * rather than a sentence in a prompt, and a decision that carries the basis it was made on.
  *
  * The previous system derived the round from the number of history entries and the candidate index
@@ -22,10 +22,12 @@
  *    reserved, and a submission that does not declare `exploratory: true` may not occupy one. RRSI
  *    re-checks this against the diff after the critic (`loop.py:523-530`); the previous port kept the
  *    prompt sentence and dropped the check.
- * 5. **A decision covers every submitted slot with a named reason**, and carries the **noise basis**
- *    it was made against. An outcome for a slot nobody submitted is refused too: otherwise a
- *    hand-made decision could elect a candidate that does not exist. `winner` is an admitted slot or
- *    `null`, and `null` means the incumbent stands.
+ * 5. **A decision covers every declared slot with a named reason**, and carries the **noise basis**
+ *    it was made against. The coverage is the plan's `[0, candidates)`, not the submitted subset: a
+ *    slot nobody submitted to is untested, and `admitted: false` with a reason that names it says so
+ *    instead of leaving the slot out of the round's trajectory (R01). Such a slot can never be
+ *    admitted, so a hand-made decision cannot elect a candidate that does not exist. `winner` is an
+ *    admitted slot or `null`, and `null` means the incumbent stands.
  *
  * `edits` are the identity of the structural change (`asset` + `target`), not a line count: they are
  * what novelty counts and what a duplicate check can decide. A repeated `(asset, target)` inside one
@@ -47,6 +49,17 @@
  * is: there is nothing to migrate, and inventing a default caliber or a default band would be
  * inventing the very facts the members exist to record.
  *
+ * **Version 3** moves the **accepted language** of a decision, not its shape. A `round/decided` must
+ * now account for every slot the round declared; version 2 accepted one that accounted only for the
+ * slots somebody had submitted to, so a declared slot nobody offered a candidate to appeared in no
+ * outcome and in no reason at all — `review.md` R01's sentence was false exactly there. The members
+ * (`winner`, `outcomes`, `calibration`), the kind set and the reducers' other rules are unchanged:
+ * what moved is which decisions count as complete, and a complete decision is what a replay of the
+ * round's trajectory rests on. Version 2 facts are refused **by name** — `version-mismatch`, from
+ * the same gate as version 1 — with no compatibility layer: the trajectory v2 left out cannot be
+ * recovered from the fact, and reading its absence as "untested" would invent the very reason this
+ * rule exists to record.
+ *
  * @module singularity-core/strategy/protocol
  */
 
@@ -65,8 +78,12 @@ import { count, openedKind, requirePlan, revisionRef, type RoundPlan } from './p
 export type { RoundPlan } from './plan.ts'
 
 export const STRATEGY_PROTOCOL = 'strategy'
-/** 2: `round/opened` gained a required `caliber`, and `round/decided` a required `calibration`. */
-export const STRATEGY_VERSION = 2
+/**
+ * 3: a decision's accepted language — it accounts for every declared slot, not only the submitted
+ * ones, so an old decision is refused by name rather than re-read as a complete one. 2: `round/opened`
+ * gained a required `caliber`, and `round/decided` a required `calibration`.
+ */
+export const STRATEGY_VERSION = 3
 
 /** The trusted role that freezes a round, receives its candidates and closes it. */
 export const STRATEGY_ROLE = 'strategy'
@@ -222,7 +239,7 @@ function decidedPayload(raw: unknown, where: string): Decided {
 }
 
 /**
- * Declare `strategy@2`. Call once at load. Nothing here reads another slice: the measure views and
+ * Declare `strategy@3`. Call once at load. Nothing here reads another slice: the measure views and
  * the frozen history arrive as inputs to the projection and to the command boundary.
  */
 export function declareStrategyProtocol(registry: ProtocolRegistry): void {
@@ -296,22 +313,32 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
               `${where} decides round ${plan.round} again; it was decided at ${state.decision.at} with winner ${state.decision.winner === null ? 'none' : `slot ${state.decision.winner}`}`,
             )
 
-          const submitted = state.submissions.map(entry => entry.slot).sort((left, right) => left - right)
+          // Coverage is the plan's, not the submissions': a slot `round/opened` declared and nobody
+          // submitted to still has a disposition, and "untested" is a fact with a reason rather than a
+          // slot that appears in no reason at all (R01).
+          const declared = Array.from({ length: plan.candidates }, (_, slot) => slot)
           const named = payload.outcomes.map(outcome => outcome.slot)
           const repeated = named.filter((slot, index) => named.indexOf(slot) !== index)
           if (repeated.length > 0)
-            refuse('illegal-transition', `${where} closes slot ${repeated[0]} out twice; each submitted slot has one disposition`)
-          const missing = submitted.filter(slot => !named.includes(slot))
+            refuse('illegal-transition', `${where} closes slot ${repeated[0]} out twice; each declared slot has one disposition`)
+          const missing = declared.filter(slot => !named.includes(slot))
           if (missing.length > 0)
             refuse(
               'illegal-transition',
-              `${where} decides round ${plan.round} without an outcome for submitted slot${missing.length === 1 ? '' : 's'} ${missing.join(', ')}; every submitted slot is closed out with a named reason, and an unaccounted slot is how a round's trajectory goes missing`,
+              `${where} decides round ${plan.round} without an outcome for declared slot${missing.length === 1 ? '' : 's'} ${missing.join(', ')}; a decision covers every slot the round declared (0..${plan.candidates - 1}), and a slot nobody submitted to is untested rather than unaccounted for`,
             )
-          const invented = named.filter(slot => !submitted.includes(slot))
-          if (invented.length > 0)
+          const outside = named.filter(slot => slot >= plan.candidates)
+          if (outside.length > 0)
             refuse(
               'illegal-transition',
-              `${where} carries an outcome for slot${invented.length === 1 ? '' : 's'} ${invented.join(', ')}, which round ${plan.round} has no submission for; an outcome is about a candidate that was submitted`,
+              `${where} carries an outcome for slot${outside.length === 1 ? '' : 's'} ${outside.join(', ')}, which round ${plan.round} does not declare (slots 0..${plan.candidates - 1}); a decision covers the plan and nothing else`,
+            )
+          const submitted = state.submissions.map(entry => entry.slot)
+          const unoffered = payload.outcomes.find(outcome => outcome.admitted && !submitted.includes(outcome.slot))
+          if (unoffered !== undefined)
+            refuse(
+              'illegal-transition',
+              `${where} closes slot ${unoffered.slot} out as admitted, but round ${plan.round} has no submission in that slot; a slot nobody submitted to is untested, and only a submitted slot can be a winner`,
             )
 
           if (payload.winner !== null) {

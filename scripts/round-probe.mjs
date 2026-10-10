@@ -6,9 +6,8 @@
  *
  * It proves the round's own rules end to end: the explicit plan and its annealed budget, every
  * submission-gate refusal, admissibility (a violated constraint, an incomplete measurement, an
- * evaluation that does not fit its slot, two calibers, the incumbent's floor), the decision
- * recomputed against the cut it is appended to, and gains frozen against the round's cutoff. Each
- * check prints what it decided, so the list is the output rather than a sentence here.
+ * evaluation that does not fit its slot, two calibers, the incumbent's floor), a decision that covers
+ * the plan's declared slots and is recomputed against the cut, and gains frozen against the cutoff.
  *
  * **Novelty, against a real publication.** `src/strategy/published-assets.ts` derives the accepted
  * classes from the head below the cutoff and the *elected* slot that proposed the published revision,
@@ -87,9 +86,9 @@ const result = (evaluationId, candidate, caliberDigest, qualities, constraints =
 /**
  * A stand-in for the measure slice: one measurement result per fact, stored as recorded.
  *
- * `probe-measure@1` is probe-local, never part of `strategy@2`. There is deliberately no
- * `assets/published` kind: *accepted* has one owner (`src/strategy/published-assets.ts`), and a
- * second convention is how two wirings come to disagree about one word.
+ * `probe-measure@1` is probe-local. There is deliberately no `assets/published` kind here: *accepted*
+ * has one owner (`src/strategy/published-assets.ts`), and a second convention is how two wirings come
+ * to disagree about one word.
  */
 const MEASURE_PROTOCOL = 'probe-measure', MEASURE_ROLE = 'probe-measure', MEASURE_KIND = 'measurement/recorded'
 function declareProbeMeasure(registry) {
@@ -171,8 +170,8 @@ async function main() {
 
     /**
      * The measure slice as of one log position: the facts at that cut, plus the two reads the round
-     * makes. The historical read narrows to the round's own cutoff, not the caller's position, and
-     * the facts at the cut are what `publishedAssetsBelow` folds.
+     * makes. The historical read narrows to the round's own cutoff; the facts at the cut are what
+     * `publishedAssetsBelow` folds.
      */
     const sliceAt = cut => {
       const facts = store.load().entriesOf(MEASURE_PROTOCOL, 1).filter(fact => fact.seq < cut)
@@ -191,13 +190,11 @@ async function main() {
     const open = (roundId, round, over = {}) =>
       commands.openRound({
         commandId: `open-${roundId}`, roundId, round, incumbent: INCUMBENT, candidates: 3, explorationSlots: 1,
-        historyCutoff: head(), caliber: CALIBER_A, metric: METRIC, weights: WEIGHTS, ...over,
-      })
+        historyCutoff: head(), caliber: CALIBER_A, metric: METRIC, weights: WEIGHTS, ...over })
     const submit = (roundId, slot, over = {}) =>
       commands.submitCandidate({
         commandId: `submit-${roundId}-${slot}-${head()}`, roundId, slot, revision: CANDIDATE_1,
-        evaluationId: `e-${slot}`, edits: SKILL, exploratory: false, ...over,
-      })
+        evaluationId: `e-${slot}`, edits: SKILL, exploratory: false, ...over })
     // The commit region hands the reader a fixed cut; the reader turns it into the log position its
     // historical reads are bounded by.
     const openCommands = (calibration = FLOOR) =>
@@ -236,7 +233,6 @@ async function main() {
     check('the last round reaches the minimum budget', lastBudget === MINIMUM_BUDGET, `got ${lastBudget}`)
     check('a second round may not reuse a round number', (await refusalOf(() => open('round-dup', 1))).code === 'illegal-transition')
 
-    // ---------------------------------------------------------------- 2. the submission gate
     check('a slot outside the plan is refused', (await refusalOf(() => submit('round-1', 3))).code === 'illegal-transition')
     const reserved = await refusalOf(() => submit('round-1', 2))
     check('a non-exploratory candidate may not take a reserved slot', reserved.code === 'illegal-transition' && reserved.detail.includes('reserves for exploration'), reserved.code)
@@ -244,7 +240,6 @@ async function main() {
     check('edits beyond the annealed budget are refused', (await refusalOf(() => submit('round-1', 0, { edits: wide }))).code === 'budget-exhausted')
     check('a repeated (asset, target) is refused', (await refusalOf(() => submit('round-1', 0, { edits: [...SKILL, ...SKILL] }))).code === 'malformed-payload')
 
-    // ---------------------------------------------------------------- 3. the evaluation must fit the slot
     await record(result('e-elsewhere', CANDIDATE_2, CALIBER_A, [0.9, 0.9]))
     check('an evaluation of another revision is refused', (await refusalOf(() => submit('round-1', 0, { evaluationId: 'e-elsewhere', revision: CANDIDATE_1 }))).code === 'evidence-input-mismatch')
 
@@ -262,20 +257,18 @@ async function main() {
     check('only the admissible candidate can win', before.winner === 1, `winner ${before.winner}`)
     check('a round below the publication accepted nothing', before.slots[1].novelty === 1, `novelty ${before.slots[1].novelty}`)
 
-    // ---------------------------------------------------------------- 4. the decision closes every slot
     const decided = await commands.decideRound({ commandId: 'decide-1', roundId: 'round-1' })
     const decision = roundState('round-1').decision
     check('the decision names an admitted winner', decided.kind === STRATEGY_KINDS.roundDecided && decision.winner === 1, `winner ${decision.winner}`)
-    check('every submitted slot is closed out with a reason', decision.outcomes.length === 3 && decision.outcomes.every(outcome => outcome.reason.length > 0), `${decision.outcomes.length} outcomes`)
+    check('every declared slot is closed out with a reason', decision.outcomes.map(outcome => outcome.slot).join() === '0,1,2' && decision.outcomes.every(outcome => outcome.reason.length > 0), `${decision.outcomes.length} outcomes`)
     check('the winner is an admitted slot', decision.outcomes.find(outcome => outcome.slot === decision.winner).admitted === true)
     check('the decision records the band it was made under', decision.calibration.floor === FLOOR.floor && decision.calibration.source === FLOOR.source)
     const late = await refusalOf(() => submit('round-1', 0, { evaluationId: 'e-0', revision: CANDIDATE_0 }))
     check('a submission after the close is refused', late.code === 'illegal-transition' && late.detail.includes('closed'), late.code)
 
     // ---------------------------------------------------------------- 5. a real publication
-    // Round 1 elected slot 1, which offered `r0003` and declared a `skill` change. Publish exactly
-    // that revision: draft and approve the content the environment holds, then move the head onto it.
-    // Now `publishedAssetsBelow` has a head below the cutoff and an election that proposed it.
+    // Round 1 elected slot 1, which offered `r0003` and declared a `skill` change. Publish exactly that
+    // revision: draft and approve the content the environment holds, then move the head onto it.
     const release = createReleaseCommands({ store, approvalSeams: seam() })
     const pin = { environmentId: ENVIRONMENT, revisionId: PUBLISHED, digest: CANDIDATE_1.digest }
     await release.draft({ commandId: 'draft-r0003', revision: pin })
@@ -284,8 +277,8 @@ async function main() {
     check('the head moved onto the revision round 1 elected', environmentState().pointer === PUBLISHED)
 
     // ---------------------------------------------------------------- 6. novelty from the publication
-    // Below this round's cutoff `skill` was accepted (the elected slot declared it) and `tool` was
-    // not. The two slots must differ: a constant, or an empty history, cannot answer 0 and 1 at once.
+    // Below this cutoff `skill` was accepted (the elected slot declared it) and `tool` was not: the
+    // two slots must differ, which a constant or an empty history could not answer.
     await open('round-published', 8, { candidates: 2, explorationSlots: 0 })
     await record(result('e-skill', CANDIDATE_0, CALIBER_A, [0.8, 0.8]))
     await record(result('e-tool', CANDIDATE_1, CALIBER_A, [0.8, 0.8]))
@@ -295,7 +288,21 @@ async function main() {
     check('an asset class the publication accepted is not novel', published.slots[0].novelty === 0, `novelty ${published.slots[0].novelty}`)
     check('an asset class no publication accepted is novel', published.slots[1].novelty === 1, `novelty ${published.slots[1].novelty}`)
 
-    // ---------------------------------------------------------------- 7. the incumbent is a floor
+    // ---------------------------------------------------------------- the plan's coverage
+    // `round-last` declares three slots and nobody submitted to any of them. A decision covers the plan:
+    // one leaving a declared slot out is refused, and the accepted one closes all three out, each saying
+    // it is untested rather than vanishing from the round's trajectory (R01). The partial one is emitted
+    // directly, as a hand-made decision would be, so a weakened coverage rule would let it through.
+    const untested = slot => ({ slot, admitted: false, reason: 'no candidate was submitted to this slot' })
+    const partial = { commandId: 'decide-partial', protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind: STRATEGY_KINDS.roundDecided,
+      subject: 'round-last', payload: { winner: null, outcomes: [untested(0), untested(1)], calibration: FLOOR } }
+    const omission = await store.emit(partial).then(() => undefined, error => error.refusal)
+    check('a decision that omits a declared slot is refused', omission?.code === 'illegal-transition' && omission.detail.includes('declared slot'), omission?.detail ?? 'the omission was accepted')
+    const closed = await commands
+      .decideRound({ commandId: 'decide-last', roundId: 'round-last' })
+      .then(() => roundState('round-last').decision.outcomes, error => error.refusal)
+    const allUntested = Array.isArray(closed) && closed.length === 3 && closed.every(outcome => outcome.admitted === false && outcome.reason.includes('no candidate was submitted to this slot'))
+    check('a declared slot nobody submitted to is closed out as untested', allUntested, Array.isArray(closed) ? `${closed.length} outcomes` : closed.detail)
     // A candidate below the incumbent but almost free: the in-band cost rule would admit it
     // (100*-0.15 - 15*-9 > 0) and only the floor refuses it. The band is the calibration's, so the
     // same facts under a declared, wider band are admissible.
@@ -338,7 +345,6 @@ async function main() {
     check('a fact above the cutoff does not move the frozen gain', after.slots[1].gain === before.slots[1].gain && after.winner === before.winner, `gain ${after.slots[1].gain} vs ${before.slots[1].gain}`)
     check('a fact above the cutoff does not move novelty', after.slots[1].novelty === before.slots[1].novelty, `novelty ${after.slots[1].novelty}`)
 
-    // ---------------------------------------------------------------- 10. two calibers may not be pooled
     await open('round-2', 2)
     await record(result('e-c0', CANDIDATE_0, CALIBER_A, [0.7, 0.7]))
     await record(result('e-c1', CANDIDATE_1, CALIBER_B, [0.8, 0.8]))
@@ -348,7 +354,6 @@ async function main() {
     check('two calibers are refused rather than pooled', mixed.code === 'caliber-mismatch', mixed.code)
     check('the refused round has no decision fact', roundState('round-2').decision === undefined)
 
-    // ---------------------------------------------------------------- 11. a stale decision is refused
     await open('round-3', 3)
 
     await record(result('e-s0', CANDIDATE_0, CALIBER_A, [0.8]))
@@ -362,18 +367,15 @@ async function main() {
     const stale = await refusalOf(() => deciding)
     check('a decision the facts no longer imply is refused', stale.code === 'illegal-transition' && stale.detail.includes('recompute'), stale.detail)
 
-    // ---------------------------------------------------------------- 12. the facts survive a reopen
     await store.close()
     store = await ControlSessionStore.open({ persistence: live.persistence, controlId: 'round-probe', registry, subjects, cwd: root })
     commands = openCommands()
     const reopened = roundState('round-1')
-    check('the plan and the decision survive a reopen', reopened.plan.historyCutoff === plan.historyCutoff && reopened.decision.winner === 1)
-    check('the head survives a reopen', environmentState().pointer === PUBLISHED)
+    check('the plan and the decision survive a reopen', reopened.plan.historyCutoff === plan.historyCutoff && reopened.decision.winner === 1 && environmentState().pointer === PUBLISHED)
     check('the closed round still refuses a submission', (await refusalOf(() => submit('round-1', 0, { evaluationId: 'e-0', revision: CANDIDATE_0 }))).code === 'illegal-transition')
 
     const rounds = [...store.load().statesOf(STRATEGY_PROTOCOL, STRATEGY_VERSION).values()]
     console.log('')
-
     console.log(`rounds: ${rounds.filter(state => state.plan !== undefined).length}, submissions: ${rounds.reduce((total, state) => total + state.submissions.length, 0)}, decisions: ${rounds.filter(state => state.decision !== undefined).length}, checks: ${checks}, refusals: ${refusals}`)
     console.log(`budget: round 1 = ${firstBudget}, round ${ROUNDS} = ${lastBudget}; decision: winner slot ${decision.winner} of ${decision.outcomes.length}; published ${PUBLISHED} → novelty ${published.slots[0].novelty} for the accepted class, ${published.slots[1].novelty} for the other`)
     if (failures.length > 0) {

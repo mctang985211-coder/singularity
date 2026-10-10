@@ -27,8 +27,9 @@
  *    the band, and the source is named in the reason (R06). Quality is floored; `constraintsMet` is
  *    not: a below-floor candidate and an out-of-bounds one carry two different reasons.
  *
- * Every submitted slot gets a decision and a reason, admitted or not. `winner: null` means nothing
- * was admitted and the incumbent stands.
+ * Every declared slot gets a decision and a reason, admitted or not: a slot nobody submitted to is
+ * recorded as untested rather than left out. `winner: null` means nothing was admitted and the
+ * incumbent stands.
  *
  * One consequence a first reader will meet: a round opened with `historyCutoff: 0` on a fresh log has
  * nothing below its cutoff, so the incumbent has no frozen aggregate, every slot has no frozen gain,
@@ -143,6 +144,7 @@ export interface RoundDecision {
   readonly calibration: Calibration
   /** The round's frozen caliber: the measurement settings every pooled candidate answers (§5.4). */
   readonly caliber: string
+  /** One view per submission, in slot order. `outcomes` covers the whole plan, empty slots included. */
   readonly slots: readonly SlotView[]
   readonly winner: number | null
   readonly outcomes: readonly Outcome[]
@@ -330,15 +332,22 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
   }
 
   const slots = planned.map(entry => slotViewOf(entry, history))
-  const candidates: Candidate[] = slots.map(slot => {
-    const edits = submissions.find(submission => submission.slot === slot.slot)?.edits ?? []
+  // Every *declared* slot is closed out, whether or not it was offered a candidate: a slot nobody
+  // submitted to is untested, and its outcome says so in words instead of leaving the round's
+  // trajectory one slot short (R01). `select` judges it like any other inadmissible slot, so it is
+  // never admitted and therefore never the winner.
+  const candidates: Candidate[] = Array.from({ length: plan.candidates }, (_, slot): Candidate => {
+    const view = slots.find(entry => entry.slot === slot)
+    if (view === undefined)
+      return { slot, exploratory: false, assets: [], measurement: null, constraintsMet: false, inadmissible: 'no candidate was submitted to this slot' }
+    const edits = submissions.find(submission => submission.slot === slot)?.edits ?? []
     return {
-      slot: slot.slot,
-      exploratory: slot.exploratory,
+      slot,
+      exploratory: view.exploratory,
       assets: assetsOf(edits),
-      measurement: measurementOf(slot),
-      constraintsMet: slot.constraintsMet,
-      inadmissible: slot.reason,
+      measurement: measurementOf(view),
+      constraintsMet: view.constraintsMet,
+      inadmissible: view.reason,
     }
   })
 
