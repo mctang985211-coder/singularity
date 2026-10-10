@@ -1,0 +1,72 @@
+{
+  "inputs": [
+    {
+      "path": "tb/tb_sha256_w_mem_selfcheck.v",
+      "from": "tb/tb_sha256_w_mem_selfcheck.v"
+    }
+  ],
+  "workspace": {
+    "submission": "source",
+    "file": "rtl/sha256_w_mem.v",
+    "artifact": "rtl/sha256_w_mem.v",
+    "initial": "seed/sha256_w_mem.v"
+  },
+  "criteria": [
+    {
+      "criterionId": "w-schedule",
+      "statement": "the edited module produces the message schedule every published NIST vector requires, as the protected self-checking testbench compares it round by round",
+      "verifier": "functional"
+    }
+  ],
+  "verifiers": [
+    {
+      "ref": "functional",
+      "version": "1",
+      "program": "functional.mjs",
+      "args": ["{artifact}", "{input}"],
+      "selftest": [
+        {
+          "name": "accepts the unmodified upstream module",
+          "expected": "pass",
+          "artifact": "seed/sha256_w_mem.v",
+          "argv": ["seed/sha256_w_mem.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+        },
+        {
+          "name": "rejects a module whose schedule is wrong in one round",
+          "expected": "fail",
+          "artifact": "samples/fail-w_mem.v",
+          "argv": ["samples/fail-w_mem.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+        }
+      ]
+    },
+    {
+      "ref": "area",
+      "version": "1",
+      "program": "area.mjs",
+      "args": ["{artifact}"],
+      "selftest": [
+        {
+          "name": "measures the unmodified upstream module",
+          "expected": "pass",
+          "artifact": "seed/sha256_w_mem.v",
+          "argv": ["seed/sha256_w_mem.v"]
+        },
+        {
+          "name": "produces no number for a file that is not the graded module",
+          "expected": "fail",
+          "artifact": "samples/fail-no-module.v",
+          "argv": ["samples/fail-no-module.v"]
+        }
+      ]
+    }
+  ],
+  "metric": {
+    "unit": "um^2",
+    "direction": "lower",
+    "measured": {
+      "criterionId": "area",
+      "statement": "the synthesized chip area of the graded module and everything it instantiates, under one pinned yosys invocation and one pinned liberty",
+      "verifier": "area"
+    }
+  }
+}
