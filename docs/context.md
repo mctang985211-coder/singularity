@@ -1110,6 +1110,30 @@ G1 的域形状是「一段文本进 → 程序 stdout 出 → 一条判据 → 
 ③ 面板（`web.ts` + `client.js` + `panel-probe.mjs`，W2 在跑）；④ gate/ledger/deploy/文档同步；⑤ **一轮**对抗性审查，
 修完进 G3。`assembly/src` 的预算已由用户裁定抬到 1000（每文件仍 200），见 `scripts/gates.mjs` 的注释。
 
+### 17.5.1 已落地的部分（提交 `c8e64d8`，418 测试 / 24 门禁全绿）
+
+**缩写版**：core 的两条新规则、装配层的 domain v2、子任务调度、读路由与投影都已落地并有变异证明。
+**未落地**：`deployment/domain/sha256/**`（W1 在做）、面板的 client bundle 与探针（W2 在做）。
+`assembly/src` 现在 14 个文件、1414 行；每文件都 <200，`domain.ts`/`driver.ts` 按读写与调用/读的缝拆过
+（`shape.ts`/`verifiers.ts`/`snapshot.ts`/`workspace.ts`/`scheduler.ts` 是新文件）。
+
+**装配包总预算抬到 1500**（用户裁定；原来 800，我第一次估 1000 但实际 1414——注释里写的是实测值不是估算值）。
+每文件 200 的上限没有动，**而且正是它逼出了正确的拆分**。
+
+**三个接口在实现中改动了**（已同步给工作流，别再改回去）：
+- `advance(parent: Agent | undefined)`：子会话的预设、模型路由与写租约只能从父来。
+- `AgentTaskSurface` 现在有 **四个**工具：`propose` / `decompose` / `submit` / `status`；`decompose` 的返回是
+  `PlanRecord{taskId, opened}`，`children[].key` 是批内局部名，转成 `taskId` 后由 `taskIdOf` 派生稳定 id。
+- `ChildSessionRequest` 没有 `instruction`：投递是 `say()`，必须在 `open` 之后（DSH 的"setup 只组合不驱动"）。
+
+**`inject` 列表只有一个**（`sessionPersistence`），web 面的 `connection` 用 `ctx.get` 取：写进 `inject` 而 profile
+不提供会让**整个 bundle 静默跳过**——本轮实测的失效模式，也是本仓付过代价的。
+
+**两个门禁自身的缺陷本轮被撞出来并修好了**：`protocol-inventory` 的宿主桩重试只给失败的模块改名，它**相对的**
+依赖仍命中第一遍的缓存失败（把可加载的模块报成不可加载）；`no-unreferenced-export` 的扫描不含 `assembly/src`，
+于是插件正在调用的名字被报成"没人绑定"。**改门禁要像改代码一样给证据**，这两条都写进了注释。
+
+
 **接口在实现中改动了三处**（都是我改的，已同步给工作流，别再改回去）：
 
 - `advance(parent: Agent | undefined)` 需要父 agent：子会话的预设、模型路由与写租约都只能从父那里来，
