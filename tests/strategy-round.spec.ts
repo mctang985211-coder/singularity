@@ -29,7 +29,7 @@ import { declareStrategyProtocol, STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_RO
 import { projectRound, type FrozenAggregate, type MeasureSlice, type RoundEvaluation } from '../src/strategy/view.ts'
 import { asyncRefusalOf } from './fixtures.ts'
 
-const METRIC = { unit: 'score', direction: 'higher' } as const
+const METRIC = { direction: 'higher' } as const
 const WEIGHTS = { quality: 100, cost: 15 }
 const FLOOR: Calibration = { floor: 0.1, source: 'measured' }
 const CALIBER = 'f'.repeat(64)

@@ -84,7 +84,12 @@ export interface ReleaseState {
   readonly draftDigest: string
   /** The human identity the approval seam supplied. Present exactly when the draft is approved. */
   readonly approvedBy?: string
-  /** The `approval/asked` id the approval rests on. Present exactly when `approvedBy` is. */
+  /**
+   * The `approval/asked` id the approval rests on. Present exactly when `approvedBy` is. No reducer
+   * reads it, and it stays anyway: it is the audit identity of the native act, the one thing neither
+   * `approvedBy` (which human) nor the stamped approver role nor `commandId` (our own retry id)
+   * carries, and the deployment's approval probes read it back against the host's ask log.
+   */
   readonly approvalId?: string
 }
 

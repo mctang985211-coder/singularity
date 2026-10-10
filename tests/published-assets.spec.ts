@@ -40,7 +40,7 @@ const SUBJECTS: Readonly<Record<string, string>> = {
   [PUBLISHER_ROLE]: 'publisher-service',
   [STRATEGY_ROLE]: 'strategy-service',
 }
-const METRIC = { unit: 'score', direction: 'higher' } as const
+const METRIC = { direction: 'higher' } as const
 const WEIGHTS = { quality: 100, cost: 15 }
 const CALIBRATION = { floor: 0.1, source: 'measured' } as const
 const CALIBER = 'f'.repeat(64)

@@ -54,7 +54,8 @@ export interface OpenRoundInput {
   readonly historyCutoff: number
   /** The digest of the measurement settings every pooled candidate must have been measured under. */
   readonly caliber: string
-  readonly metric: { readonly unit: string; readonly direction: 'higher' | 'lower' }
+  /** Which way a larger measurement is better. The round's numbers carry no unit (version 4 removed it). */
+  readonly metric: { readonly direction: 'higher' | 'lower' }
   readonly weights: { readonly quality: number; readonly cost: number }
 }
 

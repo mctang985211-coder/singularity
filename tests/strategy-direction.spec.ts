@@ -6,8 +6,8 @@
  * elected the **worse** candidate. This is the argmax, the incumbent floor and the reported gain, each
  * under a direction-declaring round, through the repository's own reducer and `projectRound`.
  *
- * Every expected number is a hand-written literal from the round's own unit — the gain is `incumbent −
- * quality` under `lower`, computed here by hand — never recomputed the way the code computes it.
+ * Every expected number is a hand-written literal in the round's own direction — the gain is
+ * `incumbent − quality` under `lower`, computed here by hand — never recomputed the way the code does.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -48,7 +48,7 @@ function lowerRound(incumbent: number, qualities: readonly [number, number]): Re
     log.emit({ commandId: nextId('e'), protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind, subject: 'round-1', payload })
   emit(STRATEGY_KINDS.roundOpened, {
     round: 1, incumbent: INCUMBENT, candidates: 2, explorationSlots: 0, editBudget: 2, historyCutoff: 5,
-    caliber: CALIBER, metric: { unit: 'error-rate', direction: 'lower' }, weights: { quality: 100, cost: 15 },
+    caliber: CALIBER, metric: { direction: 'lower' }, weights: { quality: 100, cost: 15 },
   })
   const candidates = [rev('r0002', 'b'), rev('r0003', 'c')] as const
   candidates.forEach((revision, slot) => {

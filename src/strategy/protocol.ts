@@ -1,5 +1,5 @@
 /**
- * `strategy@3` — the explicit round: a plan frozen in one fact, a submission gate that is a refusal
+ * `strategy@4` — the explicit round: a plan frozen in one fact, a submission gate that is a refusal
  * rather than a sentence in a prompt, and a decision that carries the basis it was made on.
  *
  * The previous system derived the round from the number of history entries and the candidate index
@@ -60,6 +60,13 @@
  * recovered from the fact, and reading its absence as "untested" would invent the very reason this
  * rule exists to record.
  *
+ * **Version 4** removes `round/opened.metric.unit`. It was a required member no reader ever
+ * consumed — the projection ranks on `metric.direction` and the round's own numbers, so the label
+ * named a quantity nothing compared. Removing a required member changes the accepted shape exactly
+ * as adding one does, so version 3 facts, which carry `unit`, are refused **by name** from the same
+ * gate as versions 1 and 2, with no compatibility layer: this build cannot frame that payload, and
+ * reading it as a round without a unit would be the silent reinterpretation the closed shape is for.
+ *
  * @module singularity-core/strategy/protocol
  */
 
@@ -79,11 +86,13 @@ export type { RoundPlan } from './plan.ts'
 
 export const STRATEGY_PROTOCOL = 'strategy'
 /**
- * 3: a decision's accepted language — it accounts for every declared slot, not only the submitted
- * ones, so an old decision is refused by name rather than re-read as a complete one. 2: `round/opened`
- * gained a required `caliber`, and `round/decided` a required `calibration`.
+ * 4: `round/opened` no longer carries `metric.unit`, a required member with no reader, so a version 3
+ * fact is refused by name instead of being re-read as a round without a unit. 3: a decision's accepted
+ * language — it accounts for every declared slot, not only the submitted ones, so an old decision is
+ * refused by name rather than re-read as a complete one. 2: `round/opened` gained a required
+ * `caliber`, and `round/decided` a required `calibration`.
  */
-export const STRATEGY_VERSION = 3
+export const STRATEGY_VERSION = 4
 
 /** The trusted role that freezes a round, receives its candidates and closes it. */
 export const STRATEGY_ROLE = 'strategy'
@@ -116,7 +125,6 @@ export interface RoundDecisionRecord {
   readonly outcomes: readonly Outcome[]
   /** The noise basis the selection was made against, so a replay can reconstruct the band (R07). */
   readonly calibration: Calibration
-  readonly decidedBy: string
   readonly at: string
 }
 
@@ -124,7 +132,6 @@ export interface RoundDecisionRecord {
 export interface RoundState {
   readonly roundId: string
   readonly plan?: RoundPlan
-  readonly openedBy?: string
   readonly openedAt?: string
   readonly submissions: readonly CandidateSubmission[]
   readonly decision?: RoundDecisionRecord
@@ -239,7 +246,7 @@ function decidedPayload(raw: unknown, where: string): Decided {
 }
 
 /**
- * Declare `strategy@3`. Call once at load. Nothing here reads another slice: the measure views and
+ * Declare `strategy@4`. Call once at load. Nothing here reads another slice: the measure views and
  * the frozen history arrive as inputs to the projection and to the command boundary.
  */
 export function declareStrategyProtocol(registry: ProtocolRegistry): void {
@@ -356,7 +363,6 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
               winner: payload.winner,
               outcomes: payload.outcomes,
               calibration: payload.calibration,
-              decidedBy: envelope.actor,
               at: envelope.at,
             },
           }

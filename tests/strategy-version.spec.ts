@@ -1,14 +1,13 @@
 /**
- * `strategy@3` at the version gate: a fact of the previous version is refused by name, not re-read.
+ * `strategy@4` at the version gate: a fact of the previous version is refused by name, not re-read.
  *
- * The bump at version 3 moved the **accepted language** of `round/decided` — a decision accounts for
- * every slot the round declared, where version 2 accepted one that accounted only for the submitted
- * ones — so a version 2 fact is not reinterpreted under version 3's reading of a complete decision.
- * The refusal is `version-mismatch` and it names the version that *is* declared, which is the
- * actionable half: replay the log with the build that wrote it, or re-record the round.
- *
- * Both sides read `STRATEGY_VERSION`, so the next bump re-points nothing here: the assertion stays
- * "the version before this one is refused", which is the property every bump in this stack keeps.
+ * Version 4 removed a required member (`round/opened.metric.unit`), so a version 3 fact, which
+ * carries it, is refused rather than re-read as a round without a unit. Version 3 moved the
+ * **accepted language** of `round/decided` — it accounts for every declared slot — so a version 2
+ * fact is not reinterpreted under version 3's reading of a complete decision. The refusal is
+ * `version-mismatch` and it names the version that *is* declared: replay the log with the build that
+ * wrote it, or re-record the round. Both sides read `STRATEGY_VERSION`, so the next bump re-points
+ * nothing here — the assertion stays "the version before this one is refused".
  */
 
 import { describe, expect, it } from 'vitest'

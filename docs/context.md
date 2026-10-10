@@ -331,18 +331,39 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 `tests/control-store.spec.ts:175`（`…contractDigest).toBeDefined()`）——三条都是"存在即通过"，
 任何非空值都能过。**这不是 F2 那个自由参数的形状，是 `debugging.md` §3 的第三类。**
 
-## 11c. 两个新的硬约束（F1 修完后出现，下一轮会撞上）
+## 11c. 两个新的硬约束（**其中一条我原先写反了，已被实测更正**）
 
-1. **`src/strategy/view.ts` 正好卡在 400 行预算上**（门禁 >400 才红）。方向感知花了约 29 行净增，
+1. **`src/strategy/view.ts` 卡在 400 行预算上**（门禁 >400 才红）。方向感知花了约 29 行净增，
    是用压缩该文件自己的说明文字换来的。**该文件下一次任何净增都必须先有等量的删除。**
-2. **`spec-budget` 只剩 52 行余量**（specs 6,861 / src 8,131 = 0.844，棘轮 0.85）。F1 的 spec 因此
-   从 159 行砍到 86 行（砍掉的是**重叠**的那三条，砍得对）。
+2. **`spec-budget` 只剩约 70 行余量**（棘轮 0.85）。
 
-   **但下一轮不要靠继续砍 spec 来腾地方。** 比值失控有两种原因，而 `docs/spec-policy.md` §4 只允许
-   一种修法：**说不出来外部事实的 spec 删掉**；而**说不出来外部事实的代码也删掉**。
-   这里的第二种才对症：审查已经点名**四个存了没人读的字段**（F9：`RoundDecisionRecord.decidedBy`、
-   `RoundState.openedBy`、`ReleaseState.approvalId`、`RoundPlan.metric.unit`）**和一个消费端没有的重复载荷**
-   （F7：信封里的 `seq`/`prevDigest`/`at`/`digest`，承载方本来就提供）。**删这些同时降低分母并消掉真实缺陷。**
+   **更正**：我原先写"删掉没有消费者的源码同时能解救 spec 预算"——**这是反的**。
+   门禁比的是 **specs ÷ src**：
+
+   - **删源码 → 比值上升（更紧）**。实测：F9 删了 4 行代码、净加 24 行（版本说明 + 两处"为什么保留"），
+     比值 0.8435 → 0.8412，**是加了源码才松的，不是删了代码**。
+   - **删 spec → 比值下降**（唯一真正对症的减项）。
+   - 加源码 → 比值下降，但那不是目标。
+
+   所以 **F9 那批删除的正当理由是根因 3（声明了没有消费者），不是预算**。
+   要松预算只有两条路：**删掉说不出来外部事实的 spec 断言**（`spec-policy.md` §4），
+   或者如实承认覆盖率已经到位、把棘轮停在实测值。
+
+## 11e. F9/F7 的裁决（**两条都记了理由，不是机械删**）
+
+- **删**：`RoundDecisionRecord.decidedBy`、`RoundState.openedBy`（两者都只是重述 `envelope.actor`，
+  而每个 `round/decided` 都由 `STRATEGY_ROLE` 发射，值是常量）、`RoundPlan.metric.unit`（无读者）。
+  因为 `unit` 是 `round/opened` 的**必填**成员，这是 **`strategy@4`**（v3 按 `version-mismatch` 具名拒绝；
+  v4 载荷带 `unit` 按闭合形状拒绝）。
+- **留 `ReleaseState.approvalId`**：不是 frame 的重述（`actor` 是批准**角色**、`approvedBy` 是哪个人、
+  `commandId` 是我们自己的重试 id、`draftDigest` 是内容绑定），而它是**唯一**把已记录的批准与原生
+  `approval/asked` 那一次动作连起来的成员，且有两个独立读数（`release-probe`、`cd-probe`）。
+  删了就得让读者重新扫原始事实——**为了拿一个已经算好的值而重放**（`debugging.md` §1）。理由写进 JSDoc。
+- **留 F7（信封里的 `seq`/`prevDigest`/`at`）**，并在 `envelope.ts` 的模块 docstring 里写下**权威划分**：
+  承载方拥有**物理位置**（会话里第几个事件、append 续什么、readback 按什么寻址），
+  信封拥有**日志的位置、链与时刻**——`seq` 是所有 cutoff 算术的单位，`adopt` 仅凭 `seq`/`prevDigest`
+  就能校验连续性与链（这是"从不可信介质读回来的日志自证"的全部），`at` 被 13 个 reducer 读而承载方的
+  `time` 从不进入 reducer。收尾一句：**"Re-open U02 only with an owner for the cuts."**
 
 ## 12. C/D 已落地并被门禁强制（提交见下）；剩余一项
 

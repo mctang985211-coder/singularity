@@ -8,6 +8,18 @@
  * The digest covers the body only (`digest` excluded), so a fact's identity is exactly what
  * it claims, and a tampered payload is a named refusal rather than a silent reinterpretation.
  *
+ * **Why `seq`, `prevDigest` and `at` stay when the carrier already supplies a sequence and a time.**
+ * `review.md` U02 read them as a second copy of the medium's `SessionEvent.seq`/`time`; the split is
+ * by authority. The carrier owns the **physical** position — which event in the session, what an
+ * append continues, what a readback is addressed by. This frame owns **the log's** position, link and
+ * instant: `seq` is the unit every cut is expressed in (the frozen `historyCutoff`,
+ * `publishedAssetsBelow`, `ControlReadCut.entriesOf`), and `adopt` verifies contiguity and chain links
+ * on `seq`/`prevDigest` alone, so a log read back from a medium is checked on its own terms; `at` is
+ * the instant reducers record, which the carrier's `time` never reaches them. The two agree today only
+ * because a control session carries nothing but control events — the log keeps its own so it stays
+ * foldable with no carrier to ask, which is how every spec uses it. Re-open U02 only with an owner for
+ * the cuts.
+ *
  * @module singularity-core/protocol/envelope
  */
 

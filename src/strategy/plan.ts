@@ -48,13 +48,14 @@ export interface RoundPlan {
   readonly historyCutoff: number
   /** The measurement settings every pooled candidate must have been measured under (§5.4). */
   readonly caliber: string
-  readonly metric: { readonly unit: string; readonly direction: 'higher' | 'lower' }
+  /** Which way is better. The numbers compared are the round's own; a unit label had no reader. */
+  readonly metric: { readonly direction: 'higher' | 'lower' }
   readonly weights: { readonly quality: number; readonly cost: number }
 }
 
 const APPENDED = { appended: true } as const
 const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as const
-const METRIC_MEMBERS = ['unit', 'direction'] as const
+const METRIC_MEMBERS = ['direction'] as const
 const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
 const OPENED_MEMBERS = ['round', 'incumbent', 'candidates', 'explorationSlots', 'editBudget', 'historyCutoff', 'caliber', 'metric', 'weights'] as const
 
@@ -124,7 +125,7 @@ function openedPayload(raw: unknown, where: string): RoundPlan {
     editBudget: count(source, 'editBudget', where),
     historyCutoff: count(source, 'historyCutoff', where),
     caliber: digest(source, 'caliber', `${where}.caliber`),
-    metric: { unit: text(metric, 'unit', `${where}.metric`), direction },
+    metric: { direction },
     weights: { quality: quality as number, cost: cost as number },
   }
 }
@@ -149,7 +150,6 @@ export function openedKind(kind: string, emitter: string): KindRule<RoundState> 
       return {
         roundId: envelope.subject,
         plan: payload,
-        openedBy: envelope.actor,
         openedAt: envelope.at,
         submissions: [],
       }

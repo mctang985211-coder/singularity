@@ -699,7 +699,7 @@ async function main() {
       // The question every pooled candidate must have answered: the incumbent's own caliber, which
       // is derived from the frozen plan and not invented here.
       caliber: caliberDigestOf(measureStateOf('r1-baseline')),
-      metric: METRIC,
+      metric: { direction: METRIC.direction },
       weights: WEIGHTS,
     })
     // Each candidate is measured **against the round's incumbent**, which is what makes its gain
@@ -854,7 +854,7 @@ async function main() {
       explorationSlots: 0,
       historyCutoff: store.load().entries().length,
       caliber: caliberDigestOf(measureStateOf('r2-baseline')),
-      metric: METRIC,
+      metric: { direction: METRIC.direction },
       weights: WEIGHTS,
     })
     const planTwo = roundStateOf('round-2').plan
@@ -959,7 +959,7 @@ async function main() {
         explorationSlots: 0,
         historyCutoff: store.load().entries().length,
         caliber: caliberDigestOf(measureStateOf('iso-a')),
-        metric: METRIC,
+        metric: { direction: METRIC.direction },
         weights: WEIGHTS,
       })
       for (const [slot, side] of [left, right].entries())

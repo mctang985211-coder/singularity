@@ -48,7 +48,7 @@
     },
     {
       "protocol": "strategy",
-      "version": 3,
+      "version": 4,
       "subject": "the round id",
       "kinds": [
         "candidate/submitted",
