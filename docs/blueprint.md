@@ -407,7 +407,7 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | 门禁 | 拦住的屎 | 是否已证伪 |
 |---|---|---|
 | `no-export-star` | 隐藏模块承诺的 barrel | ✅ |
-| `single-durable-writer` | 第二个写者（S3' 后收紧为"零持久写者"） | ✅ |
+| `src-names-no-durable-write` | 第二个写者（S3' 后收紧为"`src/` 下没有任何模块点名持久写"；作用域就是产品，测试与探针要落到 `mkdtemp` 才能行使沙箱） | ✅ |
 | `no-unreferenced-export` | 面大于所用（旧仓 197 处） | ✅ |
 | `no-duplicate-type-body` | 一个类型声明两次 | ✅ |
 | `source-size` | 400 行（起始上界，不是目标） | ✅ |

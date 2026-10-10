@@ -95,7 +95,7 @@ winner …"里，一条在 `task-binding` 的"refuses a bubble …"里），全�
 - 所以"这棵树不持久化写"这句话**兑现不了**，而它此前是绝对口气印出来的。
 
 **改动**：门禁名从 `no-durable-writer` 改成 **`src-names-no-durable-write`**，
-七处打印文案从 "no module may write durably" 改成 "no module **under src/** may write durably"，
+六处打印文案从 "no module may write durably" 改成 "no module **under src/** may write durably"（计数由 `grep -c 'under src/'` 复核），
 检测器上加一段说明作用域与理由。**检测器扫的范围一个字没动**（仍是 `src/`），
 变的只有它承诺的东西 —— 这正是"绿的意思是这次扫描说不出一个写，从来不是没有写过"那句话的同一方向。
 
