@@ -615,10 +615,10 @@ const DETECTORS = [
  * job is to keep the others honest. The measured ratio is printed on every run next to the charge, and
  * stated in this gate's finding when it is over the ratchet: a frozen number here would drift.
  *
- * The one stated allowance: the ratchet sits at 1.88 while the closes that kept it there measured 1.8765
- * (16,451 lines of evidence against 8,767 of source), about 30 lines — one detector and one probe leg,
+ * The one stated allowance: the ratchet sits at 1.88 while the closes that kept it there measured 1.8775
+ * (16,460 lines of evidence against 8,767 of source), about 22 lines — one detector and one probe leg,
  * which is what a close of this kind costs. Round six's closes did not take more than that: the count
- * scan over every document and the recursive charge under `scripts/` added 281 lines to this file and
+ * scan over every document and the recursive charge under `scripts/` added 290 lines to this file and
  * deleted 230 of the restatement they replaced, and the allowance is unchanged in kind from round five's.
  */
 const EVIDENCE_BUDGET = 1.88
@@ -777,7 +777,7 @@ const RECORD_DOCS = new Set([
   'docs/adversarial-review-5.md',
   'docs/adversarial-review-6.md',
 ])
-const COMMIT = /\b[0-9a-f]{7,40}\b/
+const COMMIT = /\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b/
 
 /** Every document the count scan reads: this repository's own markdown, not two named files. */
 function docPaths() {
@@ -819,8 +819,9 @@ const TREE_ON_LINE = /src\/|tests\/|scripts\/|docs\/|singularity-core|README\.md
 
 /**
  * The prose scan. Three boundaries, each stating what it does not reach (the reasoning is in §13): a
- * fenced block is quoted output, and a fence left *open* is a finding; a line that names a commit is a
- * record of that commit, which is not verified against git because this gate reads the tree and not its
+ * fenced block is quoted output, and a fence left *open* is a finding; a line that names a commit — a
+ * hex token with a letter in it, because a bare long number is not a commit — is a record of that
+ * commit, and the commit is not verified against git because this gate reads the tree and not its
  * history; and a declared record is checked rather than trusted.
  *
  * Not caught, said here rather than assumed: a count spelled in words, a bare number in a table cell
@@ -1621,6 +1622,7 @@ if (PROBE) {
     ['a count inside a fenced block, which is quoted output', [{ file: 'docs/__probe.md', text: '```\ngates: 11 gates over 42 files\n```\n' }], 0],
     ['a fence left open, which would exempt the rest of the document', [{ file: 'docs/__probe.md', text: '```\ngates: OK — 11 gates passed\n' }], 1],
     ['a count whose line names the commit it measures', [{ file: 'docs/__probe.md', text: 'at `e8c1c70` the tree had 10 gates\n' }], 0],
+    ['a count on a line whose long number is not a commit', [{ file: 'docs/__probe.md', text: 'the tree has 12 gates, measured 20261010\n' }], 1],
     ['a bare file count that does not name a tree', [{ file: 'docs/__probe.md', text: '4 files were misread in one revision\n' }], 0],
     ['a bare file count that names this tree', [{ file: 'docs/__probe.md', text: 'this tree has 15 files\n' }], 1],
     ['a declared record that names its commit', [{ file: 'docs/__probe-review.md', text: 'measured at `e8c1c70`: 21 gates\n' }], 0],
