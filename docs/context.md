@@ -1074,3 +1074,59 @@ G1 的域形状是「一段文本进 → 程序 stdout 出 → 一条判据 → 
 - **功能腿是硬约束**：面积再低、NIST 不过就是 inadmissible；不要把"没跑成"记成"低分"。
 - **冻结前不写成绩**：`yosys_from` 双路解析在冻结前只作冒烟，任何"提升 x%"的说法都要等冻结后的同一 caliber。
 - **不要为了跑 sha256 而把 letters 的域形状改坏**：需要一个域接口承载两种形状，不是把 letters 撑大。
+
+### 17.5 G2 进行中：已冻结的接口与本轮已落地的东西
+
+**接口先冻结再并行**：[phase-g2-design.md](phase-g2-design.md)（本轮提交 `087bc6c`）是三个工作流共同的契约，
+§6b 是三个冻结的类型面。压缩后若要继续，先读它，再读本节。
+
+本轮**已经在 `main` 上**的东西：
+
+- `task/decomposed` 与 `task/reassigned` 的 reducer 现在要求 actor 是该任务**当前持有人**（关掉 `assembly-review.md`
+  A01 留给 G2 的那条）。用的是既有的 `requireResponsible`，**没有新增拒绝码**，也不升版本：被拒的序列在本树
+  任何真实部署的日志里不可达。同一次提交里改正了所有发射顺序（`tests/` 的 fixture、`scripts/{slice-b,recovery-probe,
+  rsi-live}.mjs`）——它们是"先规划后派人"，而真实顺序是先派人后规划。
+- `run/started` 的命令期检查多一条：任务的计划里有子任务正在 `running` 时，父任务自己的 run 被具名拒绝
+  （`waiting_children` 放在能真正拦住东西的地方；命令期而不是 fold，因为 fold 只能事后删事实）。
+  **故意是"有子任务在跑"而不是"计划未完成"**：父任务在子任务开工前跑自己的基线、在子任务 verified 后再跑，
+  是战役的正常形状。
+- `src/runtime/agent-session.ts`：`AgentSessionRequest` 多了 `parentAgent`（会话头的持久父子链接）与 `setup`
+  （预设是**作用域父**不是字段——`meta.agentPreset` 不给工具；`composeFrom` 必须在 setup 里做），
+  `OpenedAgentSession` 多了 `agent`（唯一只能用它做的事：往收件箱投一条消息）。resume 会重跑 setup。
+- `src/runtime/child-session.ts`（新）：DSH **没有公开的"跑一个回合"API**。实测三条路里只有一条对自建子会话可用：
+  `agent.followup(createUserMessage(...))` + `await agent.whenIdle()`（`ctx.subagents.sendMessage` 对自建子会话抛
+  `NOT_RESUMABLE`，手写 `user/message` 因 surface-eligible 缺 `surfaceOp` 被拒）。该模块的 JSDoc 写明了为什么
+  `whenIdle` 在这里精确、以及它何时会不再精确。
+- `scripts/gates.mjs` 的 `protocol-inventory` 宿主桩有一个**真 bug 被这一轮撞出来**：第一遍 import 已经缓存了
+  失败，重试只给失败的模块改名，于是它**相对的**依赖仍命中第一遍的缓存失败，把"能加载的模块"报成"无法加载"。
+  修法是把 retry 标记沿相对边传播进子图。
+
+**尚未落地（下一步）**：`assembly/src/domain.ts` 的 v2（工作区准备 + 受保护输入 + 度量声明）、
+`deployment/domain/sha256/**`、`assembly/src/web.ts` + `client.js` + 读面板探针，以及三个域的 gate/ledger/deploy 同步。
+分工与文件域见设计文档 §7。
+
+**压缩后接着做的顺序（照这个来，不要重新规划）**：`git status` 看已在树上的改动，然后
+① `domain.ts` 的 v2（唯一挡住 `tsc -p assembly/tsconfig.json` 的东西）；② `deployment/domain/sha256/**`；
+③ 面板（`web.ts` + `client.js` + `panel-probe.mjs`，W2 在跑）；④ gate/ledger/deploy/文档同步；⑤ **一轮**对抗性审查，
+修完进 G3。`assembly/src` 的预算已由用户裁定抬到 1000（每文件仍 200），见 `scripts/gates.mjs` 的注释。
+
+**接口在实现中改动了三处**（都是我改的，已同步给工作流，别再改回去）：
+
+- `advance(parent: Agent | undefined)` 需要父 agent：子会话的预设、模型路由与写租约都只能从父那里来，
+  没有"没有父的 child"。`undefined` 具名拒绝。
+- `AgentTaskSurface` 多了 `decompose({taskId, children})` → `PlanRecord{taskId, opened}`：计划是持有人写的，
+  写完当场把 `ready` 的子任务开起来。**先提交计划再开会话**（计划是事实，会话不是）。
+- `ChildSessionRequest` **没有** `instruction` 字段：投递就是 `say()`，而它必须在 `open` 之后——
+  DSH 自己的契约是"setup 只组合、不驱动"。`openChildSession` 里 `agentPresets.composeFrom` 在 `setup` 内跑。
+
+**`inject` 列表故意只有一个**（`sessionPersistence`）：`inject` 里写一个 profile 不提供的名字会让**整个 bundle 静默跳过**
+（本轮实测、且是本仓付过代价的失效模式）。`sessions`/`agents`/`agentLoop`/`agentPresets` 一律从 context 读，
+缺席时由用到它的地方具名拒绝。同理 W2 用 `ctx.get('connection')` 拿鉴权门而不是把它写进 `inject`
+（cordis 的 proxy 对没有 inject 的属性直接抛 `cannot get property "connection" without inject`）。
+
+
+**度量口径的一条新决定（比上游报告更严，因为本轮实测）**：sha256 域的 quality 读 **`Chip area for top module`**
+（层级合计），不读 lab grader 用的 `Chip area for module`（局部面积）。原因是实测：局部面积**不是分区不变量**——
+把同样的逻辑搬进一个子模块，局部读数掉 17.7% 而总面积**上升**。层级合计对"把逻辑搬去哪儿"不敏感，
+所以它才是那个"越小越好"真的意味着更小的数。分区本身仍然被钉住（文件列表与顺序），lib 的字节摘要也进口径。
+

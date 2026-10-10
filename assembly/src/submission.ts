@@ -6,8 +6,8 @@
  */
 
 import { execFile, spawn } from 'node:child_process'
-import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../../src/environment/protocol.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
@@ -46,6 +46,7 @@ export function workspaceOf(apparatus: Apparatus, taskId: string): string {
   return join(apparatus.workspaceRoot, 'tasks', taskId)
 }
 export async function submit(apparatus: Apparatus, caller: Caller, callId: string, request: { readonly taskId: string; readonly program: string }): Promise<Submission> {
+  const { domain } = apparatus
   const runId = runIdOf(apparatus.controlId, caller.sessionId, callId)
   const committed = taskStateOf(apparatus, request.taskId)
   // Only the holder may attempt the task, and this is checked before anything is written — including
@@ -68,12 +69,17 @@ export async function submit(apparatus: Apparatus, caller: Caller, callId: strin
     )
 
   const workspace = workspaceOf(apparatus, request.taskId)
-  const inputPath = join(workspace, apparatus.domain.inputPath)
-  const declared: BubbleInput = { name: apparatus.domain.inputPath, digest: await digestOf(inputPath, `the input of task "${request.taskId}"`) }
+  const [declared] = domain.inputs
+  if (declared === undefined)
+    refuse('malformed-declaration', `the domain declares no input, so task "${request.taskId}" has nothing to judge an artifact against`)
+  // The digest the run is bound to is the one the loader computed over the domain's own bytes, never a
+  // re-read of the workspace: the material is staged from those exact bytes, and re-reading would let a
+  // file that changed under the deployment redefine what this attempt was judged against.
+  const frozen: BubbleInput = { name: declared.path, digest: declared.digest }
   // The revision is derived from the request, never from workspace bytes: a program may rewrite its own
   // input, and an id built from those bytes would make the retry a different command against siblings
   // the first delivery already committed.
-  const basis = sha256(`${apparatus.domain.templateDigest}\u0000${request.taskId}`)
+  const basis = sha256(`${domain.templateDigest}\u0000${request.taskId}`)
   const revisionId = `rev-${basis.slice(0, 16)}`
   await apparatus.environments.createRevision({
     commandId: `revision:${basis}`,
@@ -93,23 +99,29 @@ export async function submit(apparatus: Apparatus, caller: Caller, callId: strin
     commandId: `bubble:${request.taskId}/${runId}`,
     taskId: request.taskId,
     runId,
-    inputs: [declared],
+    inputs: [frozen],
     workspace: { kind: 'dir', ref: workspace },
     model: caller.model,
     tools: [{ name: 'node', version: process.version, implementationDigest: await toolchainDigest() }],
     conditions: [],
   })
 
-  const programPath = join(workspace, apparatus.domain.program)
-  await writeFile(programPath, request.program, 'utf8')
-  await writeFile(join(workspace, apparatus.domain.artifact), await runProgram(programPath, inputPath), 'utf8')
-  await judgeAndRecord(apparatus, request.taskId, runId, workspace, declared)
+  // The submitted text lands at the domain's `file` in both shapes: a program to be run, or the source
+  // the criterion judges. What differs is only whether something else produces the artifact, and that
+  // is `domain.submission` — the one place this layer reads a submission shape.
+  const filePath = join(workspace, domain.file)
+  await mkdir(dirname(filePath), { recursive: true })
+  await writeFile(filePath, request.program, 'utf8')
+  if (domain.submission === 'program') {
+    const inputPath = join(workspace, declared.path)
+    await writeFile(join(workspace, domain.artifact), await runProgram(filePath, inputPath), 'utf8')
+  }
+  await judgeAndRecord(apparatus, request.taskId, runId, workspace, frozen)
   await apparatus.tasks.settle({ commandId: `settle:${request.taskId}/${runId}`, taskId: request.taskId, runId }, key)
   return answerOf(apparatus, taskStateOf(apparatus, request.taskId), runId)
 }
 export async function judgeAndRecord(apparatus: Apparatus, taskId: string, runId: string, workspace: string, declared: BubbleInput): Promise<void> {
   const { domain } = apparatus
-  const inputPath = join(workspace, domain.inputPath)
   const artifactPath = join(workspace, domain.artifact)
   const judged = await runProductionVerdict({
     runId,
@@ -118,7 +130,9 @@ export async function judgeAndRecord(apparatus: Apparatus, taskId: string, runId
     inputs: [declared],
     workspace,
     artifactPath: domain.artifact,
-    command: commandOf(domain.verifier, artifactPath, inputPath),
+    // The `{input}` vocabulary is closed and names exactly one staged path — the single input the loader
+    // requires — so a verifier that needs it is handed that one and nothing else.
+    command: commandOf(domain.verifier, artifactPath, join(workspace, declared.name)),
     // The digest of the bytes about to run, read here: a verifier rebuilt under this deployment must be
     // reported as a different implementation, never judged anyway.
     runJudge: async execution => {

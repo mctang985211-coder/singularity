@@ -40,9 +40,11 @@ async function broken(task: unknown): Promise<string> {
   await writeFile(join(dir, 'verifier.mjs'), 'process.exit(0)\n', 'utf8')
   await writeFile(join(dir, 'samples', 'pass.txt'), '3', 'utf8')
   await writeFile(join(dir, 'samples', 'fail.txt'), '4', 'utf8')
+  // The v2 shape: an input is protected material with a source, and the workspace names the submission
+  // shape, the file it is written to, and the artifact the criterion reads.
   const base = {
-    inputs: ['in/source.txt'],
-    workspace: { program: 'program.mjs', artifact: 'report.txt' },
+    inputs: [{ path: 'in/source.txt', from: 'samples/pass.txt' }],
+    workspace: { submission: 'program', file: 'program.mjs', artifact: 'report.txt' },
     criteria: [{ criterionId: 'letters', statement: 'the report is the count', verifier: 'letters' }],
     verifiers: [
       {
@@ -65,10 +67,11 @@ describe('the deployment domain', () => {
   it('reads every domain string from the declared file, digesting the verifier bytes', async () => {
     const domain = await loadDomain(REAL, spawnProcess)
     const declared = JSON.parse(await readFile(join(REAL, 'task.json'), 'utf8'))
-    expect([domain.inputPath, domain.artifact, domain.program]).toEqual([
-      declared.inputs[0],
+    expect([domain.inputs.map(input => input.path), domain.artifact, domain.file, domain.submission]).toEqual([
+      declared.inputs.map((input: { path: string }) => input.path),
       declared.workspace.artifact,
-      declared.workspace.program,
+      declared.workspace.file,
+      declared.workspace.submission,
     ])
     expect([domain.criterion.verifierRef, domain.criterion.implementationDigest]).toEqual([
       declared.verifiers[0].ref,
@@ -82,9 +85,36 @@ describe('the deployment domain', () => {
     expect(report).toMatchObject({ ran: 2, failures: [] })
   })
 
-  it('refuses a domain that does not declare exactly one input, by name', async () => {
-    const dir = await broken({ inputs: [] })
-    expect((await asyncRefusalOf(() => loadDomain(dir, spawnProcess))).detail).toContain('exactly one input')
+  it('refuses an input that resolves outside the domain, by name', async () => {
+    const dir = await broken({ inputs: [{ path: 'in/source.txt', from: '../outside.txt' }] })
+    expect((await asyncRefusalOf(() => loadDomain(dir, spawnProcess))).detail).toContain('outside')
+  })
+
+  it('refuses a domain that declares more than one input, by name', async () => {
+    const dir = await broken({
+      inputs: [
+        { path: 'in/one.txt', from: 'samples/pass.txt' },
+        { path: 'in/two.txt', from: 'samples/fail.txt' },
+      ],
+    })
+    // The template vocabulary is closed and `{input}` is singular, so a second input would expand to
+    // whichever one this layer happened to pick; refused by name rather than half-filled.
+    expect((await asyncRefusalOf(() => loadDomain(dir, spawnProcess))).detail).toContain('exactly one staged path')
+  })
+
+  it('refuses a source submission whose file is not the artifact it is judged as', async () => {
+    const dir = await broken({ workspace: { submission: 'source', file: 'rtl/edited.v', artifact: 'rtl/judged.v', initial: 'samples/pass.txt' } })
+    expect((await asyncRefusalOf(() => loadDomain(dir, spawnProcess))).detail).toContain('judged as written')
+  })
+
+  it('refuses a program submission that also declares a starting source', async () => {
+    const dir = await broken({ workspace: { submission: 'program', file: 'program.mjs', artifact: 'report.txt', initial: 'samples/pass.txt' } })
+    expect((await asyncRefusalOf(() => loadDomain(dir, spawnProcess))).detail).toContain('second writer')
+  })
+
+  it('refuses a submission shape that is neither a program nor a source', async () => {
+    const dir = await broken({ workspace: { submission: 'binary', file: 'program.mjs', artifact: 'report.txt' } })
+    expect((await asyncRefusalOf(() => loadDomain(dir, spawnProcess))).detail).toContain('binary')
   })
 
   it('refuses a criterion naming a verifier the domain does not hold', async () => {

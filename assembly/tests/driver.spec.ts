@@ -20,8 +20,8 @@ import { agentFor, execFor, factsOf, kindsOf, mount, serviceOf } from './seam.ts
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const sha256 = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
 
-/** The input every case uses: nine letters, which is what the report must say. */
-const INPUT = 'alpha beta'
+/** The count the domain's own staged input holds — the report the criterion demands of every case. */
+const LETTERS = 35
 const COUNTING = "import { readFileSync } from 'node:fs'\nprocess.stdout.write(String((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).length))\n"
 
 let root: string | undefined
@@ -38,42 +38,45 @@ async function mounted(controlId = 'lib-1') {
 }
 
 describe('one caller through the host plugin', () => {
-  it('admits the caller its own task, and writes the input into the workspace', async () => {
+  it("stages the domain's own protected input, and admits the task against it", async () => {
     const { surface, medium, workspace } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'count the letters', input: INPUT })
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'count the letters' })
     expect(kindsOf(medium)).toEqual(['agent/opened', 'task/admitted', 'task/assigned'])
-    expect([await readFile(join(proposal.workspace, 'in', 'source.txt'), 'utf8'), proposal.workspace]).toEqual([INPUT, join(workspace, 'tasks', proposal.taskId)])
+    // The bytes come from the declaration, and the contract names the path they were staged to: a
+    // caller supplies a goal and nothing else, so the input cannot be chosen by the model.
+    const staged = await readFile(join(proposal.workspace, 'in', 'source.txt'), 'utf8')
+    expect([staged, await readFile(join(REAL, 'samples', 'source.txt'), 'utf8'), proposal.workspace]).toEqual([staged, staged, join(workspace, 'tasks', proposal.taskId)])
   })
 
   it('opens the caller node under the role it was told to, with the real session id', async () => {
     const { surface, medium } = await mounted()
-    await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g', input: INPUT })
+    await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
     expect(factsOf(medium)[0]?.payload).toMatchObject({ agentId: 'agent-7', sessionId: 'session-9', role: 'root' })
   })
 
   it('proposes the same goal twice as one task, committing nothing the second time', async () => {
     const { surface, medium } = await mounted()
     const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const first = await surface.forCall(call).propose({ goal: 'count the letters', input: INPUT })
+    const first = await surface.forCall(call).propose({ goal: 'count the letters' })
     const committed = medium.events.length
-    const second = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).propose({ goal: 'count the letters', input: INPUT })
+    const second = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).propose({ goal: 'count the letters' })
     expect([second.taskId, medium.events.length]).toEqual([first.taskId, committed])
   })
 
   it('records a verified run whose verdict comes from the domain verifier', async () => {
     const { surface, medium } = await mounted()
     const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const proposal = await surface.forCall(call).propose({ goal: 'count the letters', input: INPUT })
+    const proposal = await surface.forCall(call).propose({ goal: 'count the letters' })
     const answer = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
-    expect(answer).toMatchObject({ verdict: 'pass', phase: 'verified', artifactDigest: sha256('9') })
+    expect(answer).toMatchObject({ verdict: 'pass', phase: 'verified', artifactDigest: sha256(String(LETTERS)) })
     expect(kindsOf(medium).slice(-3)).toEqual(['bubble/opened', TASK_KINDS.evidenceProduced, TASK_KINDS.runVerified])
   })
 
   it('records the model route and the toolchain that actually ran in the bubble', async () => {
     const { surface, medium } = await mounted()
     const call = execFor(agentFor('agent-7', 'session-9', 'm-under-test'), 'call-1')
-    const proposal = await surface.forCall(call).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(call).propose({ goal: 'g' })
     await surface.forCall(execFor(agentFor('agent-7', 'session-9', 'm-under-test'), 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
     expect(factsOf(medium).find(fact => fact.kind === 'bubble/opened')?.payload).toMatchObject({
       model: 'test/m-under-test',
@@ -84,7 +87,7 @@ describe('one caller through the host plugin', () => {
   it('records a wrong answer as a fail rather than a success', async () => {
     const { surface } = await mounted()
     const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const proposal = await surface.forCall(call).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(call).propose({ goal: 'g' })
     const answer = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).submit({ taskId: proposal.taskId, program: "process.stdout.write('0')" })
     expect(answer).toMatchObject({ verdict: 'fail', phase: 'failed' })
   })
@@ -92,7 +95,7 @@ describe('one caller through the host plugin', () => {
   it('records a crashing program as an empty artifact the verifier refuses', async () => {
     const { surface } = await mounted()
     const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const proposal = await surface.forCall(call).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(call).propose({ goal: 'g' })
     const answer = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).submit({ taskId: proposal.taskId, program: "process.stdout.write('5'); process.exit(3)" })
     expect([answer.verdict, answer.phase, answer.artifactDigest]).toEqual(['fail', 'failed', sha256('5')])
   })
@@ -100,7 +103,7 @@ describe('one caller through the host plugin', () => {
   it('answers a redelivered call from the record and runs nothing again', async () => {
     const { surface, medium } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
     const first = await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
     const committed = medium.events.length
     await rm(join(proposal.workspace, 'program.mjs'))
@@ -112,9 +115,9 @@ describe('one caller through the host plugin', () => {
   it('freezes the revision against the request, not against bytes a program can rewrite', async () => {
     const { surface, medium } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
-    const first = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g', input: INPUT })
+    const first = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
     await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: first.taskId, program: COUNTING })
-    const second = await surface.forCall(execFor(agent, 'call-3')).propose({ goal: 'another goal', input: 'other input' })
+    const second = await surface.forCall(execFor(agent, 'call-3')).propose({ goal: 'another goal' })
     await surface.forCall(execFor(agent, 'call-4')).submit({ taskId: second.taskId, program: COUNTING })
     // One revision per task, and its manifest names the task and the template — never the input bytes,
     // which a submitted program can rewrite and which therefore may not be part of any command identity.
@@ -128,7 +131,7 @@ describe('one caller through the host plugin', () => {
   it('reads the task back with the receipt of its settled run, committing nothing', async () => {
     const { surface, medium } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
     await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
     const committed = medium.events.length
     const status = await surface.forCall(execFor(agent, 'call-3')).status({ taskId: proposal.taskId })
@@ -138,7 +141,7 @@ describe('one caller through the host plugin', () => {
   it("attributes the facts a caller drives to that caller's own identity", async () => {
     const { surface, medium } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
     await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
     const driven = ['task/admitted', 'task/assigned', 'run/started', 'bubble/opened']
     expect(factsOf(medium).filter(fact => driven.includes(fact.kind)).every(fact => fact.actor === 'lib-1:agent:agent-7')).toBe(true)
@@ -147,7 +150,7 @@ describe('one caller through the host plugin', () => {
   it('records the verdict and the settlement as apparatus acts, not the caller', async () => {
     const { surface, medium } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
     await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
     const actorOf = (kind: string) => factsOf(medium).find(fact => fact.kind === kind)?.actor
     expect([actorOf(TASK_KINDS.evidenceProduced), actorOf(TASK_KINDS.runVerified)]).toEqual(['lib-1:verifier:letters@1', 'lib-1:scheduler'])
@@ -155,8 +158,8 @@ describe('one caller through the host plugin', () => {
 
   it('lets a second agent work its own task under its own binding', async () => {
     const { surface } = await mounted()
-    const mine = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g', input: INPUT })
-    const theirs = await surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-1')).propose({ goal: 'g', input: INPUT })
+    const mine = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
+    const theirs = await surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-1')).propose({ goal: 'g' })
     const answers = await Promise.all([
       surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).submit({ taskId: mine.taskId, program: COUNTING }),
       surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-2')).submit({ taskId: theirs.taskId, program: COUNTING }),
@@ -171,14 +174,14 @@ describe('one caller through the host plugin', () => {
 
   it("refuses one agent's submission to another agent's task, by name", async () => {
     const { surface } = await mounted()
-    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
     const theirs = surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-2'))
     expect((await asyncRefusalOf(() => theirs.submit({ taskId: proposal.taskId, program: COUNTING }))).code).toBe('not-responsible')
   })
 
   it('writes nothing at all for a caller that is not the holder', async () => {
     const { surface, medium } = await mounted()
-    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
     const committed = medium.events.length
     const theirs = surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-2'))
     const refusal = await asyncRefusalOf(() => theirs.submit({ taskId: proposal.taskId, program: COUNTING }))
@@ -188,8 +191,8 @@ describe('one caller through the host plugin', () => {
   it('refuses a redelivery whose run is still in flight instead of running the program again', async () => {
     const { surface, medium } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g', input: INPUT })
-    // A program that rewrites its own input makes the production verdict refuse the bytes it declared,
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
+    // A program that rewrites the declared input makes the production verdict refuse the bytes it declared,
     // which leaves the run in flight — the state a submit killed mid-way leaves behind.
     const destructive = "import { writeFileSync } from 'node:fs'\nwriteFileSync(process.argv[2], 'changed')\nprocess.stdout.write('9')"
     await asyncRefusalOf(() => surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: destructive }))
@@ -200,7 +203,7 @@ describe('one caller through the host plugin', () => {
 
   it("refuses a read of a task the caller is not responsible for, by name", async () => {
     const { surface } = await mounted()
-    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
     const theirs = surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-2'))
     expect((await asyncRefusalOf(() => theirs.status({ taskId: proposal.taskId }))).code).toBe('not-responsible')
   })
@@ -219,9 +222,9 @@ describe('one caller through the host plugin', () => {
   it('leaves the workspace and its bytes in place', async () => {
     const { surface } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g', input: INPUT })
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
     await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
-    expect(await readFile(join(proposal.workspace, 'report.txt'), 'utf8')).toBe('9')
+    expect(await readFile(join(proposal.workspace, 'report.txt'), 'utf8')).toBe(String(LETTERS))
     await expect(access(join(proposal.workspace, 'program.mjs'))).resolves.toBeUndefined()
   })
 })

@@ -202,6 +202,8 @@ async function main() {
     })
 
     // A plan: counting first, then the limit check, each supporting one criterion of the parent.
+    // The parent is assigned first, because a plan is the holder's act.
+    await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
     await commands.decompose({
       commandId: 'plan',
       parentTaskId: PARENT,

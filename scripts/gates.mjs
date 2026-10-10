@@ -264,9 +264,7 @@ const PUBLISHED_WITHOUT_CONSUMER = new Set([
   'src/task/bubble.ts\0BUBBLE_MEMBERS',
   'src/task/bubble.ts\0WORKSPACE_MEMBERS',
   'src/task/commands.ts\0AgentCommands',
-  'src/task/commands.ts\0HeldAgent',
   'src/task/commands.ts\0TaskCommandOptions',
-  'src/task/commands.ts\0TaskCommands',
   'src/task/commands.ts\0VerdictInput',
   'src/task/contract.ts\0VerifierRegistry',
   'src/task/decomposition.ts\0assertDecompositionAgainst',
@@ -469,8 +467,14 @@ const DETECTORS = [
   },
   {
     name: 'no-unreferenced-export',
-    /** Parameterised over the published-surface record, so the self-test can hand it a wrong one. */
-    detect: (files, views) => unreferencedExportFindings(files, views, PUBLISHED_WITHOUT_CONSUMER),
+    /**
+     * Parameterised over the published-surface record, so the self-test can hand it a wrong one.
+     *
+     * The file set is the stack *and* the plugin: `assembly/src` imports `src/**` and is a real binder, so
+     * a scan over the stack alone would report a name as unbound while a mounted profile was calling it
+     * — the same defect as a budget that does not reach the plugin's files.
+     */
+    detect: (files, views) => unreferencedExportFindings([...files, ...assemblySources().map(({ file, text }) => file)], { raw: new Map([...views.raw, ...assemblySources().map(({ file, text }) => [file, text])]), code: new Map([...views.code, ...assemblySources().map(({ file, text }) => [file, codeOnly(text)])]) }, PUBLISHED_WITHOUT_CONSUMER),
   },
   {
     name: 'no-duplicate-type-body',
@@ -710,11 +714,22 @@ function assemblySources() {
  * a module header, its imports and its exports — so the alternative was a 215-line file or a rule that
  * could not fit. Both hard-won rules stay: the plugin refuses a redelivery whose run is still in
  * flight, and it freezes a revision against the request rather than against bytes the submitted program
- * can rewrite. The file budget stays 200 and every file is under it. Compression came first: the
- * package is 14% comment and the rest is the rules themselves.
+ * can rewrite.
+ *
+ * It moved from 800 to 1500 for G2, which added five responsibilities that are each a real boundary —
+ * the read route (`web.ts`), child-session scheduling (`scheduler.ts`), workspace preparation
+ * (`workspace.ts`), the declaration readers (`shape.ts`, `verifiers.ts`) and the read projection
+ * (`snapshot.ts`) — and the user chose this over splitting a second package, which would have cost the
+ * budget and the domain-free scan their reach over the new files. The move was first estimated at 1000
+ * and that estimate was wrong: the realised count is 1414, and the record says so rather than the
+ * estimate. The per-file rule stays 200 and it is what actually forced the design: `domain.ts` and
+ * `driver.ts` were split at the read/write and call/read seams when they reached it, and every file is
+ * under the limit. What the number is not: a target. A package that reaches it is the moment to ask
+ * which of its responsibilities has a second consumer, not a reason to keep going — the two splits above
+ * are what happened the last two times this number was the wrong size.
  */
 const ASSEMBLY_FILE_BUDGET = 200
-const ASSEMBLY_TOTAL_BUDGET = 800
+const ASSEMBLY_TOTAL_BUDGET = 1500
 
 /** The split rule and the package budget, measured on the plugin's own files. */
 function assemblyBudgetFindings(sources) {
@@ -914,7 +929,12 @@ function treeInventoryFindings(ledger, measured) {
 }
 
 /** The two documents that state mutation results, which `mutation-claims` reads by name. */
-const CLAIM_DOCS = ['docs/context.md', 'docs/f-evidence.md', 'docs/assembly-g1.md']
+/**
+ * The documents that make mutation claims, so a claim recorded in the ledger has a reader who can find
+ * it. G2's design document is here because it is where that round's rules are frozen before they exist:
+ * a claim named only in a ledger nobody reads is not evidence.
+ */
+const CLAIM_DOCS = ['docs/context.md', 'docs/f-evidence.md', 'docs/assembly-g1.md', 'docs/phase-g2-design.md']
 
 function readDocs() {
   return CLAIM_DOCS.map(file => {
@@ -1300,7 +1320,20 @@ function registerHostStubs(modules) {
   const hook = `const STUBS = ${JSON.stringify(stubs)}
 export async function resolve(specifier, context, next) {
   const stub = STUBS[specifier]
-  return stub === undefined ? next(specifier, context) : { url: stub, shortCircuit: true }
+  if (stub !== undefined) return { url: stub, shortCircuit: true }
+  // A relative import made from inside a retried module has to be retried too. The first pass already
+  // resolved — and cached the *failure* of — every module it walked, so the retry would otherwise
+  // re-enter a stub-importing module through an unchanged specifier and meet the first pass's cached
+  // error. \`retryUrl\` re-resolves only the module named in the failure, which is why this pass saw a
+  // module it had stubbed still reported as unloadable; the marker is what carries the retry inward.
+  if (context.parentURL !== undefined && context.parentURL.includes('gate-stub') && (specifier.startsWith('./') || specifier.startsWith('../'))) {
+    const resolved = await next(specifier, context)
+    if (resolved.url.startsWith('data:')) return resolved
+    const retried = new URL(resolved.url)
+    retried.searchParams.set('gate-stub', '1')
+    return { ...resolved, url: retried.href }
+  }
+  return next(specifier, context)
 }
 `
   register(`data:text/javascript,${encodeURIComponent(hook)}`)

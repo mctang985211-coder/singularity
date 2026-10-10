@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   foldSubject,
+  MemoryLog,
   type ProtocolRegistry,
   type RefusalCode,
   TASK_KINDS,
@@ -31,7 +32,7 @@ import {
   plan,
   treeLog,
 } from './tree-fixtures.ts'
-import { taskRegistry } from './task-fixtures.ts'
+import { SUBJECTS, taskRegistry } from './task-fixtures.ts'
 
 /** A parent with a plan, in a log whose registry the caller keeps so it can be folded. */
 async function decomposed(children = plan(), registry: ProtocolRegistry = taskRegistry()): Promise<ReturnType<typeof treeLog>> {
@@ -65,6 +66,21 @@ describe('a decomposition is one complete fact', () => {
     const log = await decomposed()
     const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, [child(CHILD_A)])))
     expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('again') })
+  })
+
+  it('refuses a plan its task-holder did not write', async () => {
+    // The task is assigned to an agent whose identity one deployment stamps, and the plan arrives under a
+    // table where that name resolves to somebody else. Same facts, different trusted table — which is the
+    // only way anybody but the holder could ever emit this fact, since the actor is never a request field.
+    const registry = taskRegistry()
+    const log = treeLog(registry)
+    await log.emit(admit(PARENT, parentContract()))
+    await log.emit(assigned(PARENT))
+    const stranger = new MemoryLog(registry, { subjects: { ...SUBJECTS, scheduler: 'runtime-elsewhere' } })
+    await stranger.emit(admit(PARENT, parentContract()))
+    await stranger.emit(assigned(PARENT))
+    const refusal = await asyncRefusalOf(() => stranger.emit(decompose(PARENT, plan())))
+    expect(refusal).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining('runtime-elsewhere') })
   })
 
   it('refuses a plan that cannot be executed, each by name', async () => {

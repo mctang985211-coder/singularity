@@ -29,7 +29,7 @@
  * @module singularity-core/runtime/agent-session
  */
 
-import type { AgentHandle, AgentOptions, AgentRegistry } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentOptions, AgentRegistry, AgentSetup } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionStore } from '@deepseek-ai/dsh-session'
 import { SessionAlreadyExistsError, SessionAlreadyOwnedError, type SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 
@@ -96,6 +96,24 @@ export interface AgentSessionRequest {
   readonly cwd?: string
   /** The model route a freshly created agent starts with. Omitted on resume: DSH keeps its own. */
   readonly agentOptions?: AgentOptions
+  /**
+   * The agent that owns this one, for a session that is somebody's child.
+   *
+   * Runtime ownership only: DSH records it in the session header as `parentSession`, which is the
+   * durable link, and uses it to attribute the child's own delegation. It is not what makes the
+   * child's tools exist — that is {@link setup}, and the two are separate for a measured reason
+   * (`docs/phase-g2-design.md` §6): a child created with a preset *name* and no setup gets an empty
+   * tool registry, because a preset is a scope parent rather than a field.
+   */
+  readonly parentAgent?: Agent
+  /**
+   * Composes the child's context: run after the context exists and before the agent is published.
+   *
+   * DSH invokes this on create **and** on resume, which is why it is a parameter of the request
+   * rather than a step the caller performs afterwards — a resumed child must be recomposed, and a
+   * caller that composed after `open` would compose only on the create path.
+   */
+  readonly setup?: AgentSetup
 }
 
 /** The identity the caller owns afterwards. No handle is exposed: the lease stays with this module. */
@@ -104,6 +122,12 @@ export interface OpenedAgentSession {
   readonly sessionId: string
   /** `true` only when an already-persisted session was resumed. */
   readonly resumed: boolean
+  /**
+   * The live agent, for the one thing a caller can only do with it: put a message in its inbox and
+   * wait for it to go quiet. The lease stays here — this is the object, not the handle that holds
+   * the write lease, and closing goes through {@link closeAgentSession}.
+   */
+  readonly agent: Agent
 }
 
 /** One live agent session this module opened, and the write lease that lives inside its handle. */
@@ -142,8 +166,8 @@ export async function openAgentSession(ctx: RuntimeSeams, request: AgentSessionR
 
   const handle =
     persisted === undefined
-      ? await createAgent(agents, sessionId, request.cwd, request.agentOptions)
-      : await resumeAgent(agents, sessionId, request.agentOptions)
+      ? await createAgent(agents, sessionId, request)
+      : await resumeAgent(agents, sessionId, request)
 
   const claimed = CLAIMS.get(sessionId)
   // A successful open proves the *medium* granted a new write handle; it does not prove this
@@ -160,7 +184,7 @@ export async function openAgentSession(ctx: RuntimeSeams, request: AgentSessionR
     )
   }
   CLAIMS.set(sessionId, { owner: ctx, handle })
-  return { agentId: request.agentId, sessionId, resumed: persisted !== undefined }
+  return { agentId: request.agentId, sessionId, resumed: persisted !== undefined, agent: handle.agent }
 }
 
 /**
@@ -198,12 +222,14 @@ export async function closeAgentSession(agentId: string): Promise<void> {
 }
 
 /** Create the session fresh. Only the medium decides whether that is possible. */
-async function createAgent(agents: AgentRegistry, sessionId: SessionId, cwd: string | undefined, agentOptions: AgentOptions | undefined): Promise<AgentHandle> {
+async function createAgent(agents: AgentRegistry, sessionId: SessionId, request: AgentSessionRequest): Promise<AgentHandle> {
   try {
     return await agents.create({
       sessionId,
-      ...(cwd === undefined ? {} : { meta: { cwd } }),
-      ...(agentOptions === undefined ? {} : { agentOptions }),
+      ...(request.cwd === undefined ? {} : { meta: { cwd: request.cwd } }),
+      ...(request.parentAgent === undefined ? {} : { parentAgent: request.parentAgent }),
+      ...(request.setup === undefined ? {} : { setup: request.setup }),
+      ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
     })
   } catch (error) {
     if (error instanceof SessionAlreadyExistsError)
@@ -222,12 +248,18 @@ async function createAgent(agents: AgentRegistry, sessionId: SessionId, cwd: str
  * single-writer lease, and a lease conflict is named. Every other failure keeps its upstream
  * identity in the detail instead of being classified by class: the repair refusals are bare
  * `Error`s, which `instanceof` against the exported classes silently misses.
+ *
+ * `setup` is re-run here, and that is the point of it being a request parameter: a resumed child
+ * whose composition was not replayed would come back with an empty tool registry, because nothing
+ * about a scope survives the process that mounted it.
  */
-async function resumeAgent(agents: AgentRegistry, sessionId: SessionId, agentOptions: AgentOptions | undefined): Promise<AgentHandle> {
+async function resumeAgent(agents: AgentRegistry, sessionId: SessionId, request: AgentSessionRequest): Promise<AgentHandle> {
   try {
     return await agents.resume({
       resumeSessionId: sessionId,
-      ...(agentOptions === undefined ? {} : { agentOptions }),
+      ...(request.parentAgent === undefined ? {} : { parentAgent: request.parentAgent }),
+      ...(request.setup === undefined ? {} : { setup: request.setup }),
+      ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
     })
   } catch (error) {
     if (error instanceof SessionAlreadyOwnedError)

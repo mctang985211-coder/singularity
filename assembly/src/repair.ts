@@ -41,13 +41,15 @@ export async function repair(apparatus: Apparatus): Promise<void> {
   }
 }
 export async function unfrozen(apparatus: Apparatus, workspace: string, runId: string, declared: BubbleInput | undefined): Promise<string | undefined> {
+  const { domain } = apparatus
+  const expected = domain.inputs[0]
   if (declared === undefined) return `run "${runId}" declares no frozen input, so there is nothing for a judgement to be bound to`
-  if (declared.name !== apparatus.domain.inputPath)
-    return `run "${runId}" was frozen against the input "${declared.name}", which this deployment no longer declares (it declares "${apparatus.domain.inputPath}"), so the judgement it was frozen for cannot be repeated`
-  if ((await digestOnDisk(join(workspace, apparatus.domain.artifact))) === undefined) return `the artifact of run "${runId}" is gone from ${workspace}, so the judgement it was frozen for cannot be repeated`
-  const digest = await digestOnDisk(join(workspace, apparatus.domain.inputPath))
-  if (digest === undefined) return `the input "${apparatus.domain.inputPath}" of run "${runId}" cannot be read from ${workspace}, so the bytes it declared cannot be read`
+  if (expected === undefined || declared.name !== expected.path)
+    return `run "${runId}" was frozen against the input "${declared.name}", which this deployment no longer declares (it declares "${expected?.path ?? 'none'}"), so the judgement it was frozen for cannot be repeated`
+  if ((await digestOnDisk(join(workspace, domain.artifact))) === undefined) return `the artifact of run "${runId}" is gone from ${workspace}, so the judgement it was frozen for cannot be repeated`
+  const digest = await digestOnDisk(join(workspace, expected.path))
+  if (digest === undefined) return `the input "${expected.path}" of run "${runId}" cannot be read from ${workspace}, so the bytes it declared cannot be read`
   if (digest !== declared.digest)
-    return `the input "${apparatus.domain.inputPath}" of run "${runId}" no longer hashes to the digest the run declared (declared ${declared.digest.slice(0, 12)}…, found ${digest.slice(0, 12)}…), so the judgement it was frozen for cannot be repeated`
+    return `the input "${expected.path}" of run "${runId}" no longer hashes to the digest the run declared (declared ${declared.digest.slice(0, 12)}…, found ${digest.slice(0, 12)}…), so the judgement it was frozen for cannot be repeated`
   return undefined
 }

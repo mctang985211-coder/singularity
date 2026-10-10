@@ -127,12 +127,12 @@ async function bootstrap({ at, store, commands, programDigest }) {
   const contract = { goal: 'count the words', inputs: ['words.txt'], criteria: [criterion(programDigest)] }
   await commands.admit({ commandId: 'admit-parent', taskId: PARENT_TASK, contract: { ...contract, goal: 'report the count' } })
   await commands.admit({ commandId: 'admit-child', taskId: CHILD, contract })
+  await commands.assign({ commandId: 'assign-parent', taskId: PARENT_TASK, agentId: AGENT })
   await commands.decompose({
     commandId: 'plan',
     parentTaskId: PARENT_TASK,
     children: [{ taskId: CHILD, dependsOn: [], supports: ['counted'], maxRuns: 2 }],
   })
-  await commands.assign({ commandId: 'assign-parent', taskId: PARENT_TASK, agentId: AGENT })
   await commands.assign({ commandId: 'assign-child', taskId: CHILD, agentId: AGENT })
 
   const digest = store.load().stateOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT).revisions[REVISION].contentDigest

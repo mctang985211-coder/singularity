@@ -38,11 +38,13 @@ const output = {
 
 const GUIDANCE = `Singularity is assembled in this session, for any task whose answer must be judged by an
 implementation rather than by you. \`singularity_propose_task\` admits a task with this deployment's
-criterion and returns its id and the workspace holding its input; \`singularity_submit_program\` writes a
-program you wrote into that workspace and runs it as an ES module of node with the input path as its only
-argument, and only what it prints to standard output reaches the criterion's own verifier.
-\`singularity_task_status\` reads the task back. The verifier's word is the only word that counts: a
-program that crashes, prints nothing, or prints a plausible number that is not the answer is a recorded fail.`
+criterion and returns its id and the workspace that holds the material it is judged on;
+\`singularity_decompose_task\` splits a task you are responsible for into sub-tasks that run in their own
+sessions, where only a verified sub-task satisfies a criterion and only an unblocked one starts;
+\`singularity_submit_program\` writes what you produced into that workspace and hands it to the
+criterion's own verifier — an independent program whose verdict is recorded as a fact.
+\`singularity_task_status\` reads the task back. The verifier's word is the only word that counts: work
+that crashes, produces nothing, or produces something plausible that is not the answer is a recorded fail.`
 
 export function apply(ctx: Context): void {
   const disposers = [
@@ -50,23 +52,60 @@ export function apply(ctx: Context): void {
       defineTool({
         name: 'singularity_propose_task',
         description:
-          'Propose one task to the Singularity pipeline. It is admitted with the criterion this deployment holds and you become responsible for it. Returns the task id, the workspace that holds its input, and the criterion the answer is judged against.',
+          'Propose one task to the Singularity pipeline. It is admitted with the criterion this deployment holds and you become responsible for it. Returns the task id, the workspace prepared with the material the task is judged on, and the criterion the answer is judged against.',
         parameters: {
           goal: { type: 'string', description: 'What the task is for, in one sentence.', required: true },
-          input: { type: 'string', description: 'The input text the task is about. It is written into the workspace this call returns.', required: true },
         },
         output,
-        execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).propose({ goal: args.goal, input: args.input }))),
+        execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).propose({ goal: args.goal }))),
+      }),
+    ),
+    ctx.tools.register(
+      defineTool({
+        name: 'singularity_decompose_task',
+        description:
+          'Split a task you are responsible for into sub-tasks, each worked by its own agent in its own session. Declare the whole plan in one call: every sub-task, what it depends on, which of the task\'s own criteria it supports, and how many attempts it may have. A sub-task runs the moment nothing it depends on is still pending, and only a sub-task that verifies satisfies the criterion it supports — so the plan is what decides the order of work.',
+        parameters: {
+          taskId: { type: 'string', description: 'The task id the proposal returned. You must be the agent responsible for it.', required: true },
+          children: {
+            type: 'array',
+            description: 'The whole plan, in one call. At least one sub-task.',
+            required: true,
+            items: {
+              type: 'object',
+              properties: {
+                key: { type: 'string', description: 'A name for this sub-task, unique inside the plan. The sub-task id is derived from it, so the same key addresses the same sub-task on a retry.', required: true },
+                goal: { type: 'string', description: 'What this sub-task is for, in one sentence.', required: true },
+                dependsOn: { type: 'array', description: 'Keys of sub-tasks that must verify before this one may start.', required: true, items: { type: 'string' } },
+                supports: { type: 'array', description: 'Criterion ids of your own contract that this sub-task\'s verification supports.', required: true, items: { type: 'string' } },
+                maxRuns: { type: 'integer', description: 'How many attempts this sub-task may have. Fixed here, and nothing can raise it later.', required: true },
+              },
+              // Closed on purpose: the protocol refuses a plan carrying a member it does not declare, so
+              // the schema says so here rather than letting a plausible extra key be silently dropped.
+              additionalProperties: false,
+            },
+          },
+        },
+        output,
+        execute: async (args, exec) =>
+          JSON.stringify(
+            await attempt(() =>
+              ctx.singularity.forCall(exec).decompose({
+                taskId: args.taskId,
+                children: args.children.map(child => ({ taskId: child.key, dependsOn: child.dependsOn, supports: child.supports, maxRuns: child.maxRuns })),
+              }),
+            ),
+          ),
       }),
     ),
     ctx.tools.register(
       defineTool({
         name: 'singularity_submit_program',
         description:
-          "Submit the program that answers a proposed task. It is written into the task workspace and run as an ES module of node with the input path as its only argument; only what it prints to standard output is judged by the criterion's own verifier — an independent program whose verdict is recorded as a fact. Anything on standard error is not part of the submission, and a program that crashes or prints nothing is a recorded fail, not a missing result.",
+          "Submit what answers a proposed task: the domain's own submission, written into the task workspace and handed to the criterion's own verifier — an independent program whose verdict is recorded as a fact. Anything on standard error is not part of the submission, and work that crashes or produces nothing is a recorded fail, not a missing result.",
         parameters: {
           taskId: { type: 'string', description: 'The task id the proposal returned.', required: true },
-          program: { type: 'string', description: 'The whole program as JavaScript source. It must print the answer to standard output.', required: true },
+          program: { type: 'string', description: 'The submission as text: for a program domain, the whole program source, which must print the answer to standard output.', required: true },
         },
         output,
         execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).submit({ taskId: args.taskId, program: args.program }))),

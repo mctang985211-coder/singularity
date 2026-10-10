@@ -14,11 +14,11 @@ import { apply, inject, name } from '../src/agent.ts'
 import type { AgentTaskSurface, Proposal, Status } from '../src/driver.ts'
 import { agentFor, execFor } from './seam.ts'
 
-const TOOLS = ['singularity_propose_task', 'singularity_submit_program', 'singularity_task_status']
+const TOOLS = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program', 'singularity_task_status']
 const PROPOSAL: Proposal = { taskId: 'task-x', workspace: '/w', criterionId: 'c', phase: 'awaiting-run' }
 const STATUS: Status = { phase: 'running', runs: 1, receipt: null }
 
-/** The three services a mounted scope presents, with every registration the face makes. */
+/** The services a mounted scope presents, with every registration the face makes. */
 function scope(surface: Partial<AgentTaskSurface>) {
   const tools: ToolDefinition[] = []
   const sections: { name: string; order: number; text: string }[] = []
@@ -55,14 +55,14 @@ describe('the agent face', () => {
   it('offers no parameter through which a caller could name itself', () => {
     const mounted = scope({})
     apply(mounted.ctx)
-    expect(mounted.tools.map(tool => Object.keys(tool.parameters.properties ?? {}))).toEqual([['goal', 'input'], ['taskId', 'program'], ['taskId']])
+    expect(mounted.tools.map(tool => Object.keys(tool.parameters.properties ?? {}))).toEqual([['goal'], ['taskId', 'children'], ['taskId', 'program'], ['taskId']])
   })
 
   it('binds the surface from the call it received, not from the arguments it was given', async () => {
     const mounted = scope({ propose: async () => PROPOSAL })
     apply(mounted.ctx)
     const exec = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const answer = await toolNamed(mounted.tools, 'singularity_propose_task').execute({ goal: 'g', input: 'i' }, exec)
+    const answer = await toolNamed(mounted.tools, 'singularity_propose_task').execute({ goal: 'g' }, exec)
     expect([mounted.calls[0], answerOf(answer)]).toEqual([exec, PROPOSAL])
   })
 
@@ -90,7 +90,11 @@ describe('the agent face', () => {
     const mounted = scope({})
     apply(mounted.ctx)
     const described = toolNamed(mounted.tools, 'singularity_submit_program').description
-    expect([/ES module/.test(described), /standard output/.test(described), /standard error/.test(described)]).toEqual([true, true, true])
+    // The tool says what it does with a submission and what is not part of it. It no longer promises a
+    // runtime: the deployment's domain declares whether the text is run or judged as written, so a
+    // description that named node's ES modules would be a claim this package cannot keep for a `source`
+    // domain — and the model would be told the wrong thing about its own submission.
+    expect([/workspace/.test(described), /criterion's own verifier/.test(described), /standard error/.test(described)]).toEqual([true, true, true])
   })
 
   it('owns every registration through the effect it opened', () => {

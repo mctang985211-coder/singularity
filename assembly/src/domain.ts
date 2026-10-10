@@ -5,14 +5,15 @@
  * @module @dangosys/dsh-singularity-next/domain
  */
 
-import { readFile } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { join } from 'node:path'
 
 import { refuse } from '../../src/protocol/refusal.ts'
 import type { AcceptanceCriterion } from '../../src/task/contract.ts'
-import { runVerifierCommand, type VerifierProcess } from '../../src/verifier/command.ts'
-import type { VerifierImplementation, VerifierInput, VerifierSelftestSample, VerifierVerdict } from '../../src/verifier/implementation.ts'
+import type { VerifierProcess } from '../../src/verifier/command.ts'
+import type { VerifierImplementation } from '../../src/verifier/implementation.ts'
 import { sha256 } from './ids.ts'
+import { inside, list, nonEmpty, readBytes, record, text } from './shape.ts'
+import { requireVerifier, verifierOf } from './verifiers.ts'
 
 export interface DomainVerifier extends VerifierImplementation {
   /** The program whose bytes {@link VerifierImplementation.implementationDigest} names. */
@@ -20,99 +21,61 @@ export interface DomainVerifier extends VerifierImplementation {
   /** The declared template; `{artifact}` and `{input}` are the two paths one judgement reads. */
   readonly args: readonly string[]
 }
+/**
+ * One piece of protected material: where its bytes are staged, where they came from, and the digest of
+ * those exact bytes.
+ *
+ * The bytes are kept, not just the digest, because staging has to be a write of what was digested: a
+ * caller that re-read `sourcePath` could stage bytes the digest never covered, and the mismatch would
+ * surface later as if the workspace were at fault.
+ */
+export interface DomainInput {
+  /** Workspace-relative path this material is staged to. */
+  readonly path: string
+  /** Domain-relative path its bytes were read from. Reported so a reader can find the source. */
+  readonly sourcePath: string
+  readonly digest: string
+  readonly bytes: Uint8Array
+}
+/**
+ * What the domain offers to be measured, and how to read the number.
+ *
+ * `direction` is part of the metric and not a convention: a deployment where smaller is worse cannot say
+ * so anywhere else. `measured` is a full criterion because a number with no verifier is a number nobody
+ * can reproduce; it must be a **different** criterion from the one the run is judged against, which the
+ * measure protocol enforces when the trial is recorded.
+ */
+export interface DomainMetric {
+  readonly unit: string
+  readonly direction: 'higher' | 'lower'
+  readonly measured: AcceptanceCriterion
+}
 export interface Domain {
   readonly dir: string
   /** Content digest of the declaration itself: what a run's revision is frozen against. */
   readonly templateDigest: string
-  /** Workspace-relative path of the single declared input, as core's own input reference reads it. */
-  readonly inputPath: string
-  readonly program: string
+  /** The protected material, in declaration order. Judged material is named by the contract. */
+  readonly inputs: readonly DomainInput[]
+  /**
+   * How a submission becomes the artifact: a program to run, or the source itself.
+   *
+   * The distinction is the whole of the domain's shape, and it is declared rather than inferred: a
+   * `source` submission is judged as written, while a `program` submission has to be run to produce
+   * anything to judge.
+   */
+  readonly submission: 'program' | 'source'
+  /** Workspace-relative path the submitted text is written to, in both shapes. */
+  readonly file: string
+  /** Workspace-relative path the criterion's verifier is pointed at. */
   readonly artifact: string
+  /** The starting bytes a `source` submission edits, already read and digested. */
+  readonly initial?: { readonly path: string; readonly bytes: Uint8Array }
   readonly criterion: AcceptanceCriterion
   /** The criterion's own verifier, and every implementation this deployment holds. */
   readonly verifier: DomainVerifier
   readonly verifiers: readonly DomainVerifier[]
-}
-const described = (value: unknown): string => (value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value)
-
-function record(value: unknown, where: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value))
-    refuse('malformed-declaration', `${where} must be an object, got ${described(value)}`)
-  return value as Record<string, unknown>
-}
-function list(value: unknown, where: string): readonly unknown[] {
-  if (!Array.isArray(value)) refuse('malformed-declaration', `${where} must be a list, got ${described(value)}`)
-  return value
-}
-function nonEmpty(value: unknown, where: string): string {
-  if (typeof value !== 'string' || value.length === 0) refuse('malformed-declaration', `${where} must be a non-empty string, got ${described(value)}`)
-  return value
-}
-const text = (source: Record<string, unknown>, key: string, where: string): string => nonEmpty(source[key], `${where}.${key}`)
-
-async function readBytes(path: string, what: string): Promise<Buffer> {
-  try {
-    return await readFile(path)
-  } catch (error) {
-    refuse('malformed-declaration', `${what} (${path}) could not be read (${error instanceof Error ? error.message : String(error)}); declared material that is not there cannot be run`)
-  }
-}
-function inside(root: string, name: string, where: string): string {
-  if (isAbsolute(name)) refuse('malformed-declaration', `${where} is ${JSON.stringify(name)}, an absolute path; a declared name lives inside the tree it belongs to`)
-  const within = relative(resolve(root), resolve(root, name))
-  if (within === '' || within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within))
-    refuse('malformed-declaration', `${where} is ${JSON.stringify(name)}, which resolves outside ${root}`)
-  return resolve(root, name)
-}
-async function samplesOf(dir: string, entries: readonly unknown[], where: string): Promise<{ samples: VerifierSelftestSample[]; argv: Map<string, readonly string[]> }> {
-  const samples: VerifierSelftestSample[] = []
-  const argv = new Map<string, readonly string[]>()
-  for (const [index, entry] of entries.entries()) {
-    const at = `${where}.selftest[${index}]`
-    const declared = record(entry, at)
-    const name = text(declared, 'name', at)
-    const artifact = inside(dir, text(declared, 'artifact', at), `${at}.artifact`)
-    const declaredArgv = list(declared['argv'], `${at}.argv`).map((argument, position) => nonEmpty(argument, `${at}.argv[${position}]`))
-    const command = declaredArgv.map((argument, position) => inside(dir, argument, `${at}.argv[${position}]`))
-    if (command[0] !== artifact)
-      refuse('malformed-declaration', `${at} declares sample "${name}" reading ${command[0] ?? 'nothing'}, but its artifact is ${artifact}; a sample whose bytes are not the bytes it reads proves nothing`)
-    if (argv.has(artifact))
-      refuse('malformed-declaration', `${at} declares sample "${name}" on artifact ${artifact}, which another sample already declares; one artifact is one known sample, or the selftest cannot say which one ran`)
-    const expected = declared['expected']
-    if (expected !== 'pass' && expected !== 'fail') refuse('malformed-declaration', `${at}.expected must be "pass" or "fail", got ${JSON.stringify(expected ?? null)}`)
-    const inputs: { name: string; digest: string }[] = []
-    for (const [position, path] of command.slice(1).entries())
-      inputs.push({ name: declaredArgv[position + 1]!, digest: sha256(await readBytes(path, `the input of sample "${name}"`)) })
-    samples.push({ name, expected, input: { subject: artifact, artifactDigest: sha256(await readBytes(artifact, `the artifact of sample "${name}"`)), inputs } })
-    argv.set(artifact, command)
-  }
-  return { samples, argv }
-}
-async function verifierOf(dir: string, entry: unknown, where: string, runProcess: VerifierProcess): Promise<DomainVerifier> {
-  const declared = record(entry, where)
-  const program = inside(dir, text(declared, 'program', where), `${where}.program`)
-  const args = list(declared['args'], `${where}.args`).map((argument, index) => nonEmpty(argument, `${where}.args[${index}]`))
-  for (const [index, argument] of args.entries()) {
-    const unfillable = [...argument.matchAll(/\{(\w+)\}/g)].filter(match => match[1] !== 'artifact' && match[1] !== 'input')
-    if (unfillable.length > 0)
-      refuse('malformed-declaration', `${where}.args[${index}] names the placeholder ${unfillable[0]![0]}, which this version cannot fill; a template is filled with {artifact} and {input} and nothing else`)
-  }
-  const { samples, argv } = await samplesOf(dir, list(declared['selftest'], `${where}.selftest`), where)
-  return {
-    ref: text(declared, 'ref', where),
-    version: text(declared, 'version', where),
-    program,
-    args,
-    implementationDigest: sha256(await readBytes(program, `${where}.program`)),
-    selftest: { samples },
-    // This port is the selftest's: a real judgement reaches the verifier through `runJudge`.
-    judge: async (sample: VerifierInput): Promise<VerifierVerdict> => {
-      const command = argv.get(sample.subject)
-      if (command === undefined) refuse('malformed-declaration', `the selftest asked for ${JSON.stringify(sample.subject)}, which is not the artifact of any declared sample`)
-      const judged = await runVerifierCommand({ command: [process.execPath, program, ...command], artifactPath: sample.subject }, runProcess)
-      return { verdict: judged.verdict, detail: judged.detail }
-    },
-  }
+  /** Absent when the domain offers nothing to trade: a criterion can exist without a metric. */
+  readonly metric?: DomainMetric
 }
 export async function loadDomain(dir: string, runProcess: VerifierProcess): Promise<Domain> {
   const declaration = join(dir, 'task.json')
@@ -125,18 +88,52 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
   }
   const declared = record(parsed, 'task.json')
 
-  // A declared input is one workspace-relative name and core's own input reference, with no second label.
-  const inputs = list(declared['inputs'], 'task.json.inputs').map((entry, index) => nonEmpty(entry, `task.json.inputs[${index}]`))
-  const [inputPath] = inputs
-  if (inputPath === undefined || inputs.length !== 1)
-    refuse('malformed-declaration', `task.json declares ${inputs.length} inputs; this version builds a workspace from exactly one input, so a domain declaring a different number is refused by name rather than half-built`)
-  inside(dir, inputPath, 'task.json.inputs[0]')
+  // A declared input is protected material: a workspace-relative destination and a domain-relative
+  // source, with the digest computed here from the bytes actually read.
+  const inputs: DomainInput[] = []
+  for (const [index, entry] of list(declared['inputs'], 'task.json.inputs').entries()) {
+    const at = `task.json.inputs[${index}]`
+    const declaredInput = record(entry, at)
+    const path = text(declaredInput, 'path', at)
+    const sourcePath = text(declaredInput, 'from', at)
+    const source = inside(dir, sourcePath, `${at}.from`)
+    const bytes = await readBytes(source, `the input ${JSON.stringify(sourcePath)}`)
+    inputs.push({ path, sourcePath, digest: sha256(bytes), bytes })
+  }
+  // The template vocabulary is closed and `{input}` is singular, so a second declared input would expand
+  // to whichever one this layer happened to pick. Refused by name rather than half-filled.
+  if (inputs.length !== 1)
+    refuse(
+      'malformed-declaration',
+      `task.json declares ${inputs.length} inputs, and the command template's {input} names exactly one staged path; a domain that needs two has to say how the second reaches the verifier, which this version cannot express`,
+    )
 
   const workspace = record(declared['workspace'], 'task.json.workspace')
-  const program = text(workspace, 'program', 'task.json.workspace')
+  const submission = text(workspace, 'submission', 'task.json.workspace')
+  if (submission !== 'program' && submission !== 'source')
+    refuse(
+      'malformed-declaration',
+      `task.json.workspace.submission is ${JSON.stringify(submission)}; a submission is either "program" (the submitted text is run and its output is judged) or "source" (the submitted text is judged as written), and a third shape is not one this layer can stage`,
+    )
+  const file = text(workspace, 'file', 'task.json.workspace')
   const artifact = text(workspace, 'artifact', 'task.json.workspace')
-  inside(dir, program, 'task.json.workspace.program')
-  inside(dir, artifact, 'task.json.workspace.artifact')
+  if (submission === 'source' && file !== artifact)
+    refuse(
+      'malformed-declaration',
+      `task.json declares a "source" submission writing ${JSON.stringify(file)} while its artifact is ${JSON.stringify(artifact)}; a source is judged as written, so the path that is submitted and the path that is judged have to be the same one`,
+    )
+  const declaredInitial = workspace['initial']
+  if (submission === 'program' && declaredInitial !== undefined)
+    refuse(
+      'malformed-declaration',
+      `task.json declares a "program" submission and an initial source; a program produces the artifact, so material placed at ${JSON.stringify(file)} before it runs would make the program a second writer of the bytes it is judged on`,
+    )
+  let initial: { path: string; bytes: Uint8Array } | undefined
+  if (declaredInitial !== undefined) {
+    const sourcePath = nonEmpty(declaredInitial, 'task.json.workspace.initial')
+    const source = inside(dir, sourcePath, 'task.json.workspace.initial')
+    initial = { path: sourcePath, bytes: await readBytes(source, `the initial source ${JSON.stringify(sourcePath)}`) }
+  }
 
   const verifiers: DomainVerifier[] = []
   for (const [index, entry] of list(declared['verifiers'], 'task.json.verifiers').entries())
@@ -146,26 +143,43 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
   if (criteria.length !== 1)
     refuse('malformed-declaration', `task.json declares ${criteria.length} criteria; this version records one verdict per run, so it adjudicates exactly one criterion`)
   const criterion = record(criteria[0], 'task.json.criteria[0]')
-  const named = text(criterion, 'verifier', 'task.json.criteria[0]')
-  const verifier = verifiers.find(entry => entry.ref === named)
-  if (verifier === undefined)
-    refuse('malformed-declaration', `criterion ${JSON.stringify(text(criterion, 'criterionId', 'task.json.criteria[0]'))} names the verifier ${JSON.stringify(named)}, which task.json does not declare`)
+
+  const criterionOf = (container: Record<string, unknown>, at: string): AcceptanceCriterion => {
+    const resolved = requireVerifier(verifiers, text(container, 'verifier', at), at)
+    return {
+      criterionId: text(container, 'criterionId', at),
+      statement: text(container, 'statement', at),
+      verifierRef: resolved.ref,
+      verifierVersion: resolved.version,
+      implementationDigest: resolved.implementationDigest,
+    }
+  }
+
+  let metric: DomainMetric | undefined
+  if (declared['metric'] !== undefined) {
+    const declaredMetric = record(declared['metric'], 'task.json.metric')
+    const direction = text(declaredMetric, 'direction', 'task.json.metric')
+    if (direction !== 'higher' && direction !== 'lower')
+      refuse('malformed-declaration', `task.json.metric.direction is ${JSON.stringify(direction)}; a metric is either "higher" or "lower", because "what counts as better" is not a convention this layer may assume`)
+    metric = {
+      unit: text(declaredMetric, 'unit', 'task.json.metric'),
+      direction,
+      measured: criterionOf(record(declaredMetric['measured'], 'task.json.metric.measured'), 'task.json.metric.measured'),
+    }
+  }
 
   return {
     dir,
     templateDigest: sha256(bytes),
-    inputPath,
-    program,
+    inputs,
+    submission,
+    file,
     artifact,
-    verifier,
+    ...(initial === undefined ? {} : { initial }),
     verifiers,
-    criterion: {
-      criterionId: text(criterion, 'criterionId', 'task.json.criteria[0]'),
-      statement: text(criterion, 'statement', 'task.json.criteria[0]'),
-      verifierRef: verifier.ref,
-      verifierVersion: verifier.version,
-      implementationDigest: verifier.implementationDigest,
-    },
+    verifier: requireVerifier(verifiers, text(criterion, 'verifier', 'task.json.criteria[0]'), 'task.json.criteria[0]'),
+    criterion: criterionOf(criterion, 'task.json.criteria[0]'),
+    ...(metric === undefined ? {} : { metric }),
   }
 }
 export function commandOf(verifier: DomainVerifier, artifactPath: string, inputPath: string): readonly string[] {

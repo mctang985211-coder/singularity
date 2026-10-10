@@ -1,5 +1,5 @@
 {
-  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim. No row carries one today: `mutate:fw-direction-sign-ignored` was this ledger's one recorded miss, and it is a claim now that the probe checks its readout against the direction the views carry - the reproduction and the fix are in docs/f-evidence.md §5.2, and scripts/mutate.mjs prints the verdict rather than this file. What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
+  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim. No row carries one today: `mutate:fw-direction-sign-ignored` was this ledger's one recorded miss, and it is a claim now that the probe checks its readout against the direction the views carry - the reproduction and the fix are in docs/f-evidence.md \u00a75.2, and scripts/mutate.mjs prints the verdict rather than this file. What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
   "commitClaim": "protocol-copied-rule-refused",
   "claims": [
     {
@@ -513,7 +513,7 @@
         ]
       },
       "witness": "blocks a dependent on a dependency that ended without verifying, naming it",
-      "note": "two edits, because the stopped case is caught by the `dead` filter first: flipping only the second filter leaves every spec green, which is itself worth recording — the two filters are not redundant, and the first one is what makes \"any terminal satisfies\" unreachable for `stopped`"
+      "note": "two edits, because the stopped case is caught by the `dead` filter first: flipping only the second filter leaves every spec green, which is itself worth recording \u2014 the two filters are not redundant, and the first one is what makes \"any terminal satisfies\" unreachable for `stopped`"
     },
     {
       "id": "task-unverified-child-accepts",
@@ -728,7 +728,7 @@
         ]
       },
       "witness": "cannot start a run for sub-task",
-      "note": "the probe dies on the refusal the reorder produces instead of reporting a failed check, which is what \"以那句拒绝失败\" means: the recovery path is gone, and the store says so by name"
+      "note": "the probe dies on the refusal the reorder produces instead of reporting a failed check, which is what \"\u4ee5\u90a3\u53e5\u62d2\u7edd\u5931\u8d25\" means: the recovery path is gone, and the store says so by name"
     },
     {
       "id": "protocol-copied-rule-refused",
@@ -1354,9 +1354,9 @@
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
-          "file": "assembly/src/domain.ts",
-          "find": "implementationDigest: sha256(await readBytes(program, `${where}.program`)),",
-          "replace": "implementationDigest: sha256('a digest this package made up'),"
+          "file": "assembly/src/verifiers.ts",
+          "find": "implementationDigest: sha256(await readBytes(program, `${where}.program`))",
+          "replace": "implementationDigest: sha256(\"a digest that is not the program's bytes\")"
         }
       ],
       "run": {
@@ -1374,8 +1374,8 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "await writeFile(join(workspace, apparatus.domain.artifact), await runProgram(programPath, inputPath), 'utf8')",
-          "replace": "await writeFile(join(workspace, apparatus.domain.artifact), await runProgram(programPath, programPath), 'utf8')"
+          "find": "const inputPath = join(workspace, declared.path)\n    await writeFile(join(workspace, domain.artifact), await runProgram(filePath, inputPath), 'utf8')",
+          "replace": "const inputPath = join(workspace, declared.path)\n    await writeFile(join(workspace, domain.artifact), await runProgram(filePath, filePath), 'utf8')"
         }
       ],
       "run": {
@@ -1450,8 +1450,8 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "  if ((await digestOnDisk(join(workspace, apparatus.domain.artifact))) === undefined)",
-          "replace": "  if (false)"
+          "find": "if ((await digestOnDisk(join(workspace, domain.artifact))) === undefined) return `the artifact of run \"${runId}\" is gone from ${workspace}, so the judgement it was frozen for cannot be repeated`",
+          "replace": "if (false) return `the artifact of run \"${runId}\" is gone from ${workspace}, so the judgement it was frozen for cannot be repeated`"
         }
       ],
       "run": {
@@ -1545,7 +1545,7 @@
       "edits": [
         {
           "file": "assembly/src/domain.ts",
-          "find": "if (inputPath === undefined || inputs.length !== 1)",
+          "find": "if (inputs.length !== 1)",
           "replace": "if (false)"
         }
       ],
@@ -1620,9 +1620,9 @@
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
-          "file": "assembly/src/domain.ts",
+          "file": "assembly/src/verifiers.ts",
           "find": "if (unfillable.length > 0)",
-          "replace": "if (unfillable.length > 1)"
+          "replace": "if (false)"
         }
       ],
       "run": {
@@ -1659,8 +1659,8 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "if (declared.name !== apparatus.domain.inputPath)",
-          "replace": "if (false)"
+          "find": "if (expected === undefined || declared.name !== expected.path)",
+          "replace": "if (expected === undefined)"
         }
       ],
       "run": {
@@ -1678,7 +1678,7 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "const digest = await digestOnDisk(join(workspace, apparatus.domain.inputPath))",
+          "find": "const digest = await digestOnDisk(join(workspace, expected.path))",
           "replace": "const digest = declared.digest"
         }
       ],
@@ -1697,8 +1697,8 @@
       "edits": [
         {
           "file": "assembly/src/agent.ts",
-          "find": "run as an ES module of node with the input path as its only argument; only what it prints to standard output is judged",
-          "replace": "run with the input path as its only argument; what it prints is judged"
+          "find": "written into the task workspace and handed to the criterion's own verifier",
+          "replace": "ignored: the model is told nothing about where its submission goes"
         }
       ],
       "run": {
@@ -1735,13 +1735,8 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "const basis = sha256(`${apparatus.domain.templateDigest}\\u0000${request.taskId}`)",
-          "replace": "const basis = sha256(`${apparatus.domain.templateDigest}\\u0000${declared.digest}`)"
-        },
-        {
-          "file": "assembly/src/submission.ts",
-          "find": "manifest: { taskTemplate: apparatus.domain.templateDigest, task: request.taskId },",
-          "replace": "manifest: { taskTemplate: apparatus.domain.templateDigest, inputs: [declared] },"
+          "find": "const basis = sha256(`${domain.templateDigest}\\u0000${request.taskId}`)",
+          "replace": "const basis = sha256(`${domain.templateDigest}\\u0000${await readFile(filePath, 'utf8')}`)"
         }
       ],
       "run": {
@@ -1770,6 +1765,120 @@
         ]
       },
       "witness": "writes nothing at all for a caller that is not the holder"
+    },
+    {
+      "id": "assembly-m24-plan-belongs-to-holder",
+      "rule": "a plan is the holder's act: `task/decomposed` requires the emitter's actor to be the task's current holder",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "src/task/decomposition.ts",
+          "find": "      requireResponsible(state, envelope.actor, where)\n",
+          "replace": ""
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-decomposition.spec.ts"
+        ]
+      },
+      "witness": "refuses a plan its task-holder did not write"
+    },
+    {
+      "id": "assembly-m25-transfer-belongs-to-holder",
+      "rule": "a transfer is the holder's act: `task/reassigned` requires the emitter's actor to be the task's current holder",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "src/task/responsibility.ts",
+          "find": "      requireResponsible(state, envelope.actor, where)\n",
+          "replace": ""
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-binding.spec.ts"
+        ]
+      },
+      "witness": "refuses a transfer emitted under an identity that is not the holder"
+    },
+    {
+      "id": "assembly-m26-parent-waits-for-a-running-child",
+      "rule": "a parent does not run its own acceptance while a sub-task it delegated that acceptance to is running",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "  const running = own.children.filter(child => child.status === 'running')",
+          "replace": "  const running = []"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-commands.spec.ts"
+        ]
+      },
+      "witness": "refuses the parent while a sub-task of its own plan is running"
+    },
+    {
+      "id": "assembly-m27-initial-source-not-overwritten",
+      "rule": "preparing a workspace never overwrites a submission with the seed again",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "assembly/src/workspace.ts",
+          "find": "await writeFile(seed, domain.initial.bytes, { flag: 'wx' })",
+          "replace": "await writeFile(seed, domain.initial.bytes)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/workspace.spec.ts"
+        ]
+      },
+      "witness": "leaves a submission in place when the workspace is prepared again"
+    },
+    {
+      "id": "assembly-m28-one-input",
+      "rule": "a domain declares exactly one input, because the command template's {input} names exactly one staged path",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "assembly/src/domain.ts",
+          "find": "if (inputs.length !== 1)",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/domain.spec.ts"
+        ]
+      },
+      "witness": "refuses a domain that declares more than one input, by name"
+    },
+    {
+      "id": "assembly-m29-staging-writes-the-loader-bytes",
+      "rule": "a workspace is staged from the bytes the loader digested, never re-read from the declared source",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "assembly/src/workspace.ts",
+          "find": "await writeFile(target, input.bytes)",
+          "replace": "await writeFile(target, await readFile(input.sourcePath))"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/workspace.spec.ts"
+        ]
+      },
+      "witness": "stages the bytes it digested even when the declared source has changed since"
     }
   ]
 }

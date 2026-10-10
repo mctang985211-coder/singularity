@@ -112,6 +112,18 @@ describe('only the agent currently answerable may start work', () => {
     expect(sameAgent).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('already holds it') })
   })
 
+  it('refuses a transfer emitted under an identity that is not the holder', async () => {
+    // The `from` member names the right agent, so the only thing wrong is who is acting: this deployment's
+    // table resolves the emitter to an identity the assignment never named. Handing work to somebody else
+    // is a decision about one's own responsibility, so an actor that does not hold the task has nothing to
+    // hand over — and the transfer's `from` cannot catch that, because a request may say anything.
+    const log = logWith({ ...SUBJECTS, scheduler: 'runtime-elsewhere' })
+    await log.emit(admitted())
+    await log.emit(assigned('agent-1', SCHEDULER))
+    const refusal = await asyncRefusalOf(() => log.emit(reassigned('agent-1', 'agent-2', 'runtime-elsewhere')))
+    expect(refusal).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining(SCHEDULER) })
+  })
+
   it('refuses the previous holder after a transfer, and lets the new one work', async () => {
     // The original holder cannot continue: this is the invariant the frozen repo never had.
     const original = logWith()

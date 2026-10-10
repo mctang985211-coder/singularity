@@ -9,8 +9,11 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
+import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { assertClosedKeys } from '../../src/protocol/envelope.ts'
 import { loadDomain } from './domain.ts'
 import { openDriver } from './driver.ts'
@@ -18,7 +21,16 @@ import { spawnProcess } from './submission.ts'
 
 export const name = 'singularity-assembly'
 
-/** The one seam this plugin opens its control store over. */
+/**
+ * The one seam this plugin declares.
+ *
+ * The child-session services (`sessions`, `agents`, `agentLoop`, `agentPresets`) are deliberately **not**
+ * listed. An `inject` name a profile does not provide makes the entire bundle skip silently — measured,
+ * and it is the failure mode this repository has already paid for once. A deployment that mounts this
+ * plugin and never schedules a sub-task needs none of them, and one that does schedule gets a named
+ * refusal from {@link advance} rather than a package that quietly vanished. So the seams are read off the
+ * context where they are used, and their absence is reported there.
+ */
 export const inject = ['sessionPersistence']
 
 const CONFIG_MEMBERS = ['controlId', 'domainDir', 'workspaceRoot'] as const
@@ -40,7 +52,17 @@ export interface Config {
 export async function apply(ctx: Context, config: Config & Record<string, unknown>): Promise<void> {
   assertClosedKeys(config, CONFIG_MEMBERS, 'the singularity-assembly config')
   const domain = await loadDomain(config.domainDir, spawnProcess)
-  const driver = await openDriver({ controlId: config.controlId, workspaceRoot: config.workspaceRoot, domain, persistence: ctx.sessionPersistence })
-  ctx.provide('singularity', { forCall: exec => driver.forCall(exec) })
+  const driver = await openDriver({
+    controlId: config.controlId,
+    workspaceRoot: config.workspaceRoot,
+    domain,
+    persistence: ctx.sessionPersistence,
+    seams: ctx as ChildSessionSeams,
+  })
+  ctx.provide('singularity', {
+    forCall: (exec: ToolRunContext) => driver.forCall(exec),
+    read: () => driver.read(),
+    advance: (parent: Agent | undefined) => driver.advance(parent),
+  })
   ctx.effect(() => () => driver.close())
 }

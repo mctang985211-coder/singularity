@@ -137,6 +137,33 @@ describe('a run starts only when every cross-entity condition holds', () => {
     expect(blocked).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/task-sibling.*only a verified dependency/) })
   })
 
+  it('refuses the parent while a sub-task of its own plan is running', async () => {
+    const live = await deployment()
+    await createRevision(live)
+    await openAgent(live)
+    const commands = await planned(live)
+    await commands.startRun({ commandId: 'r-child', taskId: CHILD, runId: 'run-child', revision: pin(live) })
+
+    // The child holds the acceptance its plan delegated to it, so the parent may not work on the same
+    // acceptance at the same time. The refusal names the sub-task, so an operator knows what to wait for.
+    const waiting = await asyncRefusalOf(() => commands.startRun({ commandId: 'r-parent', taskId: PARENT, runId: RUN, revision: pin(live) }))
+    expect(waiting).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(new RegExp(`"${CHILD}" is running`)) })
+  })
+
+  it('lets the parent run once its sub-task has settled', async () => {
+    const live = await deployment()
+    await createRevision(live)
+    await openAgent(live)
+    const commands = await planned(live)
+    await commands.startRun({ commandId: 'r-child', taskId: CHILD, runId: 'run-child', revision: pin(live) })
+    await commands.failRun({ commandId: 'f-child', taskId: CHILD, runId: 'run-child', reason: 'the attempt failed' })
+
+    // The gate is "a sub-task is running", not "the plan is unfinished": a parent running its own
+    // baseline before its children start, and again once they settle, is the ordinary shape of a campaign.
+    const reached = await commands.startRun({ commandId: 'r-parent', taskId: PARENT, runId: RUN, revision: pin(live) })
+    expect(reached.kind).toBe(TASK_KINDS.runStarted)
+  })
+
   it('binds each agent surface to its own identity, so one agent cannot work another\'s task', async () => {
     const live = await deployment()
     await createRevision(live)

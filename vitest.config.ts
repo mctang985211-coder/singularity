@@ -24,6 +24,7 @@ export default defineConfig({
       '@deepseek-ai/dsh-session-persistence': `${DSH_INSTALLED}/dsh-session-persistence/lib/index.js`,
       '@deepseek-ai/dsh-session-persistence-jsonl': `${DSH_INSTALLED}/dsh-session-persistence-jsonl/lib/index.js`,
       '@deepseek-ai/dsh-agent': `${DSH_INSTALLED}/dsh-agent/lib/index.js`,
+      '@deepseek-ai/dsh-llm': `${DSH_INSTALLED}/dsh-llm/lib/index.js`,
       '@deepseek-ai/dsh-agent-loop': `${DSH_INSTALLED}/dsh-agent-loop/lib/index.js`,
       '@deepseek-ai/dsh-tools': `${DSH_INSTALLED}/dsh-tools/lib/index.js`,
       '@deepseek-ai/dsh-user-approval': `${DSH_INSTALLED}/dsh-user-approval/lib/index.js`,

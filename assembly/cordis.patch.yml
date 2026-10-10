@@ -12,3 +12,13 @@
     - id: singularity-assembly
       name: '@dangosys/dsh-singularity-next'
       config: {}
+
+# The read route, in a row of its own. `./web` is a separate entry because it `inject`s `webServer`, and
+# a profile that mounts no Web server must be able to stack this bundle without the row: an `inject` name
+# a profile does not provide makes the whole bundle skip silently, which is a failure this repository has
+# already paid for. A profile with a Web server keeps the row and gets the panel; one without it gets
+# every other tool and no route.
+- insert:
+    - id: singularity-web
+      name: '@dangosys/dsh-singularity-next/web'
+      config: {}

@@ -302,6 +302,22 @@ export async function closeChildSession(agentId: string): Promise<void>
 **不做的事**：不改 `src/**` 的协议来承载会话；子会话不写任何控制事实（它写的是 DSH 自己的 transcript），
 子任务的**责任、契约与判决**仍然只由装配层的命令写进控制 store。
 
+## 6c. 本轮的变异证明（每条新规则一个，缺一个就删规则）
+
+`node scripts/mutate.mjs <id>`，各自独立跑，实测结果：
+
+| claim | 规则 | 见证（会失败的那个测试） |
+|---|---|---|
+| `mutate:assembly-m24-plan-belongs-to-holder` | 计划是持有人的行为：`task/decomposed` 要求 actor 是当前持有人 | refuses a plan its task-holder did not write |
+| `mutate:assembly-m25-transfer-belongs-to-holder` | 转移是持有人的行为：`task/reassigned` 要求 actor 是当前持有人（第一次的见证撞的是 `from` 那条规则，MISSED，换成"换一张可信身份表"的见证后才 caught） | refuses a transfer emitted under an identity that is not the holder |
+| `mutate:assembly-m26-parent-waits-for-a-running-child` | 父任务不在自己委托出去的验收上与子任务同时开工 | refuses the parent while a sub-task of its own plan is running |
+| `mutate:assembly-m27-initial-source-not-overwritten` | 再次准备工作区不会用种子覆盖已有提交 | leaves a submission in place when the workspace is prepared again |
+| `mutate:assembly-m28-one-input` | 声明恰好一个输入（`{input}` 只有一个名字） | refuses a domain that declares more than one input, by name |
+| `mutate:assembly-m29-staging-writes-the-loader-bytes` | 工作区写入的是装载时摘要过的字节，不是重新读的源 | stages the bytes it digested even when the declared source has changed since |
+
+前两条是**在新表下重放同一批事实**：`from` 成员能挡住"名字指错人"，挡不住"不是这个人在做"，
+后者只有 actor 能表达，所以见证必须换一个可信身份表（换表这个动作本身就是事实，见上表 m25 那一行）。
+
 ## 7. 工作流与文件域（一个文件域一个 owner；共享文件只有协调者动）
 
 | 工作流 | 独占文件 | 交付 |

@@ -375,11 +375,11 @@ async function main() {
       { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.admitted, subject: TASK, payload: { contract: contractOf() } },
       { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.admitted, subject: ATTEMPT1, payload: { contract: contractOf() } },
       { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.admitted, subject: ATTEMPT2, payload: { contract: contractOf() } },
+      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: TASK, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
       { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.decomposed, subject: TASK, payload: { children: [
         { taskId: ATTEMPT1, dependsOn: [], supports: ['counted'], maxRuns: 1 },
         { taskId: ATTEMPT2, dependsOn: [ATTEMPT1], supports: ['counted'], maxRuns: 1 },
       ] } },
-      { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: TASK, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
       { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: ATTEMPT1, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
       { protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: ATTEMPT2, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
     ].entries())

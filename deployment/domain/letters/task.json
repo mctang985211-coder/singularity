@@ -1,7 +1,13 @@
 {
-  "inputs": ["in/source.txt"],
+  "inputs": [
+    {
+      "path": "in/source.txt",
+      "from": "samples/source.txt"
+    }
+  ],
   "workspace": {
-    "program": "program.mjs",
+    "submission": "program",
+    "file": "program.mjs",
     "artifact": "report.txt"
   },
   "criteria": [
@@ -16,19 +22,28 @@
       "ref": "letters",
       "version": "1",
       "program": "verifier.mjs",
-      "args": ["{artifact}", "{input}"],
+      "args": [
+        "{artifact}",
+        "{input}"
+      ],
       "selftest": [
         {
           "name": "accepts the true count",
           "expected": "pass",
           "artifact": "samples/pass-report.txt",
-          "argv": ["samples/pass-report.txt", "samples/source.txt"]
+          "argv": [
+            "samples/pass-report.txt",
+            "samples/source.txt"
+          ]
         },
         {
           "name": "rejects a count that is not the input's",
           "expected": "fail",
           "artifact": "samples/fail-report.txt",
-          "argv": ["samples/fail-report.txt", "samples/source.txt"]
+          "argv": [
+            "samples/fail-report.txt",
+            "samples/source.txt"
+          ]
         }
       ]
     }
