@@ -100,7 +100,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 - **装载时由我们做全部语义校验**：读该 session 的日志 → 选出 `type === plugin:singularity:control` 的事件 → `assertEnvelope(data)` + 内层 protocol/version/kind/payload 严格校验。**不得只凭 DSH 事件类型判断归属。**
 - **DSH 只保证**信封形状 + 词表成员 + 深冻结物化（`adoptSessionEvent`）+ 崩溃屏障（`flush`）+ 跨进程 lease；**每一个语义检查都是我们的**。
 
-**A4 已完成**（本轮）：`ProtocolLog` 的文件存储实现删除，`src/protocol/memory-log.ts` 的 `MemoryLog` 成为纯内存事实管线（提交队列 / 发射者纪律 / 命令识别 / `adopt` 重放校验），门禁 `single-durable-writer` 收紧为 **`no-durable-writer`（零持久写者）**且自检仍全绿。持久性从此只有一个归属：DSH。
+**A4 已完成**（本轮）：`ProtocolLog` 的文件存储实现删除，`src/protocol/memory-log.ts` 的 `MemoryLog` 成为纯内存事实管线（提交队列 / 发射者纪律 / 命令识别 / `adopt` 重放校验），门禁 `single-durable-writer` 收紧为 **`src-names-no-durable-write`（`src/` 下没有任何模块点名持久写）**且自检仍全绿。持久性从此只有一个归属：DSH。**名字里的作用域是第八轮 B3 换来的**：这条规则此前写作"任何模块"，而实现只扫 `src/`，测试与探针要行使真实的沙箱就必须写到 `mkdtemp` 目录里。
 
 **会打破它的因素**：非无损 JSON 或超大载荷 → `materializeAppendBatch` 抛 `TypeError`，记录根本不落；选到 **surface** 宿主类型会拖入 message 形状与 `surfaceManager.validateNext` → 必须选 log-only；**在更新版 harness/词表/格式下 resume 会整份会话拒绝**（`assertVersion`、`validateStoredEvents`）→ **我们的事实随日志一起死**；`Session.append` 在写入时不拒绝未标记的未知类型，伤害只在下次读出现；卡住的写者无限持有 flock（**故意无过期**）→ 没有基于租约超时的恢复。
 
@@ -313,7 +313,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 | 账本看不见载荷形状 | 行里带每种 kind 的**成员集**，而成员集**由解析器自己回答**（喂它一个未声明成员，从拒绝里读出闭合集）——**没有第二份副本** | **嵌套形状**（给 `candidate/submitted` 的 `revision` 加成员仍 18/18）；**"加了成员又同时把账本改到同一版本"**（只有 diff 能看出） |
 | 账本发现可绕过 | 不再认字面文件名：**把每个能加载的 src 模块都 import 一遍**并把 `declare` 包起来，外加调用每个导出的 `declare*Protocol`（35/37 模块可加载，两个依赖 DSH 缝的**每次运行都打印出来**） | 只在"没有 load 走到的路径"上声明的、且用中括号拼写的 |
 | `no-unreferenced-export` 是文本匹配 | 改成**绑定检查**：解析 import/re-export 子句、解析到文件、只有当另一个文件**真的从这个文件绑定该名字**才算引用；**命名空间 import 直接拒绝**（和 fs 命名空间同一条理由） | 只在 `typeof import('./x')` 类型位置使用、或只被 `scripts/*.mjs` 使用且没经 `index.ts` 再导出 |
-| `no-durable-writer` 看不见动态 import | **动态 `import(...)` 一律拒绝**，除非说明符是门禁读得到的、且不是文件系统模块 | `createRequire(...)('node:fs')` / `eval` / `new Function` —— **明说不抓** |
+| `src-names-no-durable-write` 看不见动态 import | **动态 `import(...)` 一律拒绝**，除非说明符是门禁读得到的、且不是文件系统模块 | **规则的作用域是 `src/`**（第八轮 B3：此前门禁打印"no module"而循环跳过 `src/` 之外的每个文件，测试与探针要行使沙箱就必须真的写 `mkdtemp`，所以这句话当时比事实宽）；`createRequire(...)('node:fs')` / `eval` / `new Function` —— **明说不抓** |
 
 **两个待决提议，我的裁决都是"不做"，理由如下：**
 
@@ -731,6 +731,7 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
 | 六条根因、三层架子、六实体落点 | `docs/blueprint.md` |
 | 第一轮审核与 K1/K2 检查点、阶段退出条件 | `docs/review.md` |
 | **八个出口各自是怎么被找到、又是怎么关的** | `docs/adversarial-review-2..8.md` |
+| **第八轮三条 blocking 的处理过程与还剩什么** | `docs/round-9-handoff.md`（交回材料，第九轮先读它） |
 | 写代码前必须读的行为纪律 | `docs/debugging.md`、`docs/spec-policy.md` |
 | 按缝切片的工作方式与已认的缝 | `docs/tdd-seams.md` |
 | RRSI 只移植决策层的边界与五处收紧 | `docs/adr/0001-rrsi-port-boundary.md` |
@@ -740,20 +741,25 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
 第七轮审查者自己写运行时探针，对每一个已声明的嵌套条目注入成员，全部被拒；本轮两个提交
 **零 `src`、零测试行**；三条针对机制本身的变异声明被独立重跑并确认：`mutate:protocol-copied-rule-refused`、`mutate:protocol-nested-reader-widened`、`mutate:protocol-post-declare-push`。
 
-### 下一轮的第一件事：第八轮的三条 blocking（**都还开着**）
+### 第八轮三条 blocking 的处理状态（第九轮开工前，**逐条**）
 
-1. **围栏规则仍然能被"不是围栏的东西"击败。** 判定用的正则允许**前导空白**，所以四个空格缩进的
-   一对反引号（在任何渲染器里都是**缩进代码块**）被读成围栏，里面的计数被藏起来。
-   **不是假设**：`docs/f-evidence.md` 里**已经存在这样一对**。
-2. **五处已声明的嵌套形状可以被放宽，而全套绿色**：`workspace`、`metric`、`weights`、`run`、`outcomes`。
-   其中 `workspace` 那一个，审查者**把全部门禁跑了一遍**仍全绿，而运行输出**把这五处都印成
-   "由命名它们的读者强制"**。所以嵌套层的"一个来源"**只是部分被证明** —— 账本里那条
-   `protocol-nested-reader-widened` 只覆盖它点名的那**一个**读者。**这是第八轮最实质的一条：
-   与第六轮同一种病，换了方向。**
-3. **耐用性规则被陈述为绝对，却只扫 `src/`。** 第七轮**已经关掉**的构造，原样搬到 `tests/` 下，
-   **全部门禁沉默**。第六轮那个形状，现在是一个**目录**而不是一个拼法。
+**只有一条算关掉，一条只关掉了那句话，一条没动。** 过程与可复核的构造在
+`docs/round-9-handoff.md`；**第九轮请对着它的提交独立重跑，并优先反驳 B2 那一节的选择**。
 
-### 三条 HIGH（同批处理）
+1. **缩进围栏：已关。** `FENCE` 收成行首匹配，另加 `INDENTED_FENCE` 把"缩进的标记"本身报成
+   finding（它既不开启也不闭合），第八轮的构造在真实副本上复现为 `gates: 2 of 21 failed`；
+   `docs/f-evidence.md` 里那对缩进标记已顶格。自检加两条腿。
+2. **五处嵌套读者没有实验：没关。** 门禁印的那句"由命名它们的读者强制"**是假的**，已改成
+   "交给命名它们的读者，而闭合每个读者的是喂它一个未声明成员的 spec"。**五处实验没写**：
+   代价 46 行，而这棵树只剩 1 行证据余量，规格文件还贴着 400 行上限 ——
+   **这是预算决定，不是措辞问题**；选项与理由在 `docs/round-9-handoff.md` 的 B2 一节，其中
+   "换成框架强制"那条否决理由**当时是猜的，现在有数字了**（一步内可回答的嵌套集有 3 个，不是 4 个）。
+3. **耐用性规则：说法收窄到它能兑现的范围。** 检测器扫的范围没动（仍是 `src/`），名字改成
+   `src-names-no-durable-write`，七处文案改成"src/ 下的模块"。规则从来不是关于 `tests/` 的：
+   测试与探针**必须**真的落到 `mkdtemp` 上才能行使沙箱。**仍然没有任何门禁会报"某个测试往仓库里
+   写了一个文件"** —— 规则管的是产品。
+
+### 第八轮三条 HIGH（**仍全部开着**，本轮没碰）
 
 - `docs/context.md` 里仍在用**旧的**记录规则描述（"未校验"、"六份"），而两条都已被本轮改掉 ——
   **没有门禁读这段散文**。这正是"给规则写描述"与"让规则被检查"之间那道缝。

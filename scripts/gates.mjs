@@ -395,7 +395,12 @@ const DETECTORS = [
     },
   },
   {
-    name: 'no-durable-writer',
+    /**
+     * The scope is the product, and round eight's B3 is why the name says so: it read absolutely while
+     * the loop below skips everything outside `src/`. The suite and the probes must reach a real medium
+     * to exercise the sandbox at all, so the true statement is the narrower one this now prints.
+     */
+    name: 'src-names-no-durable-write',
     detect: (files, views) => {
       const findings = []
       for (const file of files) {
@@ -410,20 +415,20 @@ const DETECTORS = [
           const specifier = match[3]
           const clause = match[2].trim()
           if (EXEC_MODULES.has(specifier)) {
-            findings.push(`${file} ${verb}s ${specifier}; a general process executor runs whatever a string says, a shell redirection into a file among them, so no module may name one`)
+            findings.push(`${file} ${verb}s ${specifier}; a general process executor runs whatever a string says, a shell redirection into a file among them, so no module under src/ may name one`)
             continue
           }
           if (!FS_MODULES.has(specifier)) continue
           // A default or namespace binding hides every name behind one identifier, so no allowlist
           // can see what it will call. It is refused outright, which is the counterexample fix.
           if (!clause.startsWith('{')) {
-            findings.push(`${file} ${verb}s ${specifier} as a ${clause.startsWith('*') ? 'whole module' : clause.startsWith('type') ? 'type' : 'default or namespace'} binding; no module may write durably; name the members you read instead`)
+            findings.push(`${file} ${verb}s ${specifier} as a ${clause.startsWith('*') ? 'whole module' : clause.startsWith('type') ? 'type' : 'default or namespace'} binding; no module under src/ may write durably; name the members you read instead`)
             continue
           }
           for (const entry of clause.replace(/[{}]/g, '').split(',')) {
             const name = entry.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0]?.trim()
             if (name === undefined || name === '') continue
-            if (!READ_ONLY_FS.has(name)) findings.push(`${file} ${verb}s ${name} from ${specifier}; no module may write durably; DSH session persistence owns the medium`)
+            if (!READ_ONLY_FS.has(name)) findings.push(`${file} ${verb}s ${name} from ${specifier}; no module under src/ may write durably; DSH session persistence owns the medium`)
           }
         }
         // A dynamic import is the same capability behind a door a static scan cannot see, refused for
@@ -434,9 +439,9 @@ const DETECTORS = [
           const at = `${file}:${lineOf(code, match.index)}`
           const literal = /^\s*(['"])([^'"]*)\1\s*\)/.exec(views.raw.get(file).slice(match.index + match[0].length))
           if (literal === null)
-            findings.push(`${at} loads a module through a dynamic import whose target is not one quoted literal the gate can read on its own (a concatenation, a template, a variable or an expression); no module may write durably, so a dynamic import may only name one literal module, and never a filesystem one`)
+            findings.push(`${at} loads a module through a dynamic import whose target is not one quoted literal the gate can read on its own (a concatenation, a template, a variable or an expression); no module under src/ may write durably, so a dynamic import may only name one literal module, and never a filesystem one`)
           else if (FS_MODULES.has(literal[2]) || EXEC_MODULES.has(literal[2]))
-            findings.push(`${at} dynamically imports ${literal[2]}; no module may write durably; DSH session persistence owns the medium`)
+            findings.push(`${at} dynamically imports ${literal[2]}; no module under src/ may write durably; DSH session persistence owns the medium`)
         }
         // A loader or a builtin fetched by name is that door without the wall: neither is an import
         // clause, so no import rule reads what it loads. Both are refused by name — there is no readable
@@ -446,7 +451,7 @@ const DETECTORS = [
           ['getBuiltinModule', 'fetches a module by name with process.getBuiltinModule, which no import clause names and no specifier scan can see'],
         ]) {
           const at = code.search(new RegExp(`\\b${spelling}\\b`))
-          if (at >= 0) findings.push(`${file}:${lineOf(code, at)} ${how}; no module may write durably, so a loader this gate cannot read is refused by name`)
+          if (at >= 0) findings.push(`${file}:${lineOf(code, at)} ${how}; no module under src/ may write durably, so a loader this gate cannot read is refused by name`)
         }
       }
       return findings
@@ -815,8 +820,10 @@ const COUNT_CLAIM = /(?<![\w.])\d[\d,]*\s*(?:条\s*)?(?:测试|门禁|spec 文�
 const FILE_CLAIM = /(?<![\w.])\d[\d,]*\s*(?:个\s*)?文件|(?<![\w.])\d[\d,]*\s+files?\b/
 const TREE_ON_LINE = /src\/|tests\/|scripts\/|docs\/|singularity-core|README\.md|this tree|this repository|本树|本仓|本仓库|仓库/
 
-/** A fence delimiter: three or more backticks or tildes, and whatever follows, read as an info string. */
-const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
+/** A fence delimiter: three or more backticks or tildes at the line's first character, and an info string. */
+const FENCE = /^(`{3,}|~{3,})(.*)$/
+/** The same delimiter with anything before it, which a renderer reads as a code block rather than a fence. */
+const INDENTED_FENCE = /^[ \t]+(`{3,}|~{3,})/
 
 /**
  * The prose scan. The boundaries, each stating what it does not reach (the reasoning is in §13):
@@ -826,6 +833,9 @@ const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
  *   fence on the first ``` after it, so the rest read as prose and was then skipped as quoted, silently.
  *   A delimiter longer than three is a finding in its own right — the tree quotes output with three.
  * - A fence left open is a finding for every delimiter, so one ``` cannot exempt the rest.
+ * - A delimiter indented by anything is a finding rather than a fence: a renderer reads an indented
+ *   delimiter as a code block, so it quotes nothing, and honouring one let the eighth review put a
+ *   balanced indented pair round a count. Neither opens nor closes, so four spaces decide nothing.
  * - A declared record is skipped whole-file only when it names a commit this repository holds, checked
  *   against git and not matched as a hex token; if it names none it is not a record, and it is scanned.
  * - A count on a line carrying a commit-shaped token is that line's record, and the token is **not**
@@ -850,6 +860,10 @@ function countClaimFindings(docs = readCorpus(), records = RECORD_DOCS, commits 
       )
     let open = null
     text.split('\n').forEach((line, index) => {
+      // An indented delimiter is neither an opener nor a closer, it is a finding: as an opener it hides
+      // the rest of the document, and as a closer it ends a fence nobody opened.
+      if (INDENTED_FENCE.test(line))
+        findings.push(`${file}:${index + 1} indents a fence delimiter; a renderer reads that as a code block rather than a fence, so it quotes nothing, and honouring it is how the eighth review hid a count behind a balanced indented pair`)
       const fence = FENCE.exec(line)
       if (fence !== null) {
         const delimiter = fence[1]
@@ -1629,6 +1643,9 @@ if (PROBE) {
     ['a `~~~` fence left open', [{ file: 'docs/__probe.md', text: '~~~\ngates: 11 gates over 42 files\n' }], 1],
     ['a four-backtick fence closed by a three-backtick line, which B1 hid a count behind', [{ file: 'docs/__probe.md', text: '````\ngates: 11 gates over 42 files\n```\n' }], 2],
     ['a balanced four-backtick fence, refused by name rather than honoured', [{ file: 'docs/__probe.md', text: '````\ngates: 11 gates over 42 files\n````\n' }], 2],
+    // Round eight's B1: two findings, one per indented delimiter, and the count between them is read.
+    ['a balanced pair of indented fences round a count, which is a code block in every renderer', [{ file: 'docs/__probe.md', text: '    ```\n    gates: 11 gates over 42 files\n    ```\n' }], 3],
+    ['a tab-indented fence delimiter, indented by the other character that does it', [{ file: 'docs/__probe.md', text: '\t```\ngates: 11 gates over 42 files\n```\n' }], 3],
     ['a declared record that names a commit this repository holds', [{ file: 'docs/__probe-review.md', text: 'measured at `e8c1c70`: 21 gates\n' }], 0],
     ['a declared record that names only a token no repository holds', [{ file: 'docs/__probe-review.md', text: 'measured at `deadbeefcafe1234`: 21 gates\n' }], 1],
     ['a declared record that names no commit at all', [{ file: 'docs/__probe-review.md', text: 'the tree had 21 gates\n' }], 2],
@@ -1737,15 +1754,15 @@ if (PROBE) {
       [probeFiles[0], source],
       [probeFiles[1], use],
     ])
-    const findings = DETECTORS.find(detector => detector.name === 'no-durable-writer').detect(probeFiles, {
+    const findings = DETECTORS.find(detector => detector.name === 'src-names-no-durable-write').detect(probeFiles, {
       raw: probeRaw,
       code: new Map([...probeRaw].map(([file, text]) => [file, codeOnly(text)])),
     })
     if (findings.length === expected) {
-      console.log(`  ok    no-durable-writer handled ${label} (${expected} finding${expected === 1 ? '' : 's'})`)
+      console.log(`  ok    src-names-no-durable-write handled ${label} (${expected} finding${expected === 1 ? '' : 's'})`)
     } else {
       missed += 1
-      console.log(`  FAIL  no-durable-writer reported ${findings.length} findings on ${label}, expected ${expected}`)
+      console.log(`  FAIL  src-names-no-durable-write reported ${findings.length} findings on ${label}, expected ${expected}`)
     }
   }
 
@@ -2076,7 +2093,7 @@ void HIDDEN.kindsOf('hidden', 1)
   // modules loaded with stubs, and the declaration net's own boundary where a reader meets it.
   const declaredNested = DECLARED.flatMap(entry => entry.kinds.filter(kind => (kind.nested ?? []).length > 0).map(kind => `${entry.protocol}@${entry.version} ${kind.name} (${kind.nested.join(', ')})`))
   console.log('  note  protocol-inventory compares the ledger with each kind\'s declared member set, which is the same value defineKind applies to the payload before its parser runs; there is nothing to sample, so a parser whose accepted set would depend on the payload cannot make the declared set wrong')
-  console.log(`  note  protocol-inventory compares each kind's declared payload members with its ledger row and does not reach inside a payload: the closed shapes a kind declares there (${declaredNested.join('; ') || 'none in this tree'}) are enforced by the readers that name them, one level down`)
+  console.log(`  note  protocol-inventory compares each kind's declared payload members with its ledger row and does not reach inside a payload: the closed shapes a kind declares there (${declaredNested.join('; ') || 'none in this tree'}) are handed to the readers that name them, one level down, and what closes each reader there is the spec that feeds it an undeclared member — a declaration is not what stops a reader from spreading one`)
   console.log(`  note  protocol-inventory observes a declaration when a module loads or an exported declarer is called, and counts each src file's dot-spelled declarations against what was observed at that site; ${observedBySite.size} site(s) carried a declaration this run (${[...observedBySite.keys()].sort().join(', ')}), and in those files a declaration spelled otherwise (X['declare'](…)) on a path no load reaches is reached by neither mechanism`)
   if (PUBLISHED_WITHOUT_CONSUMER.size > 0)
     console.log(`  note  no-unreferenced-export records ${PUBLISHED_WITHOUT_CONSUMER.size} name(s) that src/index.ts publishes and nothing in this tree binds; the record may only shrink, and a name published without being recorded in it is a finding`)

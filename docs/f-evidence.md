@@ -127,11 +127,14 @@ direction 翻成 `lower`、用仓库自己的 `digestOf` 重算摘要、改掉�
   （这句随方向变：fixture 声明 `lower` 时动词换成 `is beaten by`，所以 marker 前缀 `domain-probe: OK` 是
   稳定的那一半，接线读的正是它。）
 - **合成失败会长这样**（`scriptFindings` 读 marker + 退出码）。任一检查为假时探针打印
-  `  FAIL  <检查名> — <读数>`，每条断言都带它自己的观测值，最后是：
+  `  FAIL  <检查名> — <读数>`，每条断言都带它自己的观测值，最后是这一段（引用的输出一律顶格起围栏：
+  缩进的标记在渲染器里是代码块而不是围栏，门禁第八轮之后按 finding 报它）：
 
-  ```
-  domain-probe: 1 check(s) failed: the two sides of every task freeze one caliber, digit for digit
-  ```
+```
+
+domain-probe: 1 check(s) failed: the two sides of every task freeze one caliber, digit for digit
+
+```
 
   并且退出码为 1；marker 行不再出现，于是门禁同时命中"没有 marker"和"退出码非 0"两件事。探针的
   自检腿（`gates.mjs --probe`）用 `'ok\nsome checks failed\n'` 这种合成输出即可让它失败——它读的正是
