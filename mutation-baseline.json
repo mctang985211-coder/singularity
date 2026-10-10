@@ -877,5 +877,24 @@
         ]
       },
       "witness": "×"
+    },
+    {
+      "id": "protocol-nested-verdict-reader-widened",
+      "rule": "the verdict citation reader closes the citation with `nested.verdict`, the set the declaration handed it, rather than one member wider",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/measure/protocol.ts",
+          "find": "    assertClosedKeys(citation, verdictMembers, `${where}.verdict`)",
+          "replace": "    assertClosedKeys(citation, [...verdictMembers, 'note'], `${where}.verdict`)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/measure-slice.spec.ts"
+        ]
+      },
+      "witness": "expected the step to refuse"
     }  ]
 }

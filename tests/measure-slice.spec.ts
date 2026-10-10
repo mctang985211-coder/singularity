@@ -360,6 +360,14 @@ describe('the measurement slice', () => {
       verdict: { criterionId: 'quality', evidenceDigest: 'a'.repeat(64), artifactDigest: 'b'.repeat(64) },
     }))
     expect(citedElsewhere).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining('cites verdict') })
+    // The citation is a closed shape, like every nested reader: one member wider is refused at the
+    // parse boundary, before any reduce can see it. The rest of the citation is one a recorded
+    // verdict could carry, so what refuses it is the closure and nothing else.
+    const widenedCitation = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.constraintChecked, {
+      criterionId: 'limits', met: true, artifactDigest: ARTIFACT, verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST,
+      verdict: { criterionId: 'quality', evidenceDigest: 'a'.repeat(64), artifactDigest: ARTIFACT, note: 'extra' },
+    }))
+    expect(widenedCitation).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('verdict') })
     await check(instance, true)
     const twice = await asyncRefusalOf(() => check(instance, true))
     expect(twice).toMatchObject({ code: 'evidence-conflict', detail: expect.stringContaining('once') })

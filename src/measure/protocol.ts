@@ -58,6 +58,7 @@ export const MEASURE_KINDS = {
 const RUN_MEMBERS = ['taskId', 'runId'] as const
 const METRIC_MEMBERS = ['measured', 'unit', 'direction'] as const
 const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
+const VERDICT_CITATION_MEMBERS = ['criterionId', 'evidenceDigest', 'artifactDigest'] as const
 
 /** Where a measurement happens: the run whose declared bubble every trial is bound to. */
 export interface EvaluationRun {
@@ -227,7 +228,7 @@ function missedOf(raw: unknown, where: string): MissedTrial {
   }
 }
 
-function constraintOf(raw: unknown, where: string): ConstraintCheck {
+function constraintOf(raw: unknown, where: string, verdictMembers: MemberSet): ConstraintCheck {
   const source = record(raw, where)
   const met = source['met']
   if (typeof met !== 'boolean') refuse('malformed-payload', `${where}.met must be a boolean, got ${met === null ? 'null' : typeof met}`)
@@ -236,6 +237,9 @@ function constraintOf(raw: unknown, where: string): ConstraintCheck {
   let verdict
   if (rawVerdict !== undefined) {
     const citation = record(rawVerdict, `${where}.verdict`)
+    // The citation is a closed shape like every nested reader: one member wider is refused here, at
+    // the parse boundary, before any reduce can read it as a verdict this deployment recorded.
+    assertClosedKeys(citation, verdictMembers, `${where}.verdict`)
     verdict = {
       criterionId: text(citation, 'criterionId', `${where}.verdict`),
       evidenceDigest: digest(citation, 'evidenceDigest', `${where}.verdict`),
@@ -393,12 +397,14 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
         },
       }),
 
-      [MEASURE_KINDS.constraintChecked]: defineKind<EvaluationState, ConstraintCheck, {}>({
+      [MEASURE_KINDS.constraintChecked]: defineKind<EvaluationState, ConstraintCheck, { verdict: MemberSet }>({
         guarantees: { appended: true },
         members: ['criterionId', 'met', 'artifactDigest', 'verifierRef', 'verifierVersion', 'implementationDigest', 'verdict', 'detail'],
-        nested: {},
+        // The citation inside `verdict` is closed by the set this declaration hands the reader, so a
+        // citation cannot grow a member the recorded verdict never carried.
+        nested: { verdict: VERDICT_CITATION_MEMBERS },
         emitter: payload => verifierRoleOf(payload),
-        parse: raw => constraintOf(raw, `${MEASURE_KINDS.constraintChecked} payload`),
+        parse: (raw, where, nested) => constraintOf(raw, where, nested.verdict),
         reduce: (state, envelope, payload) => {
           const where = `${MEASURE_KINDS.constraintChecked} #${envelope.seq}`
           const plan = requirePlan(state, where, envelope.subject)

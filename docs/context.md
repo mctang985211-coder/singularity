@@ -781,6 +781,21 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
 理由写在门禁常量上——那个文件是**一个协议**（版本、四个 kind、各自的读者、初始状态），
 拆开只会得到"两个文件互相 import"或"半个 kind"；`src/` 里没有任何文件接近这个数。
 
+### 收口审查（对着 `e5122e0` 独立重跑）：会合提交自己身上两处，都已关
+
+1. **`constraint/checked` 的嵌套引用读者没有闭合**——第八轮刚给五处嵌套读者补完一行实验，
+   这个提交新增的第六处（`verdict` 引用）读载荷时**不查闭合键**，正是 B2 那个形态。已按家族同款
+   修法关掉：`nested: { verdict: VERDICT_CITATION_MEMBERS }` 声明交给读者、读者
+   `assertClosedKeys` 收口（`src/measure/protocol.ts`），并补第六条一行实验
+   （`tests/measure-slice.spec.ts`：引用多一个成员 → `malformed-payload`）与声明
+   `mutate:protocol-nested-verdict-reader-widened`（见证不是 `×`，见 `mutation-baseline.json`）。
+   与那五处一样，它仍受"把 `nested` 声明本身放宽实测全绿"那条遗留约束——关掉它的依然是 spec。
+2. **`recordedVerdictDigest` 的两条拒绝没有腿**。"引用不能指未记录的判决"是这次会合的承重保证，
+   但 `unknown-run` 与"先记录再引用"当时只有 `rsi-live` 一条脚本路径能撞上。已在
+   `tests/task-commands.spec.ts` 的 verdict 用例里各补一条断言（同一证据两次同摘要、
+   未知 run、未记录判据），并因它有了测试消费者，摘除了 `PUBLISHED_WITHOUT_CONSUMER`
+   里它的豁免行——ratchet 只收紧。
+
 ### 第八轮 B2 的收尾：五处嵌套读者各有一条实验（**第九轮按审查者的构造改的**）
 
 第八轮指出 `workspace` / `metric` / `weights` / `run` / `outcomes` 五处嵌套读者可以被放宽而全套绿。

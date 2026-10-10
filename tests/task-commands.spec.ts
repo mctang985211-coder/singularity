@@ -8,6 +8,7 @@ import {
   createTaskCommands,
   ENVIRONMENT_PROTOCOL,
   ENVIRONMENT_VERSION,
+  recordedVerdictDigest,
   type RefusalCode,
   refuse,
   TASK_KINDS,
@@ -207,6 +208,16 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
     })
     const evidence = recorded.payload as { verifierRef: string; verifierVersion: string; inputDigests: unknown }
     expect([evidence.verifierRef, evidence.verifierVersion, evidence.inputDigests]).toEqual([UNIT_VERIFIER, '1', BUBBLE_INPUTS])
+
+    // A measurement cites this verdict through the reader's own lookup: the same evidence answers
+    // the same digest, and a run nobody started or a criterion nobody recorded is refused by name —
+    // the citation cannot name a verdict that was never recorded.
+    const state = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CHILD)
+    if (state === undefined) throw new Error('expected the admitted child to fold')
+    const citation = { runId: RUN, criterionId: 'part', artifactDigest: 'b'.repeat(64) }
+    expect(recordedVerdictDigest(state, 'the citation', citation)).toBe(recordedVerdictDigest(state, 'the citation', citation))
+    expect(refusalOf(() => recordedVerdictDigest(state, 'the citation', { ...citation, runId: 'run-ghost' })).code).toBe<RefusalCode>('unknown-run')
+    expect(refusalOf(() => recordedVerdictDigest(state, 'the citation', { ...citation, criterionId: 'nothing' })).detail).toContain('record the verdict before citing it')
   })
 })
 

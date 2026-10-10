@@ -272,7 +272,6 @@ const PUBLISHED_WITHOUT_CONSUMER = new Set([
   'src/task/decomposition.ts\0assertDecompositionAgainst',
   'src/task/decomposition.ts\0DECOMPOSITION_CHILD_MEMBERS',
   'src/task/decomposition.ts\0DECOMPOSITION_MEMBERS',
-  'src/task/protocol.ts\0recordedVerdictDigest',
   'src/task/responsibility.ts\0REASSIGNMENT_MEMBERS',
   'src/task/responsibility.ts\0RESPONSIBILITY_MEMBERS',
   'src/task/run.ts\0EvidenceRecord',
