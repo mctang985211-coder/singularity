@@ -223,3 +223,52 @@ R08 最后一段：**"只证明 Run 钉住某 revision，不能证明其中某 S
 
 **F 明确不做**：删除旧栈、把旧栈的数据迁过来、通用沙箱、group/router、任何新的轮次编排。
 "部署替代"的**证据**是上面四条，不是一次不可逆的切换。
+
+---
+
+## 6. F 的具体形状（**零 src 改动；若实现方发现必须改 src，先报告再动**）
+
+F 的退出条件是**取证**，不是造机制。再压一遍之后，F **一个协议不加、一行 src 不加**：
+
+### 6.1 fixture（`tests/fixtures/f-domain.json` 之类，**内容摘要即对照身份**）
+
+```json
+{
+  "tasks": [ { "taskId", "goal", "inputs": [...], "criteria": [AcceptanceCriterion] } ],
+  "frozen": { "model": "...", "tools": [{name, implementationDigest, version}], "conditions": [...],
+              "metric": { "measured": {ref,version,implementationDigest}, "unit", "direction" },
+              "weights": { "quality", "cost" }, "trials": N },
+  "standards": { "minQualityGain": 0.0, "maxCostIncrease": 0.0 },
+  "sets": { "solve": [taskId...], "holdout": [taskId...] }
+}
+```
+
+- `frozen` 就是**一次 `measure@3` 的 caliber**（run 的 bubble 声明 + metric + weights + trials），
+  所以"同口径"不需要新概念：两侧的 evaluation 必须 `caliberDigestOf` 相等。
+- `sets` 分开记录 solve 与 holdout —— **R08：被反复反馈给 proposer 的数据已经进入搜索，
+  不能再宣称是留出证据**。这条是 fixture 里唯一"流程"性的成员，必须有。
+
+### 6.2 对照探针（`scripts/domain-probe.mjs`，接门禁 `domain-comparison`）
+
+对 `tasks` 里每个任务：真开一个 run + bubble（`task@5`），真跑测量程序（复用 `scripts/measure-runner.mjs`
+的形态），把 **H0 修订**与**已发布修订**各测一次，落成两条 `measure@3` 的 evaluation。
+然后**由探针自己**聚合（跨任务的比较是**实验的读数**，不是产品的不变量——这就是为什么它不需要新投影）。
+
+断言（expected 来自 fixture 与手算，**不由被测函数算**）：
+1. 两侧各自的 evaluation 全部开盘，且 `caliberDigestOf` **相等**（同口径）；
+2. 每个任务两侧都有 `trials` 次真实执行，缺失按冻结槽位计划显式表示；
+3. 每个任务的 **holdout 与 solve 分别**记录（不得混池）；
+4. 用 `frozen.standards` 判定"是否达标"，**低于标准就是没达标**——不许把"接线了"当成"有效"；
+5. 同一截止范围重放得到**同一结论**（fixture 摘要 + 两侧修订摘要一起进结论的输入）。
+
+### 6.3 证据文档（`docs/f-evidence.md`，格式同 `k1-evidence.md`）
+
+逐条观测 + **未观测项单列**。已知至少要列两条：
+- **数字不是真模型产出的**（`cd-probe` 与 `measure-probe` 都是探针自撰的方法文件）；
+  真模型路线由 `scripts/model-smoke.mjs` 覆盖，但它**刻意不是门禁**（要网络与凭据）。
+- **行为回归就是既有四个探针**，F 不新增回归机制。
+
+### 6.4 明确不做
+
+删旧栈、迁旧数据、通用沙箱、group/router、任何新编排、任何新的比较协议。
+"部署替代"的证据是 6.2 的五条读数，不是一次不可逆的切换。
