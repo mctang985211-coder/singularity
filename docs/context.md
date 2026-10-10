@@ -1022,3 +1022,55 @@ node scripts/assembly-repair-probe.mjs   # 在飞 run 的收尾（探针自己�
   不可能共享一键；这条检查在动态名册下不会被触发，是限制不是漏洞。
 - **模型会写错程序**：契约（工具描述与 prompt）已写明"写进工作区、作为 node 的 ES module 运行、只判 stdout"，
   崩溃或空产物是记录下来的 fail；记录里的 `detail` 永远是判据 verifier 的原话。
+
+---
+
+## 17. 下一阶段：sha256 真实域的第一个优化任务（G3 的入场券）
+
+**这一节先写下来，因为它是压缩后最容易丢的东西**：G1 已交付并提交（`eb9581a`，记录 [assembly-g1.md](assembly-g1.md)），
+下一阶段不再是"接线"，而是**在一个真实领域上跑通一次真实优化**。
+
+### 17.1 装置在哪、怎么跑
+
+```sh
+source /home/ROXY/singularity-next/env.sh
+/home/ROXY/singularity-next/labs/sha256/grader.sh     # 秒级，三行输出
+# 本轮实测：verdict pass / area 35163.724800 / yosys_from nix-profile（2.4s）
+```
+
+| 件 | 路径 | 说明 |
+|---|---|---|
+| 功能判决（**硬约束，不可补偿**） | `labs/sha256/grader.sh` 腿 1 | NIST 测试向量经 iverilog 13.0；判过的是 grader 打印的那一行字面量（见下方引用） |
+| quality 度量（可交易） | `labs/sha256/grader.sh` 腿 2 | yosys + `labs/sky130hd-lib/sky130hd_tt_025C_1v80.lib` 综合 `sha256_core` 的 **Chip area**，direction: lower |
+| 领域契约 | `labs/sha256/DOMAIN.md` | 三任务族（area / throughput / robust）+ 冻结纪律；第一轮建议 **area 族一题** |
+| 交接 | `labs/sha256/HANDOFF.md` | 构建人的入口；`src/{rtl,tb}`、`src/interfaces/*` 是源码 |
+
+它要求判过的字面行是：
+
+```text
+*** All 03 test cases completed successfully
+```
+
+
+### 17.2 冻结纪律（**写下来，冻结前所有数字只作冒烟**）
+
+grader.sh + liberty 文件 + 工具版本构成**度量装置的 digest**；改综合脚本序列或换 liberty 版本 = 换 caliber，
+历史分数不可比。**当前 `yosys_from` 还有 buckyball 兜底的第二条解析路径，冻结时必须消除**（单路解析）——
+本轮实测两条路径都活着，而且**不是同一个合成器**：nix-profile 是 `yosys 0.69`，buckyball result 是 `yosys 0.67`。
+也就是说同一份 RTL 在两台机器上会落到两个版本上跑分，`area` 因此不可比；这是冻结要消掉的第一件事。
+
+### 17.3 为什么这不是"再加一个 letters"
+
+G1 的域形状是「一段文本进 → 程序 stdout 出 → 一条判据 → 一个 verdict」。sha256 域是另一种形状：
+**受保护的源码树进 → 改动后的 RTL 出 → 功能是硬约束 + area 是可交易的度量（数与方向）**。
+后者正是 `src/measure/`（evaluation/constraint/方向/缺失分母）与 `src/strategy/`（round/candidate/selection）
+要承载的东西——所以下一步是把装置接到**已有的 measure/strategy 协议**上，而不是给装配层写第二个特例；
+装配层的域接口该怎么长出"工作区准备 + 受保护输入 + 度量口径"是这一轮要定的接口（先冻结接口，再并行实现）。
+
+### 17.4 不要重开的事（这一阶段新增）
+
+- **领域字面量不许进 `assembly/src`**（门禁 `assembly-domain-free` 每次检查）；sha256 的名字只许写在
+  `deployment/domain/sha256/` 与 profile 的 `domainDir` 里。
+- **功能腿是硬约束**：面积再低、NIST 不过就是 inadmissible；不要把"没跑成"记成"低分"。
+- **冻结前不写成绩**：`yosys_from` 双路解析在冻结前只作冒烟，任何"提升 x%"的说法都要等冻结后的同一 caliber。
+- **不要为了跑 sha256 而把 letters 的域形状改坏**：需要一个域接口承载两种形状，不是把 letters 撑大。
