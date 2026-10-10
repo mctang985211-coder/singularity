@@ -679,13 +679,18 @@ async function main() {
     // The accounting, read on the fixture's own claims and on a control that is deliberately one
     // slot short: an arithmetic only ever applied to rows that balance is an arithmetic whose
     // answer is a constant, so the control is what makes "a slot is missing" a fact this can say.
-    const shortControl = { planId: 'control-one-slot-short', observed: 1, missing: [1], denominator: 3 }
     const accounts = claim => claim.observed + claim.missing.length === claim.denominator
-    // The answer is read from one plan that balances, the one that is short, and a control that is
-    // short by construction: a rule only ever shown a balanced row is a rule that always says yes.
-    const accountsFor = [claims[0], claimOf(`${holdoutSet[0]}-published`), shortControl].map(accounts)
+    // The answer is read from a plan that balances, the one plan with a declared miss (whose slots
+    // still all have an outcome), and two controls that are short by construction: a rule only ever
+    // shown rows that balance is a rule that always says yes.
+    const accountsFor = [
+      claims.find(claim => claim.missing.length === 0),
+      claims.find(claim => claim.missing.length > 0),
+      { planId: 'control-one-slot-short', observed: 1, missing: [1], denominator: 3 },
+      { planId: 'control-two-slots-short', observed: 0, missing: [0], denominator: 3 },
+    ].map(accounts)
     check('no slot anywhere is silently absent: each one is an observation or a named miss',
-      JSON.stringify(accountsFor) === JSON.stringify([true, false, false]) && claims.filter(claim => claim.missing.length > 0).length === 1,
+      JSON.stringify(accountsFor) === JSON.stringify([true, true, false, false]) && claims.filter(claim => claim.missing.length > 0).length === 1,
       JSON.stringify(claims.map(claim => [claim.planId, claim.observed, claim.missing.length, claim.denominator])))
     check('the slot the plan left empty is the reason the candidate is inadmissible, not a score',
       claimOf(`${holdoutSet[0]}-published`).admissible === false &&
