@@ -48,7 +48,7 @@ import {
   type Outcome,
 } from './decision.ts'
 import { requirePlan, type RoundPlan } from './plan.ts'
-import { readCalibration, sameRevision, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
+import { CALIBRATION_MEMBERS, readCalibration, sameRevision, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
 import { publishedAssetsBelow } from './published-assets.ts'
 
 /**
@@ -328,7 +328,7 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
 export function projectRound(state: RoundState, slice: MeasureSlice, calibration: Calibration): RoundDecision {
   const plan = requirePlan(state, `project round "${state.roundId}"`)
   // One definition of "a band must name its provenance", shared with the payload that records it.
-  readCalibration(calibration, 'the noise basis')
+  readCalibration(calibration, 'the noise basis', CALIBRATION_MEMBERS)
 
   const incumbentAggregate = slice.incumbentBelow(plan.incumbent, plan.historyCutoff)
   const acceptedAssets = publishedAssetsBelow(slice.entries, plan.incumbent.environmentId, plan.historyCutoff)

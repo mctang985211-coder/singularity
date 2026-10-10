@@ -159,7 +159,7 @@ export const STRATEGY_KINDS = {
 const APPENDED = { appended: true } as const
 const EDIT_MEMBERS = ['asset', 'target'] as const
 const OUTCOME_MEMBERS = ['slot', 'admitted', 'reason'] as const
-const CALIBRATION_MEMBERS = ['floor', 'source'] as const
+export const CALIBRATION_MEMBERS = ['floor', 'source'] as const
 const SUBMISSION_MEMBERS = ['slot', 'revision', 'evaluationId', 'edits', 'exploratory'] as const
 const DECIDED_MEMBERS = ['winner', 'outcomes', 'calibration'] as const
 
@@ -175,7 +175,7 @@ export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
  * rule that a band cannot be anonymous — `measured` and `declared` floors are different claims (R06)
  * — has one definition rather than two.
  */
-export function readCalibration(raw: unknown, where: string, members: MemberSet = CALIBRATION_MEMBERS): Calibration {
+export function readCalibration(raw: unknown, where: string, members: MemberSet): Calibration {
   const source = record(raw, where)
   assertClosedKeys(source, members, where)
   const floor = source['floor']
