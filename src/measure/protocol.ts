@@ -181,7 +181,7 @@ function weightsOf(raw: unknown, where: string, members: MemberSet = WEIGHTS_MEM
   return { quality, cost: finite(source, 'cost', where) }
 }
 
-function trialOf(raw: unknown, where: string): TrialRecord {
+function trialOf(raw: unknown, where: string, members: MemberSet): TrialRecord {
   const source = record(raw, where)
   const cost = maybeFinite(source, 'cost', where)
   const detail = maybeText(source, 'detail', where)
@@ -190,7 +190,7 @@ function trialOf(raw: unknown, where: string): TrialRecord {
     quality: finite(source, 'quality', where),
     ...(cost === undefined ? {} : { cost }),
     artifactDigest: digest(source, 'artifactDigest', where),
-    inputDigests: inputList(source['inputDigests'], `${where}.inputDigests`),
+    inputDigests: inputList(source['inputDigests'], `${where}.inputDigests`, members),
     verifierRef: text(source, 'verifierRef', where),
     verifierVersion: text(source, 'verifierVersion', where),
     implementationDigest: digest(source, 'implementationDigest', where),
@@ -277,8 +277,9 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
       >({
         guarantees: { appended: true },
         members: ['baseline', 'candidate', 'run', 'context', 'metric', 'weights', 'trials', 'judgement'],
-        // The shapes inside this payload, by the member that holds each; `judgement[]` is closed by
-        // `contract.ts`'s criterion reader, which enforces the one set named here.
+        // The shapes inside this payload, by the member that holds each, handed to the reader that
+        // closes it: `judgement[]` goes to `contract.ts`'s criterion reader, and each entry there is
+        // the declaration rather than a copy the reader keeps.
         nested: { baseline: REVISION_MEMBERS, candidate: REVISION_MEMBERS, run: RUN_MEMBERS, metric: METRIC_MEMBERS, weights: WEIGHTS_MEMBERS, judgement: CRITERION_MEMBERS },
         emitter: SCHEDULER_ROLE,
         parse: (raw, where, nested) => {
@@ -287,7 +288,7 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
           if (!Number.isInteger(trials) || trials < 1)
             refuse('malformed-payload', `${where}.trials must be an integer >= 1, got ${String(trials)}; a plan with no slots has no denominator, so nothing could be reported complete or missing`)
           const metric = metricOf(source['metric'], `${where}.metric`, nested.metric)
-          const judgement = criterionList(source['judgement'], `${where}.judgement`)
+          const judgement = criterionList(source['judgement'], `${where}.judgement`, nested.judgement)
           if (judgement.some(criterion => criterion.criterionId === metric.measured.criterionId))
             refuse('malformed-contract', `${where} judges "${metric.measured.criterionId}" as a hard constraint and measures it as the metric; a constraint nobody trades off and a number that is traded off are two criteria`)
           const run = record(source['run'], `${where}.run`)
@@ -325,11 +326,13 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
       [MEASURE_KINDS.trialRecorded]: defineKind<EvaluationState, TrialRecord, { inputDigests: MemberSet }>({
         guarantees: { appended: true },
         members: ['slot', 'quality', 'cost', 'artifactDigest', 'inputDigests', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'],
-        nested: { inputDigests: BUBBLE_INPUT_MEMBERS }, // closed by `inputList`, which enforces this one set
+        // `inputDigests[]` is closed by `inputList`, which is handed this one set; the declaration is
+        // what closes each entry.
+        nested: { inputDigests: BUBBLE_INPUT_MEMBERS },
         // The role *is* the implementation: a deployment must hold that verifier's identity to emit
         // its numbers, and the log refuses the fact when it does not.
         emitter: payload => verifierRoleOf(payload),
-        parse: raw => trialOf(raw, `${MEASURE_KINDS.trialRecorded} payload`),
+        parse: (raw, where, nested) => trialOf(raw, where, nested.inputDigests),
         reduce: (state, envelope, payload) => {
           const where = `${MEASURE_KINDS.trialRecorded} #${envelope.seq}`
           const plan = requirePlan(state, where, envelope.subject)

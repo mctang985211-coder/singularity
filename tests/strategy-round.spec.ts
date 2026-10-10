@@ -184,6 +184,9 @@ describe('the submission gate is the reducer\u2019s, inside the commit region', 
     await expectRefusal(() => emitSubmission(log, 'round-1', 2, { exploratory: true }), 'evidence-conflict', 'one slot holds one candidate')
     await expectRefusal(() => emitSubmission(log, 'round-1', 0, { edits: wide }), 'budget-exhausted', 'anneals to a budget of 2')
     await expectRefusal(() => emitSubmission(log, 'round-1', 0, { edits: [...SKILL, ...SKILL] }), 'malformed-payload', 'one structural change per target')
+    // The revision is closed by the set the declaration names and hands to `revisionRef`, not by a copy
+    // in the reader: one more member in the pin is refused by name.
+    await expectRefusal(() => emitSubmission(log, 'round-1', 0, { revision: { ...CANDIDATE_A, note: 'extra' } }), 'malformed-payload', 'note')
     await expectRefusal(() => emitSubmission(log, 'round-1', 1), 'illegal-transition', 'reserves for exploration')
     const both = [{ asset: 'skill' as const, target: 'count' }, { asset: 'tool' as const, target: 'count' }]
     emitSubmission(log, 'round-1', 0, { edits: both })

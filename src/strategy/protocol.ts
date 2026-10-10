@@ -218,14 +218,16 @@ function editList(raw: unknown, where: string, members: MemberSet): readonly Str
 /** The submission payload, before the log stamps who submitted it. */
 type Submission = Omit<CandidateSubmission, 'actor' | 'at'>
 
-function submissionPayload(raw: unknown, where: string, nested: { readonly edits: MemberSet }): Submission {
+function submissionPayload(raw: unknown, where: string, nested: { readonly edits: MemberSet; readonly revision: MemberSet }): Submission {
   const source = record(raw, where)
   const exploratory = source['exploratory']
   if (typeof exploratory !== 'boolean')
     refuse('malformed-payload', `${where}.exploratory must be true or false, got ${exploratory === undefined ? 'nothing' : JSON.stringify(exploratory)}; a reserved slot turns on this member and a missing one is not a false one`)
   return {
     slot: count(source, 'slot', where),
-    revision: revisionRef(source['revision'], `${where}.revision`),
+    // Handed the declaration, so `nested.revision` is what closes the pin rather than the reader's own
+    // default: one constant, the same one `plan.ts` declares for its incumbent.
+    revision: revisionRef(source['revision'], `${where}.revision`, nested.revision),
     evaluationId: text(source, 'evaluationId', where),
     edits: editList(source['edits'], `${where}.edits`, nested.edits),
     exploratory,
@@ -271,8 +273,8 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
       [STRATEGY_KINDS.candidateSubmitted]: defineKind<RoundState, Submission, { edits: MemberSet; revision: MemberSet }>({
         guarantees: APPENDED,
         members: SUBMISSION_MEMBERS,
-        // `edits[]` is closed below with this set; `revision` is closed by `revisionRef`, which
-        // enforces the one revision set `plan.ts` declares.
+        // `edits[]` and `revision` are closed by their own readers, each handed the set named here:
+        // `revisionRef` is the one revision reader, so this entry is what closes the pin.
         nested: { edits: EDIT_MEMBERS, revision: REVISION_MEMBERS },
         emitter: STRATEGY_ROLE,
         parse: (raw, where, nested) => submissionPayload(raw, where, nested),

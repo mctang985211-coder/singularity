@@ -147,6 +147,44 @@ describe('declaration is all-or-nothing', () => {
   })
 })
 
+describe('the declared value is the enforced one', () => {
+  /**
+   * The sixth review's construction. The mark used to be an own enumerable symbol property, and object
+   * spread copies those: `{ ...rule, parse: anotherParser }` kept the mark and the `members` value
+   * while replacing the boundary, so a rule whose parser accepted an undeclared member was declared,
+   * accepted by the log and folded into the state. The mark is the identity `defineKind` returned now,
+   * which a copy cannot carry — the test above is the absence of a mark, and this one is a *copy* of a
+   * mark, which is the leg that was missing.
+   */
+  it('refuses a spread copy of a branded rule, because identity is not copyable', () => {
+    const registry = new ProtocolRegistry()
+    const rule = defineKind<unknown, Record<string, never>>({ guarantees: { appended: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state })
+    const copied = { ...rule, parse: () => ({ leaked: true }) } as KindRule<unknown>
+    registry.declare('probe', 1, { initialState: {}, kinds: { 'probe/kind': rule } })
+    expect(refusalOf(() => registry.declare('copied', 1, { initialState: {}, kinds: { 'probe/kind': copied } })).code).toBe<RefusalCode>('malformed-declaration')
+    expect(registry.kindsOf('probe', 1)).toEqual(['probe/kind'])
+  })
+
+  /**
+   * The ninth finding: the declared array was snapshotted at declare time while the parse boundary read
+   * it live, so a push after `declare` widened what the log accepted and left the comparison reading
+   * the old list. The declared value is frozen where `defineKind` built it, so there is no later write
+   * to make — the same array is read at both moments, and neither can be changed.
+   */
+  it('freezes the declared member set where defineKind built it, so nothing can widen it afterwards', () => {
+    const registry = new ProtocolRegistry()
+    const rule = defineKind<unknown, Record<string, unknown>>({ guarantees: { appended: true }, members: ['alpha'], nested: {}, emitter: 'writer', parse: raw => raw as Record<string, unknown>, reduce: state => state })
+    registry.declare('probe', 1, { initialState: {}, kinds: { 'probe/kind': rule } })
+    let widening = 'widened'
+    try {
+      ;(rule.members as string[]).push('operatorNote')
+    } catch {
+      widening = 'refused'
+    }
+    expect([widening, rule.members, refusalOf(() => rule.parse({ alpha: 1, operatorNote: 'undeclared' }, 'probe/kind payload')).code]).toEqual(['refused', ['alpha'], 'malformed-payload'])
+  })
+})
+
 describe('the emitter discipline', () => {
   it('refuses a fact whose role this deployment holds no identity for', async () => {
     const registry = demoRegistry()

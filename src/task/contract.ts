@@ -19,6 +19,7 @@
 
 import { assertClosedKeys, digestOf } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
+import type { MemberSet } from '../protocol/registry.ts'
 
 /** One acceptance criterion, bound to the verifier implementation that decides it. */
 export interface AcceptanceCriterion {
@@ -95,10 +96,15 @@ function requireRecord(value: unknown, field: string): Record<string, unknown> {
 
 /**
  * Read one criterion's closed shape. Pure: it depends on nothing but the value.
+ *
+ * The closed set is a parameter, because the entry belongs to the kind that declares it: a parse
+ * boundary that closes `judgement[]` hands `nested.judgement` over, so the declaration is what closes
+ * each criterion rather than a copy the reader keeps beside it. The default is the set this module
+ * owns for the shapes it declares itself.
  */
-export function assertCriterionShape(raw: unknown, field: string): AcceptanceCriterion {
+export function assertCriterionShape(raw: unknown, field: string, members: MemberSet = CRITERION_MEMBERS): AcceptanceCriterion {
   const record = requireRecord(raw, field)
-  assertClosedKeys(record, CRITERION_MEMBERS, field, 'malformed-contract')
+  assertClosedKeys(record, members, field, 'malformed-contract')
   return {
     criterionId: requireText(record['criterionId'], `${field}.criterionId`),
     statement: requireText(record['statement'], `${field}.statement`),
@@ -115,11 +121,11 @@ export function assertCriterionShape(raw: unknown, field: string): AcceptanceCri
  * unique, so a repeat is refused rather than merged — two entries under one id are two claims about
  * one criterion, and no reader could tell them apart afterwards.
  */
-export function criterionList(raw: unknown, where: string): readonly AcceptanceCriterion[] {
+export function criterionList(raw: unknown, where: string, members: MemberSet = CRITERION_MEMBERS): readonly AcceptanceCriterion[] {
   if (!Array.isArray(raw)) refuse('malformed-contract', `${where} must be an array of acceptance criteria, got ${raw === null ? 'null' : typeof raw}`)
   const seen = new Set<string>()
   return raw.map((entry, index) => {
-    const criterion = assertCriterionShape(entry, `${where}[${index}]`)
+    const criterion = assertCriterionShape(entry, `${where}[${index}]`, members)
     if (seen.has(criterion.criterionId)) refuse('malformed-contract', `${where} declares "${criterion.criterionId}" twice; a criterion id is stable and unique`)
     seen.add(criterion.criterionId)
     return criterion
@@ -129,10 +135,14 @@ export function criterionList(raw: unknown, where: string): readonly AcceptanceC
 /**
  * Read one contract's closed shape. Pure, so a reducer may call it while replaying a log whose
  * verifiers are long gone.
+ *
+ * The closed set is a parameter for the same reason as the criterion reader's: `task/admitted`
+ * declares `nested.contract`, hands it here, and that entry is what closes the contract. A shape
+ * *inside* it — each `criteria[]` entry — belongs to the reader below, one level down.
  */
-export function assertContractShape(raw: unknown, field: string): TaskContract {
+export function assertContractShape(raw: unknown, field: string, members: MemberSet = CONTRACT_MEMBERS): TaskContract {
   const record = requireRecord(raw, field)
-  assertClosedKeys(record, CONTRACT_MEMBERS, field, 'malformed-contract')
+  assertClosedKeys(record, members, field, 'malformed-contract')
 
   const goal = requireText(record['goal'], `${field}.goal`)
 

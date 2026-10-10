@@ -69,9 +69,15 @@ function nameList(raw: unknown, where: string): readonly string[] {
   })
 }
 
-function child(raw: unknown, where: string): DecompositionChild {
+/**
+ * One declared sub-task, closed by the set the declaring rule hands over.
+ *
+ * No default: the only caller is `task/decomposed`, whose `nested.children` is the one value this
+ * shape has. A reader with a set of its own is how a declaration and a reader drift apart.
+ */
+function child(raw: unknown, where: string, members: MemberSet): DecompositionChild {
   const source = record(raw, where)
-  assertClosedKeys(source, DECOMPOSITION_CHILD_MEMBERS, where)
+  assertClosedKeys(source, members, where)
   const maxRuns = source['maxRuns']
   if (typeof maxRuns !== 'number' || !Number.isInteger(maxRuns) || maxRuns < 1)
     refuse('malformed-payload', `${where}.maxRuns must be an integer >= 1, got ${JSON.stringify(maxRuns ?? null)}`)
@@ -137,16 +143,17 @@ export function decomposedKind(kind: string, emitter: string): KindRule<TaskStat
   return defineKind<TaskState, { children: readonly DecompositionChild[] }, { children: MemberSet }>({
     guarantees: { appended: true, atomicFact: true },
     members: DECOMPOSITION_MEMBERS,
-    // Each element of `children` is closed by `child` with the one set named here.
+    // Each element of `children` is closed by `child` with the one set named here, handed over rather
+    // than read out of a second copy in the reader.
     nested: { children: DECOMPOSITION_CHILD_MEMBERS },
     emitter,
-    parse: raw => {
+    parse: (raw, _where, nested) => {
       const where = `${kind} payload`
       const source = record(raw, where)
       const rawChildren = source['children']
       if (!Array.isArray(rawChildren) || rawChildren.length === 0)
         refuse('malformed-payload', `${where}.children must declare at least one sub-task; an empty decomposition plans nothing`)
-      const children = rawChildren.map((entry, index) => child(entry, `${where}.children[${index}]`))
+      const children = rawChildren.map((entry, index) => child(entry, `${where}.children[${index}]`, nested.children))
       const ids = new Set<string>()
       for (const entry of children) {
         if (ids.has(entry.taskId))

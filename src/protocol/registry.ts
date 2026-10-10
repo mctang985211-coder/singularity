@@ -58,20 +58,30 @@ export type MemberSet = readonly string[]
  * The closed shapes *inside* one payload, by the payload member that holds each: `{}` says, in one
  * place, that this payload closes no shape inside itself.
  *
- * A value here is the set the parser enforces for that member — its own members, or each element's
- * when the member is a list. A shape *inside* a nested shape (each `contract.criteria[]` entry, say)
- * is closed by the reader that declares it, so one level is all a payload member names.
+ * A value here is the set the reader that owns that member enforces: that member's own members, or
+ * each element's when the member is a list. The parse boundary hands the value to that reader, so the
+ * entry *is* what closes the member rather than a second copy printed beside the one the reader uses —
+ * round six showed a declared value with no reader behind it can say less than the parser accepts, and
+ * a reader can widen without the declaration changing. A shape *inside* a nested shape (each
+ * `contract.criteria[]` entry, say) is closed by the reader that declares it, so one level is all a
+ * payload member names; an entry whose shape cannot be named from the payload's level is deleted
+ * rather than printed.
  */
 type NestedSets = Readonly<Record<string, MemberSet>>
 
 /**
- * The mark `defineKind` leaves on a rule, so the registry can refuse one that skipped it.
+ * The rules `defineKind` built, **by identity**, so the registry can refuse one that skipped it.
  *
  * A rule built by hand could declare a member set nothing enforces, and the inventory would then be
- * comparing the ledger with a promise the parse boundary never kept. The mark is not exported, so the
- * only way to carry it is to have gone through `defineKind`; a rule without it is refused by name.
+ * comparing the ledger with a promise the parse boundary never kept. The mark was an own enumerable
+ * symbol property until the sixth review showed what that is worth: object spread copies own
+ * enumerable symbols, so `{ ...rule, parse: anotherParser }` kept the mark and the `members` value
+ * while replacing the boundary, and a rule whose parser accepted an undeclared member was declared,
+ * accepted by the log and folded. **A property can be copied; an identity cannot.** A spread copy is
+ * a different object, so it is not in this set and is refused by name, and the set is not exported,
+ * so going through `defineKind` is the only way in.
  */
-const DECLARED = Symbol('defineKind')
+const BUILT_BY_DEFINE_KIND = new WeakSet<object>()
 
 /** The closed guarantee vocabulary. An undeclared key is refused, like any other closed shape. */
 const GUARANTEE_KEYS = ['appended', 'atomicFact', 'conditional', 'derived'] as const
@@ -91,6 +101,20 @@ function assertMemberSet(set: unknown, where: string): void {
 }
 
 /**
+ * Freeze one nested declaration where it was written: every set in the record, and the record itself.
+ *
+ * The values are the sets the readers enforce, so a later `push` into one of them would move the
+ * boundary the declaration prints without changing the declaration, and a reader that had already
+ * copied the set would never see it. `Object.freeze` is the whole fix: after `defineKind` returns,
+ * the declared shape cannot be widened by anyone, so the value read at declare time and the value
+ * enforced at parse time are the same value rather than two readings of a mutable one.
+ */
+function freezeNested(nested: NestedSets): void {
+  for (const set of Object.values(nested)) Object.freeze(set)
+  Object.freeze(nested)
+}
+
+/**
  * One kind's declared shape, refused unless the declaration can be enforced and read.
  *
  * The nested keys are checked against the payload's own members because the declaration is a
@@ -98,10 +122,10 @@ function assertMemberSet(set: unknown, where: string): void {
  * kind of second source this interface exists to remove.
  */
 function assertDeclaredShape(rule: KindRule<unknown>, where: string): void {
-  if ((rule as { readonly [DECLARED]?: true })[DECLARED] !== true)
+  if (!BUILT_BY_DEFINE_KIND.has(rule))
     refuse(
       'malformed-declaration',
-      `${where} was not built by defineKind, so nothing enforces the member set it declares; a declaration is only one source when the boundary closes the payload with it`,
+      `${where} was not built by defineKind, so nothing enforces the member set it declares; a declaration is only one source when the boundary closes the payload with it, and a copy of a rule that was built by it is a different object — the mark is the identity defineKind returned, not a property a spread carries`,
     )
   if (rule.members === undefined) return
   assertMemberSet(rule.members, `${where} declares its payload members`)
@@ -164,8 +188,6 @@ export interface KindRule<State> {
   readonly parse: (raw: unknown, where: string) => unknown
   /** Advance the state, or refuse. Reads the parsed payload. */
   readonly reduce: (state: State, envelope: Envelope, payload: unknown) => State
-  /** The mark `defineKind` leaves; the registry refuses a rule that carries none. */
-  readonly [DECLARED]?: true
 }
 
 /**
@@ -180,9 +202,16 @@ export interface KindRule<State> {
  * one source rather than two — the parser reads no top-level list at all, and the inventory reads
  * this value instead of asking the parser what it accepts.
  *
- * `nested` is passed to the parser, which uses it for the shapes it closes itself: the same constant
- * cannot be a second version of the truth in the body and in the declaration if the body reads the
- * declaration.
+ * `nested` is passed to the parser, which hands each entry to the reader that closes that member, so
+ * the same constant cannot be a second version of the truth in the body and in the declaration: the
+ * body reads the declaration. An entry nothing enforces is worse than no entry, which is why the
+ * tree deletes one rather than printing it.
+ *
+ * **The declared values are frozen where they were written, and the rule itself is frozen where it
+ * was built.** A set that could be pushed into after `declare` is two values wearing one name: a
+ * reader that snapshotted it at declare time and the parse boundary reading it live would disagree,
+ * and the sixth review widened a boundary exactly that way with the comparison unchanged. After this
+ * call, the only writable thing left is nothing.
  *
  * A kind that declares no set is not closed by this wrapper, and the protocol inventory reports it
  * rather than comparing it. Every kind in this tree's ledger surface declares one; a declaration is
@@ -200,7 +229,11 @@ export function defineKind<State, Payload, Nested extends NestedSets = Record<st
   const emitter: (payload: unknown) => string =
     typeof declared === 'string' ? (): string => declared : (raw: unknown): string => declared(raw as Payload)
   const closed = spec.members
-  return {
+  // Frozen in place, so the constant the declaration was written with is the frozen value too: a push
+  // into it afterwards is a write to a frozen array rather than a boundary that moved.
+  if (closed !== undefined) Object.freeze(closed)
+  if (spec.nested !== undefined) freezeNested(spec.nested)
+  const rule: KindRule<State> = {
     ...(closed === undefined ? {} : { members: closed }),
     ...(spec.nested === undefined ? {} : { nested: spec.nested }),
     guarantees: spec.guarantees,
@@ -212,8 +245,9 @@ export function defineKind<State, Payload, Nested extends NestedSets = Record<st
       return spec.parse(raw, where, spec.nested as Nested)
     },
     reduce: (state, envelope, payload) => spec.reduce(state, envelope, payload as Payload),
-    [DECLARED]: true,
   }
+  BUILT_BY_DEFINE_KIND.add(rule)
+  return Object.freeze(rule)
 }
 
 /** One protocol version: one initial state, one closed kind set. */

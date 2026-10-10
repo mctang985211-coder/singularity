@@ -117,13 +117,14 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
       [TASK_KINDS.admitted]: defineKind<TaskState, { contract: TaskContract }, { contract: MemberSet }>({
         guarantees: { appended: true },
         members: ['contract'],
-        // The contract's own members, and each criterion inside it, are closed by `contract.ts`'s
-        // readers with the sets those readers declare — one level is what a payload member names.
+        // The contract's own members are declared here and handed to `contract.ts`'s reader, so this
+        // entry is what closes the contract; each criterion inside it is one level down and is closed
+        // by that same module's criterion reader.
         nested: { contract: CONTRACT_MEMBERS },
         emitter: SCHEDULER_ROLE,
-        parse: raw => {
-          const source = record(raw, `${TASK_KINDS.admitted} payload`)
-          return { contract: assertContractShape(source['contract'], `${TASK_KINDS.admitted} payload.contract`) }
+        parse: (raw, where, nested) => {
+          const source = record(raw, where)
+          return { contract: assertContractShape(source['contract'], `${where}.contract`, nested.contract) }
         },
         reduce: (state, envelope, payload) => {
           if (state.contract !== undefined)

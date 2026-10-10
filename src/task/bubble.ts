@@ -67,14 +67,21 @@ const BUBBLE_TOOL_MEMBERS = ['name', 'implementationDigest', 'version'] as const
 
 const DIGEST = /^[0-9a-f]{64}$/
 
-/** Read one closed list of named input digests. Names are unique; a repeat is refused, not merged. */
-export function inputList(raw: unknown, where: string): readonly BubbleInput[] {
+/**
+ * Read one closed list of named input digests. Names are unique; a repeat is refused, not merged.
+ *
+ * The closed set is a parameter, because the entry belongs to the kind that declares it: the parse
+ * boundary hands `nested.inputs` (or `nested.inputDigests`) over, so the declaration is what closes
+ * each element and a reader cannot widen the shape without the declaration changing. The default is
+ * the one set this module owns for the request payloads it reads outside a kind's declaration.
+ */
+export function inputList(raw: unknown, where: string, members: MemberSet = BUBBLE_INPUT_MEMBERS): readonly BubbleInput[] {
   if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of named inputs, got ${raw === null ? 'null' : typeof raw}`)
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const at = `${where}[${index}]`
     const source = record(entry, at)
-    assertClosedKeys(source, BUBBLE_INPUT_MEMBERS, at)
+    assertClosedKeys(source, members, at)
     const name = text(source, 'name', at)
     const digest = text(source, 'digest', at)
     if (!DIGEST.test(digest)) refuse('malformed-payload', `${at}.digest must be a sha256 hex content digest, got ${JSON.stringify(digest)}`)
@@ -111,15 +118,22 @@ export function assertInputsBound(bubble: Bubble | undefined, declared: readonly
   }
 }
 
-/** Every tool the execution could reach. Names are unique: two tools with one name are one tool. */
-function toolList(raw: unknown, where: string): readonly BubbleTool[] {
+/**
+ * Every tool the execution could reach. Names are unique: two tools with one name are one tool.
+ *
+ * The closed set has no default: the only caller is the rule that declares `nested.tools`, so the
+ * declaration is the only value this reader can close with. Round six's drift — the declaration
+ * printing one shape while the reader enforced another — needs a second value in this body, and
+ * there is none.
+ */
+function toolList(raw: unknown, where: string, members: MemberSet): readonly BubbleTool[] {
   if (!Array.isArray(raw))
     refuse('malformed-payload', `${where} must be an array of the tools the execution could reach, got ${raw === null ? 'null' : typeof raw}`)
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const at = `${where}[${index}]`
     const source = record(entry, at)
-    assertClosedKeys(source, BUBBLE_TOOL_MEMBERS, at)
+    assertClosedKeys(source, members, at)
     const name = text(source, 'name', at)
     if (seen.has(name)) refuse('malformed-payload', `${where} names tool ${JSON.stringify(name)} twice; one name was one implementation`)
     seen.add(name)
@@ -153,8 +167,9 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
   >({
     guarantees: { appended: true },
     members: BUBBLE_MEMBERS,
-    // `inputs[]` and `tools[]` are closed by their own readers with the sets named here; `workspace`
-    // is closed below, out of this declaration.
+    // `inputs[]`, `tools[]` and `workspace` are closed by their own readers with the sets named here:
+    // this declaration is handed to each of them, so it is what the log enforces rather than a second
+    // copy printed beside the one the reader uses.
     nested: { workspace: WORKSPACE_MEMBERS, inputs: BUBBLE_INPUT_MEMBERS, tools: BUBBLE_TOOL_MEMBERS },
     emitter,
     parse: (raw, where, nested) => {
@@ -163,10 +178,10 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
       assertClosedKeys(workspace, nested.workspace, `${where}.workspace`)
       return {
         runId: text(source, 'runId', where),
-        inputs: inputList(source['inputs'], `${where}.inputs`),
+        inputs: inputList(source['inputs'], `${where}.inputs`, nested.inputs),
         workspace: { kind: text(workspace, 'kind', `${where}.workspace`), ref: text(workspace, 'ref', `${where}.workspace`) },
         model: text(source, 'model', where),
-        tools: toolList(source['tools'], `${where}.tools`),
+        tools: toolList(source['tools'], `${where}.tools`, nested.tools),
         conditions: conditionList(source['conditions'], `${where}.conditions`),
       }
     },

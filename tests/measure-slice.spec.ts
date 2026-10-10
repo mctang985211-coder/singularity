@@ -324,6 +324,10 @@ describe('the measurement slice', () => {
     expect(wrongType.code).toBe('malformed-payload')
     const shortDigest = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', artifactDigest: 'short' }))
     expect(shortDigest.code).toBe('malformed-payload')
+    // The trial's inputs are closed by the set the declaration names and hands to `inputList`, not by a
+    // copy in the reader: one more member in an input entry is refused by name.
+    const widenedInput = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', inputDigests: [{ ...BUBBLE_INPUTS[0], note: 'extra' }] }))
+    expect(widenedInput).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('note') })
   })
 
   it('refuses a plan that judges its own metric, repeats a criterion, or has no slots or quality weight', async () => {

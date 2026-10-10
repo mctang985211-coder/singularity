@@ -1829,11 +1829,43 @@ if (PROBE) {
     } catch (error) {
       unbranded = error?.refusal?.code ?? 'unreadable'
     }
-    if (refused !== 'malformed-payload' || findings.length !== 1 || unbranded !== 'malformed-declaration') {
+    // Provenance, not absence: the round-six review copied a branded rule with an object spread and
+    // kept both the mark and the declared set while replacing the parse boundary, so the log accepted
+    // a member the declaration did not name with every gate green. The brand is identity now, and
+    // this is the leg that says so - the rule below names the same member set and is still refused,
+    // because it is a different object from the one defineKind built.
+    const copied = { ...rule, parse: () => ({}) }
+    let spread
+    try {
+      new Registry().declare('probe', 3, { initialState: {}, kinds: { 'probe/kind': copied } })
+      spread = 'accepted'
+    } catch (error) {
+      spread = error?.refusal?.code ?? 'unreadable'
+    }
+    // And a declared set is a value nothing can widen afterwards: a later push would make the
+    // enforcement and the ledger comparison two different sets with neither changing.
+    let widened
+    try {
+      rule.members.push('beta')
+      widened = 'widened'
+    } catch {
+      widened = 'frozen'
+    }
+    if (
+      refused !== 'malformed-payload' ||
+      findings.length !== 1 ||
+      unbranded !== 'malformed-declaration' ||
+      spread !== 'malformed-declaration' ||
+      widened !== 'frozen'
+    ) {
       missed += 1
-      console.log(`  FAIL  the declared member set was not the enforced one (an undeclared member: ${refused}; ledger comparison: ${findings.length} findings; a rule that skipped defineKind: ${unbranded})`)
+      console.log(
+        `  FAIL  the declared member set was not the enforced one (an undeclared member: ${refused}; ledger comparison: ${findings.length} findings; a rule that skipped defineKind: ${unbranded}; a copy of a declared rule: ${spread}; a declared set widened after the fact: ${widened})`,
+      )
     } else {
-      console.log(`  ok    defineKind closed the payload with the declared set (an undeclared member refused, ${findings.length} ledger finding) and the registry refused a rule that skipped it`)
+      console.log(
+        `  ok    defineKind closed the payload with the declared set (an undeclared member refused, ${findings.length} ledger finding), the registry refused a rule that skipped it and a copy of one, and the declared set could not be widened`,
+      )
     }
   }
 

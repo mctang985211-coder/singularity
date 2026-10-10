@@ -164,13 +164,13 @@ export function evidenceProducedKind(
   >({
     guarantees: APPENDED,
     members: EVIDENCE_PRODUCED_MEMBERS,
-    // `inputDigests[]` is closed by `inputList`, which enforces the one set named here.
+    // `inputDigests[]` is closed by `inputList`, which is handed this one set: the declaration is what
+    // closes each entry, so a reader cannot widen the shape without the declaration changing.
     nested: { inputDigests: BUBBLE_INPUT_MEMBERS },
     // The role *is* the implementation: a deployment must hold that verifier's identity to
     // emit its verdicts, and the log refuses the fact when it does not.
     emitter,
-    parse: raw => {
-      const where = `${kind} payload`
+    parse: (raw, where, nested) => {
       const source = record(raw, where)
       const verdict = source['verdict']
       if (verdict !== 'pass' && verdict !== 'fail')
@@ -184,7 +184,7 @@ export function evidenceProducedKind(
         verifierVersion: text(source, 'verifierVersion', where),
         implementationDigest: digest(source, 'implementationDigest', where),
         artifactDigest: digest(source, 'artifactDigest', where),
-        inputDigests: inputList(source['inputDigests'], `${where}.inputDigests`),
+        inputDigests: inputList(source['inputDigests'], `${where}.inputDigests`, nested.inputDigests),
         ...(detail === undefined ? {} : { detail }),
       }
     },

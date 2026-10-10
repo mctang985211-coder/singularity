@@ -242,4 +242,21 @@ describe('a verdict is bound to the inputs the run declared', () => {
       expect(`${label}: ${refusal.code}`).toBe(`${label}: malformed-payload`)
     }
   })
+
+  /**
+   * The nested entry, not a copy in the reader. `evidence/produced` declares
+   * `nested: { inputDigests }` and hands it to `inputList`; a reader that widened itself by one member
+   * would accept this entry while the declaration still printed `["name","digest"]`, which is the
+   * sixth review's second direction. The bubble leg above names the same member for `bubble/opened`,
+   * and this one names it for the verdict's own list.
+   */
+  it('closes each verdict input with the set the declaration names, not a wider one', async () => {
+    const log = logWith()
+    await log.emit(admitted())
+    await log.emit(assigned('agent-1', SCHEDULER))
+    await log.emit(started())
+    await log.emit(bubble())
+    const widened = await asyncRefusalOf(() => log.emit(judged({ inputDigests: [{ name: 'fixture/words.txt', digest: 'f'.repeat(64), note: 'extra' }] as never })))
+    expect(widened).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('note') })
+  })
 })
