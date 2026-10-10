@@ -892,8 +892,10 @@ method-driver 存在前没有消费者，审核原文自己也这么排）。
 
 - **A05 修了**：`publishedAssetsBelow` 的匹配集从"当前 head 一个修订"扩为"cutoff 以下指针**曾指过**的
   修订集合"——采用是"发布过"的事实，不是"现任"的事实；skill→skill+tool 不再丢 skill，回滚不抹历史，
-  未发布过的当选不计入。上游本就按已接受编辑累计（`rrsi/history.py:129`）。五条 `assets-*` 变异声明
-  锚点随重写连动，逐条重验 5/5 caught；新增两腿（连续继承+回滚、指针从未持有过）；三处
+  未发布过的当选不计入。上游本就按已接受编辑累计（`rrsi/history.py:129`）。五条变异声明
+  （`mutate:assets-head-cutoff`、`mutate:assets-election-cutoff`、`mutate:assets-revision-content`、
+  `mutate:assets-no-head-guess`、`mutate:assets-class-dedup`）锚点随重写连动，逐条重验全部 caught；
+  新增两腿（连续继承+回滚、指针从未持有过）；三处
   "novelty feeds selection" 陈旧注释（D3 之前的话）一并更正——它们正是审核把 A05 定成 P1 的论据来源。
 - **A06 修了**：`projectRound` 对已决 round **读记录**——`decideRound` 在提交区已按自己的 cut 重算并
   拒绝分叉，记录就是"决定自己的重算"唯一发生处的产物；投影不再重算已决轮，晚到 trial 与调用方的
