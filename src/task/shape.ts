@@ -63,6 +63,17 @@ export function revisionRef(raw: unknown, where: string, members: readonly strin
   return { environmentId: text(source, 'environmentId', where), revisionId: text(source, 'revisionId', where), digest: digest(source, 'digest', where) }
 }
 
+/**
+ * Two revision references name the same content. An id alone is not enough: it can be re-pointed.
+ *
+ * It lives beside the shape it compares, in the module that owns `RevisionRef`'s closed member set:
+ * both the task protocol (a run's pin) and the strategy protocol (a slot's candidate) compare
+ * revisions, and the comparison is theirs to share while neither imports the other.
+ */
+export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
+  return left.environmentId === right.environmentId && left.revisionId === right.revisionId && left.digest === right.digest
+}
+
 /** The run a fact names, or a refusal naming the run. */
 export function requireRun(state: TaskState, runId: string, where: string): RunState {
   const run = state.runs[runId]

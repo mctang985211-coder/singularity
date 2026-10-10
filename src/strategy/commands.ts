@@ -31,9 +31,9 @@ import type { ControlReadCut, ControlSessionStore } from '../control/session-sto
 import { digestOf, type Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { RevisionRef } from '../task/protocol.ts'
+import { sameRevision } from '../task/shape.ts'
 import { editBudgetFor, type Calibration } from './decision.ts'
 import {
-  sameRevision,
   STRATEGY_KINDS,
   STRATEGY_PROTOCOL,
   STRATEGY_VERSION,

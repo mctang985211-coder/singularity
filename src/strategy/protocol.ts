@@ -163,11 +163,6 @@ export const CALIBRATION_MEMBERS = ['floor', 'source'] as const
 const SUBMISSION_MEMBERS = ['slot', 'revision', 'evaluationId', 'edits', 'exploratory'] as const
 const DECIDED_MEMBERS = ['winner', 'outcomes', 'calibration'] as const
 
-/** Two revision references name the same content. An id alone is not enough: it can be re-pointed. */
-export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
-  return left.environmentId === right.environmentId && left.revisionId === right.revisionId && left.digest === right.digest
-}
-
 /**
  * A noise basis, read from where it is written: `round/decided.calibration`.
  *

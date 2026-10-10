@@ -34,10 +34,9 @@
 
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
-import { sameRevision } from '../strategy/protocol.ts'
 import { assertInputsBound, BUBBLE_INPUT_MEMBERS, inputList, type Bubble, type BubbleInput } from './bubble.ts'
 import { requireResponsible } from './responsibility.ts'
-import { digest, maybeText, record, requireContractOf, requireRun, revisionRef, REVISION_MEMBERS, settled, text } from './shape.ts'
+import { digest, maybeText, record, requireContractOf, requireRun, revisionRef, REVISION_MEMBERS, sameRevision, settled, text } from './shape.ts'
 import type { RevisionRef, TaskState } from './protocol.ts'
 
 export type RunStatus = 'running' | 'verified' | 'failed'

@@ -56,7 +56,8 @@ import {
 import type { Envelope } from '../protocol/envelope.ts'
 import { foldSubject, foldSubjects } from '../protocol/fold.ts'
 import { ProtocolRegistry } from '../protocol/registry.ts'
-import { declareStrategyProtocol, sameRevision, STRATEGY_PROTOCOL, STRATEGY_VERSION, type RoundState } from './protocol.ts'
+import { sameRevision } from '../task/shape.ts'
+import { declareStrategyProtocol, STRATEGY_PROTOCOL, STRATEGY_VERSION, type RoundState } from './protocol.ts'
 
 /**
  * The two protocols this projection folds, declared once here so a caller hands it a log rather than

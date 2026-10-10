@@ -38,6 +38,7 @@ import type { EvaluationView } from '../measure/view.ts'
 import type { Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { RevisionRef } from '../task/protocol.ts'
+import { sameRevision } from '../task/shape.ts'
 import {
   noveltyOf,
   select,
@@ -48,7 +49,7 @@ import {
   type Outcome,
 } from './decision.ts'
 import { requirePlan, type RoundPlan } from './plan.ts'
-import { CALIBRATION_MEMBERS, readCalibration, sameRevision, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
+import { CALIBRATION_MEMBERS, readCalibration, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
 import { publishedAssetsBelow } from './published-assets.ts'
 
 /**
