@@ -757,6 +757,9 @@ const RECORD_DOCS = new Set([
   'docs/adversarial-review-5.md',
   'docs/adversarial-review-6.md',
   'docs/adversarial-review-7.md',
+  // The eighth review is a record of the commit it names on its first line, like the seven above: a
+  // review's counts are measurements of *that* commit, which is what the ledger above measures too.
+  'docs/adversarial-review-8.md',
 ])
 /** A hex token with a letter in it: commit-shaped, which was all this was checked for until round seven. */
 const COMMIT = /\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b/g
