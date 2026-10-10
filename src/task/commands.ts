@@ -108,6 +108,18 @@ export interface AgentCommands {
 export interface TaskCommands extends AgentCommands {
   /** Not reachable from `forAgent`: producing a verdict is a verifier's act, not an agent's. */
   recordVerdict(input: { readonly commandId: string; readonly taskId: string; readonly verdict: VerdictInput }): Promise<Envelope>
+  /**
+   * Not reachable from `forAgent` either: the apparatus records what a run consumed, and an agent
+   * vouching for its own method use is the self-report this stack refuses everywhere else.
+   */
+  recordConsumption(input: {
+    readonly commandId: string
+    readonly taskId: string
+    readonly runId: string
+    readonly revision: RevisionRef
+    readonly method: string
+    readonly source: string
+  }): Promise<Envelope>
   forAgent(agentId: string): AgentCommands
 }
 
@@ -233,6 +245,17 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         },
       )
     },
+
+    recordConsumption: input =>
+      // The revision stays the caller's claim rather than being filled from the run's pin: a
+      // deployment that recorded consumption against a stale revision gets the reducer's refusal
+      // named after that revision, instead of the claim being silently rewritten into a true one.
+      emitRaw(options, input.commandId, TASK_KINDS.methodConsumed, input.taskId, {
+        runId: input.runId,
+        revision: input.revision,
+        method: input.method,
+        source: input.source,
+      }),
 
     forAgent: agentId => {
       // The narrow view does not hand back a judging method at all: the boundary is the absence of
