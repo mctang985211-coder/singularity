@@ -53,6 +53,18 @@ export interface EmitInput<Payload = unknown> {
   readonly kind: string
   readonly subject: string
   readonly payload: Payload
+  /**
+   * The subjects-table key this emission is **bound** to, when the trusted surface that submits the
+   * fact stands for one executor rather than the kind's own service. The kind's emitter names the
+   * submitting service and stays on the envelope; an `as` binding selects which identity that
+   * service stamps as the actor. It resolves through the same trusted table and nothing else, so a
+   * binding can only name an identity the deployment already holds — never supply one.
+   *
+   * It is submission context, not request content: command identity stays the shape of the fact
+   * (frame and payload), because the journal below rebuilds exactly that from committed facts, and
+   * the binding's effect is already part of the fact it produced — the actor the envelope carries.
+   */
+  readonly as?: string
 }
 
 export interface LogOptions {
@@ -149,6 +161,20 @@ export class MemoryLog {
   }
 
   /**
+   * The fact one command already committed, or `undefined` when it committed none.
+   *
+   * The journal `decide` identifies a redelivered command with is private to the commit region, and
+   * a command whose external act — asking a person — happens *before* that region cannot wait for
+   * the identification to arrive with it. This is that same journal, readable where the ordering
+   * decides: a caller that finds its command here re-offers the recorded request instead of
+   * repeating the act, and a caller that finds it under a different request is refused before the
+   * act, exactly as the region itself would refuse it after.
+   */
+  committedOf(commandId: string): Envelope | undefined {
+    return this.#commands.get(commandId)?.envelope
+  }
+
+  /**
    * Decide one fact: every rule, sealed, and **not** part of the log yet.
    *
    * A caller that owns a durability barrier hands the decision to `record` once the medium has
@@ -167,13 +193,15 @@ export class MemoryLog {
     const position = this.#entries.length
     const payload = rule.parse(input.payload, `${input.protocol}@${input.version} ${input.kind} #${position}`)
 
-    // The author is a property of the protocol, not of the caller.
+    // The author is a property of the protocol and of the trusted binding, never of the request: the
+    // kind's emitter names the submitting service, an `as` binding names the executor that service
+    // stands for, and both resolve through the one subjects table.
     const role = rule.emitter(payload)
-    const actor = this.#subjects[role]
+    const actor = this.#subjects[input.as ?? role]
     if (actor === undefined)
       refuse(
         'unknown-emitter-role',
-        `kind ${input.kind} is emitted by role ${JSON.stringify(role)}, which this deployment has no trusted identity for (known roles: ${Object.keys(this.#subjects).sort().join(', ') || 'none'})`,
+        `kind ${input.kind} is emitted by role ${JSON.stringify(role)}${input.as === undefined ? '' : `, bound as ${JSON.stringify(input.as)}`}, which this deployment has no trusted identity for (known roles: ${Object.keys(this.#subjects).sort().join(', ') || 'none'})`,
       )
 
     // Command identity: a repeated request returns its recorded fact; a different one is refused.

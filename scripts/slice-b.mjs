@@ -169,7 +169,7 @@ async function main() {
     const commands = createTaskCommands({
       store,
       registry,
-      agents: new Map([[AGENT, { identity: 'runtime-1' }]]),
+      agents: new Map([[AGENT, { as: 'scheduler' }]]),
       implementations: [{ ref: VERIFIER, version: '1', implementationDigest: programDigest }],
     })
 

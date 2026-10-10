@@ -317,6 +317,9 @@ export function runFailedKind(kind: string, emitter: string): KindRule<TaskState
     reduce: (state, envelope, payload) => {
       const where = `${kind} #${envelope.seq}`
       const run = requireRun(state, payload.runId, where)
+      // Settling is work on the attempt, and work is the responsible agent's: a stranger cannot
+      // fail a run somebody else is answerable for.
+      requireResponsible(state, envelope.actor, where)
       if (run.status !== 'running')
         refuse('illegal-transition', `${where} settles run "${payload.runId}" again; it is already ${run.status}`)
       // A missing reason stays missing: the view reports "none recorded", it does not invent one.

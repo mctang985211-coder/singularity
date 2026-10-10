@@ -849,6 +849,40 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
    同时拒绝空见证与 `×` 本身——"任何失败都满足的串不是见证"，探针有腿。改弱见证从此是会被门禁
    说话的编辑。
 
+### 装配前审核（`assembly-review.md`，基线 `1a7dc12`）：六条逐条对抗核对，G0 已修
+
+审核由外部协作者提交（`assembly-review.md` + `assembly-blueprint.md`，作为本轮记录入库）。
+四个并行子代理逐条复跑"实测"、评估场景可达性与修法体积，裁决如下：
+
+| 条目 | 裁决 | 依据 |
+|---|---|---|
+| **A01** forAgent 未绑定调用者 | **成立，已修** | 复现属实且更深：在能干活的责任配置下 `requireResponsible` 比对的是全员共用的 scheduler 身份——**死字母**；且实测暴露 `bubble/opened` 与 `run/failed` 的责任检查**文档声称存在、代码缺失**（`responsibility.ts` 头注说三处，实际只有 `run/started` 一处） |
+| **A02** 批准重送再问后冲突 | **成立，已修** | 逐字复现（ask 无条件先于命令识别）。这是"重送识别原结果"纪律对 emit 前外部副作用的漏网 |
+| **A03** RSI 发布未绑 selection | 不是缺陷，是 G3 合同 | bootstrap 直发布合理；`draftFromDecision`/`requestPublish` 合同见蓝图 §7，实现在 G3 暴露发布前完成 |
+| **A04** A→B→A 需 generation | **不成立（幻影场景）** | reducer 单元行为真，攻击路径不可达：同 commandId 重送被命令识别拦、二次批准具名拒绝、回 A 每步都要真人重批、串行区内无"已构造未提交"窗口。**"冻结的发布依据"已由批准状态机实现**（standing approval 即 generation token，重 draft 清批准）。给每个 environment 加单调 generation 字段正是老架构膨胀的形态。蓝图 §7 的 `expectedHead.generation` 按此否决 |
+| **A05** 采用历史断代 | 成立但 **P1→P2**：novelty 早已移出 selection（D3），唯一消费者是 proposer 摘要；审核定级论据来自三处 D3 之前的陈旧注释（"novelty feeds selection"）。修法 ~10 行（匹配集从"当前 head"扩为"cutoff 以下曾指向过的修订集合"），**并入 G3 入场门**，届时连更正三处陈旧注释 |
+| **A06** 已决 round 投影翻 winner | 缝属实但今天无害（消费者是未建成的 Web 读面板）。修法零新增持久字段，**先于 G2 读面板交付** |
+
+G0 收窄为 A01+A02（审核原文让 A03 等 G3 却让 A04–A06 修在 G1 前，自相矛盾；按"分批、每批可反例证伪"重排）。
+
+**A01 修法**（零新协议、零版本升级）：`EmitInput` 增加可选 `as`——subjects 表的**键**，提交区内解析为 actor；
+emitter（提交服务角色）与 actor（实际执行者）从此分开记录。`forAgent` 把整个面绑到该 agent 的键上
+（身份由 `store.identityOf` 唯一解析，"一物一份"）；构造时拒绝两个 agent 共享一键（`malformed-declaration`）。
+`as` 是提交上下文不是请求内容：命令摘要保持事实形状（journal 从事实回放重建，回送才认得出）。
+补上 `bubble/opened` 与 `run/failed` 缺失的责任检查（被拒序列在本树任何部署的日志里不可达——所有在树
+部署只有一个绑定，故不升版本）。反例腿：双执行者（`scheduler` 与 `runtime` 两键）下陌生者启动/关闭被
+`not-responsible` 点名、持有者可干、交接后旧面拒新面通、共享一键构造被拒（`tests/task-commands.spec.ts`）。
+五个调用点（fixtures/三探针/rsi-live）迁到 `{ as: 'scheduler' }`——行为等同，旧测试全绿不改。
+
+**A02 修法**（~20 行，无新状态）：`MemoryLog.committedOf(commandId)` 固定读端口 + store 透传——
+journal 是 store 自己的识别纪律，在"外部动作先于提交区"的排序决定处可读。`approve` 先查后问：
+已提交同核心（subject/revision/digest/approvedBy）→ 返回已提交事实，**不再问**；同 id 异请求 →
+问之前就 `command-conflict`。反例腿：丢答复重送同摘要同 audit id、asks 恒为 1（`tests/release-draft.spec.ts`）。
+
+**写下来的边界**：同 id 并发重送各问一次、先提交者胜、后者被拒——人被多问一句是害处上限，
+事实层始终单份；不建进程内在途合并表（第二份真相）。规划行为（admit/decompose/assign）绑定后
+只改归因不改许可——非持有者可否分解是 G2 的计划权限问题，不在 A01 范围内假装已解决。
+
 ### 不要重开的事（**代价已经付过**）
 
 - **声明而不是采样**成员集，是对的机制。

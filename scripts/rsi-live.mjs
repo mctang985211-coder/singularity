@@ -351,7 +351,7 @@ async function main() {
       store,
       registry,
       subjects,
-      agents: new Map([[AGENT, { identity: subjects.scheduler }]]),
+      agents: new Map([[AGENT, { as: 'scheduler' }]]),
       implementations: [{ ref: PRODUCER, version: '1', implementationDigest: verifierDigest }],
     })
     const asAgent = commands.forAgent(AGENT)

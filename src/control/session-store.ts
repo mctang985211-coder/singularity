@@ -225,6 +225,19 @@ export class ControlSessionStore {
     return this.#subjects[role]
   }
 
+  /**
+   * The fact one command already committed, or `undefined` when it committed none.
+   *
+   * The commit region identifies a redelivered command itself, but only once the command reaches it.
+   * A command whose external act — asking a person — happens before the region cannot let the
+   * identification arrive with it, or the act repeats first; this is the same journal the region
+   * identifies with, readable before the ask, so a lost reply is answered from the fact rather than
+   * asked for twice.
+   */
+  committedOf(commandId: string): Envelope | undefined {
+    return this.#log.committedOf(commandId)
+  }
+
   /** A fixed committed read cut. The view has no writer and shares no mutable values with it. */
   load(): ControlReadCut {
     const log = this.#log

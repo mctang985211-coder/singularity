@@ -116,7 +116,7 @@ export async function openAgent(live: Deployment): Promise<void> {
   })
 }
 
-export function commandsFor(live: Deployment, agents = new Map([[AGENT, { identity: SCHEDULER }]])) {
+export function commandsFor(live: Deployment, agents = new Map([[AGENT, { as: 'scheduler' }]])) {
   return createTaskCommands({
     store: live.store,
     registry: live.registry,

@@ -63,6 +63,8 @@ type Listener = (session: Session, event: SessionEvent) => void
 interface SeamDouble {
   readonly agent: Agent
   readonly seams: ApprovalSeams
+  /** How many times the native service was asked, so a redelivery can be held to ask once. */
+  readonly asks: () => number
 }
 
 /** One `approval/asked` event, shaped as the native service appends it: the id is all we read. */
@@ -75,16 +77,18 @@ const askedEvent = (id: string): SessionEvent => ({ type: 'approval/asked', data
 function seam(outcome = 'allowed-once', approvalId: string | null = 'audit-1'): SeamDouble {
   const listeners = new Set<Listener>()
   const agent = { session: { id: 'agent-1' } } as unknown as Agent
+  let asked = 0
   const seams: ApprovalSeams = {
     approval: {
       request: async () => {
+        asked += 1
         if (approvalId !== null) for (const listener of [...listeners]) listener(agent.session, askedEvent(approvalId))
         return outcome
       },
     },
     feed: { on: (_name, listener) => { listeners.add(listener); return () => listeners.delete(listener) } },
   }
-  return { agent, seams }
+  return { agent, seams, asks: () => asked }
 }
 
 /** Draft, approve and publish through the command boundary, so each call site stays one line. */
@@ -265,6 +269,28 @@ describe('the approval binds content, and names the draft it answers', () => {
 
     expect([envelope.subject, envelope.emitter, envelope.actor, envelope.payload]).toEqual([ENVIRONMENT, APPROVER_ROLE, APPROVAL_SEAM, approved(REVISION, digest, ALICE, 'approval-42')])
     expect(releaseState(store)).toEqual(approved(REVISION, digest, ALICE, 'approval-42'))
+  })
+
+  it('answers a lost reply from the fact it committed, without asking the person twice', async () => {
+    const { store } = await live()
+    const digest = await createRevision(store, REVISION, MANIFEST)
+    await draft(store, REVISION, digest)
+    const double = seam()
+
+    // The first ask granted, and the fact committed; the reply was lost.
+    const first = await approve(store, double)
+    // The same command, re-offered after the lost reply, returns the approval it already
+    // committed — the same fact, the same audit id — and the person is not asked again.
+    const again = await approve(store, double)
+    expect(again.seq).toBe(first.seq)
+    expect(again.payload).toEqual(approved(REVISION, digest, ALICE, 'audit-1'))
+    expect(double.asks()).toBe(1)
+
+    // A different request under the same id is refused before the person is asked, with the
+    // conflict the commit region itself would raise after the ask.
+    const conflict = await asyncRefusalOf(() => approve(store, double, { approvedBy: 'human:bob' }))
+    expect(conflict.code).toBe<RefusalCode>('command-conflict')
+    expect(double.asks()).toBe(1)
   })
 
   it('refuses an approval whose digest is not the draft’s, and leaves the release unapproved', async () => {

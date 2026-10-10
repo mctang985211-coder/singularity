@@ -30,6 +30,7 @@ import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import type { TaskState } from './protocol.ts'
+import { requireResponsible } from './responsibility.ts'
 import { record, requireContractOf, requireRun, text } from './shape.ts'
 
 /** One named input of an execution: a name the verdict echoes and the content digest it ran on. */
@@ -194,6 +195,9 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
       const where = `${kind} #${envelope.seq}`
       requireContractOf(state, where, envelope.subject)
       const run = requireRun(state, payload.runId, where)
+      // The execution context belongs to the attempt, and the attempt to the agent answerable for
+      // it: nobody else declares what this run executed against.
+      requireResponsible(state, envelope.actor, where)
       if (run.status !== 'running')
         refuse('illegal-transition', `${where} opens an execution context for run "${payload.runId}", which already settled ${run.status}`)
       if (run.bubble !== undefined)

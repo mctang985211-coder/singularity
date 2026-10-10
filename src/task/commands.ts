@@ -17,7 +17,9 @@
  * 2. **A command decides the parts a caller must not.** `assignTask` fills the responsible identity
  *    from the deployment's own table rather than from its argument, and `recordVerdict` fills the
  *    verifier's ref and version from the frozen criterion. A caller supplies what it did; it does
- *    not supply who it is.
+ *    not supply who it is. The executor a fact is stamped for arrives the same way: `forAgent`
+ *    binds a surface to the agent's own entry in the deployment's table, and every fact that
+ *    surface produces carries that agent's identity as its actor.
  *
  * There is no second queue here. A queue in this service would serialize reads that the store's own
  * region already serializes, and every command that did not need a cut would still pay for one —
@@ -43,9 +45,14 @@ import { projectTree } from './tree.ts'
 import type { BubbleInput, BubbleTool } from './bubble.ts'
 import type { DecompositionChild } from './decomposition.ts'
 
-/** What the deployment holds for one agent: the identity that stands for it in the log. */
+/** What the deployment holds for one agent: the subjects-table key its acts are bound to. */
 export interface HeldAgent {
-  readonly identity: string
+  /**
+   * The binding this agent's facts stamp as their actor. It is a key into the store's one role
+   * table, resolved there and never restated here: the identity it names is the store's to answer,
+   * so a second copy of it cannot drift from the one the log stamps with.
+   */
+  readonly as: string
 }
 
 /** A verdict as its producer reports it. Who judged is filled in from the criterion, never passed. */
@@ -77,16 +84,22 @@ export interface TaskCommandOptions {
  * on one id, and the second would silently replay the first.
  */
 export interface AgentCommands {
-  admit(input: { readonly commandId: string; readonly taskId: string; readonly contract: unknown }): Promise<Envelope>
-  decompose(input: { readonly commandId: string; readonly parentTaskId: string; readonly children: readonly DecompositionChild[] }): Promise<Envelope>
-  assign(input: { readonly commandId: string; readonly taskId: string; readonly agentId: string }): Promise<Envelope>
-  reassign(input: { readonly commandId: string; readonly taskId: string; readonly from: string; readonly agentId: string }): Promise<Envelope>
+  /**
+   * The optional second parameter of every method below is the **binding**: the subjects-table key
+   * the calling surface's facts stamp as their actor. It is not part of the request and never part
+   * of the payload — a model-facing tool cannot reach it, because the assembly binds it from the
+   * live agent it resolved, and this interface is the trusted surface's own.
+   */
+  admit(input: { readonly commandId: string; readonly taskId: string; readonly contract: unknown }, as?: string): Promise<Envelope>
+  decompose(input: { readonly commandId: string; readonly parentTaskId: string; readonly children: readonly DecompositionChild[] }, as?: string): Promise<Envelope>
+  assign(input: { readonly commandId: string; readonly taskId: string; readonly agentId: string }, as?: string): Promise<Envelope>
+  reassign(input: { readonly commandId: string; readonly taskId: string; readonly from: string; readonly agentId: string }, as?: string): Promise<Envelope>
   startRun(input: {
     readonly commandId: string
     readonly taskId: string
     readonly runId: string
     readonly revision: RevisionRef
-  }): Promise<Envelope>
+  }, as?: string): Promise<Envelope>
   openBubble(input: {
     readonly commandId: string
     readonly taskId: string
@@ -96,13 +109,13 @@ export interface AgentCommands {
     readonly model: string
     readonly tools: readonly BubbleTool[]
     readonly conditions: readonly string[]
-  }): Promise<Envelope>
+  }, as?: string): Promise<Envelope>
   failRun(input: {
     readonly commandId: string
     readonly taskId: string
     readonly runId: string
     readonly reason?: string
-  }): Promise<Envelope>
+  }, as?: string): Promise<Envelope>
 }
 
 export interface TaskCommands extends AgentCommands {
@@ -138,35 +151,49 @@ interface Cut {
 }
 
 export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
+  // One binding is one executor. The log tells agents apart by the identity their acts stamp, so a
+  // deployment that binds two agents to one key has declared executors it cannot tell apart, and
+  // every responsibility check would compare a fact against itself.
+  const holderOf = new Map<string, string>()
+  for (const [agentId, held] of options.agents) {
+    const holder = holderOf.get(held.as)
+    if (holder !== undefined)
+      refuse(
+        'malformed-declaration',
+        `agents "${holder}" and "${agentId}" are both bound to ${JSON.stringify(held.as)}; one binding is one executor, and two agents whose facts stamp one identity are one agent the log cannot tell apart`,
+      )
+    holderOf.set(held.as, agentId)
+  }
   const commands: TaskCommands = {
-    admit: input => emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract }),
+    admit: (input, as) => emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract }, as),
 
-    decompose: input =>
-      emitRaw(options, input.commandId, TASK_KINDS.decomposed, input.parentTaskId, { children: input.children }),
+    decompose: (input, as) =>
+      emitRaw(options, input.commandId, TASK_KINDS.decomposed, input.parentTaskId, { children: input.children }, as),
 
-    assign: input => {
+    assign: (input, as) => {
       // The identity is filled from the deployment's table, so a caller supplies what it did and
       // never who it is. Holding it is a deployment fact; the node is a log fact.
-      const identity = requireHeldIdentity(options, input.agentId, `assign task "${input.taskId}"`)
-      return emitRaw(options, input.commandId, TASK_KINDS.assigned, input.taskId, { agentId: input.agentId, agentIdentity: identity }, () =>
+      const identity = requireHeldBinding(options, input.agentId, `assign task "${input.taskId}"`).identity
+      return emitRaw(options, input.commandId, TASK_KINDS.assigned, input.taskId, { agentId: input.agentId, agentIdentity: identity }, as, () =>
         requireOpenedNode(cutOf(options), input.agentId, `assign task "${input.taskId}"`),
       )
     },
 
-    reassign: input => {
-      const identity = requireHeldIdentity(options, input.agentId, `transfer task "${input.taskId}"`)
+    reassign: (input, as) => {
+      const identity = requireHeldBinding(options, input.agentId, `transfer task "${input.taskId}"`).identity
       return emitRaw(
         options,
         input.commandId,
         TASK_KINDS.reassigned,
         input.taskId,
         { from: input.from, agentId: input.agentId, agentIdentity: identity },
+        as,
         () => requireOpenedNode(cutOf(options), input.agentId, `transfer task "${input.taskId}"`),
       )
     },
 
-    startRun: input =>
-      emitRaw(options, input.commandId, TASK_KINDS.runStarted, input.taskId, { runId: input.runId, revision: input.revision }, () => {
+    startRun: (input, as) =>
+      emitRaw(options, input.commandId, TASK_KINDS.runStarted, input.taskId, { runId: input.runId, revision: input.revision }, as, () => {
         const cut = cutOf(options)
         const task = cut.task(input.taskId)
         if (task === undefined || task.contract === undefined)
@@ -187,7 +214,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         requirePlanAllows(cut, input.taskId)
       }),
 
-    openBubble: input =>
+    openBubble: (input, as) =>
       // The whole declared context goes through: rebuilding the payload from three of its members is
       // how a required member silently disappears between the caller and the reducer.
       emitRaw(options, input.commandId, TASK_KINDS.bubbleOpened, input.taskId, {
@@ -197,15 +224,16 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         model: input.model,
         tools: input.tools,
         conditions: input.conditions,
-      }),
+      }, as),
 
-    failRun: input =>
+    failRun: (input, as) =>
       emitRaw(
         options,
         input.commandId,
         TASK_KINDS.runFailed,
         input.taskId,
         input.reason === undefined ? { runId: input.runId } : { runId: input.runId, reason: input.reason },
+        as,
       ),
 
     recordVerdict: input => {
@@ -230,6 +258,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
           inputDigests: input.verdict.inputDigests,
           ...(input.verdict.detail === undefined ? {} : { detail: input.verdict.detail }),
         },
+        undefined,
         () => {
           const now = requireCriterion(cutOf(options), input.taskId, input.verdict.criterionId)
           if (input.verdict.implementationDigest !== now.implementationDigest)
@@ -259,20 +288,19 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
 
     forAgent: agentId => {
       // The narrow view does not hand back a judging method at all: the boundary is the absence of
-      // the method, rather than a rule the agent is trusted to respect.
-      if (!options.agents.has(agentId))
-        refuse(
-          'unknown-emitter-role',
-          `agent "${agentId}" is not one this deployment holds, so it has no command surface here (known: ${[...options.agents.keys()].sort().join(', ') || 'none'})`,
-        )
+      // the method, rather than a rule the agent is trusted to respect. And the surface is bound:
+      // every fact it produces stamps this agent's identity, resolved from the deployment's one
+      // table through the store, so the log attributes the act to the executor that drove it and a
+      // responsibility check compares the caller against the holder instead of against itself.
+      const { as } = requireHeldBinding(options, agentId, `act as agent "${agentId}"`)
       return {
-        admit: commands.admit,
-        decompose: commands.decompose,
-        assign: commands.assign,
-        reassign: commands.reassign,
-        startRun: commands.startRun,
-        openBubble: commands.openBubble,
-        failRun: commands.failRun,
+        admit: input => commands.admit(input, as),
+        decompose: input => commands.decompose(input, as),
+        assign: input => commands.assign(input, as),
+        reassign: input => commands.reassign(input, as),
+        startRun: input => commands.startRun(input, as),
+        openBubble: input => commands.openBubble(input, as),
+        failRun: input => commands.failRun(input, as),
       }
     },
   }
@@ -296,15 +324,21 @@ function cutOf(options: TaskCommandOptions): Cut {
   }
 }
 
-/** The identity this deployment holds for one agent. A deployment fact, not a log fact. */
-function requireHeldIdentity(options: TaskCommandOptions, agentId: string, action: string): string {
+/** The binding one held agent's acts stamp, and the identity that binding resolves to. */
+function requireHeldBinding(options: TaskCommandOptions, agentId: string, action: string): { as: string; identity: string } {
   const held = options.agents.get(agentId)
   if (held === undefined)
     refuse(
       'unknown-emitter-role',
       `cannot ${action}: agent "${agentId}" is not one this deployment holds (known: ${[...options.agents.keys()].sort().join(', ') || 'none'})`,
     )
-  return held.identity
+  const identity = options.store.identityOf(held.as)
+  if (identity === undefined)
+    refuse(
+      'unknown-emitter-role',
+      `cannot ${action}: agent "${agentId}" is bound to ${JSON.stringify(held.as)}, which this deployment's store holds no identity for, so no fact of its could be stamped`,
+    )
+  return { as: held.as, identity }
 }
 
 /** The log half: a held agent whose node was never opened has no session backing it. */
@@ -360,7 +394,8 @@ async function emitRaw(
   kind: string,
   subject: string,
   payload: unknown,
+  as?: string,
   require?: () => void,
 ): Promise<Envelope> {
-  return options.store.emit({ commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind, subject, payload }, require) as Promise<Envelope>
+  return options.store.emit({ commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind, subject, payload, ...(as === undefined ? {} : { as }) }, require) as Promise<Envelope>
 }

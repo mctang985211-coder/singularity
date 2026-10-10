@@ -5,6 +5,10 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  AGENT_KINDS,
+  AGENT_PROTOCOL,
+  AGENT_ROLE,
+  AGENT_VERSION,
   createTaskCommands,
   ENVIRONMENT_PROTOCOL,
   ENVIRONMENT_VERSION,
@@ -88,7 +92,7 @@ describe('a run starts only when every cross-entity condition holds', () => {
       createTaskCommands({
         store: live.store,
         registry: live.registry,
-        agents: new Map([['agent-ghost', { identity: SCHEDULER }]]),
+        agents: new Map([['agent-ghost', { as: 'scheduler' }]]),
         implementations: [],
       }).assign({ commandId: 'a-ghost', taskId: PARENT, agentId: 'agent-ghost' }),
     )
@@ -130,6 +134,43 @@ describe('a run starts only when every cross-entity condition holds', () => {
 
     const blocked = await asyncRefusalOf(() => commands.startRun({ commandId: 'r-blocked', taskId: CHILD, runId: RUN, revision: pin(live) }))
     expect(blocked).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/task-sibling.*only a verified dependency/) })
+  })
+
+  it('binds each agent surface to its own identity, so one agent cannot work another\'s task', async () => {
+    const live = await deployment()
+    await createRevision(live)
+    await openAgent(live)
+    const other = 'agent-2'
+    await live.store.emit({ commandId: 'open-other', protocol: AGENT_PROTOCOL, version: AGENT_VERSION, kind: AGENT_KINDS.opened, subject: other, payload: { agentId: other, role: 'worker', sessionId: `singularity:agent:${other}` } })
+    // Two executors, two bindings: the log tells them apart by what their acts stamp, and the
+    // responsibility check compares the caller against the holder instead of against itself.
+    const commands = createTaskCommands({
+      store: live.store, registry: live.registry,
+      agents: new Map([[AGENT, { as: 'scheduler' }], [other, { as: AGENT_ROLE }]]),
+      implementations: [{ ref: UNIT_VERIFIER, version: '1', implementationDigest: UNIT_IMPLEMENTATION }],
+    })
+    await commands.admit({ commandId: 'admit-parent', taskId: PARENT, contract: parentContract() })
+    await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
+
+    const stranger = await asyncRefusalOf(() => commands.forAgent(other).startRun({ commandId: 'r-stranger', taskId: PARENT, runId: RUN, revision: pin(live) }))
+    expect(stranger).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining(AGENT) })
+    const own = await commands.forAgent(AGENT).startRun({ commandId: 'r-own', taskId: PARENT, runId: RUN, revision: pin(live) })
+    expect(own.actor).toBe(SCHEDULER)
+    const strangerFail = await asyncRefusalOf(() => commands.forAgent(other).failRun({ commandId: 'f-stranger', taskId: PARENT, runId: RUN, reason: 'not mine' }))
+    expect(strangerFail.code).toBe<RefusalCode>('not-responsible')
+    await commands.forAgent(AGENT).failRun({ commandId: 'f-own', taskId: PARENT, runId: RUN, reason: 'settled for the transfer' })
+
+    // The holder hands the task over through its own bound surface; the previous holder cannot
+    // continue the work it just gave away, and the new holder can.
+    await commands.forAgent(AGENT).reassign({ commandId: 'hand-over', taskId: PARENT, from: AGENT, agentId: other })
+    const previous = await asyncRefusalOf(() => commands.forAgent(AGENT).startRun({ commandId: 'r-after', taskId: PARENT, runId: 'run-2', revision: pin(live) }))
+    expect(previous).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining(other) })
+    const taken = await commands.forAgent(other).startRun({ commandId: 'r-new-holder', taskId: PARENT, runId: 'run-2', revision: pin(live) })
+    expect(taken.actor).toBe(live.store.identityOf(AGENT_ROLE))
+
+    // And the deployment cannot declare two executors it could never tell apart.
+    const doubled = refusalOf(() => createTaskCommands({ store: live.store, registry: live.registry, agents: new Map([[AGENT, { as: 'one' }], [other, { as: 'one' }]]), implementations: [] }))
+    expect(doubled.code).toBe<RefusalCode>('malformed-declaration')
   })
 
   it('refuses work once the plan budget is spent, and admits exactly one of two concurrent starts', async () => {

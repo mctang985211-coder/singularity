@@ -20,7 +20,11 @@
  * **The native ask runs before the commit region, and the fact is decided after it.** An ask waits
  * for a person; holding the store's serial region while somebody thinks would serialize the whole
  * deployment behind a human. So the ask settles first, and the reducer then decides the fact against
- * the state as it is *now*. A grant for content that is no longer on the table therefore does not
+ * the state as it is *now*. What must not repeat is the ask itself: a command whose reply was lost
+ * is identified against the journal **before** the person is asked — the same identification the
+ * commit region would perform, read early because the external act happens first. A redelivery is
+ * answered from the fact it already committed, and a different request under the same id is refused
+ * before anyone is asked, exactly as the region would refuse it after. A grant for content that is no longer on the table therefore does not
  * become an approval — the reducer refuses it (`stale-approval`, `illegal-transition`) — which is
  * the same discipline as "re-validate the approved content at publish time", applied one step
  * earlier.
@@ -125,6 +129,27 @@ export function createReleaseCommands(options: ReleaseCommandOptions): ReleaseCo
       ),
 
     approve: async input => {
+      // The ask is an external act that happens before the commit region, so the store's own
+      // identification — which lives inside it — would arrive too late to save a person from being
+      // asked twice. Read the journal first: a command that already committed has its answer, and
+      // re-offering its recorded request returns the fact without a question; the same id under a
+      // different request is refused here, before the ask, with the conflict the region itself
+      // would raise after it.
+      const recorded = options.store.committedOf(input.commandId)
+      if (recorded !== undefined) {
+        const committed = recorded.payload as { revisionId?: string; draftDigest?: string; approvedBy?: string }
+        if (
+          recorded.subject !== input.environmentId ||
+          committed.revisionId !== input.revisionId ||
+          committed.draftDigest !== input.draftDigest ||
+          committed.approvedBy !== input.approvedBy
+        )
+          refuse(
+            'command-conflict',
+            `command ${JSON.stringify(input.commandId)} already committed ${recorded.protocol}/${recorded.kind} #${recorded.seq} for a different request`,
+          )
+        return recorded
+      }
       const attempt = await askForApproval(options.approvalSeams ?? {}, input.ask)
       if (attempt.outcome !== APPROVAL_GRANT || attempt.approvalId === undefined)
         refuse(
