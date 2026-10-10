@@ -46,7 +46,6 @@ const ROUNDS = 4
 const FIRST_BUDGET = 4
 const MINIMUM_BUDGET = 1
 const FLOOR = { floor: 0.1, source: 'measured' }
-const METRIC = { direction: 'higher' }
 const WEIGHTS = { quality: 100, cost: 15 }
 const CALIBER_A = 'a1'.repeat(32)
 const CALIBER_B = 'b2'.repeat(32)
@@ -78,7 +77,7 @@ function seam() {
 /** Completed trials of one evaluation, as the recorded result states them. */
 const trials = (qualities, denominator = 2) => ({ denominator, observed: qualities.map((quality, slot) => ({ slot, quality })) })
 const result = (evaluationId, candidate, caliberDigest, qualities, constraints = [{ criterionId: 'correctness', met: true }], denominator = 2, cost = 10) => ({
-  evaluationId, caliberDigest, baseline: INCUMBENT, candidate, ...trials(qualities, denominator), cost, constraints,
+  evaluationId, caliberDigest, baseline: INCUMBENT, candidate, ...trials(qualities, denominator), cost, constraints, direction: 'higher',
 })
 
 // ---------------------------------------------------------------- the probe's measurement facts
@@ -162,6 +161,7 @@ async function main() {
       return {
         evaluationId: payload.evaluationId, caliberDigest: payload.caliberDigest, baseline: payload.baseline, candidate: payload.candidate,
         denominator: payload.denominator, observed: payload.observed.length, missing, cost: payload.cost ?? null, constraints: payload.constraints,
+        direction: payload.direction,
         quality: payload.observed.reduce((total, entry) => total + entry.quality, 0) / payload.denominator,
         admissible: missing.length === 0 && payload.constraints.every(constraint => constraint.met === true),
         why: missing.length > 0 ? `${missing.length} of ${payload.denominator} planned trials have no observation` : null,
@@ -190,7 +190,7 @@ async function main() {
     const open = (roundId, round, over = {}) =>
       commands.openRound({
         commandId: `open-${roundId}`, roundId, round, incumbent: INCUMBENT, candidates: 3, explorationSlots: 1,
-        historyCutoff: head(), caliber: CALIBER_A, metric: METRIC, weights: WEIGHTS, ...over })
+        historyCutoff: head(), caliber: CALIBER_A, weights: WEIGHTS, ...over })
     const submit = (roundId, slot, over = {}) =>
       commands.submitCandidate({
         commandId: `submit-${roundId}-${slot}-${head()}`, roundId, slot, revision: CANDIDATE_1,
@@ -261,7 +261,7 @@ async function main() {
     const decision = roundState('round-1').decision
     check('the decision names an admitted winner', decided.kind === STRATEGY_KINDS.roundDecided && decision.winner === 1, `winner ${decision.winner}`)
     check('every declared slot is closed out with a reason', decision.outcomes.map(outcome => outcome.slot).join() === '0,1,2' && decision.outcomes.every(outcome => outcome.reason.length > 0), `${decision.outcomes.length} outcomes`)
-    check('the winner is an admitted slot', decision.outcomes.find(outcome => outcome.slot === decision.winner).admitted === true)
+    check('the winner is an admitted slot', decision.outcomes.find(outcome => outcome.slot === decision.winner)?.admitted === true)
     check('the decision records the band it was made under', decision.calibration.floor === FLOOR.floor && decision.calibration.source === FLOOR.source)
     const late = await refusalOf(() => submit('round-1', 0, { evaluationId: 'e-0', revision: CANDIDATE_0 }))
     check('a submission after the close is refused', late.code === 'illegal-transition' && late.detail.includes('closed'), late.code)
@@ -287,6 +287,7 @@ async function main() {
     const published = projectRound(roundState('round-published'), sliceAt(head()), FLOOR)
     check('an asset class the publication accepted is not novel', published.slots[0].novelty === 0, `novelty ${published.slots[0].novelty}`)
     check('an asset class no publication accepted is novel', published.slots[1].novelty === 1, `novelty ${published.slots[1].novelty}`)
+    check('the tie between the two published-class candidates goes to the lower slot', published.winner === 0, `winner ${published.winner}`)
 
     // ---------------------------------------------------------------- the plan's coverage
     // `round-last` declares three slots and nobody submitted to any of them. A decision covers the plan:
