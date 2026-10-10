@@ -1,5 +1,6 @@
 {
   "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim. No row carries one today: `mutate:fw-direction-sign-ignored` was this ledger's one recorded miss, and it is a claim now that the probe checks its readout against the direction the views carry - the reproduction and the fix are in docs/f-evidence.md §5.2, and scripts/mutate.mjs prints the verdict rather than this file. What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
+  "commitClaim": "protocol-copied-rule-refused",
   "claims": [
     {
       "id": "fw-fixture-standard-moved",
@@ -728,6 +729,58 @@
       },
       "witness": "cannot start a run for sub-task",
       "note": "the probe dies on the refusal the reorder produces instead of reporting a failed check, which is what \"以那句拒绝失败\" means: the recovery path is gone, and the store says so by name"
+    },
+    {
+      "id": "protocol-copied-rule-refused",
+      "rule": "the mark defineKind leaves is identity rather than a property, so a spread copy cannot replace a declared rule's parse boundary",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/protocol/registry.ts",
+          "find": "const BUILT_BY_DEFINE_KIND = new WeakSet<object>()",
+          "replace": "const BUILT_BY_DEFINE_KIND = Symbol('built by defineKind')"
+        },
+        {
+          "file": "src/protocol/registry.ts",
+          "find": "  if (!BUILT_BY_DEFINE_KIND.has(rule))",
+          "replace": "  if ((rule as unknown as Record<symbol, unknown>)[BUILT_BY_DEFINE_KIND] !== true)"
+        },
+        {
+          "file": "src/protocol/registry.ts",
+          "find": "    reduce: (state, envelope, payload) => spec.reduce(state, envelope, payload as Payload),\n  }\n  BUILT_BY_DEFINE_KIND.add(rule)\n  return Object.freeze(rule)",
+          "replace": "    reduce: (state, envelope, payload) => spec.reduce(state, envelope, payload as Payload),\n    [BUILT_BY_DEFINE_KIND]: true,\n  }\n  return Object.freeze(rule)"
+        }
+      ],
+      "run": { "kind": "vitest", "args": ["tests/gate.spec.ts"] },
+      "witness": "\u00d7"
+    },
+    {
+      "id": "protocol-nested-reader-widened",
+      "rule": "a nested reader closes each entry with the set the declaration handed it, so a widened reader is refused by the tree's own spec",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/bubble.ts",
+          "find": "    assertClosedKeys(source, members, at)\n    const name = text(source, 'name', at)\n    const digest = text(source, 'digest', at)",
+          "replace": "    assertClosedKeys(source, [...members, 'note'], at)\n    const name = text(source, 'name', at)\n    const digest = text(source, 'digest', at)"
+        }
+      ],
+      "run": { "kind": "vitest", "args": ["tests/measure-slice.spec.ts"] },
+      "witness": "\u00d7"
+    },
+    {
+      "id": "protocol-post-declare-push",
+      "rule": "the declared member set is frozen where defineKind built it, so a push after declare cannot widen the boundary the payload is closed with",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/protocol/registry.ts",
+          "find": "  if (closed !== undefined) Object.freeze(closed)\n",
+          "replace": ""
+        }
+      ],
+      "run": { "kind": "vitest", "args": ["tests/gate.spec.ts"] },
+      "witness": "\u00d7"
     }
   ]
 }

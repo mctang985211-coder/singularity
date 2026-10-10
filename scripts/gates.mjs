@@ -4,22 +4,21 @@
  *
  * These are the first asset of this codebase, not an afterthought: the previous system had a good design
  * and still grew twelve persisted formats and 197 unreferenced exports, because only two gates existed
- * and neither constrained *shape proliferation*. Five lessons are built in; the round that produced each
- * is recorded in `docs/context.md` §11g and in the review documents rather than repeated here in full:
+ * and neither constrained *shape proliferation*. Five lessons are built in, the round behind each is in
+ * `docs/context.md` §11g, and what each still cannot reach is stated where it is used:
  *
- * - **A gate that has never failed is not known to work**: `--probe` runs every detector against a
- *   synthetic file set that violates all of them.
+ * - **A gate that has never failed is not known to work**: `--probe` fires every detector on a synthetic
+ *   file set that violates all of them.
  * - **Text matching is not symbol matching**: references are counted over comment- and literal-stripped
  *   source, and an export counts only when another module *binds* the name.
  * - **A pattern is a spelling, and a spelling is not a mechanism**: each past spelling is asked of the
  *   thing that can answer now, and what that still cannot reach is printed where it is used.
- * - **A mechanism loses to a spelling only where the mechanism is not applied**: every close states its
- *   own boundary, and a close without one is the next round's finding.
+ * - **A mechanism loses to a spelling only where it is not applied**: a close without a stated boundary
+ *   is the next round's finding.
  * - **A verdict read as a substring is not a verdict**: each behavioural gate runs its script twice,
  *   once with `src/` removed, so a verdict that does not change with the tree is reported.
  *
- * Usage: `node scripts/gates.mjs` scans the real tree; `--probe` self-tests every detector against a
- * synthetic file set that must make it fire.
+ * Usage: `node scripts/gates.mjs` scans the real tree; `--probe` self-tests every detector.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -41,10 +40,18 @@ const MAX_SOURCE_LINES = 400
  * The rule is absolute rather than an allowlist with one exemption: the previous system kept a
  * self-built durable log beside the upstream one and re-implemented a worse barrier, lease and replay.
  *
- * **This gate is not a passive reader, and a bypass is not passive either.** The sweep imports every
- * module under `src`, so a write placed at module level does not merely pass the gate: it *performs
- * the write*, during the gate run, before anybody reads the output. Round five's bypass —
- * `createRequire(import.meta.url)('node:fs/promises').writeFile(…)` — did exactly that.
+ * What this detector is: a scan for a spelling that reaches a write — a non-read-only name imported or
+ * re-exported from an fs module, a default or namespace binding, a dynamic import whose target cannot be
+ * read, `createRequire`, `process.getBuiltinModule`, and the process-execution module, each refused by
+ * name because the gate cannot see what it will do.
+ *
+ * What it is not, written because a gate believed to be a barrier is worse than one known not to be: not
+ * interposition and not a proof. A write reached through a host package's API, or a Node capability this
+ * list does not name, is invisible to it; and since the sweep imports every module under `src`, a write
+ * at module level *runs* during the sweep — the file is there afterwards. Green means "no write this
+ * scan can name", never "no write happened": round five's
+ * `createRequire(import.meta.url)('node:fs/promises').writeFile(…)` and round seven's
+ * `export { writeFile } from 'node:fs/promises'` both wrote while this gate read green.
  */
 const READ_ONLY_FS = new Set([
   'readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'statSync', 'lstat', 'lstatSync',
@@ -52,36 +59,23 @@ const READ_ONLY_FS = new Set([
   'constants', 'Stats', 'Dirent',
 ])
 const FS_MODULES = new Set(['node:fs', 'node:fs/promises'])
+/** A process executor runs whatever a string says, shell redirection included, so it is refused whole. */
+const EXEC_MODULES = new Set(['node:child_process'])
 
-/** Every file under the source directories, as repo-relative posix paths. */
+/** Every `.ts` file under the source directories, as repo-relative posix paths. */
 function sourceFiles() {
-  const found = []
-  const walk = directory => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
-      const path = join(directory, entry.name)
-      if (entry.isDirectory()) walk(path)
-      else if (/\.(ts|mts|tsx)$/.test(entry.name)) found.push(relative(ROOT, path))
-    }
-  }
-  for (const directory of SOURCE_DIRS) {
-    try {
-      if (statSync(join(ROOT, directory)).isDirectory()) walk(join(ROOT, directory))
-    } catch {
-      // A directory that does not exist yet contributes nothing.
-    }
-  }
-  return found.sort()
+  return SOURCE_DIRS
+    .flatMap(directory => treeFiles(join(ROOT, directory)).filter(file => /\.(ts|mts|tsx)$/.test(file)).map(file => `${directory}/${file}`))
+    .sort()
 }
 
 /**
  * Source with comments and string literal contents replaced by spaces, at exactly the input length.
  *
- * Lexical, not a parser, and honest about being approximate: a regex literal is not a literal here, a
- * `'` or `"` that does not close on its own line is not a string, and a `${…}` substitution inside a
- * template reads as literal text. One pass, because which of `//`, `/*`, `'`, `"` and `` ` `` opens
- * anything depends on what is already open. Length and line breaks survive, because findings read line
- * numbers out of the result.
+ * Lexical, not a parser, and approximate on purpose: a regex literal is not a literal here, a quote that
+ * does not close on its own line is not a string, and a `${…}` substitution reads as literal text. One
+ * pass, because which of `//`, `/*`, `'`, `"` and `` ` `` opens anything depends on what is open; length
+ * and line breaks survive, because findings read line numbers out of the result.
  */
 function codeOnly(source) {
   const out = source.split('')
@@ -165,10 +159,8 @@ function codeOnly(source) {
 
 /**
  * Every name a file declares as an export: `export <decl>`, and `export { … }` **without** `from`.
- *
- * A re-export (`export { X } from './y.ts'`) is deliberately not a new export here. It is a
- * *binding* of `y.ts`'s `X`, counted where `X` is declared, and counting it twice would let a barrel
- * file vouch for a name nothing uses. `src/index.ts` is exactly such a barrel.
+ * A re-export binds another module's name and is counted where that name is declared — counting it
+ * here would let a barrel file vouch for a name nothing uses, and `src/index.ts` is such a barrel.
  */
 function declaredExports(code) {
   const names = new Set()
@@ -186,13 +178,10 @@ function declaredExports(code) {
 }
 
 /**
- * What one file binds from other modules: each name an `import`/`export … from` clause takes, with the
- * specifier it came from, whether the clause forwards the name, plus any namespace binding's specifier.
- *
- * The clause is read out of the code view, so one inside a comment or a string is not a binding; the
- * specifier is read out of the raw text at the same offsets, because `codeOnly` blanks string contents.
- * The two kinds are told apart here rather than at the counting site: an import is a use of the name,
- * and `export { X } from './y.ts'` only *forwards* it.
+ * What one file binds from other modules: each name an `import`/`export … from` clause takes, with its
+ * specifier, whether the clause forwards the name, plus any namespace binding's specifier. The clause
+ * comes from the code view, so one inside a comment is not a binding; the specifier comes from the raw
+ * text at the same offsets, because `codeOnly` blanks string contents.
  */
 function moduleBindings(code, raw) {
   const bound = []
@@ -218,11 +207,9 @@ function moduleBindings(code, raw) {
 }
 
 /**
- * The file a relative specifier names, or `undefined` when it leaves the scanned tree.
- *
- * A `.js` specifier resolves to the `.ts` file beside it, because that is what this configuration
- * compiles to: the written path is what the *output* would be called. Round four's L-3: resolving only
- * the literal path reported a file imported as `'./x.js'` as an export nobody uses.
+ * The file a relative specifier names, or `undefined` when it leaves the scanned tree. A `.js`
+ * specifier resolves to the `.ts` beside it, because that is what this configuration compiles to:
+ * round four's L-3 was a file imported as `'./x.js'` reported as an export nobody uses.
  */
 function resolveModule(from, specifier, files) {
   if (!specifier.startsWith('.')) return undefined
@@ -241,14 +228,11 @@ function lineOf(source, index) {
 const ENTRY_POINT = 'src/index.ts'
 
 /**
- * The published surface a consumer outside this repository uses and nothing here binds.
- *
- * These are the names `src/index.ts` publishes that nothing in `src/` or `tests/` binds. Their
- * consumer is the host that mounts this plugin, which no gate here can see, so the honest treatment is
- * a recorded act rather than a checked one: publishing an unbound name fails unless the name is
- * recorded here, and a recorded name that has since been bound (or is no longer published) fails too.
- * A ratchet, like the evidence budget: it makes publishing a name visible and deliberate, not
- * impossible. The bypass that produced this shape is in `docs/context.md` §11g.
+ * The published surface a consumer outside this repository uses and nothing here binds: the names
+ * `src/index.ts` publishes that nothing in `src/` or `tests/` binds. Their consumer is the host that
+ * mounts this plugin, which no gate here can see, so publishing one is a recorded act: an unrecorded
+ * name fails, and a recorded name that is now bound or no longer published fails too. A ratchet, like
+ * the evidence budget — it makes publishing deliberate, not impossible (`docs/context.md` §11g).
  */
 const PUBLISHED_WITHOUT_CONSUMER = new Set([
   'src/agent/protocol.ts\0AGENT_OPENED_MEMBERS',
@@ -294,21 +278,15 @@ let RUNTIME_EXPORTS = new Map()
 /**
  * Every export no other module binds, with the two ways a name can still be accounted for.
  *
- * A re-export is not a use: it *forwards* the name, and a use of the forwarded name only when the
- * forwarding module's own name is used, transitively, by an import. What is left is the honest
- * remainder: names the entry point publishes whose only consumer is outside this repository, recorded
- * in `PUBLISHED_WITHOUT_CONSUMER` and checked in both directions. Both the record and the entry point
- * are parameters, so the self-test can hand this function another one of either — the rounds that
- * produced this shape are in `docs/context.md` §11g.
+ * A re-export is not a use — it *forwards* the name, and uses it only when the forwarding module is
+ * itself used, transitively. What is left is the honest remainder: names the entry point publishes whose
+ * consumer is outside this repository, recorded in `PUBLISHED_WITHOUT_CONSUMER` and checked both ways.
+ * The record and the entry point are parameters so the self-test can hand this function another one.
  *
- * **What a file exports is asked of the file, not of a pattern.** Round five's H-1 re-opened the dead
- * export in three spellings the text scan never enumerated, because the list came from a regex; the
- * sweep already imports every module under `src`, so the loader's namespace is read here too.
- *
- * **A binding is a consumer; the entry point's own bindings are not.** A name the entry point binds but
- * does not publish is reachable by no consumer, so its import of a dead export is not a use — and this
- * gate cannot tell a barrel that computed a published value out of an import from that bypass, which it
- * says rather than implying otherwise.
+ * **What a file exports is asked of the file, not of a pattern** (round five's H-1), so the loader's
+ * namespace is read as well as the text. **A binding is a consumer; the entry point's own bindings are
+ * not** — and this gate cannot tell a barrel that computed a published value out of an import from that
+ * bypass, which it says rather than implying otherwise.
  */
 function unreferencedExportFindings(files, views, recorded, runtime = RUNTIME_EXPORTS) {
   const findings = []
@@ -329,8 +307,8 @@ function unreferencedExportFindings(files, views, recorded, runtime = RUNTIME_EX
       else if (file !== ENTRY_POINT) used.add(`${target}\0${name}`)
     }
   }
-  // A forwarded name is used exactly when the module doing the forwarding is used, so the uses walk
-  // backwards along the forwarding edges to a fixpoint instead of stopping at the barrel.
+  // A forwarded name is used exactly when its forwarding module is, so the walk goes backwards along
+  // the forwarding edges to a fixpoint instead of stopping at the barrel.
   for (let grew = true; grew; ) {
     grew = false
     for (const { from, to, name } of forwarded)
@@ -353,11 +331,10 @@ function unreferencedExportFindings(files, views, recorded, runtime = RUNTIME_EX
   const declared = new Set()
   for (const file of files) {
     if (!file.startsWith('src/')) continue
-    // What this file exports is the union of two readers that miss different things: the loader's
-    // namespace is where a *value* export's spelling cannot hide (`b` in `export const a = 1, b = 2`,
-    // `default`, a destructuring), and the text scan is where a *type* export lives, because the
-    // loader erases types. Names the file forwards are neither: a forwarding binds another module's
-    // name and is counted where that name is declared.
+    // Two readers that miss different things: the loader's namespace is where a *value* export's
+    // spelling cannot hide (`b` in `export const a = 1, b = 2`, `default`, a destructuring), and the
+    // text scan is where a *type* export lives, because the loader erases types. A forwarded name is
+    // neither — it is counted where it is declared.
     const forwards = new Set((bound.get(file) ?? []).filter(entry => entry.forwarding).map(entry => entry.name))
     const exported = [...new Set([...declaredExports(views.code.get(file)), ...(runtime.get(file) ?? [])])].filter(name => !forwards.has(name))
     for (const name of exported) {
@@ -374,8 +351,8 @@ function unreferencedExportFindings(files, views, recorded, runtime = RUNTIME_EX
       findings.push(`${file} exports ${name}, which no other module binds by importing it, or by re-exporting it where the re-export is itself used; drop the keyword or the export`)
     }
   }
-  // The record only shrinks: an entry that something now binds, or that is no longer published, is a
-  // stale claim about the tree, which is the same defect as an unreferenced export written backwards.
+  // The record only shrinks: an entry something now binds, or that is no longer published, is a stale
+  // claim about the tree — an unreferenced export written backwards.
   for (const key of recorded) {
     const [file, name] = key.split('\0')
     if (used.has(key))
@@ -387,11 +364,9 @@ function unreferencedExportFindings(files, views, recorded, runtime = RUNTIME_EX
 }
 
 /**
- * The gates that read the real tree by running a script and reading the verdict line it prints.
- *
- * One entry each, because three consumers need the same three facts: the detector, the probe's
- * synthetic failing run (which needs the markers to know that a script reporting failure is
- * reported), and the skip line that says which gates the synthetic file set cannot reach.
+ * The gates that read the real tree by running a script and reading the verdict line it prints. One
+ * entry each, because three consumers need the same facts: the detector, the probe's synthetic failing
+ * run, and the skip line naming what the synthetic file set cannot reach.
  */
 const SCRIPT_GATES = [
   { name: 'control-store-probe', label: 'the control store probe', script: 'scripts/control-probe.mjs', markers: ['failures: 0', 'gaps: 0'] },
@@ -425,41 +400,54 @@ const DETECTORS = [
       const findings = []
       for (const file of files) {
         if (!file.startsWith('src/')) continue
-        const imports = /import\s*(?:type\s*)?([\s\S]*?)\s*from\s*['"]([^'"]+)['"]/g
-        for (const match of views.raw.get(file).matchAll(imports)) {
-          if (!FS_MODULES.has(match[2])) continue
-          const clause = match[1].trim()
+        const code = views.code.get(file)
+        // Import *and* re-export clauses, because `export { writeFile } from 'node:fs/promises'` names a
+        // write with no `import` in it: round seven forwarded one through such a module and every gate
+        // stayed green while the forwarding module's caller performed the write.
+        const clauses = /\b(import|export)\s*(?:type\s*)?([\s\S]*?)\s*from\s*['"]([^'"]+)['"]/g
+        for (const match of views.raw.get(file).matchAll(clauses)) {
+          const verb = match[1]
+          const specifier = match[3]
+          const clause = match[2].trim()
+          if (EXEC_MODULES.has(specifier)) {
+            findings.push(`${file} ${verb}s ${specifier}; a general process executor runs whatever a string says, a shell redirection into a file among them, so no module may name one`)
+            continue
+          }
+          if (!FS_MODULES.has(specifier)) continue
           // A default or namespace binding hides every name behind one identifier, so no allowlist
           // can see what it will call. It is refused outright, which is the counterexample fix.
-          if (!clause.startsWith('{'))
-            findings.push(`${file} imports ${match[2]} as a ${clause.startsWith('*') ? 'namespace' : 'default'} binding; no module may write durably; DSH session persistence owns the medium`)
+          if (!clause.startsWith('{')) {
+            findings.push(`${file} ${verb}s ${specifier} as a ${clause.startsWith('*') ? 'whole module' : clause.startsWith('type') ? 'type' : 'default or namespace'} binding; no module may write durably; name the members you read instead`)
+            continue
+          }
           for (const entry of clause.replace(/[{}]/g, '').split(',')) {
-            const name = entry.trim().replace(/^type\s+/, '')
-            if (name === '') continue
-            if (!READ_ONLY_FS.has(name)) findings.push(`${file} imports ${name} from ${match[2]}; no module may write durably; DSH session persistence owns the medium`)
+            const name = entry.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0]?.trim()
+            if (name === undefined || name === '') continue
+            if (!READ_ONLY_FS.has(name)) findings.push(`${file} ${verb}s ${name} from ${specifier}; no module may write durably; DSH session persistence owns the medium`)
           }
         }
-        // A dynamic import is the same capability through a door a static scan cannot see, so the
-        // construct is refused for the same reason a namespace binding is: the gate cannot see what it
-        // will call. A literal that is not a filesystem module is readable, and legal; everything else
-        // is refused. Round four's H-2 decided "everything else" by the *first token*, so
-        // `await import('node:' + 'fs/promises')` read as the literal `'node:'` and wrote a real file:
-        // the literal is now the whole argument — one literal, closed by the `)` that ends the call.
-        for (const match of views.code.get(file).matchAll(/(?<![\w$.])import\s*\(/g)) {
-          const at = `${file}:${lineOf(views.code.get(file), match.index)}`
+        // A dynamic import is the same capability behind a door a static scan cannot see, refused for
+        // the same reason as a namespace binding: the gate cannot see what it will call. Round four's
+        // H-2 decided "not a filesystem module" by the *first token*, so `'node:' + 'fs/promises'` read
+        // as `'node:'` and wrote a real file — the literal is now the whole argument, closed by `)`.
+        for (const match of code.matchAll(/(?<![\w$.])import\s*\(/g)) {
+          const at = `${file}:${lineOf(code, match.index)}`
           const literal = /^\s*(['"])([^'"]*)\1\s*\)/.exec(views.raw.get(file).slice(match.index + match[0].length))
           if (literal === null)
             findings.push(`${at} loads a module through a dynamic import whose target is not one quoted literal the gate can read on its own (a concatenation, a template, a variable or an expression); no module may write durably, so a dynamic import may only name one literal module, and never a filesystem one`)
-          else if (FS_MODULES.has(literal[2]))
+          else if (FS_MODULES.has(literal[2]) || EXEC_MODULES.has(literal[2]))
             findings.push(`${at} dynamically imports ${literal[2]}; no module may write durably; DSH session persistence owns the medium`)
         }
-        // A module loader built at run time is the dynamic import's door without the wall: a call
-        // expression, not an import, so no import rule can read what it loads. Like a namespace
-        // binding it is refused rather than pattern-matched — there is no readable spelling of
-        // "load anything".
-        const loader = views.code.get(file).search(/\bcreateRequire\b/)
-        if (loader >= 0)
-          findings.push(`${file}:${lineOf(views.code.get(file), loader)} builds a module loader with createRequire; no module may write durably, and a loader no import rule can read is how createRequire(import.meta.url)('node:fs/promises').writeFile(…) wrote a real file while every gate stayed green`)
+        // A loader or a builtin fetched by name is that door without the wall: neither is an import
+        // clause, so no import rule reads what it loads. Both are refused by name — there is no readable
+        // spelling of "load anything".
+        for (const [spelling, how] of [
+          ['createRequire', "builds a module loader with createRequire; createRequire(import.meta.url)('node:fs/promises').writeFile(…) wrote a real file while every gate stayed green"],
+          ['getBuiltinModule', 'fetches a module by name with process.getBuiltinModule, which no import clause names and no specifier scan can see'],
+        ]) {
+          const at = code.search(new RegExp(`\\b${spelling}\\b`))
+          if (at >= 0) findings.push(`${file}:${lineOf(code, at)} ${how}; no module may write durably, so a loader this gate cannot read is refused by name`)
+        }
       }
       return findings
     },
@@ -562,9 +550,12 @@ const DETECTORS = [
   },
   {
     name: 'mutation-claims',
-    /** It reads the real ledger, the real tree and the real documents, so its legs are its own. */
+    /** It reads the real ledger, the real tree and the real documents, and runs one claim, so its legs are its own. */
     probeSeparately: true,
-    detect: () => mutationClaimFindings(readMutationLedger()),
+    detect: () => {
+      const ledger = readMutationLedger()
+      return [...mutationClaimFindings(ledger), ...mutationRunFindings(ledger)]
+    },
   },
   {
     name: 'dsh-alignment',
@@ -583,83 +574,75 @@ const DETECTORS = [
 ]
 
 /**
- * The gates the synthetic file set cannot reach: they spawn real processes, read the real tree, or
- * reduce over their own ledger. The self-test filters them out **before** it scores anything, and
- * names each one in its skip line. Running them first and discarding the result afterwards is not the
- * same thing: it ran three end-to-end scripts to completion, threw their verdicts away, and then
- * `pnpm gates` ran them a second time for real.
- */
-
-/**
  * The evidence budget, and its ratchet.
  *
  * Round four's seventh pattern: `sourceFiles()` scanned only `src/` and `tests/` `.ts` files, so
- * `scripts/` and `tests/fixtures/*.json` were in no detector and no budget, while `tests/*.spec.ts` was
- * charged for every line. The phase delivered in that unwatched lane was the phase whose checks the
- * ratchet did not charge, and adding probe lines was the cheapest way to discharge an exit condition.
+ * `scripts/` and `tests/fixtures/*.json` were in no detector and no budget while `tests/*.spec.ts` was
+ * charged for every line — the unwatched lane was the one whose checks the ratchet did not weigh.
  *
- * So the numerator is *evidence*: every `.ts` file under `tests/` (specs, fixtures, helpers), every file
- * under `tests/fixtures/` (JSON included, by line), and every `.mjs` file under `scripts/`, at any
- * depth. The denominator stays the `.ts` files under `src/`. Renaming the gate was part of the fix: a
- * gate called `spec-budget` whose numerator was not specs is a printed claim that is not true.
+ * So the numerator is *evidence*: every `.ts` under `tests/`, every file under `tests/fixtures/` (JSON
+ * included, by line), and — since round seven's H1 found the list was an extension filter — **every file
+ * under `scripts/`, at any depth, whatever it is called**. The denominator stays the `.ts` files under
+ * `src/`. Not charged, with sizes printed by walking the tree rather than restating a list: `docs/**` and
+ * `README.md`, `tests/vectors/**`, the four root ledgers, the manifest and the two root configs — prose
+ * because this budget charges *work*, and a ledger or a vector corpus because it is an input a gate
+ * compares rather than a check the budget weighs.
  *
- * Not charged, and printed with their sizes on every run: `docs/**` and the four root ledgers. `docs/**`
- * stays out because this budget charges *work*, and prose is not the lane round four's pattern found
- * work moving to — charging it would make every sentence that records a limit cost ratio. A root ledger
- * stays out because it is an input a gate compares, not a check the budget weighs.
- *
- * These are ratchets, not targets: the numbers came down from 0.88 and 7.8 by deleting restatement, and
- * may only go down further; lowering one is part of the commit that makes it possible. This file is
- * charged like any other evidence, so with no allowance every detector and its probe leg would have to
- * be paid for by deleting a line of evidence — pressure against adding detectors, on the only file whose
- * job is to keep the others honest. The measured ratio is printed on every run next to the charge, and
- * stated in this gate's finding when it is over the ratchet: a frozen number here would drift.
- *
- * The one stated allowance: the ratchet sits at 1.88 while the closes that kept it there measured 1.8775
- * (16,460 lines of evidence against 8,767 of source), about 22 lines — one detector and one probe leg,
- * which is what a close of this kind costs. Round six's closes did not take more than that: the count
- * scan over every document and the recursive charge under `scripts/` added 290 lines to this file and
- * deleted 230 of the restatement they replaced, and the allowance is unchanged in kind from round five's.
+ * These are ratchets, not targets: they came down from 0.88 and 7.8 by deleting restatement and may only
+ * go down further. This file is charged like any other evidence, so every detector and probe leg has to
+ * be paid for by deleting a line of evidence. The allowance is not a number written here — round seven's
+ * M2 caught a paragraph that said 22 lines where the arithmetic gave 21 — but derived and printed on
+ * every run as `floor(ratchet × source) − charged`.
  */
 const EVIDENCE_BUDGET = 1.88
 const SPEC_DENSITY = 5
 
 /**
- * Every `.mjs` file under `scripts/`, at any depth, as repo-relative posix paths.
- *
- * Round six's D3: the charge stopped at the directory, so 5,000 lines as `scripts/zz-big.mjs` fired
- * while the same 5,000 as `scripts/probes/zz-big.mjs` passed. A probe is evidence wherever it is filed,
- * and `mkdir` is not a budget. The directory is a parameter so the self-test can hand this walk that
- * synthetic shape rather than a listing that would not be watching the walk.
+ * Every file under one directory, `node_modules` and history aside, as paths relative to it: the charge
+ * and the printed list of what is not charged are one walk, so they cannot drift apart.
  */
-function scriptFiles(directory = join(ROOT, 'scripts')) {
+function treeFiles(directory) {
   const found = []
   const walk = current => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
+      if (entry.name === 'node_modules' || entry.name === '.git') continue
       const path = join(current, entry.name)
       if (entry.isDirectory()) walk(path)
-      else if (entry.name.endsWith('.mjs')) found.push(relative(ROOT, path))
+      else found.push(relative(directory, path))
     }
   }
-  try { walk(directory) } catch { /* a scripts/ that does not exist contributes nothing */ }
+  try { walk(directory) } catch { /* a directory that does not exist contributes nothing */ }
   return found.sort()
 }
 
 /**
- * Every file the budget charges besides the source itself, with its line count.
+ * Every file under `scripts/`, at any depth, as repo-relative posix paths.
  *
- * Read from disk rather than from the scanned file set, because much of the evidence is not a `.ts`
- * file under `src/` or `tests/` — which is exactly the reason the budget had to be renamed.
+ * Round six's D3 stopped the charge at the directory; round seven's H1 was the same road one suffix
+ * away — only `.mjs` was charged and a dot-name was skipped, so `zz-big.js`, `.cjs`, `.ts` and
+ * `.probes/zz-big.mjs` were twenty thousand uncharged lines. A probe is evidence wherever it is filed,
+ * so nothing is filtered: no extension, no name, no depth. The directory is a parameter for the self-test.
+ */
+function scriptFiles(directory = join(ROOT, 'scripts')) {
+  const under = relative(ROOT, directory)
+  return treeFiles(directory).map(file => (under.startsWith('..') ? file : `${under}/${file}`))
+}
+
+/** Every file the budget does not charge, with its size — derived from the same walk as the charge. */
+function unchargedFiles() {
+  const charged = new Set(evidenceFiles().map(entry => entry.file))
+  return treeFiles(ROOT)
+    .filter(file => !file.startsWith('src/') && !charged.has(file))
+    .map(file => ({ file, lines: readFileSync(join(ROOT, file), 'utf8').split('\n').length }))
+}
+
+/**
+ * Every file the budget charges besides the source, with its line count, read from disk because most of
+ * the evidence is not a `.ts` file under `src/` or `tests/` — why the budget had to be renamed.
  */
 function evidenceFiles() {
   const paths = new Set(sourceFiles().filter(file => file.startsWith('tests/')))
-  try {
-    for (const entry of readdirSync(join(ROOT, 'tests', 'fixtures'), { recursive: true, withFileTypes: true }))
-      if (entry.isFile()) paths.add(relative(ROOT, join(entry.parentPath ?? entry.path, entry.name)))
-  } catch {
-    // A fixture directory that does not exist contributes nothing.
-  }
+  for (const file of treeFiles(join(ROOT, 'tests', 'fixtures'))) paths.add(`tests/fixtures/${file}`)
   for (const file of scriptFiles()) paths.add(file)
   return [...paths].sort().map(file => ({ file, lines: readFileSync(join(ROOT, file), 'utf8').split('\n').length }))
 }
@@ -670,24 +653,22 @@ function evidenceBudgetFindings(files, views, evidence) {
   if (source === 0) return []
   const charged = evidence.reduce((total, entry) => total + entry.lines, 0)
   const ratio = charged / source
+  const headroom = Math.floor(EVIDENCE_BUDGET * source) - charged
   return ratio > EVIDENCE_BUDGET
     ? [
-        `the evidence is ${charged} lines against ${source} of source (${ratio.toFixed(4)}, budget ${EVIDENCE_BUDGET}); evidence that grows with the source is locking structure, and evidence that grows without it is a check nobody charged for - delete the check that states no external fact - see docs/spec-policy.md`,
+        `the evidence is ${charged} lines against ${source} of source (${ratio.toFixed(4)}, budget ${EVIDENCE_BUDGET}); ${-headroom} line(s) have to go — evidence that grows with the source is locking structure, and evidence that grows without it is a check nobody charged for - delete the check that states no external fact - see docs/spec-policy.md`,
       ]
     : []
 }
 
 /**
- * One behaviour per test.
+ * One behaviour per test: `expect` over `it` is a crude proxy for a real rule — a test asserting one
+ * external fact eight times costs eight edits and adds nothing. Counted textually, which is approximate
+ * on purpose: a loop that asserts is counted once, so a file can only under-report here.
  *
- * `expect` count over `it` count is a crude proxy for a real rule: a test asserting the same external
- * fact eight times costs eight edits and adds no information. It is counted textually, which is honest
- * about being approximate — a loop that asserts is counted once, so a file can only under-report here.
- *
- * What it does not reach, said here instead of being implied: a behavioural script's checks are
- * `check(...)` calls and its denominator is the script, so the same arithmetic over `scripts/` would
- * divide a count by one. The evidence budget charges a probe's *size*; nothing charges its structure,
- * and a line of arithmetic that only looked like a constraint would be worse than this paragraph.
+ * What it does not reach: a behavioural script's checks are `check(...)` calls and its denominator is
+ * the script, so the same arithmetic over `scripts/` would divide by one. The budget charges a probe's
+ * *size*; nothing charges its structure.
  */
 function specDensityFindings(files, views) {
   const findings = []
@@ -707,12 +688,10 @@ function specDensityFindings(files, views) {
 /**
  * The tree ledger: the counts documents quote, in the one place this gate compares with the build.
  *
- * Three rounds watched the same numbers drift in `docs/context.md` — wrong three times, nothing
- * noticed, because the numbers lived in prose. The counts live in `tree-baseline.json` now and this
- * gate measures them: `tests` through vitest's own `list --json` port, because a text count of `it(`
- * is a different number from the one `vitest run` reports, and a measurement that cannot be taken is a
- * finding, never silence. The prose scan below reads every document this repository publishes, minus
- * the records of past commits it declares; the reasoning and the limits are in `docs/context.md` §13.
+ * Three rounds watched the same numbers drift in `docs/context.md`, noticed nothing, because they lived
+ * in prose. They live in `tree-baseline.json` now and this gate measures them — `tests` through vitest's
+ * own `list --json` port, because a text count of `it(` is a different number, and a measurement that
+ * cannot be taken is a finding, never silence. §13 has the reasoning and the limits.
  */
 const TREE_LEDGER = 'tree-baseline.json'
 
@@ -760,14 +739,15 @@ function readDocs() {
 }
 
 /**
- * The count scan's corpus and its one declared exception.
+ * The count scan's corpus and its declared records.
  *
  * The corpus is every document this repository publishes — `README.md` and every markdown file under
- * `docs/` — so a document written later is scanned without anyone remembering to add it (round six's
- * D2: the identical claim fired in `context.md` and passed in `blueprint.md`). `RECORD_DOCS` names the
- * documents that measure a past commit: measuring a commit is what makes a count a record rather than a
- * claim about this build, so each entry is read and must name one, and an entry that stops naming one
- * is a finding rather than an exemption.
+ * `docs/` — so a document written later is scanned without anyone remembering to add it (round six's D2:
+ * the identical claim fired in `context.md` and passed in `blueprint.md`). `RECORD_DOCS` names the
+ * documents that measure a past commit: that is what makes a count a record rather than a claim about
+ * this build, so each entry must name a commit **this repository holds**, checked against git — round
+ * seven's B2 was an entry skipped whole-file on any hex token with a letter in it. A declared record
+ * that names none is not a record: it is reported as such, and its counts are read as this tree's.
  */
 const RECORD_DOCS = new Set([
   'docs/review.md',
@@ -776,8 +756,24 @@ const RECORD_DOCS = new Set([
   'docs/adversarial-review-4.md',
   'docs/adversarial-review-5.md',
   'docs/adversarial-review-6.md',
+  'docs/adversarial-review-7.md',
 ])
-const COMMIT = /\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b/
+/** A hex token with a letter in it: commit-shaped, which was all this was checked for until round seven. */
+const COMMIT = /\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b/g
+
+/** Every commit this repository holds, for checking a token instead of matching its shape. */
+function repositoryCommits() {
+  try {
+    return new Set(execFileSync('git', ['rev-list', '--all'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n').filter(Boolean))
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether a text names a commit this repository holds, by full sha or by a short prefix. */
+function namesHeldCommit(text, commits) {
+  return commits !== undefined && (text.match(COMMIT) ?? []).some(token => [...commits].some(sha => sha.startsWith(token)))
+}
 
 /** Every document the count scan reads: this repository's own markdown, not two named files. */
 function docPaths() {
@@ -803,51 +799,70 @@ function readCorpus() {
 
 /**
  * A count stated in prose, in the spellings this tree's documents have drifted in: a net, not a
- * mechanism, and `docs/context.md` §13 states its boundary. The leading `(?<![\w.])` keeps a section
- * number out of it — without one, "## 6.4 门禁清单" reads as "4 门禁".
+ * mechanism, whose boundary §13 states. The leading `(?<![\w.])` keeps a section number out of it —
+ * without one, "## 6.4 门禁清单" reads as "4 门禁".
  */
 const COUNT_CLAIM = /(?<![\w.])\d[\d,]*\s*(?:条\s*)?(?:测试|门禁|spec 文件|个\s*`?\.ts`?\s*文件)|(?<![\w.])\d[\d,]*\s+(?:tests?|gates?|spec files?)\b/
 
 /**
- * A bare file count, which is this tree's only where the line names this tree. Without this half, "15
- * files" in §6.3 is outside every net; without the tree on the line, the same spelling covers the legacy
- * repository's suite in §2.1 and "4 files were misread" in §11g, and a gate that fires on those is one
- * people learn to ignore.
+ * A bare file count, which is this tree's only where the line names this tree: without this half, "15
+ * files" in §6.3 is outside every net, and without the tree on the line the same spelling covers the
+ * legacy repository's suite in §2.1 and "4 files were misread" in §11g.
  */
 const FILE_CLAIM = /(?<![\w.])\d[\d,]*\s*(?:个\s*)?文件|(?<![\w.])\d[\d,]*\s+files?\b/
 const TREE_ON_LINE = /src\/|tests\/|scripts\/|docs\/|singularity-core|README\.md|this tree|this repository|本树|本仓|本仓库|仓库/
 
+/** A fence delimiter: three or more backticks or tildes, and whatever follows, read as an info string. */
+const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
+
 /**
- * The prose scan. Three boundaries, each stating what it does not reach (the reasoning is in §13): a
- * fenced block is quoted output, and a fence left *open* is a finding; a line that names a commit — a
- * hex token with a letter in it, because a bare long number is not a commit — is a record of that
- * commit, and the commit is not verified against git because this gate reads the tree and not its
- * history; and a declared record is checked rather than trusted.
+ * The prose scan. The boundaries, each stating what it does not reach (the reasoning is in §13):
  *
- * Not caught, said here rather than assumed: a count spelled in words, a bare number in a table cell
- * with no counting word (the per-file line counts this round deleted from §6.3), a count of something
- * the ledger does not measure, and any document outside `README.md` and `docs/`.
+ * - A fenced block is quoted output. The opening delimiter is recorded and only the same character
+ *   repeated at least as many times, alone on its line, closes it: round seven's B1 closed a four-backtick
+ *   fence on the first ``` after it, so the rest read as prose and was then skipped as quoted, silently.
+ *   A delimiter longer than three is a finding in its own right — the tree quotes output with three.
+ * - A fence left open is a finding for every delimiter, so one ``` cannot exempt the rest.
+ * - A declared record is skipped whole-file only when it names a commit this repository holds, checked
+ *   against git and not matched as a hex token; if it names none it is not a record, and it is scanned.
+ * - A count on a line carrying a commit-shaped token is that line's record, and the token is **not**
+ *   verified, because this tree's documents quote other repositories' history (`docs/blueprint.md`'s
+ *   port table names commits the RRSI checkout holds and this one never did). A fabricated token buys
+ *   the same exemption: that is the boundary, not a claim that it was checked.
+ *
+ * Not caught: a count spelled in words, a bare number in a table cell with no counting word, a count of
+ * something the ledger does not measure, and any document outside `README.md` and `docs/`.
  */
-function countClaimFindings(docs = readCorpus(), records = RECORD_DOCS) {
+function countClaimFindings(docs = readCorpus(), records = RECORD_DOCS, commits = repositoryCommits()) {
   const findings = []
   for (const { file, text } of docs) {
     if (text === undefined) {
       findings.push(`${file} is in the count scan's corpus and cannot be read; every document is read, so a count in one nobody could open would read as one that agreed`)
       continue
     }
-    if (records.has(file)) {
-      if (!COMMIT.test(text)) findings.push(`${file} is declared a record of a past commit and names none; a count is a record only of a commit it names, so this exemption does not hold`)
-      continue
-    }
-    let fenced = false
+    if (records.has(file) && namesHeldCommit(text, commits)) continue
+    if (records.has(file))
+      findings.push(
+        `${file} is declared a record of a past commit and names none this repository holds${commits === undefined ? " (git could not list this repository's commits, so no record can be verified)" : ''}; a count is a record only of a commit it names, so this document is not a record and its counts are read as this tree's`,
+      )
+    let open = null
     text.split('\n').forEach((line, index) => {
-      if (/^\s*```/.test(line)) { fenced = !fenced; return }
-      if (fenced) return
+      const fence = FENCE.exec(line)
+      if (fence !== null) {
+        const delimiter = fence[1]
+        if (delimiter.length > 3)
+          findings.push(`${file}:${index + 1} uses a ${delimiter.length}-character ${delimiter[0] === '`' ? 'backtick' : 'tilde'} fence; this tree quotes output with three, and a longer delimiter is what the seventh review hid a count behind, so spell it as three`)
+        if (open === null) open = delimiter
+        else if (delimiter[0] === open[0] && delimiter.length >= open.length && fence[2].trim() === '') open = null
+        return
+      }
+      if (open !== null) return
       if (!COUNT_CLAIM.test(line) && !(FILE_CLAIM.test(line) && TREE_ON_LINE.test(line))) return
-      if (COMMIT.test(line)) return
+      if (line.match(COMMIT) !== null) return
       findings.push(`${file}:${index + 1} states a count in prose (${line.trim().slice(0, 60)}); the counts live in ${TREE_LEDGER} and this gate measures them - state it there, or on the line name the commit this one measures`)
     })
-    if (fenced) findings.push(`${file} leaves a code fence open, so every count after it is read as quoted output; close the fence`)
+    if (open !== null)
+      findings.push(`${file} leaves a ${open.length}-character ${open[0]} fence open, so every count after it is read as quoted output; close it with the same character, at least as long`)
   }
   return findings
 }
@@ -869,11 +884,11 @@ function readLedger() {
 /**
  * The mutation ledger: every claim that a mutation is caught, with the edits and the command that judge it.
  *
- * The claims live in `mutation-baseline.json` and `scripts/mutate.mjs` runs one on demand in a copy of
- * the tree; this gate is the cheap half, run on every commit: each claim still applies to this tree (its
- * anchor occurs exactly once), and a document that states a result names a claim. The limits are in
- * `docs/context.md` §13 — including the one that matters most: a claim in a commit message is outside
- * every file this gate reads.
+ * The claims live in `mutation-baseline.json` and `scripts/mutate.mjs` runs one in a copy of the tree.
+ * This gate is the cheap half plus one: each claim must still apply (its anchor occurs once), every
+ * document that states a result must name a claim, and **one claim — the ledger's `commitClaim` — runs
+ * on every commit**, because round seven's M1 was that anchors and ids alone leave a tree whose verdicts
+ * have all gone stale reading green. (§13 has the limits, first among them a claim in a commit message.)
  */
 const MUTATION_LEDGER = 'mutation-baseline.json'
 
@@ -926,28 +941,47 @@ function mutationClaimFindings(ledger, docs = readDocs(), textOf = file => readF
 }
 
 /**
- * What one kind accepts, read from the declaration rather than from its behaviour.
+ * The one claim this gate runs rather than only anchoring (round seven's M1): the ledger's `commitClaim`
+ * is executed on every commit in a copy of the tree, through the same `scripts/mutate.mjs` a reader would
+ * use, and a verdict that is not `caught` is a finding. Running all of them here is not the shape.
+ */
+function mutationRunFindings(ledger, run = verdictOfCommitClaim) {
+  const id = ledger?.commitClaim
+  if (!(ledger?.claims ?? []).some(claim => claim?.id === id))
+    return [`${MUTATION_LEDGER} names no claim to run on every commit (commitClaim: ${JSON.stringify(id ?? null)}); a ledger whose verdicts no gate ever runs is round seven's M1, so the half that reads it runs one`]
+  const verdict = run(id)
+  return verdict === 'caught' ? [] : [`${MUTATION_LEDGER}'s commitClaim ${id} is not caught by this tree: ${verdict}. A verdict gone stale is the finding, not a reason to stop running one`]
+}
+
+/** One claim, run the way a reader would, judged by the line `mutate.mjs` prints for that id. */
+function verdictOfCommitClaim(id) {
+  try {
+    const output = execFileSync(process.execPath, [join(ROOT, 'scripts/mutate.mjs'), id], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 600000 })
+    return output.split('\n').some(line => line.trim().startsWith('caught') && line.includes(id)) ? 'caught' : `it exited 0 without printing a caught verdict for ${id}`
+  } catch (error) {
+    const output = `${error.stdout ?? ''}${error.stderr ?? ''}`.trim().split('\n')
+    return `it exited ${typeof error.status === 'number' ? error.status : 1}: ${output.slice(-3).join(' | ').slice(0, 240)}`
+  }
+}
+
+/**
+ * What one kind accepts, read from the declaration rather than from its behaviour: `KindRule.members`
+ * is the value the parse boundary enforces, so the inventory compares the ledger with the same value the
+ * log enforces. Rounds three to five inferred this set by sampling payloads until the fifth round showed
+ * the mechanism's own limit — a parser that closes its payload over a member it never *names* is reached
+ * by no sample. Sampling is gone rather than patched: a declaration and its parser cannot disagree.
  *
- * `KindRule.members` is the value the parse boundary enforces, so the inventory compares the ledger with
- * the same value the log enforces. Rounds three to five each inferred this set by handing the parser
- * payloads and reading the refusal out of it, until the fifth round showed the mechanism's own limit: a
- * parser that closes its payload over a member it never *names* is reached by no sample. Sampling is
- * gone rather than patched — a declaration and its parser cannot disagree.
- *
- * Two answers, both meaningful: the declared set, or a finding when the declaration names none — a shape
- * the gate cannot read must not read as a shape that is fine.
+ * Two answers, both meaningful: the declared set, or a finding when the declaration names none.
  */
 function declaredMembers(rule) {
   return Array.isArray(rule?.members) ? [...rule.members].sort() : undefined
 }
 
 /**
- * Where a `declare` call was written, read from the stack rather than from the text.
- *
- * The nearest frame inside `src` that is not the registry itself: a `declareEnvironmentProtocol(FOLD)`
- * called from another module reports the declarer in the slice's `protocol.ts`, because the declaration
- * is *written* there. A module loaded from somewhere with no path into `src` has no such frame, so the
- * module the sweep is currently importing answers instead — the same fact the stack would have given.
+ * Where a `declare` call was written, read from the stack: the nearest frame inside `src` that is not
+ * the registry itself, so a declarer called from another module reports the slice's `protocol.ts`, where
+ * the declaration is *written*. A module loaded from no path into `src` has no such frame, so the module
+ * the sweep is importing answers instead — the same fact the stack would have given.
  */
 let LOADING = undefined
 
@@ -963,11 +997,9 @@ function declarationSite() {
 }
 
 /**
- * A value that answers to anything, for the host packages this process cannot install.
- *
- * Callable, constructable, and every property of it is itself, except `then` (a stub that looks thenable
- * would make an `await` on it hang) and the primitive coercions. This is a stub for *loading*, not a
- * model of the package: the sweep wants the module's load-time behaviour, not the host's.
+ * A value that answers to anything, for the host packages this process cannot install: callable,
+ * constructable, every property itself, except `then` (a stub that looks thenable would hang an `await`)
+ * and the primitive coercions. A stub for *loading*, not a model of the package.
  */
 const STUB_PROGRAM = `
 const STUB = new Proxy(function () {}, {
@@ -986,11 +1018,8 @@ function sourceOfModule(module) {
 }
 
 /**
- * Whether a specifier names a package the host installs rather than a path or a URL.
- *
- * `file:` and `data:` specifiers are what a module's own imports of this tree look like, and stubbing
- * them would replace this tree's modules with a stub — which is what happened when this scan accepted
- * anything that was not `.`-relative or `node:`.
+ * Whether a specifier names a package the host installs rather than a path or a URL: `file:` and `data:`
+ * specifiers are this tree's own imports, and stubbing them would replace this tree's modules.
  */
 function isHostSpecifier(specifier) {
   return !specifier.startsWith('.') && !specifier.startsWith('/') && !specifier.includes(':')
@@ -1022,12 +1051,11 @@ function hostImportsOf(source, into) {
  *
  * Round four's BL-4: two modules under `src/` import the host's DSH packages, so this process cannot
  * import them, and the only net under them was the text pattern for `.declare` — the spelling round
- * three had already walked through. So those modules are loaded instead: every specifier they name that
- * this process cannot resolve is answered with a generated stub, and the import is retried. What a
- * module declares at load time is then *observed*, however the call is spelled and whether or not it
- * lives in a `protocol.ts`. The names a stub exports come from the tree's own import clauses, and that
- * scan is allowed to be a text scan because it is not the mechanism: a name it misses makes the import
- * fail, and a module that cannot be loaded is a *finding*, never a quiet pass.
+ * three had walked through. So those modules are loaded instead: an unresolvable specifier is answered
+ * with a generated stub and the import retried, so what a module declares at load time is *observed*,
+ * however the call is spelled. The stub's names come from the tree's own import clauses, and that scan
+ * may be a text scan because it is not the mechanism: a name it misses makes the import fail, and a
+ * module that cannot be loaded is a *finding*, never a quiet pass.
  */
 function registerHostStubs(modules) {
   const specifiers = new Map()
@@ -1064,21 +1092,16 @@ function retryUrl(url) {
 }
 
 /**
- * What the code actually declares, asked of the running code rather than read out of the source.
- *
- * Three rounds found the same weakness as three spellings, so this asks the runtime instead: every
+ * What the code actually declares, asked of the running code rather than read out of the source: every
  * module under `src` is imported with `ProtocolRegistry.prototype.declare` wrapped, so a declaration is
  * observed however it is spelled and whichever registry it lands on; every exported `declare*Protocol`
- * is then called with a registry of this gate's own, so a declaration that only happens when somebody
- * calls it is seen at all; and each observed kind's member set is read from its declaration, which is
- * the value `defineKind` applied to the payload at the parse boundary.
+ * is called with a registry of this gate's own, so one that only happens when somebody calls it is seen
+ * at all; and each observed kind's member set is read from its declaration — the value `defineKind`
+ * applied at the parse boundary. Three rounds found the same weakness as three spellings.
  *
- * What this does not catch, written down because a gate's coverage is part of what it promises: a
- * declaration on a path no load reaches (the per-declaration text net below is the fallback, and it
- * matches the dot spelling only); a module that cannot be loaded even with its host imports stubbed
- * (reported as a finding naming exactly that, not covered quietly); and the members inside a **nested**
- * closed shape, which a kind declares too, which the ledger records only at the top level, and which the
- * run's note names one reader at a time.
+ * What this does not catch: a declaration on a path no load reaches (the text net below matches the dot
+ * spelling only); a module that cannot be loaded even with its host imports stubbed (reported); and the
+ * members inside a **nested** closed shape, which the ledger records only at the top level.
  */
 async function declaredProtocols(
   modules = sourceFiles()
@@ -1186,10 +1209,9 @@ async function declaredProtocols(
 }
 
 /**
- * A module no load reached even with its host imports stubbed: a gap, reported rather than noted.
- *
- * The text net still covers it, and that net matches the dot spelling only — so the honest report is a
- * finding that says so, not a note that reads as coverage. Round four's BL-4 was exactly this.
+ * A module no load reached even with its host imports stubbed: a gap, reported rather than noted. The
+ * text net matches the dot spelling only, so the honest report is a finding that says so, not a note
+ * that reads as coverage — round four's BL-4 exactly.
  */
 function unobservableDeclarations(unloaded) {
   return unloaded.map(
@@ -1199,10 +1221,8 @@ function unobservableDeclarations(unloaded) {
 }
 
 /**
- * A declaration is written in a slice's `protocol.ts` — one conventional place — or a reader cannot
- * find it either. The sweep sees a declaration wherever it was written, so this is not what keeps the
- * inventory honest (the ledger comparison is); it stays because the *home* of a shape is something a
- * reader has to be able to predict, and because the text net can enforce the same rule by name.
+ * A declaration belongs in a slice's `protocol.ts`, or a reader cannot find it either. The ledger
+ * comparison is what keeps the inventory honest; this stays because a shape's *home* must be predictable.
  */
 function declarationSiteFindings(sites) {
   const findings = []
@@ -1214,17 +1234,14 @@ function declarationSiteFindings(sites) {
 }
 
 /**
- * The net under the sweep, **per declaration rather than per file**.
+ * The net under the sweep, **per declaration rather than per file**: round five's BL-4 was a net that
+ * skipped every file one observed declaration appeared in — and every slice's `protocol.ts` is such a
+ * file — so a declaration no load reached inside one was invisible while the note claimed coverage.
  *
- * Round five's BL-4: the net skipped every file one observed declaration appeared in, and every slice's
- * `protocol.ts` is such a file, so a declaration no load reached inside one was invisible while the
- * run's note claimed it was covered. The honest unit is the declaration.
- *
- * What can be counted is the declarations a file spells in the **dot** form against the declarations
- * the sweep observed *at that site*; more text than observation is a surplus no load reached. It does
- * not catch a declaration spelled another way (`X['declare'](…)`), which the text cannot count at all,
- * nor a surplus the sweep observed through an exported declarer, which is not a surplus. So a file that
- * carries declarations is checked only in the dot spelling, and the run prints which sites those are.
+ * It counts a file's **dot**-spelled declarations against the ones observed *at that site*; more text
+ * than observation is a surplus no load reached. It does not catch another spelling (`X['declare'](…)`)
+ * nor a surplus seen through an exported declarer: a file with declarations is checked in the dot
+ * spelling only, and the run prints those sites.
  */
 function unaccountedDeclarationFindings(files, observedBySite, read = file => readFileSync(join(ROOT, file), 'utf8')) {
   const findings = []
@@ -1249,8 +1266,7 @@ function declarationTextSites(code) {
  * Every declared kind must be in the ledger and every ledger row must be declared, **with the payload's
  * member set** — the half round three walked through, when an optional member landed in state while the
  * gate compared only `(protocol, version, kind)`. One direction catches a shape added without a stated
- * consumer, the other a ledger drifted into fiction. Both are parameters, so the self-test can hand it
- * a wrong one of either and watch it fire.
+ * consumer, the other a ledger drifted into fiction. Both are parameters for the self-test.
  */
 function inventoryFindingsWith(ledger, declared) {
   const rows = Array.isArray(ledger?.protocols) ? ledger.protocols : []
@@ -1308,12 +1324,10 @@ function inventoryFindingsWith(ledger, declared) {
 }
 
 /**
- * One kind's declared payload against its ledger row, both directions.
- *
- * The comparison reads `KindRule.members` — the declaration `defineKind` applies to the payload at the
- * parse boundary — so the two can only disagree when somebody edited the ledger, which is exactly what
- * a recorded act is for. A kind whose declaration names no set is a finding rather than silence: a
- * shape this gate cannot read must not read as a shape that is fine.
+ * One kind's declared payload against its ledger row, both directions. It reads `KindRule.members` —
+ * the declaration `defineKind` applies at the parse boundary — so the two can only disagree when
+ * somebody edited the ledger, which is what a recorded act is for. A kind whose declaration names no
+ * set is a finding rather than silence: a shape this gate cannot read must not read as one that is fine.
  */
 function shapeFindings(where, kind, line) {
   if (!Array.isArray(kind.members))
@@ -1342,11 +1356,9 @@ function shapeFindings(where, kind, line) {
 let DECLARED = []
 
 /**
- * Everything must agree with one baseline: the file, the version the host actually installs, the
- * declared peers, and every absolute path that points into the install. Three separate files had
- * hardcoded that path with nothing checking them, which is how an alignment silently drifts.
- *
- * Parameterised so the self-test can hand it a wrong baseline and watch it fire.
+ * Everything must agree with one baseline: the file, the version the host installs, the declared peers
+ * and every absolute path into the install. Three files had hardcoded that path unchecked, which is how
+ * an alignment silently drifts. Parameterised for the self-test.
  */
 function alignmentFindingsWith(baseline) {
   const findings = []
@@ -1398,10 +1410,9 @@ function alignmentFindingsWith(baseline) {
 }
 
 /**
- * One behavioural script, as a gate: the checks that observe the product doing something. The first
- * of them was on no automated path, so a task-protocol version bump broke it and nothing reported
- * that until somebody ran it by hand. Parameterised over its runner so the self-test can hand it a
- * synthetic failure, because these gates read the real tree.
+ * One behavioural script, as a gate: the checks that observe the product doing something. The first of
+ * them was on no automated path, so a version bump broke it and nothing reported that until somebody ran
+ * it by hand. Parameterised over its runner, because these gates read the real tree.
  */
 function scriptFindings(label, markers, run) {
   const findings = []
@@ -1426,12 +1437,9 @@ function runScript(name) {
 }
 
 /**
- * A copy of this tree with `src/` taken away, for asking a behavioural script whether it judges.
- *
- * Round four's H-3: a verdict was a substring match on stdout, so a one-line stub printing the marker
- * passed the gate that covers phase F's exit condition. A verdict is load-bearing only if it changes
- * when the thing it judges changes, so every behavioural script runs a second time here. The copy is
- * made once per run, lazily, and removed when the process exits.
+ * A copy of this tree with `src/` taken away, for asking a behavioural script whether it judges: round
+ * four's H-3 was a one-line stub printing the marker and passing the gate that covers phase F's exit
+ * condition. The copy is made once per run, lazily, and removed when the process exits.
  */
 function mirrorWithoutSource() {
   const mirror = mkdtempSync(join(tmpdir(), 'gates-mirror-'))
@@ -1455,12 +1463,10 @@ process.on('exit', () => {
 })
 
 /**
- * The second run of one behavioural script: the same script, in a tree with no `src/`.
- *
- * A non-zero exit is the expected outcome and says the script is load-bearing; reporting the marker
- * with exit 0 in a tree with nothing to judge is the finding. What this does not catch: a script that
- * checks for `src/` and prints its marker only when it is present is not distinguished from one that
- * judges the tree. This leg rules out a constant verdict; it does not establish a correct one.
+ * The second run of one behavioural script, in a tree with no `src/`: a non-zero exit says the script
+ * is load-bearing, and reporting the marker with exit 0 in a tree with nothing to judge is the finding.
+ * What it does not catch: a script that checks for `src/` and prints its marker only when it is present
+ * is not distinguished from one that judges the tree — this rules out a constant verdict, not a wrong one.
  */
 function notLoadBearingFindings(label, markers, script, root) {
   let output
@@ -1484,11 +1490,9 @@ function scan(files, views) {
 }
 
 /**
- * The synthetic set the self-test scores.
- *
- * One file violates every static gate at once; a second mentions the first file's exports **only in
- * comments**, which is the reviewer's counterexample: a name in a comment is not a use, and text
- * matching alone called it one.
+ * The synthetic set the self-test scores: one file violates every static gate at once, and a second
+ * mentions the first file's exports **only in comments** — the reviewer's counterexample, where a name
+ * in a comment is not a use and text matching alone called it one.
  */
 function probeSet() {
   const padding = Array.from({ length: MAX_SOURCE_LINES + 5 }, (_, index) => `// padding ${index}`).join('\n')
@@ -1544,14 +1548,12 @@ export const probeCommentAnchor = 1
 
 if (PROBE) {
   const { files, raw, code } = probeSet()
-  // `realTree` gates read the real tree, and a `probeSeparately` gate has its own synthetic leg
-  // below. Both are declared where the detector is, so this filter cannot drift from the list.
+  // Both exemptions are declared where the detector is, so this filter cannot drift from the list.
   const scored = DETECTORS.filter(detector => detector.realTree !== true && detector.probeSeparately !== true)
   const results = scored.map(({ name, detect }) => ({ name, findings: detect(files, { raw, code }) }))
   let missed = 0
   console.log('gate self-test: every detector must fire on one violating file\n')
-  // Every gate this file set cannot score is named, `probeSeparately` included: a gate that is
-  // skipped here and not named reads as a gate that passed.
+  // Every gate this file set cannot score is named: skipped here and unnamed reads as passed.
   const notScored = DETECTORS.filter(detector => detector.realTree === true || detector.probeSeparately === true).map(detector => detector.name)
   console.log(`  (not run here: ${notScored.join(', ')}; synthetic failing runs below)\n`)
   for (const { name, findings } of results) {
@@ -1562,10 +1564,7 @@ if (PROBE) {
       console.log(`  ok    ${name} fired (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
     }
   }
-  // The two arithmetic gates reduce to arithmetic over a file set and a charged set, so each probe
-  // hands them one that breaks it. Without this they would be numbers nobody has watched fail — and
-  // the evidence budget's charged set now includes a script and a fixture, because that is where the
-  // work it charges for actually lives.
+  // The arithmetic gates are handed a file set that breaks them: otherwise they are unwatched numbers.
   for (const [name, files, raw, evidence] of [
     [
       'evidence-budget',
@@ -1599,10 +1598,7 @@ if (PROBE) {
     }
   }
 
-  // The tree ledger reduces to one measurement per count, so its legs hand it ledgers that disagree, a
-  // measurement that could not be taken, and synthetic documents for the prose scan: one leg per
-  // boundary, watched either firing or staying silent, including the file count no net covered before
-  // this round.
+  // The tree ledger and the prose scan, one leg per boundary, watched either firing or staying silent.
   const treeMeasured = { sourceFiles: 2, specFiles: 1, tests: 5, gates: 2 }
   for (const [label, ledger, measured] of [
     ['a count that disagrees with the measurement', { counts: { ...treeMeasured, tests: 4 } }, treeMeasured],
@@ -1615,6 +1611,7 @@ if (PROBE) {
     else console.log(`  ok    tree-inventory fired on ${label} (${findings.length} findings)`)
   }
   const probeRecord = new Set(['docs/__probe-review.md'])
+  const probeCommits = new Set([`e8c1c70${'0'.repeat(33)}`])
   for (const [label, docs, expected] of [
     ['a document stating a gate count in prose', [{ file: 'docs/__probe.md', text: 'the tree has 12 gates today\n' }], 1],
     ['a document stating none', [{ file: 'docs/__probe.md', text: `the counts live in ${TREE_LEDGER}\n` }], 0],
@@ -1625,31 +1622,34 @@ if (PROBE) {
     ['a count on a line whose long number is not a commit', [{ file: 'docs/__probe.md', text: 'the tree has 12 gates, measured 20261010\n' }], 1],
     ['a bare file count that does not name a tree', [{ file: 'docs/__probe.md', text: '4 files were misread in one revision\n' }], 0],
     ['a bare file count that names this tree', [{ file: 'docs/__probe.md', text: 'this tree has 15 files\n' }], 1],
-    ['a declared record that names its commit', [{ file: 'docs/__probe-review.md', text: 'measured at `e8c1c70`: 21 gates\n' }], 0],
-    ['a declared record that names no commit', [{ file: 'docs/__probe-review.md', text: 'the tree had 21 gates\n' }], 1],
+    ['a count inside a balanced `~~~` fence, which is a delimiter too', [{ file: 'docs/__probe.md', text: '~~~\ngates: 11 gates over 42 files\n~~~\n' }], 0],
+    ['a `~~~` fence left open', [{ file: 'docs/__probe.md', text: '~~~\ngates: 11 gates over 42 files\n' }], 1],
+    ['a four-backtick fence closed by a three-backtick line, which B1 hid a count behind', [{ file: 'docs/__probe.md', text: '````\ngates: 11 gates over 42 files\n```\n' }], 2],
+    ['a balanced four-backtick fence, refused by name rather than honoured', [{ file: 'docs/__probe.md', text: '````\ngates: 11 gates over 42 files\n````\n' }], 2],
+    ['a declared record that names a commit this repository holds', [{ file: 'docs/__probe-review.md', text: 'measured at `e8c1c70`: 21 gates\n' }], 0],
+    ['a declared record that names only a token no repository holds', [{ file: 'docs/__probe-review.md', text: 'measured at `deadbeefcafe1234`: 21 gates\n' }], 1],
+    ['a declared record that names no commit at all', [{ file: 'docs/__probe-review.md', text: 'the tree had 21 gates\n' }], 2],
     ['a document in the corpus that cannot be read', [{ file: 'docs/__probe.md', text: undefined }], 1],
   ]) {
-    const findings = countClaimFindings(docs, probeRecord)
+    const findings = countClaimFindings(docs, probeRecord, probeCommits)
     if (findings.length === expected) console.log(`  ok    tree-inventory handled ${label} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
     else { missed += 1; console.log(`  FAIL  tree-inventory reported ${findings.length} findings on ${label}, expected ${expected}: ${findings.join(' | ')}`) }
   }
 
-  // The evidence budget's charge follows the work: round six's D3 was that `scripts/probes/zz-big.mjs`
-  // was charged by nothing while `scripts/zz-big.mjs` was. The walk is handed a synthetic `scripts/`
-  // holding exactly that shape, so this leg watches the recursion rather than the listing.
+  // Round six's D3 and round seven's H1: the walk is handed a synthetic `scripts/` holding every shape
+  // that was once uncharged, so this watches the walk rather than a listing.
   const probeScripts = mkdtempSync(join(tmpdir(), 'gates-scripts-'))
   mkdirSync(join(probeScripts, 'probes'), { recursive: true })
-  writeFileSync(join(probeScripts, 'top.mjs'), '')
-  writeFileSync(join(probeScripts, 'probes', 'zz-big.mjs'), '')
-  writeFileSync(join(probeScripts, 'probes', 'notes.txt'), '')
-  const charged = scriptFiles(probeScripts)
-  if (charged.length === 2 && charged.some(file => file.endsWith('probes/zz-big.mjs')) && charged.every(file => file.endsWith('.mjs')))
-    console.log(`  ok    evidence-budget charges a nested .mjs (${charged.map(file => file.split('/').slice(-2).join('/')).join(', ')})`)
-  else { missed += 1; console.log(`  FAIL  evidence-budget did not charge the nested .mjs: ${JSON.stringify(charged)}`) }
+  mkdirSync(join(probeScripts, '.probes'), { recursive: true })
+  for (const file of ['top.mjs', 'zz-big.js', 'zz-big.cjs', 'zz-big.ts', 'notes.txt', 'probes/zz-big.mjs', '.probes/zz-big.mjs'])
+    writeFileSync(join(probeScripts, ...file.split('/')), '')
+  const charged = scriptFiles(probeScripts).map(file => file.split('/').slice(-2).join('/'))
+  if (charged.length === 7 && charged.includes('.probes/zz-big.mjs') && charged.includes('zz-big.js') && charged.includes('notes.txt'))
+    console.log(`  ok    evidence-budget charges every file under scripts/, whatever its name or suffix (${charged.join(', ')})`)
+  else { missed += 1; console.log(`  FAIL  evidence-budget left a file uncharged: ${JSON.stringify(charged)}`) }
   rmSync(probeScripts, { recursive: true, force: true })
 
-  // The mutation ledger is checked against a tree it does not match and documents that name nothing
-  // a script can run, in both directions, with a control that must stay silent.
+  // The ledger is checked against a tree it does not match, documents naming nothing, both directions.
   const probeMutations = { claims: [{ id: 'probe-claim', rule: 'the probe rule', witness: 'failed', run: { kind: 'node', args: ['scripts/gates.mjs', '--probe'] }, edits: [{ file: 'package.json', find: '"private": true', replace: '"private": false' }] }] }
   const anchored = { 'package.json': '{"private": true}\n' }
   for (const [label, docs, texts, expected] of [
@@ -1662,13 +1662,23 @@ if (PROBE) {
     if (findings.length === expected) console.log(`  ok    mutation-claims handled ${label} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
     else { missed += 1; console.log(`  FAIL  mutation-claims reported ${findings.length} findings on ${label}, expected ${expected}: ${findings.join(' | ')}`) }
   }
+  // A ledger that anchors perfectly and runs nothing is M1, so the run has a leg each way.
+  const probeRun = { commitClaim: 'probe-claim', claims: probeMutations.claims }
+  for (const [label, ledger, run, expected] of [
+    ['the claim this gate runs on every commit, caught', probeRun, () => 'caught', 0],
+    ['that claim gone stale, which is the finding M1 recorded', probeRun, () => 'the command passed under the mutation', 1],
+    ['a ledger that names no claim to run', { ...probeRun, commitClaim: undefined }, () => 'caught', 1],
+    ['a ledger naming a claim it does not record', { ...probeRun, commitClaim: 'no-such-claim' }, () => 'caught', 1],
+  ]) {
+    const findings = mutationRunFindings(ledger, run)
+    if (findings.length === expected) console.log(`  ok    mutation-claims handled ${label} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
+    else { missed += 1; console.log(`  FAIL  mutation-claims reported ${findings.length} findings on ${label}, expected ${expected}: ${findings.join(' | ')}`) }
+  }
 
-  // Every code-reading detector reads this one function's output, and its contract is exact: the
-  // input's length and its line breaks, so a line number in a finding is the line number in the
-  // file. Its failure mode is silent — the four-regex version ate a backtick, swallowed ninety
-  // lines of a spec, and reported a density of 4.7 for a file whose density was 4.5, wrong in the
-  // numerator *and* the denominator. So each nasty input below pins what must be hidden and what
-  // must survive, not merely that the call returns.
+  // Every code-reading detector reads this one function, and its failure mode is silent: the four-regex
+  // version ate a backtick, swallowed ninety lines of a spec, and reported a density of 4.7 for a file
+  // whose density was 4.5 — wrong in the numerator *and* the denominator. So each input below pins what
+  // must be hidden and what must survive, and the contract is exact: input length and line breaks.
   const STRIPPER_CASES = [
     ['an escaped quote and a `//` inside a string', String.raw`const a = 'it\'s // "fine"'` + '\n', 'fine', 'const a'],
     ['a `/*` and an escaped `"` inside a string', String.raw`const b = "a \"b\" /* c"` + '\n', 'c"', 'const b'],
@@ -1699,28 +1709,30 @@ if (PROBE) {
   if (stripperBreaks === 0)
     console.log(`  ok    codeOnly held its contract on ${STRIPPER_CASES.length} nasty inputs (length, line breaks, what must go, what must stay)`)
 
-  // The dynamic-import rule inside no-durable-writer has two branches and one control, and each
-  // must be able to fail: a literal filesystem module is refused, a target the gate cannot read is
-  // refused because the gate cannot see what it will call, and a literal that is not a filesystem
-  // module is legal — a rule that refused every dynamic import would be a different rule. The fourth
-  // leg is round four's H-2: a concatenation whose *first* token is a quoted literal used to read as
-  // that literal, so `'node:' + 'fs/promises'` passed as "not a filesystem module" while writing a
-  // real file. The literal is the whole argument or the import is refused.
-  for (const [label, source, expected] of [
+  // Each branch of the durability detector has to be able to fail, including the legal one (a non-fs
+  // literal): round four's H-2 is why the literal is the whole argument, round seven's B3 why a clause
+  // that *re-exports* is an import.
+  for (const [label, source, expected, use = `import { load } from './__probe_import.ts'\nexport const used = load\n`] of [
     ['a dynamic import of a filesystem module', `export const load = async () => (await import('node:fs/promises')).writeFile\n`, 1],
+    // Round seven's B3 verbatim: named by a re-export clause, performed by the silent forwarding module.
+    ['a write re-exported from a filesystem module and performed through a forwarding import', `export { writeFile } from 'node:fs/promises'\n`, 1, `import { writeFile } from './__probe_import.ts'\nawait writeFile('x', 'y')\n`],
+    ['a whole module re-exported from a filesystem module', `export * from 'node:fs/promises'\n`, 1],
+    ['a default binding of a filesystem module, refused whole', `import fs from 'node:fs/promises'\nexport const read = fs.readFile\n`, 1],
+    ['a read-only name re-exported from a filesystem module, which the rule allows', `export { readFile } from 'node:fs/promises'\n`, 0],
+    ['a general process executor, refused whole', `import { execFileSync } from 'node:child_process'\nexport const run = execFileSync\n`, 1],
+    ['a builtin module fetched by name, past every import clause', `export const write = process.getBuiltinModule('node:fs/promises').writeFile\n`, 1],
     ['a dynamic import whose target the gate cannot read', 'export const load = async target => await import(target)\n', 1],
     ['a dynamic import of a module that is not a filesystem one', `export const load = async () => await import('./helper.ts')\n`, 0],
     ['a filesystem module spelled as a concatenation of two literals', `export const load = async () => (await import('node:' + 'fs/promises')).writeFile\n`, 1],
     ['a filesystem module spelled as a template literal', 'export const load = async () => (await import(`node:fs/promises`)).writeFile\n', 1],
-    // Round five's H-2: a module loader built at run time. The write it performed happened during the
-    // sweep that is supposed to notice it, which is why the construct is refused outright.
+    // Round five's H-2 and round seven's B3, whose writes happened during the sweep meant to notice them.
     ['a module loader built with createRequire, which no import rule can read', "import { createRequire } from 'node:module'\nexport const load = () => createRequire(import.meta.url)('node:fs/promises').writeFile\n", 1],
     ['a read-only filesystem import, which is what the rule allows', "import { readFile } from 'node:fs/promises'\nexport const read = readFile\n", 0],
   ]) {
     const probeFiles = ['src/__probe_import.ts', 'src/__probe_import_use.ts']
     const probeRaw = new Map([
       [probeFiles[0], source],
-      [probeFiles[1], `import { load } from './__probe_import.ts'\nexport const used = load\n`],
+      [probeFiles[1], use],
     ])
     const findings = DETECTORS.find(detector => detector.name === 'no-durable-writer').detect(probeFiles, {
       raw: probeRaw,
@@ -1734,14 +1746,9 @@ if (PROBE) {
     }
   }
 
-  // The binding count behind no-unreferenced-export is the round-three fix, so the counterexample
-  // that walked through the word search has its own leg: an export nothing imports whose *name*
-  // occurs in another file as a member name must fire, and the same export, bound by an import,
-  // must not. Round four's H-1 gets legs too, because the barrel was the remaining way to be
-  // vouched for: a name nothing binds that the entry point re-exports is a finding unless the
-  // published-surface record names it, and a recorded name something now binds is a finding, so the
-  // record can only shrink. L-3 is here as well: a `.js` specifier is what tsc resolves for a `.ts`
-  // file, so the binding it carries has to count, or the file it came from is a false positive.
+  // The round-three binding fix, with the counterexample that walked through a word search, round four's
+  // H-1 barrel legs (a published name is a finding unless recorded, and the record only shrinks) and
+  // L-3 (a `.js` specifier is what tsc resolves for a `.ts` file, so its binding has to count).
   for (const [label, user, expected] of [
     ['an export whose name occurs elsewhere only as a member', `export const holder = { orphan: 2 }\n`, 1],
     ['the same export, bound by an import', `import { orphan } from './__probe_export.ts'\nexport const used = orphan\n`, 0],
@@ -1765,8 +1772,7 @@ if (PROBE) {
       console.log(`  FAIL  no-unreferenced-export reported ${orphans.length} findings on ${label}, expected ${expected}`)
     }
   }
-  // The barrel legs again, with the entry point named: the same two files, one of them `src/index.ts`
-  // re-exporting the name, and the published-surface record as the only thing that can excuse it.
+  // The barrel legs with the entry point named, the published-surface record as the only excuse.
   for (const [label, recorded, expected] of [
     ['a name the entry point publishes that nothing binds, recorded as published', new Set(['src/__probe_export.ts\0orphan']), 0],
     ['the same name, not recorded', new Set(), 1],
@@ -1791,11 +1797,9 @@ if (PROBE) {
     }
   }
 
-  // Round five's H-1, as legs. Three spellings the text scan never enumerated are given the runtime
-  // export list the sweep would have read, and each must be reported: this is what "asked of the file,
-  // not of a pattern" means, and without the runtime names all three would be invisible. The last two
-  // legs are the cheapest bypass — the entry point binding a dead export so the record need not be
-  // touched — which is a use in an ordinary module and no use at all in the barrel that is the boundary.
+  // Round five's H-1: three spellings the text scan never enumerated, given the runtime export list the
+  // sweep would have read, plus the cheapest bypass — the entry point binding a dead export so the
+  // record need not be touched, which is a use in a module and no use in the barrel that is the boundary.
   for (const [label, source, runtime, user, barrel, expected] of [
     ['both declarators of one export statement, which the text scan read as one', 'export const a = 1, b = 2\n', ['a', 'b'], '', false, 2],
     ['a default export, whose name is not written after the keyword', 'export default 1\n', ['default'], '', false, 1],
@@ -1823,10 +1827,8 @@ if (PROBE) {
     }
   }
 
-  // The inventory reads the registries and the ledger, so its probe hands the check synthetic
-  // declarations and synthetic ledgers: each way the two can disagree must produce a finding, or the
-  // ledger protects nothing. A kind's member set is a case of its own, because that is the half the
-  // ledger could not see.
+  // Each way the declared registries and the ledger can disagree, including a kind's member set — the
+  // half round three's ledger could not see.
   const probeLedger = kinds => ({ protocols: [{ protocol: 'probe', version: 1, subject: 's', producedBy: 'p', readBy: 'r', kinds }] })
   const probeDeclared = members => [{ protocol: 'probe', version: 1, kinds: [{ name: 'probe/kind', members }] }]
   const probeKinds = [
@@ -1852,11 +1854,9 @@ if (PROBE) {
     }
   }
 
-  // The mechanism itself, which is what replaced the sampling: the declared set is the value the
-  // parse boundary enforces, so a parser that would accept anything is still refused a member the
-  // declaration does not name — and a rule that skipped `defineKind` is refused by name, because a
-  // declared set nothing enforces is the second source this round removed. Both legs are behavioural
-  // rather than a reading of the gate's own source, and both fail loudly.
+  // The mechanism itself, behaviourally: the declared set is the value the parse boundary enforces, a
+  // rule that skipped `defineKind` is refused by name, and a copy of one is refused because the mark is
+  // identity rather than a property — round six's counterexample, which no reading of the source catches.
   {
     const { defineKind, ProtocolRegistry: Registry } = await import(new URL('../src/protocol/registry.ts', import.meta.url).href)
     const rule = defineKind({ guarantees: { appended: true }, members: ['alpha'], nested: {}, emitter: 'writer', parse: raw => raw, reduce: state => state })
@@ -1879,11 +1879,9 @@ if (PROBE) {
     } catch (error) {
       unbranded = error?.refusal?.code ?? 'unreadable'
     }
-    // Provenance, not absence: the round-six review copied a branded rule with an object spread and
-    // kept both the mark and the declared set while replacing the parse boundary, so the log accepted
-    // a member the declaration did not name with every gate green. The brand is identity now, and
-    // this is the leg that says so - the rule below names the same member set and is still refused,
-    // because it is a different object from the one defineKind built.
+    // Round six's counterexample: a spread copy kept the mark and the declared set while replacing the
+    // parse boundary, so the log accepted an undeclared member with every gate green. The mark is
+    // identity now, and the copy below names the same member set and is still refused.
     const copied = { ...rule, parse: () => ({}) }
     let spread
     try {
@@ -1892,8 +1890,7 @@ if (PROBE) {
     } catch (error) {
       spread = error?.refusal?.code ?? 'unreadable'
     }
-    // And a declared set is a value nothing can widen afterwards: a later push would make the
-    // enforcement and the ledger comparison two different sets with neither changing.
+    // A later push would make the enforced set and the compared set two values with neither changing.
     let widened
     try {
       rule.members.push('beta')
@@ -1919,10 +1916,8 @@ if (PROBE) {
     }
   }
 
-  // The sweep is what replaced the regex, so the sweep itself needs a leg that proves it can see a
-  // declaration the text cannot: a module that declares on a registry it built for itself, with the
-  // call spelled `X['declare'](…)`. It is a data: module rather than a file so the probe writes
-  // nothing to the tree. Its site is not a protocol.ts, and its shape is in no ledger row.
+  // The sweep needs a leg proving it sees a declaration no text scan can: a `data:` module declaring on
+  // its own registry with the call spelled `X['declare'](…)`, whose site is no protocol.ts.
   const sneakModule = `data:text/javascript,${encodeURIComponent(
     `import { defineKind, ProtocolRegistry } from ${JSON.stringify(new URL('../src/protocol/registry.ts', import.meta.url).href)}
 const PRIVATE = new ProtocolRegistry()
@@ -1939,8 +1934,7 @@ export function declareBrokenProtocol() { throw new Error('this declarer wants s
   } else {
     console.log(`  ok    the declaration sweep observed it (${sweepFindings.length} findings)`)
   }
-  // Its other branch, which must not be silence either: a declarer that refuses the registry the
-  // gate hands it leaves the inventory unable to say what it declares.
+  // The other branch: a declarer that refuses the registry leaves the inventory unable to say what it declares.
   if (sneaked.refusals.length === 0) {
     missed += 1
     console.log('  FAIL  the declaration sweep did not report a declarer that refused its registry')
@@ -1948,13 +1942,9 @@ export function declareBrokenProtocol() { throw new Error('this declarer wants s
     console.log(`  ok    the declaration sweep reported a refused declarer (${sneaked.refusals.length} finding)`)
   }
 
-  // Round four's BL-4a, as a leg: a module this process cannot import because it names a host package
-  // that is not installed here, which declares at load time with the bracket spelling. Before the fix
-  // it was green — the sweep never reached the module and the text net cannot see that spelling — so
-  // the leg hands the sweep exactly that module, written to a temp file, and requires the sweep to
-  // have loaded it with its host import stubbed *and* the inventory to report the shape. It is a
-  // `.mjs` so nothing here depends on type stripping, and it imports the registry by file URL so the
-  // declaration lands on this process's own registry prototype.
+  // Round four's BL-4a: a module naming a host package that is not installed, declaring at load time
+  // with the bracket spelling. It was green before the fix, so the leg requires the sweep to load it
+  // with its host import stubbed *and* the inventory to report the shape (`data:` URL, `.mjs` file).
   const hostImportRoot = mkdtempSync(join(tmpdir(), 'gates-host-import-'))
   const hostImportModule = join(hostImportRoot, 'probe-host-import.mjs')
   writeFileSync(
@@ -1981,11 +1971,10 @@ void HIDDEN.kindsOf('hidden', 1)
   }
   rmSync(hostImportRoot, { recursive: true, force: true })
 
-  // The declaration net's legs. Round five's BL-4 was that this net skipped a whole file once one of
-  // its declarations had been observed, and every a slice's `protocol.ts` is such a file — so the legs below
-  // are the review's own shape: one declaration observed, a second one in the same file that no load
-  // reached. The last leg is the stated limit rather than a success: the same second declaration
-  // spelled with brackets is counted by nothing, which is why the sweep loads the module instead.
+  // Round five's BL-4: the net skipped a file once one declaration in it was observed, and every
+  // protocol.ts is such a file. The legs are the review's shape — one declaration observed, a second no
+  // load reached — and the last one is the stated limit, not a success: the bracket spelling is
+  // counted by nothing, which is why the sweep loads the module instead.
   const declaredOnce = 'const registry = new ProtocolRegistry()\nregistry.declare("first", 1, {})\n'
   const bracketSecond = "const registry = new ProtocolRegistry()\nregistry.declare('first', 1, {})\nregistry['declare']('second', 1, {})\n"
   for (const [label, source, observed, expected] of [
@@ -2003,9 +1992,7 @@ void HIDDEN.kindsOf('hidden', 1)
     }
   }
 
-  // The alignment gate reads the real tree, so its probe hands the function a wrong baseline: if a
-  // version nobody installed does not produce a finding, the gate protects nothing. Versions are
-  // per package, so the probe overrides each entry rather than one top-level number.
+  // A wrong baseline: if a version nobody installed does not produce a finding, nothing is protected.
   const misaligned = alignmentFindingsWith({
     ...readBaseline(),
     packages: readBaseline().packages.map(entry => ({ ...entry, version: '0.0.0-not-installed' })),
@@ -2017,9 +2004,8 @@ void HIDDEN.kindsOf('hidden', 1)
     console.log(`  ok    dsh-alignment fired (${misaligned.length} findings)`)
   }
 
-  // These gates read the real tree, so each probe is a synthetic failing run of the marker check: the
-  // runner returns a string that reports failure, and the gate has to say so. That is one half of the
-  // check, and until round four it was the whole self-test — a string, never a script.
+  // One half of the marker check: a runner returning a failing string, which was the whole self-test
+  // until round four — a string, never a script.
   for (const gate of SCRIPT_GATES) {
     const findings = scriptFindings(gate.name, gate.markers, () => 'ok\nsome checks failed\n')
     if (findings.length === 0) {
@@ -2030,10 +2016,8 @@ void HIDDEN.kindsOf('hidden', 1)
     }
   }
 
-  // The other half, with real processes: round four's H-3 was that the self-test never ran a script,
-  // so a one-line stub printing `domain-probe: OK` was reported as "fired" while the live gate
-  // reported `ok domain-comparison`. These two legs run actual scripts in a tree with no `src/`: the
-  // stub must be reported as not load-bearing, and a script that judges the tree must not be.
+  // The other half, with real processes (round four's H-3): a stub printing the marker must be reported
+  // as not load-bearing, and a script that judges the tree must not be.
   const stubRoot = mkdtempSync(join(tmpdir(), 'gates-stub-'))
   mkdirSync(join(stubRoot, 'scripts'), { recursive: true })
   writeFileSync(join(stubRoot, 'scripts', 'stub.mjs'), `console.log(${JSON.stringify('domain-probe: OK')})\n`)
@@ -2070,10 +2054,9 @@ void HIDDEN.kindsOf('hidden', 1)
   RUNTIME_EXPORTS = sweep.exports
   const results = scan(files, { raw, code: new Map([...raw].map(([file, text]) => [file, codeOnly(text)])) })
   const inventory = results.find(result => result.name === 'protocol-inventory')
-  // The sweep's own verdicts, which are not detector findings: a declarer this gate could not ask,
-  // where a declaration was written, and the declarations each file spells that no load reached. The
-  // text net is per declaration, not per file: a file the sweep observed one declaration in is still
-  // a file whose other declarations may never have run, and every a slice's `protocol.ts` is such a file.
+  // The sweep's own verdicts, which are not detector findings: a declarer it could not ask, where a
+  // declaration was written, and the dot-spelled declarations no load reached — per file, not per
+  // declaration *inside* a file, which is why the net is per declaration.
   const observedBySite = new Map()
   for (const entry of sweep.sites) observedBySite.set(entry.site, (observedBySite.get(entry.site) ?? 0) + 1)
   for (const finding of [
@@ -2085,33 +2068,33 @@ void HIDDEN.kindsOf('hidden', 1)
     inventory?.findings.push(finding)
   let failed = 0
   console.log(`gates: ${DETECTORS.length} gates over ${files.length} files\n`)
-  // Coverage is stated rather than implied, and every line here is a property of the mechanism that
-  // can be checked against it. The first two print on every run: the comparison reads each kind's
-  // declared member set, which is the value the parse boundary enforces, and a nested shape is
-  // declared beside it and not compared with the ledger. The third and fourth are about this run:
-  // which sites carried a declaration, and which modules had to be loaded with their host packages
-  // stubbed. The declaration net's own boundary is on the third line, where a reader meets it.
+  // Coverage is stated rather than implied, and each line is a property of this run that can be checked
+  // against it: the compared value, what the comparison does not reach, the sites that declared, the
+  // modules loaded with stubs, and the declaration net's own boundary where a reader meets it.
   const declaredNested = DECLARED.flatMap(entry => entry.kinds.filter(kind => (kind.nested ?? []).length > 0).map(kind => `${entry.protocol}@${entry.version} ${kind.name} (${kind.nested.join(', ')})`))
   console.log('  note  protocol-inventory compares the ledger with each kind\'s declared member set, which is the same value defineKind applies to the payload before its parser runs; there is nothing to sample, so a parser whose accepted set would depend on the payload cannot make the declared set wrong')
   console.log(`  note  protocol-inventory compares each kind's declared payload members with its ledger row and does not reach inside a payload: the closed shapes a kind declares there (${declaredNested.join('; ') || 'none in this tree'}) are enforced by the readers that name them, one level down`)
   console.log(`  note  protocol-inventory observes a declaration when a module loads or an exported declarer is called, and counts each src file's dot-spelled declarations against what was observed at that site; ${observedBySite.size} site(s) carried a declaration this run (${[...observedBySite.keys()].sort().join(', ')}), and in those files a declaration spelled otherwise (X['declare'](…)) on a path no load reaches is reached by neither mechanism`)
   if (PUBLISHED_WITHOUT_CONSUMER.size > 0)
     console.log(`  note  no-unreferenced-export records ${PUBLISHED_WITHOUT_CONSUMER.size} name(s) that src/index.ts publishes and nothing in this tree binds; the record may only shrink, and a name published without being recorded in it is a finding`)
-  // The behavioural gates' own limit, printed with the other coverage claims rather than left to the
-  // docstring: what the second run rules out is a constant verdict, not a fabricated one.
+  // The behavioural gates' limit: the second run rules out a constant verdict, not a fabricated one.
   console.log('  note  every behavioural gate runs its script twice, once here and once in a copy of this tree with src/ removed, so a verdict that does not depend on the tree is reported; a script that reproduces that dependence without judging the tree is not distinguished by it')
   if (sweep.stubbed.length > 0)
     console.log(`  note  protocol-inventory could not import ${sweep.stubbed.length} module(s) as written (${sweep.stubbed.join(', ')}); they were imported again with the host packages they name stubbed, so what they declare at load time is observed rather than matched as text`)
-  // Round six's two closes, printed as properties of this run rather than left in a docstring: what the
-  // count scan covers, and what the budget does not charge, with its measured size.
+  // Round six's and round seven's closes as properties of this run: the count scan and its limits, what
+  // the budget charges and what it does not, and the one claim this run executes.
   const corpus = docPaths()
-  console.log(`  note  tree-inventory scans ${corpus.length} document(s) — every markdown file under docs/ and README.md — for count claims, minus ${corpus.filter(file => RECORD_DOCS.has(file)).length} declared record(s) of past commits, each checked to name the commit it measures; a fenced block is quoted output, an open fence is a finding, a count on a line that names a commit is that commit's record, and a bare file count is read as this tree's only where the line names this tree`)
+  const commits = repositoryCommits()
+  const records = corpus.filter(file => RECORD_DOCS.has(file))
+  const verified = records.filter(file => namesHeldCommit(readFileSync(join(ROOT, file), 'utf8'), commits))
+  console.log(`  note  tree-inventory scans ${corpus.length} document(s) — every markdown file under docs/ and README.md — for count claims, minus ${verified.length} record(s) of past commits, each verified against git to name a commit this repository holds${verified.length === records.length ? '' : ` (${records.length - verified.length} declared entry/entries named none and are read as this tree's)`}; a fenced block is quoted output, a fence delimiter is three backticks or three tildes and a longer or unclosed one is a finding, a count on a line carrying a commit-shaped token is that line's record (the token is not verified against git, so a fabricated one buys the same exemption), and a bare file count is read as this tree's only where the line names this tree`)
   const charge = evidenceFiles().reduce((total, entry) => total + entry.lines, 0)
   const sourceLines = files.filter(file => file.startsWith('src/')).reduce((total, file) => total + raw.get(file).split('\n').length, 0)
-  console.log(`  note  evidence-budget charges ${charge} lines of evidence against ${sourceLines} of source (${(charge / sourceLines).toFixed(4)}, ratchet ${EVIDENCE_BUDGET}): every .mjs under scripts/ at any depth, every .ts under tests/ and every file under tests/fixtures/`)
-  const uncharged = [...corpus.filter(file => file.startsWith('docs/')), 'protocol-baseline.json', 'dsh-baseline.json', TREE_LEDGER, MUTATION_LEDGER]
-  const unchargedLines = uncharged.reduce((total, file) => total + readFileSync(join(ROOT, file), 'utf8').split('\n').length, 0)
-  console.log(`  note  evidence-budget does not charge the ${corpus.filter(file => file.startsWith('docs/')).length} document(s) under docs/ or the four root ledgers — ${unchargedLines} lines between them — because prose is not the lane round four's pattern found work moving to, and a ledger is an input a gate compares rather than a check the budget weighs`)
+  console.log(`  note  evidence-budget charges ${charge} lines of evidence against ${sourceLines} of source (${(charge / sourceLines).toFixed(4)}, ratchet ${EVIDENCE_BUDGET}, ${Math.floor(EVIDENCE_BUDGET * sourceLines) - charge} whole line(s) of headroom): every file under scripts/ at any depth whatever it is called, every .ts under tests/ and every file under tests/fixtures/`)
+  const uncharged = unchargedFiles()
+  console.log(`  note  evidence-budget does not charge ${uncharged.length} file(s), ${uncharged.reduce((total, entry) => total + entry.lines, 0)} lines — ${uncharged.map(entry => `${entry.file} (${entry.lines})`).join(', ')} — because prose is not the lane round four's pattern found work moving to, and a ledger, a vector corpus or a manifest is an input a gate compares rather than a check the budget weighs; this list is walked rather than restated, so a file cannot be left off it`)
+  const ledger = readMutationLedger()
+  console.log(`  note  mutation-claims runs one claim on every commit — ${ledger.commitClaim} — in a copy of this tree, so a verdict that has gone stale is reported; the other ${(ledger.claims ?? []).length - 1} claim(s) run only on demand (node scripts/mutate.mjs --all), which is not a gate`)
   console.log('')
   for (const { name, findings } of results) {
     if (findings.length === 0) {
