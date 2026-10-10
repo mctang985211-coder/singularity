@@ -14,11 +14,12 @@
  * @module singularity-core/task/protocol
  */
 
+import { digestOf } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type MemberSet, type ProtocolRegistry } from '../protocol/registry.ts'
 import { AGENT_ROLE } from '../agent/protocol.ts'
 import { assertContractShape, CONTRACT_MEMBERS, contractDigest, type TaskContract } from './contract.ts'
-import { bubbleOpenedKind } from './bubble.ts'
+import { bubbleOpenedKind, type BubbleInput } from './bubble.ts'
 import { decomposedKind, type Decomposition } from './decomposition.ts'
 import { assignedKind, reassignedKind, type Responsibility } from './responsibility.ts'
 import { record } from './shape.ts'
@@ -61,6 +62,66 @@ export const SCHEDULER_ROLE = 'scheduler'
 /** The trusted role a verdict must come from: the verifier implementation the criterion names. */
 export function verifierRoleOf(payload: { verifierRef: string; verifierVersion: string }): string {
   return `verifier:${payload.verifierRef}@${payload.verifierVersion}`
+}
+
+/**
+ * The content identity of one recorded verdict — what a *reader* of a verdict may cite.
+ *
+ * A verdict lives once, in this protocol. Another protocol that needs to say "this was adjudicated on
+ * these bytes" cites this value rather than recording a second copy of the judgment: the two pipelines
+ * meet at evidence, not at code. The digest is taken over the verdict's content and never over its
+ * position — no `seq`, no timestamp, no envelope digest — because the same judgment folded into a
+ * different prefix is the same judgment, and a citation that moved with the log would be a citation of
+ * the log rather than of the evidence. The emitter and actor are excluded for the same reason the
+ * receipt excludes them: they are who the log stamped, and a reader cites the content.
+ */
+/**
+ * The digest of the verdict one run holds for one criterion of one artifact.
+ *
+ * A caller that cites a verdict does not compute the citation: it asks the protocol that recorded it.
+ * The lookup is the reader's, so the citation cannot name a verdict that was never recorded, and the
+ * caller never has to know the shape the digest is taken over.
+ */
+export function recordedVerdictDigest(
+  state: TaskState,
+  where: string,
+  { runId, criterionId, artifactDigest }: { readonly runId: string; readonly criterionId: string; readonly artifactDigest: string },
+): string {
+  const run = state.runs[runId]
+  if (run === undefined) refuse('unknown-run', `${where} cites a verdict of run "${runId}", which task "${state.taskId}" never started`)
+  const evidence = run.evidence.find(entry => entry.criterionId === criterionId && entry.artifactDigest === artifactDigest)
+  if (evidence === undefined)
+    refuse(
+      'illegal-transition',
+      `${where} cites a verdict of criterion "${criterionId}" on artifact ${artifactDigest.slice(0, 12)}…, which run "${runId}" holds no evidence for; record the verdict before citing it`,
+    )
+  return verdictDigestOf(runId, evidence)
+}
+
+function verdictDigestOf(
+  runId: string,
+  evidence: {
+    readonly criterionId: string
+    readonly verdict: string
+    readonly verifierRef: string
+    readonly verifierVersion: string
+    readonly implementationDigest: string
+    readonly artifactDigest: string
+    readonly inputDigests: readonly BubbleInput[]
+    readonly detail?: string
+  },
+): string {
+  return digestOf({
+    runId,
+    criterionId: evidence.criterionId,
+    verdict: evidence.verdict,
+    verifierRef: evidence.verifierRef,
+    verifierVersion: evidence.verifierVersion,
+    implementationDigest: evidence.implementationDigest,
+    artifactDigest: evidence.artifactDigest,
+    inputDigests: evidence.inputDigests,
+    ...(evidence.detail === undefined ? {} : { detail: evidence.detail }),
+  })
 }
 
 /**

@@ -6,7 +6,14 @@
       "version": 1,
       "subject": "the agent id",
       "kinds": [
-        { "name": "agent/opened", "members": ["agentId", "role", "sessionId"] }
+        {
+          "name": "agent/opened",
+          "members": [
+            "agentId",
+            "role",
+            "sessionId"
+          ]
+        }
       ],
       "producedBy": "scripts/*.mjs deployments (a deployment opens the node before recording it)",
       "readBy": "src/task/commands.ts requireOpenedNode"
@@ -16,21 +23,78 @@
       "version": 2,
       "subject": "the environment id",
       "kinds": [
-        { "name": "pointer/switched", "members": ["expected", "to"] },
-        { "name": "revision/created", "members": ["manifest", "revisionId"] }
+        {
+          "name": "pointer/switched",
+          "members": [
+            "expected",
+            "to"
+          ]
+        },
+        {
+          "name": "revision/created",
+          "members": [
+            "manifest",
+            "revisionId"
+          ]
+        }
       ],
       "producedBy": "src/environment/protocol.ts revision/created (a deployment mints revisions) and src/release/commands.ts publish (the one conditional update)",
       "readBy": "src/environment/binding.ts assertPinnedRevision, src/task/commands.ts (the pin gate), src/release/commands.ts (the head it expects)"
     },
     {
       "protocol": "measure",
-      "version": 3,
+      "version": 4,
       "subject": "the evaluation id",
       "kinds": [
-        { "name": "constraint/checked", "members": ["artifactDigest", "criterionId", "detail", "implementationDigest", "met", "verifierRef", "verifierVersion"] },
-        { "name": "evaluation/opened", "members": ["baseline", "candidate", "context", "judgement", "metric", "run", "trials", "weights"] },
-        { "name": "trial/missed", "members": ["reason", "slot", "verifierRef", "verifierVersion"] },
-        { "name": "trial/recorded", "members": ["artifactDigest", "cost", "detail", "implementationDigest", "inputDigests", "quality", "slot", "verifierRef", "verifierVersion"] }
+        {
+          "name": "constraint/checked",
+          "members": [
+            "artifactDigest",
+            "criterionId",
+            "detail",
+            "implementationDigest",
+            "met",
+            "verdict",
+            "verifierRef",
+            "verifierVersion"
+          ]
+        },
+        {
+          "name": "evaluation/opened",
+          "members": [
+            "baseline",
+            "candidate",
+            "context",
+            "judgement",
+            "metric",
+            "run",
+            "trials",
+            "weights"
+          ]
+        },
+        {
+          "name": "trial/missed",
+          "members": [
+            "reason",
+            "slot",
+            "verifierRef",
+            "verifierVersion"
+          ]
+        },
+        {
+          "name": "trial/recorded",
+          "members": [
+            "artifactDigest",
+            "cost",
+            "detail",
+            "implementationDigest",
+            "inputDigests",
+            "quality",
+            "slot",
+            "verifierRef",
+            "verifierVersion"
+          ]
+        }
       ],
       "producedBy": "src/measure/commands.ts createMeasureCommands; the three verification kinds are emitted by the implementation the frozen plan names, by content digest",
       "readBy": "src/measure/view.ts projectEvaluation (the aggregate, the missing denominator and the admissibility of one candidate) and caliberDigestOf (the comparability a round pools on)"
@@ -40,8 +104,22 @@
       "version": 1,
       "subject": "the environment whose head is moving",
       "kinds": [
-        { "name": "release/approved", "members": ["approvalId", "approvedBy", "draftDigest", "revisionId"] },
-        { "name": "release/drafted", "members": ["draftDigest", "revisionId"] }
+        {
+          "name": "release/approved",
+          "members": [
+            "approvalId",
+            "approvedBy",
+            "draftDigest",
+            "revisionId"
+          ]
+        },
+        {
+          "name": "release/drafted",
+          "members": [
+            "draftDigest",
+            "revisionId"
+          ]
+        }
       ],
       "producedBy": "src/release/commands.ts createReleaseCommands (draft, and approve behind the native approval seam)",
       "readBy": "src/release/commands.ts publish (a head may only move to an approved revision)"
@@ -51,9 +129,37 @@
       "version": 5,
       "subject": "the round id",
       "kinds": [
-        { "name": "candidate/submitted", "members": ["edits", "evaluationId", "exploratory", "revision", "slot"] },
-        { "name": "round/decided", "members": ["calibration", "outcomes", "winner"] },
-        { "name": "round/opened", "members": ["caliber", "candidates", "editBudget", "explorationSlots", "historyCutoff", "incumbent", "round", "weights"] }
+        {
+          "name": "candidate/submitted",
+          "members": [
+            "edits",
+            "evaluationId",
+            "exploratory",
+            "revision",
+            "slot"
+          ]
+        },
+        {
+          "name": "round/decided",
+          "members": [
+            "calibration",
+            "outcomes",
+            "winner"
+          ]
+        },
+        {
+          "name": "round/opened",
+          "members": [
+            "caliber",
+            "candidates",
+            "editBudget",
+            "explorationSlots",
+            "historyCutoff",
+            "incumbent",
+            "round",
+            "weights"
+          ]
+        }
       ],
       "producedBy": "src/strategy/commands.ts createStrategyCommands (the submission gate is a precondition of candidate/submitted; the annealed budget is derived, never supplied)",
       "readBy": "src/strategy/view.ts projectRound (each slot's aggregate, frozen gain and admissibility, then the selection, reading the direction from measure's evaluation/opened.metric.direction), src/strategy/plan.ts (the round's frozen plan)"
@@ -63,16 +169,87 @@
       "version": 5,
       "subject": "the task id",
       "kinds": [
-        { "name": "bubble/opened", "members": ["conditions", "inputs", "model", "runId", "tools", "workspace"] },
-        { "name": "evidence/produced", "members": ["artifactDigest", "criterionId", "detail", "implementationDigest", "inputDigests", "runId", "verdict", "verifierRef", "verifierVersion"] },
-        { "name": "method/consumed", "members": ["method", "revision", "runId", "source"] },
-        { "name": "run/failed", "members": ["reason", "runId"] },
-        { "name": "run/started", "members": ["revision", "runId"] },
-        { "name": "run/verified", "members": ["runId"] },
-        { "name": "task/admitted", "members": ["contract"] },
-        { "name": "task/assigned", "members": ["agentId", "agentIdentity"] },
-        { "name": "task/decomposed", "members": ["children"] },
-        { "name": "task/reassigned", "members": ["agentId", "agentIdentity", "from"] }
+        {
+          "name": "bubble/opened",
+          "members": [
+            "conditions",
+            "inputs",
+            "model",
+            "runId",
+            "tools",
+            "workspace"
+          ]
+        },
+        {
+          "name": "evidence/produced",
+          "members": [
+            "artifactDigest",
+            "criterionId",
+            "detail",
+            "implementationDigest",
+            "inputDigests",
+            "runId",
+            "verdict",
+            "verifierRef",
+            "verifierVersion"
+          ]
+        },
+        {
+          "name": "method/consumed",
+          "members": [
+            "method",
+            "revision",
+            "runId",
+            "source"
+          ]
+        },
+        {
+          "name": "run/failed",
+          "members": [
+            "reason",
+            "runId"
+          ]
+        },
+        {
+          "name": "run/started",
+          "members": [
+            "revision",
+            "runId"
+          ]
+        },
+        {
+          "name": "run/verified",
+          "members": [
+            "runId"
+          ]
+        },
+        {
+          "name": "task/admitted",
+          "members": [
+            "contract"
+          ]
+        },
+        {
+          "name": "task/assigned",
+          "members": [
+            "agentId",
+            "agentIdentity"
+          ]
+        },
+        {
+          "name": "task/decomposed",
+          "members": [
+            "children"
+          ]
+        },
+        {
+          "name": "task/reassigned",
+          "members": [
+            "agentId",
+            "agentIdentity",
+            "from"
+          ]
+        }
       ],
       "producedBy": "src/task/commands.ts createTaskCommands (the only surface that produces task facts)",
       "readBy": "src/task/view.ts projectTask/projectReceipt, src/task/tree.ts projectTree, src/task/consumption.ts unconsumedMethods"

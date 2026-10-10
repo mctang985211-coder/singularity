@@ -1,30 +1,51 @@
 #!/usr/bin/env node
 /**
- * The RSI loop, live: a real model writes the method, real measurements elect it, and the pointer moves.
+ * The RSI loop, live, on one pipeline: a real model writes the artifact, a real verifier judges it,
+ * the verdict is recorded once, and the pointer moves because the reading moved.
  *
- * The other probes stop one step short of this. `cd-probe.mjs` runs the whole C+D seam but its method
- * files are written by the probe, so what it measures is a program the probe wrote. `model-smoke.mjs`
- * observes a real model with no pipeline attached. `slice-b.mjs` runs the real Task/Run/verdict path
- * with a counting script as the worker. Here the model answers the task, our meter scores what that
- * answer selects, the number becomes a fact through the measure slice's own command boundary, the
- * round elects it, the release path approves the digest that is on the table, and `environment@2`'s
- * compare-and-swap moves the head. The claim this file exists for is the last check it prints: the
- * revision the pointer now names **measured better** than the one it replaced.
+ * Every other probe stops one step short of this. `cd-probe.mjs` runs the whole C+D seam but its
+ * method files are written by the probe, so what it measures is a program the probe wrote.
+ * `model-smoke.mjs` observes a real model with no pipeline attached. `slice-b.mjs` runs the real
+ * Task/Run/verdict/receipt path with a counting script as the worker — the apparatus is real and the
+ * worker is not. Here the worker is the model.
  *
- * **The model sees the task, not the apparatus.** The prompt carries `DOMAIN.md` and the manifest —
- * every token and attribute — and nothing else. It never sees the scoring rule, the reference set, the
- * selector, this file or the meter, so the answer is the task's own answer rather than ours. Round two
- * adds what round one *measured*: the number, the cost, and the tokens the selection missed.
+ * The shape of one round:
+ *
+ *   1. the model reads the task statement and answers with **the artifact itself** — a program, not a
+ *      description of one — and this file writes what it answered to disk;
+ *   2. that program runs on the real input and writes an output, which is the artifact everything is
+ *      about;
+ *   3. the criterion's verifier — a real program the criterion pins by content digest — is **spawned**
+ *      through the production verdict path to judge that artifact, reads the bytes on disk, and exits
+ *      with its verdict;
+ *   4. the verdict is recorded **once**, in `task@5`, as the evidence fact it is;
+ *   5. the measurement records the numbers through its own command boundary and checks the hard
+ *      constraint, **citing that verdict's digest** rather than recording a second judgment;
+ *   6. the round pools the candidate against one incumbent, elects it, the release path drafts it, the
+ *      native `ctx.approval` seam approves the digest on the table, and `environment@2`'s
+ *      compare-and-swap moves the head.
+ *
+ * **Why the pipelines meet at evidence rather than at code.** The verdict belongs to the task
+ * protocol, which is the only thing that knows what a criterion is; the number belongs to the measure
+ * protocol, which is the only thing that knows what is being compared. Neither imports the other's
+ * judgment: the measurement cites `evidenceDigest`, and the citation is **checked** — the constraint
+ * refuses a verdict about bytes this evaluation did not measure, and refuses a verdict of a criterion
+ * other than the one it is checking. So "the round elected a revision the verifier passed" is a chain
+ * of facts in one log rather than a claim a script makes.
+ *
+ * **The model sees the task, not the apparatus.** The prompt carries `DOMAIN.md` and the input; it
+ * never sees the verifier, the meter, the reference, this file, or the round. Round two adds what round
+ * one *measured*: the verdict the verifier recorded, its own words about why, and the numbers.
  *
  * **One direction.** This file imports the pipeline and the route; neither imports this file, and
- * nothing in `src/` can reach a model. The log records what was measured, never that a model was
- * called — the model's reply stays out of it, and only the digest of the answer is reported here.
+ * nothing in `src/` can reach a model.
  *
- * **Not observed.** That the model would answer the same way twice, or that its method is generally
- * better; one sample was measured. No check depends on which words it chose: the constraint forbids
- * one token id by content, so no phrasing can make the out-of-bounds leg admissible.
+ * **Not observed.** That the model answers the same way twice, or that it improves in general: one
+ * sample per round was measured. No check depends on what the model wrote — the verdict is the
+ * verifier's, and the round reads it.
  *
- * Run: node scripts/rsi-live.mjs        (keep the workspace: RSI_LIVE_KEEP=1)
+ * Run: node scripts/rsi-live.mjs                            (keep the workspace: RSI_LIVE_KEEP=1)
+ *      node scripts/rsi-live.mjs --round1 <a.mjs> <b.mjs>   replay recorded programs, no network
  *
  * @module singularity-core/scripts/rsi-live
  */
@@ -43,132 +64,94 @@ const ENVIRONMENT = 'library-live'
 const TASK = 'live-task'
 const AGENT = 'live-agent'
 const METER = 'meter'
-const SELECTOR = 'selector'
 const BOUNDS = 'bounds'
+const PRODUCER = 'producer'
 const MODEL_NAME = 'rsi-live-1'
 const WEIGHTS = { quality: 100, cost: 15 }
-const FLOOR = { floor: 0.05, source: 'measured' }
-const FORBIDDEN_TAG = 'drop'
-const CONDITIONS = 'no-network'
+const FLOOR = { floor: 0.1, source: 'measured' }
+const CONDITIONS = 'deterministic'
+const INPUT_NAME = 'in/input.txt'
+const ADAPTER = join(new URL('.', import.meta.url).pathname, 'verifier-command.mjs')
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
-const close = (left, right) => Math.abs(left - right) < 1e-9
 const shellLine = argv => argv.map(entry => JSON.stringify(String(entry))).join(' ')
 
-/**
- * The frozen question: which tokens the reference holds, and which marking the constraint forbids.
- *
- * The three populations are built so that the metric and the constraint pull in opposite directions,
- * and by enough that the tension is unavoidable rather than incidental:
- *
- * - the reference holds every `drop` token, so **selecting them raises the score**;
- * - the constraint forbids every `drop` token, so selecting them is inadmissible however well they score;
- * - `plain` tokens are frequent and are *not* in the reference, so a method cannot win by selecting
- *   everything, and `keep` tokens are the only signal that leads to the reference without them.
- *
- * A candidate that follows the score therefore scores **higher** than the one that wins, which is what
- * makes the round's refusal the constraint's work rather than the ranking's — and a candidate that
- * follows the marking scores well without ever touching what is forbidden.
- */
-function fixture() {
-  const tokens = []
-  const reference = new Set()
-  const add = (id, frequency, tag, wanted) => {
-    tokens.push({ id, frequency, tag })
-    if (wanted) reference.add(id)
-  }
-  // Marked for the consumer, and in the reference: the signal that leads there without the forbidden set.
-  for (let index = 0; index < 45; index += 1) add(`keep-${String(index).padStart(2, '0')}`, 5 + index, 'keep', true)
-  // Also in the reference, and forbidden: selecting these is how a candidate can score highest and lose.
-  for (let index = 0; index < 30; index += 1) add(`drop-${String(index).padStart(2, '0')}`, 100 + index, 'drop', true)
-  // Frequent, unmarked, and not wanted: the tokens that punish a selection made on frequency alone.
-  for (let index = 0; index < 75; index += 1) add(`plain-${String(index).padStart(2, '0')}`, 50 + index, 'plain', false)
-  return { tokens, reference: [...reference].sort() }
-}
+/** The input the whole campaign is about: letters, digits, spaces, punctuation and newlines. */
+const INPUT = `A tally of the words a consumer actually wants: 42 tokens, 7 of them rare!
+Mixed CASE matters, and so does punctuation -- hyphens count too, as do digits
+like 2026. What must the report count: words, letters, or bytes? The task says.
+`
 
-/** The method language, in four rule shapes, and the selector that is its only implementation. */
-const SELECTOR_SOURCE = [
-  "import { readFileSync, writeFileSync } from 'node:fs'",
-  'const [manifestPath, artifactPath, methodPath] = process.argv.slice(2)',
-  "const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))",
-  "const method = JSON.parse(readFileSync(methodPath, 'utf8'))",
-  "const matches = (token, rule) => rule.attribute === 'tag' ? token.tag === rule.value : rule.op === 'at-least' ? token.frequency >= rule.value : token.frequency <= rule.value",
-  'const selected = manifest.tokens.filter(token => (method.include ?? []).some(rule => matches(token, rule))).filter(token => !(method.exclude ?? []).some(rule => matches(token, rule)))',
-  "writeFileSync(artifactPath, `${selected.map(token => token.id).join(' ')}\\n`)",
+/**
+ * The one criterion's verifier: a real program that reads the artifact and the input and exits 0 when
+ * the artifact is the letter count. It is the criterion's implementation, pinned by content digest,
+ * and it decides in both directions — a wrong number is a `fail`, not a missing answer.
+ */
+const VERIFIER_SOURCE = [
+  "import { readFileSync } from 'node:fs'",
+  'const [artifactPath, inputPath] = process.argv.slice(2)',
+  "const artifact = readFileSync(artifactPath, 'utf8').trim()",
+  "const input = readFileSync(inputPath, 'utf8')",
+  'const letters = (input.match(/[A-Za-z]/g) ?? []).length',
+  'const claimed = Number(artifact)',
+  'if (!Number.isInteger(claimed)) { console.error(`the artifact is not an integer count: ${JSON.stringify(artifact.slice(0, 40))}`); process.exit(1) }',
+  'if (claimed !== letters) { console.error(`the artifact claims ${claimed} letters; the input holds ${letters}`); process.exit(1) }',
+  'console.log(`letters ${letters}`)',
 ].join('\n')
 
-/** The metric's implementation: F1 of the selection against the reference, and what it cost. */
+/** The metric's implementation: 1 when the recorded verdict passed, 0 when it failed. */
 const METER_SOURCE = [
   "import { readFileSync } from 'node:fs'",
-  'const [artifactPath, referencePath] = process.argv.slice(2)',
-  "const ids = text => readFileSync(text, 'utf8').trim().split(/\\s+/).filter(Boolean)",
-  'const selected = ids(artifactPath)',
-  'const reference = ids(referencePath)',
-  'const hits = selected.filter(id => reference.includes(id)).length',
-  'const precision = selected.length === 0 ? 0 : hits / selected.length',
-  'const recall = hits / reference.length',
-  'const f1 = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall)',
-  "console.log(JSON.stringify({ quality: Number(f1.toFixed(6)), cost: Number((selected.length / 1000).toFixed(6)) }))",
+  'const [verdictPath] = process.argv.slice(2)',
+  "const passed = readFileSync(verdictPath, 'utf8').trim() === 'pass'",
+  // It scores what the producer wrote and writes nothing itself: the artifact a measurement is bound to
+  // is the producer's bytes, which are also the bytes the verdict judged.
+  'console.log(JSON.stringify({ quality: passed ? 1 : 0, cost: 0 }))',
 ].join('\n')
 
 /**
- * The hard constraint, as a program that has to be able to fail and to pass: it exits 0 when the
- * selection holds no `drop`-marked token, and 1 when it holds one. It reads the marker from the
- * artifact itself, because the artifact is the ids alone — that is the whole point of the stage — so
- * the only place the marking is still visible is beside it, in the manifest.
+ * The hard constraint, as a program that can fail and can pass: it exits 0 when the recorded verdict
+ * passed. It is deliberately a *different* implementation from the metric, because the metric says how
+ * well a candidate did and the constraint says whether it may enter the comparison at all.
  */
 const BOUNDS_SOURCE = [
   "import { readFileSync } from 'node:fs'",
-  'const [artifactPath, manifestPath] = process.argv.slice(2)',
-  "const selected = new Set(readFileSync(artifactPath, 'utf8').trim().split(/\\s+/).filter(Boolean))",
-  "const tokens = JSON.parse(readFileSync(manifestPath, 'utf8')).tokens",
-  "process.exit(tokens.some(token => token.tag === 'drop' && selected.has(token.id)) ? 1 : 0)",
+  'const [artifactPath, verdictPath] = process.argv.slice(2)',
+  "process.exit(readFileSync(verdictPath, 'utf8').trim() === 'pass' ? 0 : 1)",
 ].join('\n')
 
-/** The task as the model receives it. This text *is* the frozen statement the pointer is judged under. */
-const DOMAIN = `# Task: select the tokens a downstream consumer should receive
+/** The task as the model receives it. This text is the frozen standard the campaign is judged under. */
+const DOMAIN = `# Task: write the count report
 
-You write the **selection method** for one pipeline stage. The pipeline holds a manifest of candidate
-tokens and passes on the ones this consumer wants. You do not see the list of tokens the consumer
-wants: that is the standard your method is scored against, and it is frozen.
+The consumer wants one number from \`${INPUT_NAME}\`: **how many letters the input holds**, where a
+letter is one of \`A\`–\`Z\` or \`a\`–\`z\` and nothing else is one — digits, spaces, punctuation and
+newlines are not letters, and case does not matter.
 
-## The method you write
+## What you write
 
-    { "include": [rule, ...], "exclude": [rule, ...] }
+One file, in JavaScript, run as:
 
-A token is selected when **at least one** \`include\` rule matches it and **no** \`exclude\` rule does.
-A rule is one of exactly these shapes:
+    node <your file> <input path>
 
-    { "attribute": "tag", "value": "<the token's tag>" }
-    { "attribute": "frequency", "op": "at-least", "value": <number> }
-    { "attribute": "frequency", "op": "at-most",  "value": <number> }
+It must print the number to standard output and nothing else, and it must exit 0. It may not read any
+file other than the one it is given on the command line. Node runs the file as an **ES module**: a bare
+\`require(...)\` is not defined, so import what you need (\`import { readFileSync } from 'node:fs'\`).
 
-## How it is scored
+## How it is judged
 
-* **quality** — the F1 of your selection's precision and recall against the reference set. Selecting
-  everything scores badly; so does selecting almost nothing.
-* **cost** — the number of tokens you select. Every token you pass on costs the consumer something.
-
-Higher quality is better. The reference is not in this file and cannot be derived from it by reading
-harder: it is a property of the consumer, and only measurement reveals it.
-
-## What is known about a token
-
-An \`id\`, a \`frequency\`, and a \`tag\`. The manifest is \`in/manifest.json\`, beside this file, with every
-token in it, and its \`tag\` values are the whole of what is known about a token beyond its frequency.
-Read the manifest before answering: the tags are not decoration, and the two that matter are named
-there.
+A verifier the pipeline holds reads your output, reads the input, computes the number itself, and
+records **pass** or **fail**. Your file is not trusted and is not read by the verifier: only the number
+you printed is judged, against the input's bytes. A wrong number, a non-integer, or anything other than
+the number is a fail.
 
 ## The hard constraint
 
-A token the manifest marks for the consumer is not wanted downstream: a selection holding **any**
-token with that marking is rejected however well it scores. Read the manifest to see which marking
-that is. A narrow, well-argued set is far less likely to hold one than a broad set.
+A candidate may only enter the comparison if the verifier **passed** it. A number that looks good but
+did not pass is refused however well it scores, so getting the rule right matters more than getting a
+plausible number.
 
 ## Your answer
 
-One JSON object and nothing else — no prose, no code fence:
-
-    { "include": [...], "exclude": [...] }
+One fenced JavaScript block and nothing else — no prose, no explanation.
 `
 
 const failures = []
@@ -185,8 +168,8 @@ function check(label, condition, detail) {
 
 function runProcess(file, args) {
   return new Promise(resolve => {
-    execFile(file, [...args], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }, (error, stdout) => {
-      resolve({ code: error === null ? 0 : typeof error.code === 'number' ? error.code : 1, stdout })
+    execFile(file, [...args], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+      resolve({ code: error === null ? 0 : typeof error.code === 'number' ? error.code : 1, stdout, stderr })
     })
   })
 }
@@ -205,10 +188,551 @@ async function refusalOf(step) {
   return { code: 'no-refusal', detail: 'accepted where this probe expected a refusal' }
 }
 
+/** The program in the model's answer: one fenced block, or the whole reply when it is bare code. */
+function programOf(reply) {
+  const fenced = /```(?:js|javascript)?\s*([\s\S]*?)```/.exec(reply)
+  const body = (fenced === null ? reply : fenced[1]).trim()
+  if (body === '') throw new Error(`the answer holds no program: ${JSON.stringify(reply.slice(0, 120))}`)
+  if (!/console\.log|process\.stdout/.test(body)) throw new Error(`the answer prints nothing: ${JSON.stringify(body.slice(0, 120))}`)
+  return `${body}\n`
+}
+
+async function main() {
+  const { ControlSessionStore } = await import('../src/control/session-store.ts')
+  const { ProtocolRegistry } = await import('../src/protocol/registry.ts')
+  const { foldSubjects } = await import('../src/protocol/fold.ts')
+  const { declareTaskProtocol, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, recordedVerdictDigest, verifierRoleOf } = await import('../src/task/protocol.ts')
+  const { createTaskCommands } = await import('../src/task/commands.ts')
+  const { runProductionVerdict } = await import('../src/verifier/production.ts')
+  const env = await import('../src/environment/protocol.ts')
+  const { declareMeasureProtocol, MEASURE_PROTOCOL, MEASURE_VERSION } = await import('../src/measure/protocol.ts')
+  const { declareStrategyProtocol, STRATEGY_PROTOCOL, STRATEGY_VERSION, STRATEGY_ROLE } = await import('../src/strategy/protocol.ts')
+  const { declareReleaseProtocol, APPROVER_ROLE } = await import('../src/release/protocol.ts')
+  const { createMeasureCommands } = await import('../src/measure/commands.ts')
+  const { createStrategyCommands } = await import('../src/strategy/commands.ts')
+  const { createReleaseCommands } = await import('../src/release/commands.ts')
+  const { caliberDigestOf, projectEvaluation } = await import('../src/measure/view.ts')
+  const { contextDigestOf } = await import('../src/measure/protocol.ts')
+  const { projectRound } = await import('../src/strategy/view.ts')
+  const { runMeasurement } = await import('../src/measure/execution.ts')
+
+  const root = await mkdtemp(join(tmpdir(), 'singularity-rsi-live-'))
+  const workspace = join(root, 'workspace')
+  const sessions = join(root, 'sessions')
+  await mkdir(join(workspace, 'in'), { recursive: true })
+  await mkdir(join(workspace, 'out'), { recursive: true })
+  await mkdir(join(workspace, 'artifacts'), { recursive: true })
+  await mkdir(sessions, { recursive: true })
+
+  const inputPath = join(workspace, INPUT_NAME)
+  const domainPath = join(workspace, 'DOMAIN.md')
+  const verifierProgram = join(root, 'verifier.mjs')
+  const meterProgram = join(root, 'meter.mjs')
+  const boundsProgram = join(root, 'bounds.mjs')
+  const programPathOf = revisionId => join(workspace, 'artifacts', `${revisionId}.mjs`)
+  // Declared as names inside the workspace, which is what the production verdict path resolves and
+  // contains; the absolute paths below are only how this file reaches the same bytes.
+  const artifactNameOf = revisionId => `artifacts/${revisionId}.out`
+  const verdictNameOf = revisionId => `artifacts/${revisionId}.verdict`
+  const artifactPathOf = revisionId => join(workspace, artifactNameOf(revisionId))
+  const verdictPathOf = revisionId => join(workspace, verdictNameOf(revisionId))
+  await writeFile(inputPath, INPUT, 'utf8')
+  await writeFile(domainPath, DOMAIN, 'utf8')
+  await writeFile(verifierProgram, VERIFIER_SOURCE, 'utf8')
+  await writeFile(meterProgram, METER_SOURCE, 'utf8')
+  await writeFile(boundsProgram, BOUNDS_SOURCE, 'utf8')
+
+  // The incumbent: the naive program, which counts bytes. Wrong for a task about letters, which is the
+  // point — a round is only interesting if the incumbent can be beaten.
+  await writeFile(programPathOf('r0000'), "import { readFileSync } from 'node:fs'\nconsole.log(readFileSync(process.argv[2], 'utf8').length)\n", 'utf8')
+
+  const verifierDigest = sha256(await readFile(verifierProgram))
+  const meterDigest = sha256(await readFile(meterProgram))
+  const boundsDigest = sha256(await readFile(boundsProgram))
+  const INPUTS = [{ name: INPUT_NAME, digest: sha256(await readFile(inputPath)) }]
+  const CONTEXT = {
+    model: MODEL_NAME,
+    tools: [{ name: PRODUCER, implementationDigest: verifierDigest, version: '1' }, { name: METER, implementationDigest: meterDigest, version: '1' }],
+    conditions: [CONDITIONS],
+  }
+
+  const registry = new ProtocolRegistry()
+  declareTaskProtocol(registry)
+  declareMeasureProtocol(registry)
+  declareStrategyProtocol(registry)
+  declareReleaseProtocol(registry)
+  env.declareEnvironmentProtocol(registry)
+  const subjects = {
+    scheduler: 'scheduler-service',
+    [verifierRoleOf({ verifierRef: PRODUCER, verifierVersion: '1' })]: 'producer-verifier-service',
+    [verifierRoleOf({ verifierRef: METER, verifierVersion: '1' })]: 'meter-service',
+    [verifierRoleOf({ verifierRef: BOUNDS, verifierVersion: '1' })]: 'bounds-service',
+    [STRATEGY_ROLE]: 'strategy-service',
+    [APPROVER_ROLE]: 'approval-seam',
+    [env.ENVIRONMENT_ROLE]: 'environment-service',
+    [env.PUBLISHER_ROLE]: 'publisher-service',
+  }
+
+  const live = await openPersistence(sessions)
+  const store = await ControlSessionStore.open({ persistence: live.persistence, controlId: CONTROL, registry, subjects, cwd: workspace })
+  let commandSeq = 0
+  const nextId = prefix => `${prefix}-${(commandSeq += 1)}`
+  const model = await realModel()
+  const calls = []
+  let approvalContext
+
+  try {
+    console.log(`session ${store.sessionId}; route ${model.route.provider}/${model.route.model}`)
+    const askModel = async (label, prompt) => {
+      const started = Date.now()
+      const reply = await model.complete({ system: 'You answer with one fenced JavaScript program and nothing else.', prompt })
+      calls.push({ label, elapsed: Date.now() - started, digest: sha256(reply), reply })
+      console.log(`  ..    ${label}: asked ${prompt.length} byte(s), answered ${reply.length} byte(s) in ${calls.at(-1).elapsed}ms, sha256 ${calls.at(-1).digest.slice(0, 16)}…`)
+      console.log(`  ..      answer: ${JSON.stringify(reply.slice(0, 200))}`)
+      return reply
+    }
+
+    // ---------------------------------------------------------------- 1. the model writes the artifact
+    console.log('\n== the model answers the task, seeing the statement and the input')
+    const taskText = await readFile(domainPath, 'utf8')
+    const inputText = await readFile(inputPath, 'utf8')
+    const replayIndex = process.argv.indexOf('--round1')
+    const replayed = replayIndex < 0 ? undefined : await readFile(process.argv[replayIndex + 1], 'utf8')
+    const firstProgram = programOf(replayed ?? await askModel('round-1 answer', `${taskText}\n## The input, exactly as it is on disk\n\n\`\`\`\n${inputText}\`\`\`\n`))
+    await writeFile(programPathOf('r0001'), firstProgram, 'utf8')
+    check('the model answered with a program that prints something', /console\.log|process\.stdout/.test(firstProgram))
+    check('this run is the model\'s own, not a replay of an earlier one', replayed === undefined && calls.length === 1, replayed === undefined ? `${calls.length} model call(s)` : '--round1 replayed a recorded program')
+
+    // ---------------------------------------------------------------- 2. revisions, verdicts, numbers
+    for (const revisionId of ['r0000', 'r0001'])
+      await store.emit({
+        commandId: nextId(`create-${revisionId}`),
+        protocol: env.ENVIRONMENT_PROTOCOL,
+        version: env.ENVIRONMENT_VERSION,
+        kind: env.ENVIRONMENT_KINDS.revisionCreated,
+        subject: ENVIRONMENT,
+        payload: {
+          revisionId,
+          manifest: { skills: [], tools: [PRODUCER], taskTemplates: [TASK], artifact: { file: `artifacts/${revisionId}.mjs`, digest: sha256(await readFile(programPathOf(revisionId))) } },
+        },
+      })
+    const environmentOf = () => store.load().stateOf(env.ENVIRONMENT_PROTOCOL, env.ENVIRONMENT_VERSION, ENVIRONMENT)
+    const pinOf = revisionId => ({ environmentId: ENVIRONMENT, revisionId, digest: environmentOf().revisions[revisionId].contentDigest })
+    const measureStateOf = evaluationId => store.load().stateOf(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
+    const roundStateOf = roundId => store.load().stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, roundId)
+    const taskStateOf = () => store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, TASK)
+    const bubbleOf = runId => taskStateOf().runs[runId]?.bubble
+    const lastSeq = () => store.load().entries().at(-1).seq
+    await store.emit({
+      commandId: nextId('point-at-r0000'), protocol: env.ENVIRONMENT_PROTOCOL, version: env.ENVIRONMENT_VERSION,
+      kind: env.ENVIRONMENT_KINDS.pointerSwitched, subject: ENVIRONMENT, payload: { expected: '', to: 'r0000' },
+    })
+    check('every revision declares the digest of the program bytes on disk',
+      (await Promise.all(['r0000', 'r0001'].map(async id => environmentOf().revisions[id].manifest.artifact.digest === sha256(await readFile(programPathOf(id)))))).every(Boolean) &&
+      sha256(await readFile(programPathOf('r0000'))) !== sha256(await readFile(programPathOf('r0001'))))
+
+    const commands = createTaskCommands({
+      store,
+      registry,
+      subjects,
+      implementations: [{ ref: PRODUCER, version: '1', implementationDigest: verifierDigest }],
+    })
+    const metric = { measured: { criterionId: 'counted', statement: 'the report is the letter count the verifier confirmed', verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest }, unit: 'confirmed', direction: 'higher' }
+    // The hard constraint is its own criterion, because a plan may not judge the criterion it measures
+    // and it may not judge a criterion that is not in the metric's own contract either. What ties it to
+    // the verdict is the **citation**: the check names the task criterion the verdict came from, and
+    // the bytes it names are the bytes the verdict judged.
+    const judgement = [{ criterionId: 'bounded', statement: 'the verifier passed the report', verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: boundsDigest }]
+    for (const [index, fact] of [
+      {
+        kind: TASK_KINDS.admitted,
+        payload: {
+          contract: {
+            goal: 'report the number of letters in the input',
+            inputs: [INPUT_NAME],
+            criteria: [{ criterionId: 'counted', statement: metric.measured.statement, verifierRef: PRODUCER, verifierVersion: '1', implementationDigest: verifierDigest }],
+          },
+        },
+      },
+      { kind: TASK_KINDS.assigned, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
+    ].entries())
+      await store.emit({ commandId: nextId(`fixture-${index}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: TASK, ...fact })
+
+    const runOf = evaluationId => `run-${evaluationId}`
+    const beginRun = async evaluationId => {
+      const runId = runOf(evaluationId)
+      await store.emit({ commandId: nextId(`start-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runStarted, subject: TASK, payload: { runId, revision: pinOf(environmentOf().pointer) } })
+      await store.emit({
+        commandId: nextId(`bubble-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.bubbleOpened, subject: TASK,
+        payload: { runId, inputs: INPUTS, workspace: { kind: 'dir', ref: workspace }, ...CONTEXT },
+      })
+      return runId
+    }
+
+    /**
+     * The criterion's verifier, declared with a selftest that produces both verdicts: a gate that has
+     * never failed is not known to work, and this one has to be able to say `fail` about real files.
+     */
+    const verifierImplementation = {
+      ref: PRODUCER,
+      version: '1',
+      implementationDigest: verifierDigest,
+      selftest: {
+        samples: [
+          { name: 'accepts the real count', expected: 'pass', input: { subject: inputPath, artifactDigest: sha256('letters'), inputs: [] } },
+          { name: 'rejects a count that is not the input\'s', expected: 'fail', input: { subject: inputPath, artifactDigest: sha256('not-the-count'), inputs: [] } },
+        ],
+      },
+      judge: async sample => {
+        const scratch = join(workspace, 'out', `sample-${sha256(sample.subject + String(sample.artifactDigest)).slice(0, 8)}.txt`)
+        // The number the criterion's own implementation would compute for this input, and a number it
+        // would not: the selftest is the difference between them, on real bytes.
+        const letters = ((await readFile(sample.subject, 'utf8')).match(/[A-Za-z]/g) ?? []).length
+        await writeFile(scratch, sample.artifactDigest === sha256('letters') ? String(letters) : String(letters + 1), 'utf8')
+        const adapter = await runProcess(process.execPath, [ADAPTER, JSON.stringify({
+          command: shellLine([process.execPath, verifierProgram, scratch, sample.subject]),
+          artifactPath: scratch,
+          inputs: [],
+        })])
+        if (adapter.code !== 0) throw new Error(`the verifier adapter could not judge the sample: ${adapter.stderr}`)
+        return { verdict: JSON.parse(adapter.stdout.trimEnd().split('\n')[0] ?? '{}').verdict }
+      },
+    }
+
+    /**
+     * The producer: run the revision's program on the real input, then have the criterion's verifier
+     * judge what came out. Both are real processes, and the verdict is the verifier's exit code — never
+     * anything this file decided. The judged artifact is the program's *output*, which is what the
+     * verifier and the measurement both name.
+     */
+    const produce = async (runId, revisionId) => {
+      const produced = await runProcess(process.execPath, [programPathOf(revisionId), inputPath])
+      await writeFile(artifactPathOf(revisionId), produced.stdout, 'utf8')
+      const judged = await runProductionVerdict({
+        runId,
+        criterion: { criterionId: 'counted', statement: metric.measured.statement, verifierRef: PRODUCER, verifierVersion: '1', implementationDigest: verifierDigest },
+        implementations: [verifierImplementation],
+        inputs: INPUTS,
+        workspace,
+        artifactPath: artifactNameOf(revisionId),
+        command: [process.execPath, verifierProgram, artifactPathOf(revisionId), inputPath],
+        runJudge: async execution => {
+          const adapter = await runProcess(process.execPath, [ADAPTER, JSON.stringify({
+            command: shellLine(execution.command),
+            artifactPath: execution.artifactPath,
+            inputs: execution.inputs.map(entry => ({ name: entry.name, digest: entry.digest, path: entry.path })),
+          })])
+          if (adapter.code !== 0) throw new Error(`the verifier adapter could not judge: ${adapter.stderr}`)
+          const reported = JSON.parse(adapter.stdout.trimEnd().split('\n')[0] ?? '{}')
+          return { verdict: reported.verdict, implementationDigest: sha256(await readFile(verifierProgram)), detail: reported.detail }
+        },
+      })
+      await writeFile(verdictPathOf(revisionId), `${judged.verdict}\n`, 'utf8')
+      console.log(`  ..    ${revisionId}: program exited ${produced.code}, printed ${JSON.stringify(produced.stdout.trim().slice(0, 40))}, verifier said ${judged.verdict}`)
+      await commands.recordVerdict({
+        commandId: nextId(`verdict-${revisionId}`),
+        taskId: TASK,
+        verdict: {
+          runId,
+          criterionId: 'counted',
+          verdict: judged.verdict,
+          implementationDigest: verifierDigest,
+          artifactDigest: judged.artifactDigest,
+          inputDigests: INPUTS,
+          ...(judged.detail === undefined ? {} : { detail: judged.detail.slice(0, 200) }),
+        },
+      })
+      // The citation is the protocol's own answer, not this file's arithmetic: ask the task state which
+      // verdict it holds for these bytes, and cite the digest it reports.
+      const evidenceDigest = recordedVerdictDigest(taskStateOf(), `${revisionId}'s verdict`, {
+        runId, criterionId: 'counted', artifactDigest: judged.artifactDigest,
+      })
+      return { runId, verdict: judged.verdict, artifactDigest: judged.artifactDigest, evidenceDigest, detail: judged.detail }
+    }
+
+    const measure = createMeasureCommands({
+      store,
+      registry,
+      implementations: [{ ref: METER, version: '1', implementationDigest: meterDigest }, { ref: BOUNDS, version: '1', implementationDigest: boundsDigest }],
+      subjects,
+    })
+    /** One evaluation: its plan, two real trials of the recorded verdict, and the constraint checked. */
+    const measurementOf = async (evaluationId, revisionId, baselineId, judged) => {
+      await measure.openEvaluation({
+        commandId: nextId(`open-${evaluationId}`), evaluationId, baseline: pinOf(baselineId), candidate: pinOf(revisionId),
+        run: { taskId: TASK, runId: judged.runId }, metric, weights: WEIGHTS, trials: 2, judgement,
+      })
+      for (const slot of [0, 1]) {
+        const outcome = await runMeasurement({
+          metric: metric.measured,
+          implementations: [{
+            ref: METER, version: '1', implementationDigest: meterDigest,
+            selftest: { samples: [
+              { name: 'a verdict that passed', expected: 'pass', input: { subject: 'pass', artifactDigest: sha256('pass'), inputs: [] } },
+              { name: 'a verdict that failed', expected: 'fail', input: { subject: 'fail', artifactDigest: sha256('fail'), inputs: [] } },
+            ] },
+            // The selftest writes the verdict it is asked about and runs the meter on those bytes, so
+            // both outcomes come from the program rather than from this file's opinion of it.
+            judge: async sample => {
+              const scratchVerdict = join(workspace, 'out', `sample-${sha256(String(sample.subject)).slice(0, 8)}.verdict`)
+              const scratchReport = join(workspace, 'out', `sample-${sha256(String(sample.subject)).slice(0, 8)}.report`)
+              await writeFile(scratchVerdict, `${sample.subject}\n`, 'utf8')
+              const ran = await runProcess(process.execPath, [meterProgram, scratchVerdict, scratchReport])
+              return { verdict: ran.code === 0 && ran.stdout.trim().startsWith('{"quality":1') ? 'pass' : 'fail' }
+            },
+          }],
+          inputs: INPUTS,
+          workspace,
+          artifactPath: artifactNameOf(revisionId),
+          command: shellLine([process.execPath, meterProgram, verdictPathOf(revisionId)]),
+          measure: async execution => {
+            const reported = await runProcess(process.execPath, [join('scripts', 'measure-runner.mjs'), JSON.stringify({
+              command: execution.command, artifactPath: execution.artifactPath,
+              inputs: execution.inputs.map(entry => ({ name: entry.name, digest: entry.digest, path: entry.path })),
+            })])
+            if (reported.code !== 0) throw new Error(`the measurement adapter could not measure: ${reported.stderr.trim() || reported.stdout.trim()}`)
+            const line = reported.stdout.trimEnd().split('\n')[0] ?? ''
+            if (line === '') throw new Error('the measurement adapter printed no report')
+            const answer = JSON.parse(line)
+            return { quality: answer.quality, cost: answer.cost ?? 0, implementationDigest: meterDigest, detail: `${judged.verdict}: ${judged.detail ?? ''}`.slice(0, 200) }
+          },
+        })
+        if (outcome.kind === 'missed') await measure.missTrial({ commandId: nextId(`miss-${evaluationId}-${slot}`), evaluationId, slot, reason: outcome.reason })
+        else await measure.recordTrial({ commandId: nextId(`trial-${evaluationId}-${slot}`), evaluationId, trial: { slot, ...outcome.trial } })
+      }
+      const boundsRan = await runProcess(process.execPath, [boundsProgram, artifactPathOf(revisionId), verdictPathOf(revisionId)])
+      await measure.checkConstraint({
+        commandId: nextId(`check-${evaluationId}`), evaluationId, criterionId: 'bounded',
+        // The bytes this check is bound to are the ones the trials were formed on — the report the
+        // meter wrote — and the citation names the verdict those bytes were judged against.
+        met: boundsRan.code === 0, artifactDigest: judged.artifactDigest, implementationDigest: boundsDigest,
+        verdict: { criterionId: 'counted', evidenceDigest: judged.evidenceDigest, artifactDigest: judged.artifactDigest },
+        ...(judged.detail === undefined ? {} : { detail: judged.detail.slice(0, 200) }),
+      })
+      return projectEvaluation(measureStateOf(evaluationId))
+    }
+
+    /** The measure slice as one round reads it: the incumbent's aggregate below the round's own cutoff. */
+    const sliceOf = cut => ({
+      entries: cut.entries(),
+      evaluationOf: evaluationId => {
+        const state = cut.stateOf(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
+        if (state?.trials === undefined || state.baseline === undefined || state.candidate === undefined) return undefined
+        const caliberDigest = caliberDigestOf(state)
+        return caliberDigest === undefined ? undefined : { evaluationId, caliberDigest, baseline: state.baseline, candidate: state.candidate, ...projectEvaluation(state) }
+      },
+      incumbentBelow: (revision, cutoff) => {
+        const entries = cut.entriesOf(MEASURE_PROTOCOL, MEASURE_VERSION).filter(entry => entry.seq < cutoff)
+        const opened = entries.filter(entry => entry.kind === 'evaluation/opened' && entry.payload.candidate?.revisionId === revision.revisionId).at(-1)
+        if (opened === undefined) return null
+        const view = projectEvaluation(foldSubjects(registry, entries, MEASURE_PROTOCOL, MEASURE_VERSION).get(opened.subject))
+        return { quality: view.quality, cost: view.cost }
+      },
+    })
+    const strategy = createStrategyCommands({ store, rounds: 4, firstBudget: 2, minimumBudget: 1, calibration: FLOOR, measuresAt: cut => sliceOf(cut) })
+
+    // ---------------------------------------------------------------- 3. round one
+    console.log('\n== round one: the incumbent against the model\'s program')
+    const baselineVerdict = await produce(await beginRun('r1-baseline'), 'r0000')
+    const baseline = await measurementOf('r1-baseline', 'r0000', 'r0000', baselineVerdict)
+    const baselineSeq = lastSeq()
+    const candidateVerdict = await produce(await beginRun('r1-c0'), 'r0001')
+    const candidate = await measurementOf('r1-c0', 'r0001', 'r0000', candidateVerdict)
+    await strategy.openRound({
+      commandId: nextId('open-round-1'), roundId: 'round-1', round: 1, incumbent: pinOf('r0000'), candidates: 1, explorationSlots: 0,
+      historyCutoff: store.load().entries().length, caliber: caliberDigestOf(measureStateOf('r1-baseline')),
+      metric: { direction: metric.direction }, weights: WEIGHTS,
+    })
+    await strategy.submitCandidate({ commandId: nextId('submit-r1-c0'), roundId: 'round-1', slot: 0, revision: pinOf('r0001'), evaluationId: 'r1-c0', edits: [{ asset: 'skill', target: 'count-letters' }], exploratory: false })
+    await strategy.decideRound({ commandId: nextId('decide-round-1'), roundId: 'round-1' })
+    const projected = projectRound(roundStateOf('round-1'), sliceOf(store.load()), FLOOR)
+    const decision = roundStateOf('round-1').decision
+    console.log(`  ..    incumbent ${baseline.quality} (${baselineVerdict.verdict}); model ${candidate.quality} (${candidateVerdict.verdict})`)
+    check('the incumbent was measured on itself before the round opened, and its verdict is the verifier\'s',
+      baseline.denominator === 2 && roundStateOf('round-1').plan.historyCutoff > baselineSeq && baselineVerdict.verdict === 'fail')
+    check('the model\'s program was judged by the criterion\'s verifier, not by this file',
+      candidateVerdict.verdict === (candidate.quality === 1 ? 'pass' : 'fail'))
+    check('a candidate whose verifier failed does not enter the comparison, whatever it scored',
+      decision.winner === (candidateVerdict.verdict === 'pass' ? 0 : null) && (candidateVerdict.verdict === 'pass' || projected.slots[0].admissible === false),
+      `winner ${decision.winner}; ${projected.slots[0].reason ?? 'admitted'}`)
+
+    // ---------------------------------------------------------------- 4. the pointer moves
+    console.log('\n== the release path moves the head onto the elected revision, if one was elected')
+    const pointerFacts = () => store.load().entriesOf(env.ENVIRONMENT_PROTOCOL, env.ENVIRONMENT_VERSION).filter(entry => entry.kind === env.ENVIRONMENT_KINDS.pointerSwitched)
+    const headBefore = environmentOf().pointer
+    if (decision.winner === null) {
+      check('the round elected a revision, so there is something to move the head onto', false,
+        `winner null: the model's program failed the verifier, so the pointer stays on ${JSON.stringify(headBefore)}`)
+      console.log(`\nrsi-live: no candidate cleared round one; the head stayed on ${JSON.stringify(headBefore)}`)
+      process.exitCode = 2
+      return
+    }
+    approvalContext = await mountApprovalRuntime(sessions)
+    const release = createReleaseCommands({ store, approvalSeams: { approval: approvalContext.ctx.approval, feed: approvalContext.ctx } })
+    const handle = await approvalContext.ctx.agents.create({ sessionId: approvalContext.SessionId('rsi-live-approver'), meta: { cwd: root }, agentOptions: { provider: 'scripted', model: 'stub-1' } })
+    let pending = null
+    approvalContext.ctx.on('approval/request', async () => 'allowed-once')
+    approvalContext.ctx.tools.register({
+      name: 'rsi_approve',
+      description: 'record a human authorisation of the drafted revision',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      execute: async (_args, exec) => {
+        try {
+          const envelope = await release.approve({
+            commandId: pending.commandId, environmentId: ENVIRONMENT, revisionId: pending.revisionId,
+            draftDigest: pending.draftDigest, approvedBy: 'human:alice',
+            ask: { agent: exec.agent, toolName: 'rsi_approve', callId: exec.callId, reason: 'publishing this content is a decision' },
+          })
+          return { approved: true, approvalId: envelope.payload.approvalId }
+        } catch (error) {
+          const { ProtocolRefusal } = await import('../src/protocol/refusal.ts')
+          if (error instanceof ProtocolRefusal) return { refused: error.refusal.code, detail: error.refusal.detail }
+          throw error
+        }
+      },
+    })
+    const approveThroughTheSeam = async request => {
+      pending = request
+      const { createUserMessage } = await dshModule('@deepseek-ai/dsh-llm')
+      handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'approve the drafted winner' }], source: { kind: 'user' } }))
+      await handle.agent.whenIdle()
+      return handle.agent.session.snapshotEvents().filter(event => event.type === 'tool/result').at(-1)?.data?.message?.content?.[0]?.text
+    }
+    await release.draft({ commandId: nextId('draft-r0001'), revision: pinOf('r0001') })
+    const unapproved = await refusalOf(() => release.publish({ commandId: nextId('publish-unapproved'), environmentId: ENVIRONMENT, expected: headBefore, to: 'r0001' }))
+    check('a drafted but unapproved revision cannot be published', unapproved.code === 'unapproved-revision', unapproved.code)
+    const granted = JSON.parse(await approveThroughTheSeam({ commandId: nextId('approve-r0001'), revisionId: 'r0001', draftDigest: pinOf('r0001').digest }))
+    check('the native ask granted once and the fact carries the audit id of the question that produced it', granted.approved === true && granted.approvalId !== undefined)
+    await release.publish({ commandId: nextId('publish-r0001'), environmentId: ENVIRONMENT, expected: headBefore, to: 'r0001' })
+    const headAfter = environmentOf().pointer
+    check('the head moved onto the revision the round elected, by compare-and-swap on the head it replaced',
+      headBefore !== headAfter && headAfter === 'r0001' && pointerFacts().length === 2 && pointerFacts().at(-1).payload.expected === headBefore,
+      `${headBefore} -> ${headAfter} over ${pointerFacts().length} pointer fact(s)`)
+
+    // The claim this file exists for, taken from the log rather than from local arithmetic.
+    const measured = revisionId => {
+      const opened = store.load().entriesOf(MEASURE_PROTOCOL, MEASURE_VERSION).filter(entry => entry.kind === 'evaluation/opened' && entry.payload.candidate?.revisionId === revisionId).at(-1)
+      return opened === undefined ? null : projectEvaluation(measureStateOf(opened.subject)).quality
+    }
+    const verdictHeld = revisionId => {
+      const run = revisionId === headBefore ? runOf('r1-baseline') : runOf('r1-c0')
+      return taskStateOf().runs[run]?.evidence.find(entry => entry.criterionId === 'counted')?.verdict
+    }
+    check('the revision the pointer now names was passed by the verifier and the one it replaced was not',
+      verdictHeld(headAfter) === 'pass' && verdictHeld(headBefore) === 'fail', `${verdictHeld(headBefore)} -> ${verdictHeld(headAfter)}`)
+    check('the revision the pointer now names measured better than the one it replaced',
+      measured(headAfter) > measured(headBefore), `${measured(headBefore)} -> ${measured(headAfter)}`)
+    check('the constraint that admitted it cites the task protocol\'s own verdict digest for the bytes it measured',
+      measureStateOf('r1-c0').checks[0].verdict.evidenceDigest === candidateVerdict.evidenceDigest &&
+      measureStateOf('r1-c0').checks[0].verdict.artifactDigest === candidateVerdict.artifactDigest &&
+      measureStateOf('r1-c0').checks[0].verdict.evidenceDigest === recordedVerdictDigest(taskStateOf(), 'recheck', { runId: runOf('r1-c0'), criterionId: 'counted', artifactDigest: candidateVerdict.artifactDigest }))
+    // The citation is a binding, so both ways of citing the wrong thing have to be refused. The legs
+    // carry evidence where the citation is the only defect, and a subject with no plan on purpose: the
+    // payload is parsed before any plan is read, so what refuses them is the citation rule itself.
+    const wrongBytes = await refusalOf(() => store.emit({
+      commandId: nextId('check-wrong-bytes'), protocol: MEASURE_PROTOCOL, version: MEASURE_VERSION, kind: 'constraint/checked', subject: 'r1-c0',
+      payload: {
+        criterionId: 'bounded', met: true, artifactDigest: baselineVerdict.artifactDigest, verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: boundsDigest,
+        verdict: { criterionId: 'counted', evidenceDigest: candidateVerdict.evidenceDigest, artifactDigest: candidateVerdict.artifactDigest },
+      },
+    }))
+    check('a citation of a verdict about other bytes than the ones measured is refused', wrongBytes.code === 'evidence-input-mismatch', wrongBytes.code)
+
+    // ---------------------------------------------------------------- 5. round two reads round one
+    console.log('\n== round two: the model sees what round one measured')
+    const secondProgram = programOf(replayed === undefined
+      ? await askModel('round-2 answer', [
+        taskText,
+        '## The input, exactly as it is on disk',
+        `\`\`\`\n${inputText}\`\`\``,
+        '## What happened when your previous program was judged',
+        `The verifier recorded **${candidateVerdict.verdict}** on it${candidateVerdict.detail === undefined ? '' : `, saying: ${candidateVerdict.detail}`}.`,
+        `The program the library had been on scored ${baseline.quality} and was ${baselineVerdict.verdict}.`,
+        candidateVerdict.verdict === 'pass'
+          ? 'It passed. Write the next program: if it cannot be improved on, repeat it unchanged.'
+          : 'Write the next program, fixing whatever made the verifier fail it.',
+      ].join('\n\n'))
+      : await readFile(process.argv[replayIndex + 2], 'utf8'))
+    await writeFile(programPathOf('r0002'), secondProgram, 'utf8')
+    await store.emit({
+      commandId: nextId('create-r0002'), protocol: env.ENVIRONMENT_PROTOCOL, version: env.ENVIRONMENT_VERSION,
+      kind: env.ENVIRONMENT_KINDS.revisionCreated, subject: ENVIRONMENT,
+      payload: { revisionId: 'r0002', manifest: { skills: [], tools: [PRODUCER], taskTemplates: [TASK], artifact: { file: 'artifacts/r0002.mjs', digest: sha256(await readFile(programPathOf('r0002'))) } } },
+    })
+    const secondBaselineVerdict = await produce(await beginRun('r2-baseline'), headAfter)
+    const secondBaseline = await measurementOf('r2-baseline', headAfter, headAfter, secondBaselineVerdict)
+    const secondBaselineSeq = lastSeq()
+    const secondVerdict = await produce(await beginRun('r2-c0'), 'r0002')
+    const secondCandidate = await measurementOf('r2-c0', 'r0002', headAfter, secondVerdict)
+    const roundOneDecisionSeq = store.load().entriesOf(STRATEGY_PROTOCOL, STRATEGY_VERSION).filter(entry => entry.subject === 'round-1' && entry.kind === 'round/decided')[0].seq
+    await strategy.openRound({
+      commandId: nextId('open-round-2'), roundId: 'round-2', round: 2, incumbent: pinOf(headAfter), candidates: 1, explorationSlots: 0,
+      historyCutoff: store.load().entries().length, caliber: caliberDigestOf(measureStateOf('r2-baseline')),
+      metric: { direction: metric.direction }, weights: WEIGHTS,
+    })
+    await strategy.submitCandidate({ commandId: nextId('submit-r2-c0'), roundId: 'round-2', slot: 0, revision: pinOf('r0002'), evaluationId: 'r2-c0', edits: [{ asset: 'skill', target: 'count-letters' }], exploratory: false })
+    await strategy.decideRound({ commandId: nextId('decide-round-2'), roundId: 'round-2' })
+    const decisionTwo = roundStateOf('round-2').decision
+    console.log(`  ..    round two: model ${secondCandidate.quality} (${secondVerdict.verdict}) against the incumbent's ${secondBaseline.quality}`)
+    check('round two\'s incumbent is the revision round one published, and its cutoff sits after that decision',
+      roundStateOf('round-2').plan.incumbent.revisionId === headAfter && roundStateOf('round-2').plan.historyCutoff > roundOneDecisionSeq && roundStateOf('round-2').plan.historyCutoff > secondBaselineSeq)
+    check('the second program was judged the same way, under the same context and the same criterion',
+      measureStateOf('r2-c0').baseline.revisionId === headAfter && measureStateOf('r2-c0').observed.length === 2 &&
+      contextDigestOf(bubbleOf(measureStateOf('r2-c0').run.runId)) === contextDigestOf(bubbleOf(measureStateOf('r1-c0').run.runId)))
+    // What the round *should* do is the projection's answer, not this file's. A program the verifier
+    // passed can still fail to clear the round's floor — a repeat that measures the same is not an
+    // improvement — so "it passed, therefore it won" would be this file inventing a rule.
+    const projectedTwo = projectRound(roundStateOf('round-2'), sliceOf(store.load()), FLOOR)
+    check('round two\'s decision is the projection, and a program that only repeated the incumbent did not win',
+      decisionTwo.winner === projectedTwo.winner && (secondVerdict.verdict === 'pass' || decisionTwo.winner === null),
+      `verdict ${secondVerdict.verdict}, winner ${decisionTwo.winner}, projected ${projectedTwo.winner}`)
+    if (decisionTwo.winner === 0) {
+      await release.draft({ commandId: nextId('draft-r0002'), revision: pinOf('r0002') })
+      const grantedTwo = JSON.parse(await approveThroughTheSeam({ commandId: nextId('approve-r0002'), revisionId: 'r0002', draftDigest: pinOf('r0002').digest }))
+      check('round two\'s winner was approved through the same seam before its head could move', grantedTwo.approved === true && grantedTwo.approvalId !== undefined)
+      await release.publish({ commandId: nextId('publish-r0002'), environmentId: ENVIRONMENT, expected: headAfter, to: 'r0002' })
+      check('the second improvement moved the head too, onto a revision the verifier passed',
+        environmentOf().pointer === 'r0002' && pointerFacts().length === 3, `${headAfter} -> ${environmentOf().pointer}`)
+    } else check('round two kept the incumbent, so the head did not move a second time', pointerFacts().length === 2)
+
+    // ---------------------------------------------------------------- 6. the log explains itself
+    console.log('\n== the log explains itself')
+    await store.close()
+    const reopened = await ControlSessionStore.open({ persistence: live.persistence, controlId: CONTROL, registry, subjects, cwd: workspace })
+    const afterReopen = reopened.load()
+    check('reopening the session reproduces the same head and both decisions',
+      afterReopen.stateOf(env.ENVIRONMENT_PROTOCOL, env.ENVIRONMENT_VERSION, ENVIRONMENT).pointer === environmentOf().pointer &&
+      afterReopen.stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, 'round-1').decision.winner === 0 &&
+      afterReopen.stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, 'round-2').decision.winner === decisionTwo.winner)
+    check('every model answer came from the deployment\'s own route, and no answer is in the log',
+      calls.every(call => /^[0-9a-f]{64}$/.test(call.digest)) &&
+      !afterReopen.entries().some(entry => calls.some(call => JSON.stringify(entry.payload).includes(call.reply.slice(0, 40)))),
+      `${calls.length} call(s) on ${model.route.provider}`)
+    check('the verdict is recorded once, in the task protocol, and the measurement holds a citation of it',
+      taskStateOf().runs[runOf('r1-c0')].evidence.length === 1 &&
+      measureStateOf('r1-c0').checks[0].verdict.evidenceDigest === candidateVerdict.evidenceDigest)
+    await reopened.close()
+  } finally {
+    await model.dispose().catch(() => {})
+    await live.context.fiber.dispose().catch(() => {})
+    await approvalContext?.ctx.fiber.dispose().catch(() => {})
+    if (process.env['RSI_LIVE_KEEP'] === '1') console.log(`kept: ${root}`)
+    else await rm(root, { recursive: true, force: true })
+  }
+
+  console.log(`\nrsi-live: ${checks} check(s), ${failures.length} failed, ${refusals} refusal(s) observed`)
+  if (failures.length > 0) {
+    for (const label of failures) console.log(`  FAIL  ${label}`)
+    process.exit(1)
+  }
+  console.log('rsi-live: OK — a real model wrote the artifact, a real verifier judged it, and the pointer moved onto a revision that measured better')
+}
+
 /**
  * The runtime the native approval seam needs: the service, the append feed, and enough of an agent loop
  * to drive one tool call. The adapter is scripted — the approver is not the subject of this probe, and
- * a person is not in this process, so what is observed here is the seam's plumbing and not a decision.
+ * a person is not in this process, so what is observed is the seam's plumbing, not a decision.
  */
 async function mountApprovalRuntime(root) {
   const { Context } = await dshModule('@deepseek-ai/cordis')
@@ -233,8 +757,6 @@ async function mountApprovalRuntime(root) {
   await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
   await ctx.plugin(approval.default, {})
 
-  // One turn asks for the tool, the next answers with text: exactly the two steps `approveThroughTheSeam`
-  // drives, so the call id the fact carries is the one the service logged.
   class Scripted extends LlmAdapter {
     constructor() {
       super()
@@ -258,444 +780,6 @@ async function mountApprovalRuntime(root) {
   }
   ctx.llm.registerAdapter(['scripted'], new Scripted())
   return { ctx, SessionId }
-}
-
-/** The model's answer read as a method: one JSON object, fenced or not, in this file's rule language. */
-function methodOf(reply) {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(reply)
-  const body = (fenced === null ? reply : fenced[1]).trim()
-  const start = body.indexOf('{')
-  const end = body.lastIndexOf('}')
-  if (start < 0 || end < start) throw new Error(`the answer holds no JSON object: ${JSON.stringify(reply.slice(0, 120))}`)
-  const method = JSON.parse(body.slice(start, end + 1))
-  const rules = [...(method.include ?? []), ...(method.exclude ?? [])]
-  if (rules.length === 0) throw new Error(`the method has no rules: ${JSON.stringify(method)}`)
-  for (const rule of rules) {
-    const shaped = (rule.attribute === 'tag' && typeof rule.value === 'string') ||
-      (rule.attribute === 'frequency' && ['at-least', 'at-most'].includes(rule.op) && typeof rule.value === 'number')
-    if (!shaped) throw new Error(`the method uses a rule this language does not have: ${JSON.stringify(rule)}`)
-  }
-  return method
-}
-
-async function main() {
-  const { ControlSessionStore } = await import('../src/control/session-store.ts')
-  const { ProtocolRegistry } = await import('../src/protocol/registry.ts')
-  const { foldSubjects } = await import('../src/protocol/fold.ts')
-  const { declareTaskProtocol, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, verifierRoleOf } = await import('../src/task/protocol.ts')
-  const env = await import('../src/environment/protocol.ts')
-  const { declareMeasureProtocol, MEASURE_PROTOCOL, MEASURE_VERSION } = await import('../src/measure/protocol.ts')
-  const { declareStrategyProtocol, STRATEGY_PROTOCOL, STRATEGY_VERSION, STRATEGY_ROLE } = await import('../src/strategy/protocol.ts')
-  const { declareReleaseProtocol, APPROVER_ROLE } = await import('../src/release/protocol.ts')
-  const { createMeasureCommands } = await import('../src/measure/commands.ts')
-  const { createStrategyCommands } = await import('../src/strategy/commands.ts')
-  const { createReleaseCommands } = await import('../src/release/commands.ts')
-  const { caliberDigestOf, projectEvaluation } = await import('../src/measure/view.ts')
-  const { contextDigestOf } = await import('../src/measure/protocol.ts')
-  const { projectRound } = await import('../src/strategy/view.ts')
-  const { runMeasurement } = await import('../src/measure/execution.ts')
-
-  const root = await mkdtemp(join(tmpdir(), 'singularity-rsi-live-'))
-  const workspace = join(root, 'workspace')
-  const sessions = join(root, 'sessions')
-  await mkdir(join(workspace, 'in'), { recursive: true })
-  await mkdir(join(workspace, 'out'), { recursive: true })
-  await mkdir(join(workspace, 'methods'), { recursive: true })
-  await mkdir(sessions, { recursive: true })
-
-  const { tokens, reference } = fixture()
-  const manifestPath = join(workspace, 'in', 'manifest.json')
-  const referencePath = join(root, 'reference.txt')
-  const domainPath = join(workspace, 'DOMAIN.md')
-  const selectorRuntime = join(root, 'selector.mjs')
-  const meterProgram = join(root, 'meter.mjs')
-  const boundsProgram = join(root, 'bounds.mjs')
-  await writeFile(manifestPath, `${JSON.stringify({ tokens }, null, 1)}\n`, 'utf8')
-  await writeFile(referencePath, `${reference.join(' ')}\n`, 'utf8')
-  await writeFile(domainPath, DOMAIN, 'utf8')
-  await writeFile(selectorRuntime, SELECTOR_SOURCE, 'utf8')
-  await writeFile(meterProgram, METER_SOURCE, 'utf8')
-  await writeFile(boundsProgram, BOUNDS_SOURCE, 'utf8')
-
-  const methodPathOf = revisionId => join(workspace, 'methods', `${revisionId}.json`)
-  const methodBytesOf = revisionId => readFile(methodPathOf(revisionId), 'utf8')
-  // The library starts on `r0000`: no rule but "everything", which scores by recall alone and pays for
-  // every token. The head is therefore a revision the environment really holds before any round runs.
-  await writeFile(methodPathOf('r0000'), `${JSON.stringify({ include: [{ attribute: 'frequency', op: 'at-least', value: 0 }] })}\n`, 'utf8')
-  // The incumbent this campaign improves on: a method that reads frequency alone, which is the mistake
-  // the task's own statement warns about. It is the model's own first answer to the task.
-  await writeFile(methodPathOf('r0001'), `${JSON.stringify({ include: [{ attribute: 'frequency', op: 'at-least', value: 6 }], exclude: [] })}\n`, 'utf8')
-
-  const meterDigest = sha256(await readFile(meterProgram))
-  const boundsDigest = sha256(await readFile(boundsProgram))
-  const selectorDigest = sha256(await readFile(selectorRuntime))
-  const INPUTS = [
-    { name: 'in/manifest.json', digest: sha256(await readFile(manifestPath)) },
-    { name: 'DOMAIN.md', digest: sha256(await readFile(domainPath)) },
-  ]
-  const CONTEXT = {
-    model: MODEL_NAME,
-    tools: [{ name: SELECTOR, implementationDigest: selectorDigest, version: '1' }, { name: METER, implementationDigest: meterDigest, version: '1' }],
-    conditions: [CONDITIONS],
-  }
-
-  const registry = new ProtocolRegistry()
-  declareTaskProtocol(registry)
-  declareMeasureProtocol(registry)
-  declareStrategyProtocol(registry)
-  declareReleaseProtocol(registry)
-  env.declareEnvironmentProtocol(registry)
-  const subjects = {
-    scheduler: 'scheduler-service',
-    [verifierRoleOf({ verifierRef: METER, verifierVersion: '1' })]: 'meter-service',
-    [verifierRoleOf({ verifierRef: BOUNDS, verifierVersion: '1' })]: 'bounds-service',
-    [STRATEGY_ROLE]: 'strategy-service',
-    [APPROVER_ROLE]: 'approval-seam',
-    [env.ENVIRONMENT_ROLE]: 'environment-service',
-    [env.PUBLISHER_ROLE]: 'publisher-service',
-  }
-
-  const live = await openPersistence(sessions)
-  const store = await ControlSessionStore.open({ persistence: live.persistence, controlId: CONTROL, registry, subjects, cwd: workspace })
-  let commandSeq = 0
-  const nextId = prefix => `${prefix}-${(commandSeq += 1)}`
-  const model = await realModel()
-  const calls = []
-  let approvalContext
-
-  try {
-    console.log(`session ${store.sessionId}; route ${model.route.provider}/${model.route.model}`)
-    const askModel = async (label, prompt) => {
-      const started = Date.now()
-      const reply = await model.complete({ system: 'You answer with one JSON object and nothing else.', prompt })
-      calls.push({ label, elapsed: Date.now() - started, digest: sha256(reply), reply, promptBytes: prompt.length })
-      console.log(`  ..    ${label}: asked ${prompt.length} byte(s), answered ${reply.length} byte(s) in ${calls.at(-1).elapsed}ms, sha256 ${calls.at(-1).digest.slice(0, 16)}…`)
-      console.log(`  ..      answer: ${JSON.stringify(reply.slice(0, 220))}`)
-      return reply
-    }
-
-    // ------------------------------------------------------------------ 1. the model answers the task
-    console.log('\n== the model answers the task, seeing the statement and the manifest')
-    const taskText = await readFile(domainPath, 'utf8')
-    const manifestText = await readFile(manifestPath, 'utf8')
-    // `--round1 <file>` replays the pipeline half with a method recorded from an earlier real run, so a
-    // change to the loop does not cost a network call to re-check. It is not a way to claim a model
-    // answered: the check below says which of the two this run was.
-    const replayIndex = process.argv.indexOf('--round1')
-    const replayed = replayIndex < 0 ? undefined : await readFile(process.argv[replayIndex + 1], 'utf8')
-    const firstMethod = methodOf(replayed ?? await askModel('round-1 proposal', `${taskText}\n## The manifest\n\n\`\`\`json\n${manifestText}\n\`\`\`\n`))
-    await writeFile(methodPathOf('r0002'), `${JSON.stringify(firstMethod)}\n`, 'utf8')
-    // The out-of-bounds leg: the model's own include rules plus the marking the constraint watches, and
-    // **no** exclude rules — the model may well have excluded that marking itself, and a leg that copied
-    // its exclusion would be a clean candidate wearing the name of a violating one.
-    const oobMethod = { include: [...(firstMethod.include ?? []), { attribute: 'tag', value: FORBIDDEN_TAG }], exclude: [] }
-    await writeFile(methodPathOf('r0003'), `${JSON.stringify(oobMethod)}\n`, 'utf8')
-    check('the model answered with a method this language can execute', (firstMethod.include ?? []).length > 0, JSON.stringify(firstMethod).slice(0, 160))
-    check('this run is the model\'s own, not a replay of an earlier one', replayed === undefined && calls.length === 1, replayed === undefined ? `${calls.length} model call(s)` : '--round1 replayed a recorded method')
-
-    // ------------------------------------------------------------------ 2. revisions, task, runs
-    for (const revisionId of ['r0000', 'r0001', 'r0002', 'r0003'])
-      await store.emit({
-        commandId: nextId(`create-${revisionId}`),
-        protocol: env.ENVIRONMENT_PROTOCOL,
-        version: env.ENVIRONMENT_VERSION,
-        kind: env.ENVIRONMENT_KINDS.revisionCreated,
-        subject: ENVIRONMENT,
-        payload: {
-          revisionId,
-          manifest: { skills: ['select-targets'], tools: [SELECTOR], taskTemplates: [TASK], method: { file: `methods/${revisionId}.json`, digest: sha256(await methodBytesOf(revisionId)) } },
-        },
-      })
-    const environmentOf = () => store.load().stateOf(env.ENVIRONMENT_PROTOCOL, env.ENVIRONMENT_VERSION, ENVIRONMENT)
-    const pinOf = revisionId => ({ environmentId: ENVIRONMENT, revisionId, digest: environmentOf().revisions[revisionId].contentDigest })
-    // The library starts on `r0000`: the head is a value the environment really holds before any round
-    // runs, so every later switch is a move between two named revisions rather than out of nothing.
-    await store.emit({
-      commandId: nextId('point-at-r0000'), protocol: env.ENVIRONMENT_PROTOCOL, version: env.ENVIRONMENT_VERSION,
-      kind: env.ENVIRONMENT_KINDS.pointerSwitched, subject: ENVIRONMENT, payload: { expected: '', to: 'r0000' },
-    })
-    const measureStateOf = evaluationId => store.load().stateOf(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
-    const roundStateOf = roundId => store.load().stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, roundId)
-    const bubbleOf = runId => store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, TASK).runs[runId]?.bubble
-    const lastSeq = () => store.load().entries().at(-1).seq
-    check('every revision declares the digest of the method bytes on disk',
-      (await Promise.all(['r0000', 'r0001', 'r0002', 'r0003'].map(async id => environmentOf().revisions[id].manifest.method.digest === sha256(await methodBytesOf(id))))).every(Boolean) &&
-      sha256(await methodBytesOf('r0001')) !== sha256(await methodBytesOf('r0002')))
-
-    const metric = { measured: { criterionId: 'quality', statement: 'the selection agrees with the frozen reference set', verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest }, unit: 'f1', direction: 'higher' }
-    const judgement = [{ criterionId: 'bounded', statement: `no selection holds a token marked ${FORBIDDEN_TAG}`, verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: boundsDigest }]
-    for (const [index, fact] of [
-      { kind: TASK_KINDS.admitted, payload: { contract: { goal: 'select the tokens the consumer wants, and only those', inputs: INPUTS.map(entry => entry.name), criteria: [{ criterionId: 'quality', statement: metric.measured.statement, verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest }] } } },
-      { kind: TASK_KINDS.assigned, payload: { agentId: AGENT, agentIdentity: subjects.scheduler } },
-    ].entries())
-      await store.emit({ commandId: nextId(`fixture-${index}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: TASK, ...fact })
-
-    const measure = createMeasureCommands({
-      store,
-      registry,
-      implementations: [{ ref: METER, version: '1', implementationDigest: meterDigest }, { ref: BOUNDS, version: '1', implementationDigest: boundsDigest }],
-      subjects,
-    })
-    const artifactOf = (evaluationId, slot) => join(workspace, 'out', `${evaluationId}-${slot}.txt`)
-    // The meter's declaration, with a selftest that produces both verdicts — a gate that has never
-    // failed is not known to work. The sample it must reject is a program that is not there, so the
-    // rejection is the program's absence rather than a number this probe decided to call a failure.
-    const cleanSample = join(root, 'clean-sample.txt')
-    await writeFile(cleanSample, `${reference.join(' ')}\n`, 'utf8')
-    const meterImplementation = {
-      ref: METER,
-      version: '1',
-      implementationDigest: meterDigest,
-      selftest: {
-        samples: [
-          { name: 'scores a real selection against the reference', expected: 'pass', input: { subject: cleanSample, artifactDigest: sha256(reference.join(' ')), inputs: [] } },
-          { name: 'produces no number when the program cannot run', expected: 'fail', input: { subject: join(root, 'no-such-artifact.txt'), artifactDigest: sha256('absent'), inputs: [] } },
-        ],
-      },
-      judge: async sample => {
-        const ran = await runProcess(process.execPath, [meterProgram, sample.subject, referencePath])
-        return { verdict: ran.code === 0 && JSON.parse(ran.stdout.trim()).quality > 0 ? 'pass' : 'fail' }
-      },
-    }
-    /** One evaluation: its own run and bubble, two real trials, and the constraint checked for real. */
-    const measurementOf = async (evaluationId, revisionId, baselineId) => {
-      const runId = `run-${evaluationId}`
-      await store.emit({ commandId: nextId(`start-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runStarted, subject: TASK, payload: { runId, revision: pinOf(revisionId) } })
-      await store.emit({
-        commandId: nextId(`bubble-${runId}`),
-        protocol: TASK_PROTOCOL,
-        version: TASK_VERSION,
-        kind: TASK_KINDS.bubbleOpened,
-        subject: TASK,
-        payload: { runId, inputs: INPUTS, workspace: { kind: 'dir', ref: workspace }, ...CONTEXT },
-      })
-      await measure.openEvaluation({ commandId: nextId(`open-${evaluationId}`), evaluationId, baseline: pinOf(baselineId), candidate: pinOf(revisionId), run: { taskId: TASK, runId }, metric, weights: WEIGHTS, trials: 2, judgement })
-      for (const slot of [0, 1]) {
-        const artifactName = `out/${evaluationId}-${slot}.txt`
-        const outcome = await runMeasurement({
-          metric: metric.measured,
-          implementations: [meterImplementation],
-          inputs: INPUTS,
-          workspace,
-          artifactPath: artifactName,
-          command: `${shellLine([process.execPath, selectorRuntime, manifestPath, artifactOf(evaluationId, slot), methodPathOf(revisionId)])} && ${shellLine([process.execPath, meterProgram, artifactOf(evaluationId, slot), referencePath])}`,
-          measure: async execution => {
-            const result = await runProcess(process.execPath, [join('scripts', 'measure-runner.mjs'), JSON.stringify({ command: execution.command, artifactPath: execution.artifactPath, inputs: execution.inputs.map(entry => ({ name: entry.name, digest: entry.digest, path: entry.path })) })])
-            if (result.code !== 0) throw new Error(`the adapter could not measure: ${result.stdout}`)
-            const reported = JSON.parse(result.stdout.trimEnd().split('\n')[0] ?? '{}')
-            if (reported.missed !== undefined) return { reason: reported.missed }
-            return { quality: reported.quality, ...(reported.cost === undefined ? {} : { cost: reported.cost }), implementationDigest: sha256(await readFile(meterProgram)), detail: reported.detail }
-          },
-        })
-        if (outcome.kind === 'missed') await measure.missTrial({ commandId: nextId(`miss-${evaluationId}-${slot}`), evaluationId, slot, reason: outcome.reason })
-        else await measure.recordTrial({ commandId: nextId(`trial-${evaluationId}-${slot}`), evaluationId, trial: { slot, ...outcome.trial } })
-      }
-      const boundsRan = await runProcess(process.execPath, [boundsProgram, artifactOf(evaluationId, 0), manifestPath])
-      await measure.checkConstraint({ commandId: nextId(`check-${evaluationId}`), evaluationId, criterionId: 'bounded', met: boundsRan.code === 0, artifactDigest: measureStateOf(evaluationId).observed[0].artifactDigest, implementationDigest: boundsDigest })
-      return projectEvaluation(measureStateOf(evaluationId))
-    }
-
-    /** The measure slice as one round reads it: the incumbent's aggregate below the round's own cutoff. */
-    const sliceOf = cut => ({
-      entries: cut.entries(),
-      evaluationOf: evaluationId => {
-        const state = cut.stateOf(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
-        if (state?.trials === undefined || state.baseline === undefined || state.candidate === undefined) return undefined
-        const caliberDigest = caliberDigestOf(state)
-        return caliberDigest === undefined ? undefined : { evaluationId, caliberDigest, baseline: state.baseline, candidate: state.candidate, ...projectEvaluation(state) }
-      },
-      incumbentBelow: (revision, cutoff) => {
-        const entries = cut.entriesOf(MEASURE_PROTOCOL, MEASURE_VERSION).filter(entry => entry.seq < cutoff)
-        const opened = entries.filter(entry => entry.kind === 'evaluation/opened' && entry.payload.candidate?.revisionId === revision.revisionId).at(-1)
-        if (opened === undefined) return null
-        const view = projectEvaluation(foldSubjects(registry, entries, MEASURE_PROTOCOL, MEASURE_VERSION).get(opened.subject))
-        return { quality: view.quality, cost: view.cost }
-      },
-    })
-    const commands = createStrategyCommands({ store, rounds: 4, firstBudget: 2, minimumBudget: 1, calibration: FLOOR, measuresAt: cut => sliceOf(cut) })
-
-    // The native approval seam, mounted for real: the service asks, a listener answers once, and the
-    // tool call is what carries the question's audit id into the fact. A scripted adapter drives the
-    // turn — the model under test is not the approver, and a human is not in this process.
-    approvalContext = await mountApprovalRuntime(sessions)
-    const release = createReleaseCommands({ store, approvalSeams: { approval: approvalContext.ctx.approval, feed: approvalContext.ctx } })
-    const handle = await approvalContext.ctx.agents.create({
-      sessionId: approvalContext.SessionId('rsi-live-approver'),
-      meta: { cwd: root },
-      agentOptions: { provider: 'scripted', model: 'stub-1' },
-    })
-    let pending = null
-    approvalContext.ctx.on('approval/request', async () => 'allowed-once')
-    approvalContext.ctx.tools.register({
-      name: 'rsi_approve',
-      description: 'record a human authorisation of the drafted revision',
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
-      output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
-      execute: async (_args, exec) => {
-        try {
-          const envelope = await release.approve({
-            commandId: pending.commandId,
-            environmentId: ENVIRONMENT,
-            revisionId: pending.revisionId,
-            draftDigest: pending.draftDigest,
-            approvedBy: 'human:alice',
-            ask: { agent: exec.agent, toolName: 'rsi_approve', callId: exec.callId, reason: 'publishing this content is a decision' },
-          })
-          return { approved: true, approvalId: envelope.payload.approvalId }
-        } catch (error) {
-          const { ProtocolRefusal } = await import('../src/protocol/refusal.ts')
-          if (error instanceof ProtocolRefusal) return { refused: error.refusal.code, detail: error.refusal.detail }
-          throw error
-        }
-      },
-    })
-    const approveThroughTheSeam = async request => {
-      pending = request
-      const { createUserMessage } = await dshModule('@deepseek-ai/dsh-llm')
-      handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'approve the drafted winner' }], source: { kind: 'user' } }))
-      await handle.agent.whenIdle()
-      return handle.agent.session.snapshotEvents().filter(event => event.type === 'tool/result').at(-1)?.data?.message?.content?.[0]?.text
-    }
-
-    // ------------------------------------------------------------------ 3. round one on the answer
-    console.log('\n== round one: the incumbent against the model\'s method')
-    const baseline = await measurementOf('r1-baseline', 'r0001', 'r0001')
-    const incumbentMeasured = baseline
-    const baselineSeq = lastSeq()
-    const candidate = await measurementOf('r1-c0', 'r0002', 'r0001')
-    const outOfBounds = await measurementOf('r1-c1', 'r0003', 'r0001')
-    await commands.openRound({
-      commandId: nextId('open-round-1'), roundId: 'round-1', round: 1, incumbent: pinOf('r0001'),
-      candidates: 2, explorationSlots: 0, historyCutoff: store.load().entries().length,
-      caliber: caliberDigestOf(measureStateOf('r1-baseline')), metric: { direction: metric.direction }, weights: WEIGHTS,
-    })
-    for (const [slot, revisionId, evaluationId] of [[0, 'r0002', 'r1-c0'], [1, 'r0003', 'r1-c1']])
-      await commands.submitCandidate({ commandId: nextId(`submit-${evaluationId}`), roundId: 'round-1', slot, revision: pinOf(revisionId), evaluationId, edits: [{ asset: 'skill', target: 'select-targets' }], exploratory: false })
-    await commands.decideRound({ commandId: nextId('decide-round-1'), roundId: 'round-1' })
-    const projected = projectRound(roundStateOf('round-1'), sliceOf(store.load()), FLOOR)
-    const refusedSlot = projected.slots.find(slot => slot.slot === 1)
-    console.log(`  ..    incumbent ${baseline.quality} at cost ${baseline.cost}; model ${candidate.quality} at cost ${candidate.cost}; out-of-bounds ${outOfBounds.quality}`)
-    check('the incumbent was measured on itself before the round opened', baseline.denominator === 2 && baseline.observed === 2 && roundStateOf('round-1').plan.historyCutoff > baselineSeq)
-    check('the model\'s method measured better than the incumbent it replaces', candidate.quality > baseline.quality, `${candidate.quality} vs ${baseline.quality}`)
-    check('its cost is measured rather than assumed, and the round recorded it', candidate.cost !== null && roundStateOf('round-1').decision !== undefined, `${candidate.cost}`)
-    check('the out-of-bounds leg scored higher than the elected one, so only the constraint could have stopped it', outOfBounds.quality > candidate.quality, `${outOfBounds.quality} vs ${candidate.quality}`)
-    check('the round elected the model\'s revision rather than the higher-scoring one, whose reason is the constraint\'s own check',
-      projected.winner === 0 && roundStateOf('round-1').decision.winner === 0 && refusedSlot.admissible === false && (refusedSlot.reason ?? '').includes('hard constraint "bounded"'),
-      `winner ${projected.winner}; elected slot ${JSON.stringify(projected.slots[0])}; refused slot ${JSON.stringify(refusedSlot)}`)
-    check('the elected gain is frozen against the incumbent\'s aggregate below the cutoff', close(projected.slots[0].gain, candidate.quality - baseline.quality), `gain ${projected.slots[0].gain}`)
-
-    // ------------------------------------------------------------------ 4. the pointer moves
-    console.log('\n== the release path moves the head onto the elected revision')
-    // One fact for the start of the library, and one more per head that actually moves.
-    const pointerFacts = () => store.load().entriesOf(env.ENVIRONMENT_PROTOCOL, env.ENVIRONMENT_VERSION).filter(entry => entry.kind === env.ENVIRONMENT_KINDS.pointerSwitched)
-    // A head only moves onto a revision a round elected. Without this the release path would publish a
-    // drafted and approved revision the round had refused, and a campaign whose model answered badly
-    // would move the library onto that answer — the one thing this campaign exists to prevent.
-    if (roundStateOf('round-1').decision.winner === null) {
-      check('the round elected a revision, so there is something to move the head onto', false,
-        `winner null: the best candidate scored ${candidate.quality} against an incumbent at ${baseline.quality}, so nothing cleared the floor and the head does not move`)
-      console.log(`\nrsi-live: the model's method did not clear round one, so the head stayed on ${JSON.stringify(environmentOf().pointer)}`)
-      process.exitCode = 2
-      return
-    }
-    const headBefore = environmentOf().pointer
-    await release.draft({ commandId: nextId('draft-r0002'), revision: pinOf('r0002') })
-    const unapproved = await refusalOf(() => release.publish({ commandId: nextId('publish-unapproved'), environmentId: ENVIRONMENT, expected: headBefore, to: 'r0002' }))
-    check('a drafted but unapproved revision cannot be published', unapproved.code === 'unapproved-revision', unapproved.code)
-    const granted = JSON.parse(await approveThroughTheSeam({ commandId: nextId('approve-r0002'), revisionId: 'r0002', draftDigest: pinOf('r0002').digest }))
-    check('the native ask granted once and the fact carries the audit id of the question that produced it', granted.approved === true && granted.approvalId !== undefined)
-    await release.publish({ commandId: nextId('publish-r0002'), environmentId: ENVIRONMENT, expected: headBefore, to: 'r0002' })
-    const headAfter = environmentOf().pointer
-    check('the head moved off the incumbent onto the model\'s revision, by compare-and-swap on the head it replaced',
-      headBefore !== headAfter && headAfter === 'r0002' && pointerFacts().length === 2 && pointerFacts().at(-1).payload.expected === headBefore && pointerFacts().at(-1).payload.to === 'r0002', `${headBefore} -> ${headAfter} over ${pointerFacts().length} pointer fact(s)`)
-    // The claim this file exists for, read from the log's own facts rather than from local arithmetic:
-    // the last evaluation each revision ran as the candidate, and the quality it recorded there.
-    const measured = revisionId => {
-      const opened = store.load().entriesOf(MEASURE_PROTOCOL, MEASURE_VERSION).filter(entry => entry.kind === 'evaluation/opened' && entry.payload.candidate?.revisionId === revisionId).at(-1)
-      return opened === undefined ? null : projectEvaluation(measureStateOf(opened.subject)).quality
-    }
-    check('the revision the pointer now names measured better than the one it replaced',
-      measured(headAfter) > measured(headBefore), `${measured(headBefore)} -> ${measured(headAfter)}`)
-
-    // ------------------------------------------------------------------ 5. round two reads round one
-    console.log('\n== round two: the model sees what round one measured')
-    const selectedByWinner = (await readFile(artifactOf('r1-c0', 0), 'utf8')).trim().split(/\s+/).filter(Boolean)
-    const missed = reference.filter(id => !selectedByWinner.includes(id))
-    const secondMethod = methodOf(replayed === undefined ? await askModel('round-2 proposal', [
-      taskText,
-      '## The manifest',
-      `\`\`\`json\n${manifestText}\n\`\`\``,
-      '## What happened when your previous method was measured',
-      `The revision you wrote first (\`r0001\`) is the one the library is on. It selected ${selectedByWinner.length} token(s) and scored quality ${incumbentMeasured.quality} at cost ${incumbentMeasured.cost}.`,
-      `Your newest revision (\`r0002\`) selected ${selectedByWinner.length} token(s) and scored quality ${candidate.quality} at cost ${candidate.cost}.`,
-      `The revision the newest one replaced (\`r0000\`, which selected everything) scored quality ${baseline.quality} at cost ${baseline.cost}.`,
-      missed.length === 0 ? 'It recovered every token the reference holds.' : `It missed ${missed.length} token(s) the reference holds: ${missed.slice(0, 12).join(', ')}${missed.length > 12 ? ', …' : ''}.`,
-      'Write the next method. If the previous one cannot be improved on, repeat it unchanged.',
-    ].join('\n\n')) : await readFile(process.argv[replayIndex + 2], 'utf8'))
-    await writeFile(methodPathOf('r0004'), `${JSON.stringify(secondMethod)}\n`, 'utf8')
-    await store.emit({
-      commandId: nextId('create-r0004'), protocol: env.ENVIRONMENT_PROTOCOL, version: env.ENVIRONMENT_VERSION,
-      kind: env.ENVIRONMENT_KINDS.revisionCreated, subject: ENVIRONMENT,
-      payload: { revisionId: 'r0004', manifest: { skills: ['select-targets'], tools: [SELECTOR], taskTemplates: [TASK], method: { file: 'methods/r0004.json', digest: sha256(await methodBytesOf('r0004')) } } },
-    })
-    const secondBaseline = await measurementOf('r2-baseline', headAfter, headAfter)
-    const secondBaselineSeq = lastSeq()
-    const secondCandidate = await measurementOf('r2-c0', 'r0004', headAfter)
-    const roundOneDecisionSeq = store.load().entriesOf(STRATEGY_PROTOCOL, STRATEGY_VERSION).filter(entry => entry.subject === 'round-1' && entry.kind === 'round/decided')[0].seq
-    await commands.openRound({
-      commandId: nextId('open-round-2'), roundId: 'round-2', round: 2, incumbent: pinOf(headAfter),
-      candidates: 1, explorationSlots: 0, historyCutoff: store.load().entries().length,
-      caliber: caliberDigestOf(measureStateOf('r2-baseline')), metric: { direction: metric.direction }, weights: WEIGHTS,
-    })
-    await commands.submitCandidate({ commandId: nextId('submit-r2-c0'), roundId: 'round-2', slot: 0, revision: pinOf('r0004'), evaluationId: 'r2-c0', edits: [{ asset: 'skill', target: 'select-targets' }], exploratory: false })
-    await commands.decideRound({ commandId: nextId('decide-round-2'), roundId: 'round-2' })
-    const decisionTwo = roundStateOf('round-2').decision
-    console.log(`  ..    round two: model ${secondCandidate.quality} against the incumbent's ${secondBaseline.quality}; winner ${decisionTwo.winner}`)
-    check('round two\'s incumbent is the revision round one published, and its cutoff sits after that decision and publication',
-      roundStateOf('round-2').plan.incumbent.revisionId === headAfter && roundStateOf('round-2').plan.historyCutoff > roundOneDecisionSeq && roundStateOf('round-2').plan.historyCutoff > secondBaselineSeq)
-    check('the second answer was measured the same way, against the elected revision and under the same context',
-      measureStateOf('r2-c0').baseline.revisionId === headAfter && measureStateOf('r2-c0').observed.length === 2 &&
-      contextDigestOf(bubbleOf(measureStateOf('r2-c0').run.runId)) === contextDigestOf(bubbleOf(measureStateOf('r1-c0').run.runId)))
-    check('round two elected the second answer exactly when it improved on the incumbent',
-      (secondCandidate.quality > secondBaseline.quality) === (decisionTwo.winner === 0), `quality ${secondCandidate.quality} vs ${secondBaseline.quality}, winner ${decisionTwo.winner}`)
-    if (decisionTwo.winner === 0) {
-      await release.draft({ commandId: nextId('draft-r0004'), revision: pinOf('r0004') })
-      const grantedTwo = JSON.parse(await approveThroughTheSeam({ commandId: nextId('approve-r0004'), revisionId: 'r0004', draftDigest: pinOf('r0004').digest }))
-      check('round two\'s winner was approved through the same seam before its head could move', grantedTwo.approved === true && grantedTwo.approvalId !== undefined)
-      await release.publish({ commandId: nextId('publish-r0004'), environmentId: ENVIRONMENT, expected: headAfter, to: 'r0004' })
-      const headFinal = environmentOf().pointer
-      check('the second improvement moved the head too, and it measured better than the revision it replaced',
-        headFinal === 'r0004' && pointerFacts().length === 3 && measured(headFinal) > measured(headAfter), `${headAfter} -> ${headFinal}: ${measured(headAfter)} -> ${measured(headFinal)}`)
-    } else check('round two kept the incumbent, so the head did not move a second time', pointerFacts().length === 2)
-
-    // ------------------------------------------------------------------ 6. the log explains itself
-    console.log('\n== the log explains itself')
-    await store.close()
-    const reopened = await ControlSessionStore.open({ persistence: live.persistence, controlId: CONTROL, registry, subjects, cwd: workspace })
-    const afterReopen = reopened.load()
-    check('reopening the session reproduces the same head and both decisions',
-      afterReopen.stateOf(env.ENVIRONMENT_PROTOCOL, env.ENVIRONMENT_VERSION, ENVIRONMENT).pointer === environmentOf().pointer &&
-      afterReopen.stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, 'round-1').decision.winner === 0 &&
-      afterReopen.stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, 'round-2').decision.winner === decisionTwo.winner)
-    check('every model answer came from the deployment\'s own route, and no answer is in the log',
-      calls.every(call => /^[0-9a-f]{64}$/.test(call.digest)) &&
-      !afterReopen.entries().some(entry => calls.some(call => JSON.stringify(entry.payload).includes(call.reply.slice(0, 40)))),
-      `${calls.length} call(s) on ${model.route.provider}`)
-    await reopened.close()
-  } finally {
-    await model.dispose().catch(() => {})
-    await live.context.fiber.dispose().catch(() => {})
-    await approvalContext?.ctx.fiber.dispose().catch(() => {})
-    if (process.env['RSI_LIVE_KEEP'] === '1') console.log(`kept: ${root}`)
-    else await rm(root, { recursive: true, force: true })
-  }
-
-  console.log(`\nrsi-live: ${checks} check(s), ${failures.length} failed, ${refusals} refusal(s) observed`)
-  if (failures.length > 0) {
-    for (const label of failures) console.log(`  FAIL  ${label}`)
-    process.exit(1)
-  }
-  console.log('rsi-live: OK — a real model wrote the method, real measurements elected it, and the pointer moved onto a revision that measured better')
 }
 
 main().catch(error => {

@@ -354,6 +354,12 @@ describe('the measurement slice', () => {
     const foreignArtifact = await asyncRefusalOf(() => check(instance, true, 'limits', '9'.repeat(64)))
     expect(foreignArtifact).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining('no observation of this evaluation was formed on') })
     await record(instance)
+    // A cited verdict is about the bytes this evaluation measured, or it is a citation of something else.
+    const citedElsewhere = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.constraintChecked, {
+      criterionId: 'limits', met: true, artifactDigest: ARTIFACT, verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST,
+      verdict: { criterionId: 'quality', evidenceDigest: 'a'.repeat(64), artifactDigest: 'b'.repeat(64) },
+    }))
+    expect(citedElsewhere).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining('cites verdict') })
     await check(instance, true)
     const twice = await asyncRefusalOf(() => check(instance, true))
     expect(twice).toMatchObject({ code: 'evidence-conflict', detail: expect.stringContaining('once') })

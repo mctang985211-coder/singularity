@@ -102,6 +102,7 @@ export {
   TASK_KINDS,
   TASK_PROTOCOL,
   TASK_VERSION,
+  recordedVerdictDigest,
   type EvidenceRecord,
   type RevisionRef,
   type RunState,

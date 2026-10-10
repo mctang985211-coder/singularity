@@ -46,7 +46,7 @@ export const MEASURE_PROTOCOL = 'measure'
  * covered the run identity itself. Older versions are refused by name with no compatibility layer —
  * comparability is a historical interpretation, and it moved.
  */
-export const MEASURE_VERSION = 3
+export const MEASURE_VERSION = 4
 
 export const MEASURE_KINDS = {
   evaluationOpened: 'evaluation/opened',
@@ -120,6 +120,21 @@ export interface MissedTrial {
   readonly verifierVersion: string
 }
 
+/**
+ * A verdict this measurement cites as the evidence its constraint was decided on.
+ *
+ * The verdict itself is recorded once, in `task@5`, and this is a **citation** of it rather than a
+ * second copy: a reader follows `evidenceDigest` back to the one fact that holds the judgment. The
+ * artifact is repeated because that is the half this protocol can check — the check below refuses a
+ * citation of bytes no trial of this evaluation was formed on, so "the verdict is about what we
+ * measured" is a refusal rather than a convention.
+ */
+interface VerdictCitation {
+  readonly criterionId: string
+  readonly evidenceDigest: string
+  readonly artifactDigest: string
+}
+
 /** One hard constraint's check. It carries no weight and no score: it is met, or it is not. */
 export interface ConstraintCheck {
   readonly criterionId: string
@@ -128,6 +143,8 @@ export interface ConstraintCheck {
   readonly verifierRef: string
   readonly verifierVersion: string
   readonly implementationDigest: string
+  /** The verdict this check rests on, when the verdict was recorded by the task protocol. */
+  readonly verdict?: VerdictCitation
   readonly detail?: string
 }
 
@@ -215,6 +232,16 @@ function constraintOf(raw: unknown, where: string): ConstraintCheck {
   const met = source['met']
   if (typeof met !== 'boolean') refuse('malformed-payload', `${where}.met must be a boolean, got ${met === null ? 'null' : typeof met}`)
   const detail = maybeText(source, 'detail', where)
+  const rawVerdict = source['verdict']
+  let verdict
+  if (rawVerdict !== undefined) {
+    const citation = record(rawVerdict, `${where}.verdict`)
+    verdict = {
+      criterionId: text(citation, 'criterionId', `${where}.verdict`),
+      evidenceDigest: digest(citation, 'evidenceDigest', `${where}.verdict`),
+      artifactDigest: digest(citation, 'artifactDigest', `${where}.verdict`),
+    }
+  }
   return {
     criterionId: text(source, 'criterionId', where),
     met,
@@ -222,6 +249,7 @@ function constraintOf(raw: unknown, where: string): ConstraintCheck {
     verifierRef: text(source, 'verifierRef', where),
     verifierVersion: text(source, 'verifierVersion', where),
     implementationDigest: digest(source, 'implementationDigest', where),
+    ...(verdict === undefined ? {} : { verdict }),
     ...(detail === undefined ? {} : { detail }),
   }
 }
@@ -367,7 +395,7 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
 
       [MEASURE_KINDS.constraintChecked]: defineKind<EvaluationState, ConstraintCheck, {}>({
         guarantees: { appended: true },
-        members: ['criterionId', 'met', 'artifactDigest', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'],
+        members: ['criterionId', 'met', 'artifactDigest', 'verifierRef', 'verifierVersion', 'implementationDigest', 'verdict', 'detail'],
         nested: {},
         emitter: payload => verifierRoleOf(payload),
         parse: raw => constraintOf(raw, `${MEASURE_KINDS.constraintChecked} payload`),
@@ -381,6 +409,14 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
           // its constraints on another is two reports, and neither of them is this evaluation's.
           if (!state.observed.some(entry => entry.artifactDigest === payload.artifactDigest))
             refuse('evidence-input-mismatch', `${where} checks hard constraint "${payload.criterionId}" on artifact ${payload.artifactDigest.slice(0, 12)}…, which no observation of this evaluation was formed on (observed: ${state.observed.map(entry => `${entry.artifactDigest.slice(0, 12)}…`).join(', ') || 'nothing yet'}); check the constraint on the bytes the measurement was formed on`)
+          // A cited verdict is a verdict about *these* bytes. The judgment itself lives in `task@5`;
+          // what is refused here is a citation of one artifact inside an evaluation measured on
+          // another, which would make the citation a decoration rather than a statement about this
+          // evaluation. Its criterion is not required to be this check's: a plan may not judge the
+          // criterion it measures, so requiring the two to be equal would make a citation impossible
+          // in exactly the case this member exists for — the digest already carries the criterion id.
+          if (payload.verdict !== undefined && payload.verdict.artifactDigest !== payload.artifactDigest)
+            refuse('evidence-input-mismatch', `${where} cites verdict "${payload.verdict.criterionId}" of artifact ${payload.verdict.artifactDigest.slice(0, 12)}… while checking artifact ${payload.artifactDigest.slice(0, 12)}…; a verdict cites the bytes it judged, and a check clears the bytes it measured`)
           if (state.checks.some(entry => entry.criterionId === payload.criterionId))
             refuse('evidence-conflict', `${where} checks hard constraint "${payload.criterionId}" again; one constraint is checked once, and a re-check is a new evaluation id`)
           const subject = `hard constraint "${criterion.criterionId}"`

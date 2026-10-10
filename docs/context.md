@@ -761,6 +761,26 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
    测试与探针**必须**真的落到 `mkdtemp` 上才能行使沙箱。**仍然没有任何门禁会报"某个测试往仓库里
    写了一个文件"** —— 规则管的是产品。
 
+### 两条管线在"证据"处会合（**这一层是补进规划的，A–F 表里没有**）
+
+`review.md` §5 的 A–F 与 K1/K2 里**没有**"把 SPINE 暴露给 agent / 把两条管线接起来"这一层；
+它是这一轮补的，做法按"三条腿各归其主"：
+
+- **判决进 `task@5`**：模型写出的产物由判据自己的验证器 spawn 判决，`evidence/produced` **只记一次**；
+- **`measure@4` 的约束检查引用它**：`constraint/checked` 多一个 `verdict: { criterionId, evidenceDigest, artifactDigest }`，
+  而 `evidenceDigest` 由 `task@5` 的 `recordedVerdictDigest` 给出（已进发布面）；
+  reducer **检查**这条引用：判决的字节必须是这次评估测过的字节，否则 `evidence-input-mismatch`；
+- **`strategy` 沿用已有读路径**：没有任何新数据被塞进轮次，它读的还是 `sliceOf(cut)` 与 `evaluationOf`。
+
+**为什么不在代码处合并**：`measure` 不 import `task` 的判决类型，`task` 不 import `measure` 的任何东西，
+两条管线只通过**一条被检查的摘要**相互引用。`scripts/rsi-live.mjs` 现在**只有一条管线**：
+模型写产物 → 真实验证器判决 → 判决记一次 → 数字按引用绑定 → round 选优 → 原生审批 → 指针移动。
+实测见 `docs/live-campaign.md`（43 条事实）。
+
+**顺带一条取证**：`src/measure/protocol.ts` 达到 432 行时，单文件上限从 400 抬到 600，
+理由写在门禁常量上——那个文件是**一个协议**（版本、四个 kind、各自的读者、初始状态），
+拆开只会得到"两个文件互相 import"或"半个 kind"；`src/` 里没有任何文件接近这个数。
+
 ### 第八轮 B2 的收尾：五处嵌套读者各有一条实验（**第九轮按审查者的构造改的**）
 
 第八轮指出 `workspace` / `metric` / `weights` / `run` / `outcomes` 五处嵌套读者可以被放宽而全套绿。

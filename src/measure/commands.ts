@@ -92,6 +92,12 @@ export interface MeasureCommands {
     readonly met: boolean
     readonly artifactDigest: string
     readonly implementationDigest: string
+    /**
+     * The verdict this check rests on, when a task protocol recorded one. It is a citation and not a
+     * second judgment: the fact carries the digest of the verdict, and the reducer refuses a citation
+     * of a criterion other than this one or of bytes this evaluation did not measure.
+     */
+    readonly verdict?: { readonly criterionId: string; readonly evidenceDigest: string; readonly artifactDigest: string }
     readonly detail?: string
   }): Promise<Envelope>
 }
@@ -213,6 +219,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
           verifierRef: criterion.verifierRef,
           verifierVersion: criterion.verifierVersion,
           implementationDigest: input.implementationDigest,
+          ...(input.verdict === undefined ? {} : { verdict: input.verdict }),
           ...(input.detail === undefined ? {} : { detail: input.detail }),
         },
         () => {
