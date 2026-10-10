@@ -774,6 +774,7 @@ const RECORD_DOCS = new Set([
   'docs/adversarial-review-7.md',
   // The eighth review is a record of the commit it names on its first line, like the seven above: a
   // review's counts are measurements of *that* commit, which is what the ledger above measures too.
+  // Each entry opens by naming what it measures, and the skip below checks that opening mention.
   'docs/adversarial-review-8.md',
 ])
 /** A hex token with a letter in it: commit-shaped, which was all this was checked for until round seven. */
@@ -788,9 +789,18 @@ function repositoryCommits() {
   }
 }
 
-/** Whether a text names a commit this repository holds, by full sha or by a short prefix. */
+/**
+ * Whether a record opens by naming a commit this repository holds: the **first** commit-shaped token
+ * the text carries is the anchor, checked against git rather than matched as a shape.
+ *
+ * A held token deep in the body anchors nothing. Round eight's H2 bought a whole-file exemption with
+ * one real commit anywhere in the text, so the anchor moved to where a record declares what it
+ * measures — its opening mention — and a document that opens on a foreign commit (the RRSI checkout's)
+ * is not a record of this tree however many held tokens it quotes later.
+ */
 function namesHeldCommit(text, commits) {
-  return commits !== undefined && (text.match(COMMIT) ?? []).some(token => [...commits].some(sha => sha.startsWith(token)))
+  const first = (text.match(COMMIT) ?? [])[0]
+  return commits !== undefined && first !== undefined && [...commits].some(sha => sha.startsWith(first))
 }
 
 /** Every document the count scan reads: this repository's own markdown, not two named files. */
@@ -846,8 +856,11 @@ const INDENTED_FENCE = /^[ \t]+(`{3,}|~{3,})/
  * - A delimiter indented by anything is a finding rather than a fence: a renderer reads an indented
  *   delimiter as a code block, so it quotes nothing, and honouring one let the eighth review put a
  *   balanced indented pair round a count. Neither opens nor closes, so four spaces decide nothing.
- * - A declared record is skipped whole-file only when it names a commit this repository holds, checked
- *   against git and not matched as a hex token; if it names none it is not a record, and it is scanned.
+ * - A declared record is skipped whole-file only when the **first** commit it names is one this
+ *   repository holds — a record opens by declaring what it measures, and a held token elsewhere in the
+ *   text anchors nothing (round eight's H2: one real commit anywhere bought the whole file). Checked
+ *   against git, not matched as a hex token; a record that opens on nothing this tree holds is not a
+ *   record, and it is scanned.
  * - A count on a line carrying a commit-shaped token is that line's record, and the token is **not**
  *   verified, because this tree's documents quote other repositories' history (`docs/blueprint.md`'s
  *   port table names commits the RRSI checkout holds and this one never did). A fabricated token buys
@@ -866,7 +879,7 @@ function countClaimFindings(docs = readCorpus(), records = RECORD_DOCS, commits 
     if (records.has(file) && namesHeldCommit(text, commits)) continue
     if (records.has(file))
       findings.push(
-        `${file} is declared a record of a past commit and names none this repository holds${commits === undefined ? " (git could not list this repository's commits, so no record can be verified)" : ''}; a count is a record only of a commit it names, so this document is not a record and its counts are read as this tree's`,
+        `${file} is declared a record of a past commit and does not open by naming one this repository holds (the first commit it names is the anchor, wherever later lines quote others)${commits === undefined ? " (git could not list this repository's commits, so no record can be verified)" : ''}; a count is a record only of the commit its document opens on, so this document is not a record and its counts are read as this tree's`,
       )
     let open = null
     text.split('\n').forEach((line, index) => {
@@ -951,6 +964,14 @@ function mutationClaimFindings(ledger, docs = readDocs(), textOf = file => readF
     if (!['node', 'vitest'].includes(claim.run?.kind) || !Array.isArray(claim.run?.args) || claim.run.args.length === 0)
       findings.push(`${where}: names no runnable command; a claim runs as { "kind": "node" | "vitest", "args": [...] }`)
     else for (const arg of claim.run.args) if (!arg.startsWith('-')) try { statSync(join(ROOT, arg)) } catch { findings.push(`${where}: would run ${arg}, which is not in this tree`) }
+    // A witness is the string the failing run prints, so the catch pins this rule rather than any
+    // failure in the file. `\u00d7` is the character vitest prints before every failed test: it is
+    // satisfied by any failure, so it is not a witness (round eight's H3, closed by upgrading the
+    // nineteen claims that carried it and refusing the marker here).
+    if (typeof claim.witness !== 'string' || claim.witness === '')
+      findings.push(`${where}: names no witness; a caught verdict must be a string the failing run prints, so the catch is of this rule and not of any test that happens to fail`)
+    else if (claim.witness === '\u00d7')
+      findings.push(`${where}: witnesses the any-failure marker vitest prints before every failed test; that string is satisfied by any failure in the file, so it pins no rule`)
     const edits = Array.isArray(claim.edits) ? claim.edits : []
     if (edits.length === 0) findings.push(`${where}: names no edits, so nothing would be mutated`)
     for (const edit of edits) {
@@ -1668,6 +1689,9 @@ if (PROBE) {
     ['an info string holding a backtick, which CommonMark reads as a paragraph rather than a fence', [{ file: 'docs/__probe.md', text: '``` `x\ngates: 11 gates over 42 files\n```\n' }], 3],
     ['an info string holding a tilde on a tilde fence, the same rule for the other delimiter', [{ file: 'docs/__probe.md', text: '~~~ ~x\ngates: 11 gates over 42 files\n~~~\n' }], 3],
     ['a declared record that names a commit this repository holds', [{ file: 'docs/__probe-review.md', text: 'measured at `e8c1c70`: 21 gates\n' }], 0],
+    // Round eight's H2: one held token anywhere bought the whole file. The anchor is the first commit
+    // the record names, so a record that opens on a foreign one is scanned however later lines read.
+    ['a declared record that opens on a foreign commit and only later names a held one', [{ file: 'docs/__probe-review.md', text: 'measured at `be50316` first, then `e8c1c70`: 21 gates\n' }], 1],
     ['a declared record that names only a token no repository holds', [{ file: 'docs/__probe-review.md', text: 'measured at `deadbeefcafe1234`: 21 gates\n' }], 1],
     ['a declared record that names no commit at all', [{ file: 'docs/__probe-review.md', text: 'the tree had 21 gates\n' }], 2],
     ['a document in the corpus that cannot be read', [{ file: 'docs/__probe.md', text: undefined }], 1],
@@ -1703,6 +1727,13 @@ if (PROBE) {
     if (findings.length === expected) console.log(`  ok    mutation-claims handled ${label} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
     else { missed += 1; console.log(`  FAIL  mutation-claims reported ${findings.length} findings on ${label}, expected ${expected}: ${findings.join(' | ')}`) }
   }
+
+  // Round eight's H3: the any-failure marker is not a witness, because it is satisfied by a failure
+  // anywhere in the file rather than by the leg that carries this rule.
+  const weakWitness = { claims: [{ ...probeMutations.claims[0], witness: '\u00d7' }] }
+  const weak = mutationClaimFindings(weakWitness, [{ file: 'docs/x.md', text: 'caught `mutate:probe-claim`\n' }], file => anchored[file])
+  if (weak.length === 1) console.log(`  ok    mutation-claims refuses a claim whose witness is the any-failure marker (${weak.length} finding)`)
+  else { missed += 1; console.log(`  FAIL  mutation-claims took an any-failure witness: ${weak.join(' | ')}`) }
   // A ledger that anchors perfectly and runs nothing is M1, so the run has a leg each way.
   const probeRun = { commitClaim: 'probe-claim', claims: probeMutations.claims }
   for (const [label, ledger, run, expected] of [
@@ -2128,7 +2159,7 @@ void HIDDEN.kindsOf('hidden', 1)
   const commits = repositoryCommits()
   const records = corpus.filter(file => RECORD_DOCS.has(file))
   const verified = records.filter(file => namesHeldCommit(readFileSync(join(ROOT, file), 'utf8'), commits))
-  console.log(`  note  tree-inventory scans ${corpus.length} document(s) — every markdown file under docs/ and README.md — for count claims, minus ${verified.length} record(s) of past commits, each verified against git to name a commit this repository holds${verified.length === records.length ? '' : ` (${records.length - verified.length} declared entry/entries named none and are read as this tree's)`}; a fenced block is quoted output, a fence delimiter is three backticks or three tildes and a longer or unclosed one is a finding, a count on a line carrying a commit-shaped token is that line's record (the token is not verified against git, so a fabricated one buys the same exemption), and a bare file count is read as this tree's only where the line names this tree`)
+  console.log(`  note  tree-inventory scans ${corpus.length} document(s) — every markdown file under docs/ and README.md — for count claims, minus ${verified.length} record(s) of past commits, each anchored by the first commit it names and checked against git to be one this repository holds — a held token later in the text anchors nothing${verified.length === records.length ? '' : ` (${records.length - verified.length} declared entry/entries anchor on nothing this tree holds and are read as this tree's)`}; a fenced block is quoted output, a fence delimiter is three backticks or three tildes and a longer or unclosed one is a finding, a count on a line carrying a commit-shaped token is that line's record (the token is not verified against git, so a fabricated one buys the same exemption), and a bare file count is read as this tree's only where the line names this tree`)
   const charge = evidenceFiles().reduce((total, entry) => total + entry.lines, 0)
   const sourceLines = files.filter(file => file.startsWith('src/')).reduce((total, file) => total + raw.get(file).split('\n').length, 0)
   console.log(`  note  evidence-budget charges ${charge} lines of evidence against ${sourceLines} of source (${(charge / sourceLines).toFixed(4)}, ratchet ${EVIDENCE_BUDGET}, ${Math.floor(EVIDENCE_BUDGET * sourceLines) - charge} whole line(s) of headroom): every file under scripts/ at any depth whatever it is called, every .ts under tests/ and every file under tests/fixtures/`)

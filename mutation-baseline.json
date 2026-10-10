@@ -469,7 +469,7 @@
           "tests/task-binding.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "refuses to start work nobody is responsible for"
     },
     {
       "id": "task-verdict-input-binding",
@@ -488,7 +488,7 @@
           "tests/task-binding.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "refuses a verdict formed on inputs the run never declared"
     },
     {
       "id": "task-any-terminal-satisfies",
@@ -512,7 +512,7 @@
           "tests/task-tree.spec.ts"
         ]
       },
-      "witness": "×",
+      "witness": "blocks a dependent on a dependency that ended without verifying, naming it",
       "note": "two edits, because the stopped case is caught by the `dead` filter first: flipping only the second filter leaves every spec green, which is itself worth recording — the two filters are not redundant, and the first one is what makes \"any terminal satisfies\" unreachable for `stopped`"
     },
     {
@@ -532,7 +532,7 @@
           "tests/task-tree.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "does not accept a criterion whose supporting sub-task merely stopped"
     },
     {
       "id": "task-only-missing-propagates",
@@ -551,7 +551,7 @@
           "tests/task-tree.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "blocks a dependent on a dependency that ended without verifying, naming it"
     },
     {
       "id": "control-barrier-ignored",
@@ -570,7 +570,7 @@
           "tests/control-barrier.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "never acknowledges an uncertain command while the barrier keeps failing"
     },
     {
       "id": "assets-head-cutoff",
@@ -589,7 +589,7 @@
           "tests/published-assets.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "is not rewritten by a pointer switch that happened after the cutoff"
     },
     {
       "id": "assets-election-cutoff",
@@ -608,7 +608,7 @@
           "tests/published-assets.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "does not let an election above the cutoff add a class to the frozen history"
     },
     {
       "id": "assets-revision-content",
@@ -627,7 +627,7 @@
           "tests/published-assets.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "counts nothing for a slot that pinned content the head revision does not hold"
     },
     {
       "id": "assets-no-head-guess",
@@ -646,7 +646,7 @@
           "tests/published-assets.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "counts nothing when no pointer switch happened below the cutoff"
     },
     {
       "id": "assets-class-dedup",
@@ -665,7 +665,7 @@
           "tests/published-assets.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "counts a revision two rounds each elected once"
     },
     {
       "id": "round-novelty-publish-removed",
@@ -752,7 +752,7 @@
         }
       ],
       "run": { "kind": "vitest", "args": ["tests/gate.spec.ts"] },
-      "witness": "\u00d7"
+      "witness": "refuses a spread copy of a branded rule, because identity is not copyable"
     },
     {
       "id": "protocol-nested-reader-widened",
@@ -766,7 +766,7 @@
         }
       ],
       "run": { "kind": "vitest", "args": ["tests/measure-slice.spec.ts"] },
-      "witness": "\u00d7"
+      "witness": "refuses a plan with no run, no context or an old version, a trial before a plan, a second plan, an undeclared member"
     },
     {
       "id": "protocol-post-declare-push",
@@ -780,7 +780,7 @@
         }
       ],
       "run": { "kind": "vitest", "args": ["tests/gate.spec.ts"] },
-      "witness": "\u00d7"
+      "witness": "freezes the declared member set where defineKind built it, so nothing can widen it afterwards"
     }
 ,
     {
@@ -800,7 +800,7 @@
           "tests/task-binding.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "refuses a bubble that cannot name its model, its tools or its conditions"
     },
     {
       "id": "protocol-nested-metric-reader-widened",
@@ -819,7 +819,7 @@
           "tests/measure-slice.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "refuses a plan with no run, no context or an old version, a trial before a plan, a second plan, an undeclared member"
     },
     {
       "id": "protocol-nested-weights-reader-widened",
@@ -838,7 +838,7 @@
           "tests/measure-slice.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "refuses a plan with no run, no context or an old version, a trial before a plan, a second plan, an undeclared member"
     },
     {
       "id": "protocol-nested-run-reader-widened",
@@ -857,7 +857,7 @@
           "tests/measure-slice.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "refuses a plan with no run, no context or an old version, a trial before a plan, a second plan, an undeclared member"
     },
     {
       "id": "protocol-nested-outcome-reader-widened",
@@ -876,7 +876,7 @@
           "tests/strategy-round.spec.ts"
         ]
       },
-      "witness": "×"
+      "witness": "refuses an unadmitted winner, an outcome outside the plan, a blank reason and a second decision"
     },
     {
       "id": "protocol-nested-verdict-reader-widened",
