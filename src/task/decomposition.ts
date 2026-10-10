@@ -20,6 +20,13 @@
  * boundary before a scheduler may start work, and shown by `projectTree` for readers. Copying a
  * child's contract into the parent would be the same fact recorded twice.
  *
+ * **Who may plan.** The fact is stamped with its emitter's actor, and the reducer requires that
+ * actor to be the task's current holder. A plan decides what work will happen and who it will be
+ * attributed to, which is a decision about the holder's own task, so the holder is the one who
+ * makes it — the same reason a transfer requires the holder. This is the rule the pre-assembly
+ * review left open (`assembly-review.md` A01): without it, any bound agent could plan work onto
+ * another agent's task and the log would attribute the plan to nobody the task belongs to.
+ *
  * @module singularity-core/task/decomposition
  */
 
@@ -28,6 +35,7 @@ import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import type { TaskContract } from './contract.ts'
 import type { TaskState } from './protocol.ts'
+import { requireResponsible } from './responsibility.ts'
 import { record, requireContractOf, text } from './shape.ts'
 
 /** One declared sub-task: what it is, what must verify before it, what it accepts, its budget. */
@@ -165,6 +173,9 @@ export function decomposedKind(kind: string, emitter: string): KindRule<TaskStat
     reduce: (state, envelope, payload) => {
       const where = `${kind} #${envelope.seq}`
       const contract = requireContractOf(state, where, envelope.subject)
+      // The plan is the holder's act, and the identity is the one the log stamps: a caller cannot
+      // claim it, and an agent bound to a task it does not hold cannot write its plan.
+      requireResponsible(state, envelope.actor, where)
       if (state.decomposition !== undefined)
         refuse(
           'illegal-transition',

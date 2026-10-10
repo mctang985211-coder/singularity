@@ -373,14 +373,25 @@ function requireOpenedNode(cut: Cut, agentId: string, action: string): void {
 }
 
 /**
- * If any plan declares this task as a sub-task, the plan's gate decides.
+ * If any plan declares this task as a sub-task, the plan's gate decides. And if this task *is* a
+ * plan, its own running sub-tasks decide: a parent does not work on the same acceptance at the same
+ * time as the child it delegated that acceptance to.
  *
  * The tree's own status is the gate: `ready` means every dependency verified and the budget is not
  * spent. Anything else is refused with the tree's own reason, so the operator reads the same
  * sentence here as in a projection.
+ *
+ * The second half is the `waiting_children` phase of `docs/assembly-blueprint.md` §5, placed where
+ * it can actually stop work. Writing it into the fold would delete the fact after the fact; this
+ * check runs inside the commit region that produces `run/started`, so the conflicting attempt is
+ * never recorded. It is deliberately "a sub-task is *running*" rather than "the plan is unfinished":
+ * a parent's own run before its children start, and again after they verify, is the ordinary shape
+ * of a campaign, and forbidding both would make the plan the only writer of the parent's criteria —
+ * which is not what delegation means.
  */
 function requirePlanAllows(cut: Cut, taskId: string): void {
-  for (const view of projectTree(cut.tasks())) {
+  const plans = projectTree(cut.tasks())
+  for (const view of plans) {
     const child = view.children.find(entry => entry.taskId === taskId)
     if (child === undefined) continue
     if (child.status === 'ready') continue
@@ -391,6 +402,16 @@ function requirePlanAllows(cut: Cut, taskId: string): void {
       }`,
     )
   }
+  const own = plans.find(view => view.parentTaskId === taskId)
+  if (own === undefined) return
+  const running = own.children.filter(child => child.status === 'running')
+  if (running.length === 0) return
+  refuse(
+    'illegal-transition',
+    `cannot start a run for task "${taskId}": its own sub-task ${running
+      .map(child => `"${child.taskId}"`)
+      .join(', ')} ${running.length === 1 ? 'is' : 'are'} running, and the parent does not work on an acceptance it has delegated while the delegate is still working — wait for the sub-task to settle`,
+  )
 }
 
 /** The criterion a verdict must belong to, or a refusal naming why there is none. */

@@ -24,6 +24,7 @@ import {
   CHILD_A_CONTRACT,
   CHILD_B,
   CHILD_B_CONTRACT,
+  assigned,
   decompose,
   PARENT,
   parentContract,
@@ -36,6 +37,7 @@ import { taskRegistry } from './task-fixtures.ts'
 async function decomposed(children = plan(), registry: ProtocolRegistry = taskRegistry()): Promise<ReturnType<typeof treeLog>> {
   const log = treeLog(registry)
   await log.emit(admit(PARENT, parentContract()))
+  await log.emit(assigned(PARENT))
   await log.emit(decompose(PARENT, children))
   return log
 }
@@ -83,6 +85,7 @@ describe('a decomposition is one complete fact', () => {
     for (const item of cases) {
       const log = treeLog()
       await log.emit(admit(PARENT, parentContract()))
+      await log.emit(assigned(PARENT))
       const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, item.children as never)))
       expect(`${item.label}: ${refusal.code}`).toBe(`${item.label}: ${item.code}`)
     }
@@ -91,6 +94,7 @@ describe('a decomposition is one complete fact', () => {
   it('names the cycle it found rather than only reporting one', async () => {
     const log = treeLog()
     await log.emit(admit(PARENT, parentContract()))
+    await log.emit(assigned(PARENT))
     const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, [child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })])))
     expect(refusal).toMatchObject({ code: 'cyclic-dependency', detail: expect.stringContaining(`${CHILD_A} -> ${CHILD_B}`) })
   })
@@ -114,6 +118,7 @@ describe('a decomposition is one complete fact', () => {
     await childrenFirst.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
     await childrenFirst.emit(admit(CHILD_B, CHILD_B_CONTRACT()))
     await childrenFirst.emit(admit(PARENT, parentContract()))
+    await childrenFirst.emit(assigned(PARENT))
     await childrenFirst.emit(decompose(PARENT, plan()))
     expect([planFirst, childrenFirst].map(log => foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, PARENT)?.decomposition?.children.map(entry => entry.taskId))).toEqual([[CHILD_A, CHILD_B], [CHILD_A, CHILD_B]])
   })

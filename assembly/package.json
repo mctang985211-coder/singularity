@@ -8,12 +8,15 @@
   "exports": {
     ".": "./lib/index.js",
     "./agent": "./lib/agent.js",
+    "./web": "./lib/web.js",
+    "./client": "./client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./presets/*.patch.yml": "./presets/*.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "client.js",
     "cordis.patch.yml",
     "presets"
   ],
@@ -23,6 +26,9 @@
         "./cordis.patch.yml",
         "./presets/singularity-next.patch.yml"
       ]
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "peerDependencies": {

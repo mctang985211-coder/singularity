@@ -64,6 +64,7 @@ describe('a plan is presented with its gates, not its hopes', () => {
     const registry = taskRegistry()
     const log = treeLog(registry)
     await log.emit(admit(PARENT, parentContract()))
+    await log.emit(assigned(PARENT))
     await log.emit(decompose(PARENT, plan()))
     const view = tree(registry, log)
 
@@ -104,11 +105,12 @@ describe('a plan is presented with its gates, not its hopes', () => {
     const registry = taskRegistry()
     const log = treeLog(registry)
     await log.emit(admit(PARENT, parentContract()))
+    await log.emit(assigned(PARENT))
     await log.emit(decompose(PARENT, chain()))
     await log.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
     await log.emit(admit(CHILD_B, CHILD_B_CONTRACT()))
     await log.emit(admit(CHILD_C, CHILD_C_CONTRACT()))
-    for (const subject of [PARENT, CHILD_A, CHILD_B, CHILD_C]) await log.emit(assigned(subject))
+    for (const subject of [CHILD_A, CHILD_B, CHILD_C]) await log.emit(assigned(subject))
 
     // A's single declared run fails: A is stopped, and nothing downstream may start.
     await openRun(log, CHILD_A, 'a1')
@@ -170,9 +172,9 @@ describe('a parent is accepted by verification, never by its children ending', (
     const registry = taskRegistry()
     const log = treeLog(registry)
     await log.emit(admit(PARENT, parentContract()))
+    await log.emit(assigned(PARENT))
     // One sub-task carries `counts`; the parent's own run carries `limits`.
     await log.emit(decompose(PARENT, [{ taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1 }]))
-    await log.emit(assigned(PARENT))
     await log.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
     await log.emit(assigned(CHILD_A))
     await openRun(log, CHILD_A, 'a1')

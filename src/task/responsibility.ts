@@ -77,6 +77,11 @@ export function reassignedKind(kind: string, emitter: string): KindRule<TaskStat
     },
     reduce: (state, envelope, payload) => {
       const where = `${kind} #${envelope.seq}`
+      // A transfer is the holder's act: handing work to someone else is a decision about one's own
+      // responsibility, and an agent that does not hold the task has nothing to hand over. The
+      // `from` member is the previous holder's **agent id** and is checked below; this is the
+      // holder's **identity**, which is what the log stamps, so neither can be claimed by a caller.
+      requireResponsible(state, envelope.actor, where)
       const current = state.responsibility
       if (current === undefined)
         refuse('illegal-transition', `${where} transfers task "${envelope.subject}", which nobody is responsible for yet; there is nothing to transfer`)

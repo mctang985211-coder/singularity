@@ -121,11 +121,14 @@ describe('only the agent currently answerable may start work', () => {
     const refusal = await asyncRefusalOf(() => original.emit(started()))
     expect(refusal).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining('agent-2') })
 
-    // The new holder works in a deployment whose scheduler identity *is* that agent, which is what
-    // recovery with a different agent looks like: same facts, different trusted identity.
+    // The new holder works in a deployment whose identity *is* that agent, which is what recovery
+    // with a different trusted identity looks like: the same facts, re-stamped from the table this
+    // deployment now holds. Both the assignment and the transfer carry the identity the successor's
+    // own log stamps, because a transfer is the holder's act and the holder is whoever `assigned`
+    // last named.
     const successor = logWith({ scheduler: 'runtime-2' })
     await successor.emit(admitted())
-    await successor.emit(assigned('agent-1', SCHEDULER))
+    await successor.emit(assigned('agent-1', 'runtime-2'))
     await successor.emit(reassigned('agent-1', 'agent-2', 'runtime-2'))
     const admittedRun = await successor.emit(started())
     expect(admittedRun.kind).toBe(TASK_KINDS.runStarted)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Build the assembly into two loadable modules.
+ * Build the assembly into three loadable modules.
  *
  * The package cannot be shipped as TypeScript. It imports `src/**` with `.ts` specifiers — that is how
  * this repository runs its own tests, through a loader hook — and Node refuses to strip types inside
@@ -9,9 +9,15 @@
  * `@deepseek-ai/*` package left external because the host profile provides those at runtime and a copy
  * inside the bundle would be a second cordis.
  *
- * Two entries, because the host plugin and the agent face are mounted at different places in a
- * profile: `lib/index.js` provides the `singularity` service, `lib/agent.js` turns it into tools
- * inside a mounted agent's scope. `package.json` maps them to `.` and `./agent`.
+ * Three entries, because the three faces are mounted at different places in a profile: `lib/index.js`
+ * provides the `singularity` service, `lib/agent.js` turns it into tools inside a mounted agent's
+ * scope, and `lib/web.js` adds the read route to a profile that has a Web server. The Web row is
+ * separate so a profile without one mounts the package rather than a plugin that activates and then
+ * cannot find the seam it declares. `package.json` maps them to `.`, `./agent` and `./web`.
+ *
+ * The panel's client bundle is deliberately **not** an entry here: the host reads that file verbatim
+ * and there is no bundler at runtime, so the file in the tree is the artifact
+ * (`docs/phase-g2-design.md` §4).
  *
  * The bundler is `vite`, a devDependency of this repository, resolved through the ordinary module
  * graph. A checkout with no `node_modules` fails here with Node's own `ERR_MODULE_NOT_FOUND`, which
@@ -42,6 +48,7 @@ await build({
       entry: {
         index: join(here, 'src/index.ts'),
         agent: join(here, 'src/agent.ts'),
+        web: join(here, 'src/web.ts'),
       },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,
@@ -56,4 +63,4 @@ await build({
   },
 })
 
-console.log('assembly: built lib/index.js and lib/agent.js')
+console.log('assembly: built lib/index.js, lib/agent.js and lib/web.js')

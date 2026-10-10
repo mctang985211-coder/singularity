@@ -148,12 +148,14 @@ export async function planned(live: Deployment, maxRuns = 1) {
       criteria: [{ criterionId: 'part', statement: 'the part counts', verifierRef: UNIT_VERIFIER, verifierVersion: '1', implementationDigest: UNIT_IMPLEMENTATION }],
     },
   })
+  // The holder plans: `task/decomposed` requires the actor to be the task's responsible agent, so
+  // the parent is assigned before its plan is declared.
+  await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
   await commands.decompose({
     commandId: 'plan',
     parentTaskId: PARENT,
     children: [{ taskId: CHILD, dependsOn: [], supports: ['correctness'], maxRuns }],
   })
-  await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
   await commands.assign({ commandId: 'assign-child', taskId: CHILD, agentId: AGENT })
   return commands
 }

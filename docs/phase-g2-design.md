@@ -263,21 +263,44 @@ interface ControlSnapshot {
 ### 6b.3 子会话（`src/runtime/child-session.ts`）
 
 ```ts
-export interface ChildSessionRequest {
-  readonly agentId: string            // 子任务的 task id；会话 id 由它派生（既有 agentSessionIdOf 的口径）
-  readonly cwd: string
-  readonly parent: { readonly agent: Agent; readonly sessionId: string }
-  readonly instruction: string        // 第一条也是唯一一条用户消息
+export interface ChildSeams {
+  readonly sessionPersistence?: SessionPersistence
+  readonly sessions?: SessionStore
+  readonly agents?: AgentRegistry
+  readonly agentLoop?: unknown
+  readonly agentPresets?: { composeFrom(ctx: Context, parent: Context): void }
 }
-export interface OpenChildSession { readonly agentId: string; readonly sessionId: string; readonly resumed: boolean }
-export async function openChildSession(ctx: ChildSeams, request: ChildSessionRequest): Promise<OpenChildSession>
+export interface ChildSessionRequest {
+  readonly agentId: string          // 子任务的 task id；会话 id 由它派生（既有 agentSessionIdOf 的口径）
+  readonly cwd: string
+  readonly parent: Agent            // 父 agent 的活对象：预设从它 join，模型路由从它的 header 读
+  readonly model: { readonly provider: string; readonly model: string }
+  readonly instruction: string
+  readonly setup: (childCtx: Context, agent: Agent) => void | Promise<void>   // 见下：预设 join + 我们的工具注册
+}
+export async function openChildSession(ctx: ChildSeams, request: ChildSessionRequest): Promise<{ agentId: string; sessionId: string; agent: Agent }>
 export async function closeChildSession(agentId: string): Promise<void>
-export async function deliverInstruction(ctx: ChildSeams, sessionId: string, text: string): Promise<void>
 ```
-`ChildSeams` 至少含 `sessionPersistence`/`sessions`/`agents`/`agentLoop`/`agentPresets`；缺一即在装载时具名拒绝
-（既有 `assertRuntimeSeams` 的形状）。**三个必须做对的点**（实测的缝，见 §6）：`setup` 里
-`composeFrom(childCtx, parent.ctx)`（否则子 agent 的工具表是空的）、`origin:'subagent'` 的会话会被 Web 侧栏
-过滤（我们的面板读的是控制投影，不经侧栏，所以这是**已知且接受**的行为）、resume 要独占写租约。
+
+**实测的四个必须做对的点**（装好的 `0.2.0-rc.2`，见 §6 与本节末）：
+
+1. **预设是作用域父，不是字段**。`ctx.agents.create({meta:{agentPreset}})` 不会挂任何东西；子 agent 的工具表会是空的。
+   必须在 `setup` 里 `agentPresets.composeFrom(childCtx, parent.ctx)`（`dsh-subagent/lib/types/child-agent.js` 是这么做的），
+   我们的 agent 面孔（`./agent`）也因此在子 agent 的作用域里重挂一次——这正是 `openChildSession` 收一个 `setup` 的原因。
+2. **子 agent 不继承模型路由**。`ctx.agents.create` 不接受就不给；`agentOptions: {provider, model}` 必须显式传，
+   值从父 agent 的 `session.requestHeader().config` 读（`callerOf` 已经在读同一个值，不新增第二个来源）。
+3. **投递一条消息 = `agent.followup(createUserMessage(...))` + `await agent.whenIdle()`**。
+   `followup` 同步唤醒驱动器（内部 `wakeDriver`），`whenIdle()` 是唯一的完成等待；
+   它是"整个 agent 静默"，而我们是**只为这一个子会话投递一条消息**，所以两者在这里同义——
+   这一点是本模块的接口存在的原因，写进 JSDoc。
+   不要用 `ctx.subagents.sendMessage`：它要求 `subagent/descriptor` 事实（只有 `dsh-subagent` 自己的创建路径写），
+   对一个我们自建的子会话会抛 `NOT_RESUMABLE`；也不要手写 `user/message`（surface-eligible，缺 `surfaceOp` 会被拒）。
+4. **没有级联销毁**。父会话结束不处理子会话，SIGKILL 后内存里的挂载全没了。所以：
+   每个打开的 child 由装配层的独占 `ctx.effect` 拥有 disposer；重挂时按计划重开（幂等）；
+   活的子会话**不许** resume（写租约是独占的，活的持有者在时抛 `SessionAlreadyOwnedError`）。
+
+**不做的事**：不改 `src/**` 的协议来承载会话；子会话不写任何控制事实（它写的是 DSH 自己的 transcript），
+子任务的**责任、契约与判决**仍然只由装配层的命令写进控制 store。
 
 ## 7. 工作流与文件域（一个文件域一个 owner；共享文件只有协调者动）
 

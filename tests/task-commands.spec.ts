@@ -124,6 +124,7 @@ describe('a run starts only when every cross-entity condition holds', () => {
       taskId: CHILD,
       contract: { goal: 'g', inputs: [], criteria: [{ criterionId: 'p', statement: 's', verifierRef: UNIT_VERIFIER, verifierVersion: '1', implementationDigest: UNIT_IMPLEMENTATION }] },
     })
+    await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
     // The child waits on a sibling the plan declares but nobody admitted.
     await commands.decompose({
       commandId: 'plan',
