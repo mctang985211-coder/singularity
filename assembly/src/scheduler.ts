@@ -66,12 +66,21 @@ export interface Scheduler {
 }
 
 /**
+ * How one child session is actually opened.
+ *
+ * A port, because "when a session is opened and what it is told" is this module's rule and *how* a DSH
+ * child agent is created is the runtime's business: a spec that had to construct a real agent session to
+ * assert the first would be asserting the second instead.
+ */
+export type OpenChild = (request: ChildSessionRequest) => Promise<ChildSession>
+
+/**
  * One scheduler per deployment, holding its own children.
  *
  * The set is the idempotence: a sub-task with a live session is skipped, so a boot, a reload and a
  * second caller all converge on "the sessions that should exist" without a guard to keep in sync.
  */
-export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams): Scheduler {
+export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams, open: OpenChild = request => openChildSession(seams, request)): Scheduler {
   const live = new Map<string, ChildSession>()
   return {
     advance: async parent => {
@@ -84,7 +93,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams):
       for (const plan of projectTree(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION))) {
         for (const child of plan.children) {
           if (child.status !== 'ready' || live.has(child.taskId)) continue
-          opened.push(await openOne(apparatus, seams, parent, live, child.taskId))
+          opened.push(await openOne(apparatus, parent, live, child.taskId, open))
         }
       }
       return opened
@@ -113,7 +122,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams):
  * budget left. `say` is where the run actually starts: `openChildSession` composes the agent, and the
  * message is what makes it work.
  */
-async function openOne(apparatus: Apparatus, seams: ChildSessionSeams, parent: Agent, live: Map<string, ChildSession>, childTaskId: string): Promise<string> {
+async function openOne(apparatus: Apparatus, parent: Agent, live: Map<string, ChildSession>, childTaskId: string, open: OpenChild): Promise<string> {
   const state = apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, childTaskId)
   if (state === undefined || state.contract === undefined)
     refuse('illegal-transition', `sub-task "${childTaskId}" is called ready by its plan but this control holds no admitted contract for it, so there is no work to hand to a session`)
@@ -128,7 +137,7 @@ async function openOne(apparatus: Apparatus, seams: ChildSessionSeams, parent: A
     model: modelOf(parent),
     compose: () => undefined,
   }
-  const session = await openChildSession(seams, request)
+  const session = await open(request)
   live.set(childTaskId, session)
   try {
     await session.say(instructionFor(state, workspace, apparatus.domain.artifact))

@@ -42,6 +42,12 @@
           "expected": "fail",
           "artifact": "samples/fail-printing-cheat.v",
           "argv": ["samples/fail-printing-cheat.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+        },
+        {
+          "name": "rejects a module that ends the simulation early, which exits zero and never compares a word",
+          "expected": "fail",
+          "artifact": "samples/fail-early-finish.v",
+          "argv": ["samples/fail-early-finish.v", "tb/tb_sha256_w_mem_selfcheck.v"]
         }
       ]
     },

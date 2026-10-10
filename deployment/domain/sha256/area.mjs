@@ -78,10 +78,19 @@ try {
   miss(`yosys exited ${error.status ?? 'without a status'} on ${artifactPath}: ${reason(`${error.stderr ?? ''}\n${error.stdout ?? ''}`)}`)
 }
 
-// Hierarchy mode prints the module's total area, so this one line answers for the whole design no
-// matter how the submission partitioned it. Two lines for one module name would mean the log is not
-// the one this program pinned, and a missing line means the design had no area at all.
-const areas = [...log.matchAll(/Chip area for module '\\sha256_w_mem': ([0-9.]+)/g)]
-if (areas.length !== 1) miss(`yosys printed ${areas.length} area lines for module '${TOP}'; this program reads exactly the one hierarchy total, so ${areas.length === 0 ? 'a design with no area is no measurement' : 'an ambiguous log is no measurement'}`)
+// The number is the module's *total* area, and the log has to say that twice: in hierarchy mode a
+// module's line is its total including what it instantiates, so it agrees with the `top module` line
+// the design-hierarchy section prints. Without the flag the same line is the module's **local** area,
+// which is what makes the number partition-dependent — the same logic reads 0.000000 here once it
+// lives in a child, while the design's total does not move at all. Requiring the two lines to agree is
+// what lets a declared sample falsify the pin, instead of the pin resting on remembering the flag.
+const moduleLines = [...log.matchAll(/^ +Chip area for module '\\sha256_w_mem': ([0-9.]+)$/gm)]
+if (moduleLines.length !== 1)
+  miss(`yosys printed ${moduleLines.length} area lines for module '${TOP}'; this program reads the one hierarchy total, so ${moduleLines.length === 0 ? 'a design with no area is no measurement' : 'an ambiguous log is no measurement'}`)
+const quality = Number(moduleLines[0][1])
+const topLines = [...log.matchAll(/^ +Chip area for top module '\\sha256_w_mem': ([0-9.]+)$/gm)]
+if (topLines.length > 1) miss(`yosys printed ${topLines.length} design-hierarchy totals for '${TOP}'; an ambiguous log is no measurement`)
+if (topLines.length === 1 && Number(topLines[0][1]) !== quality)
+  miss(`the module line reads ${quality} while the design hierarchy totals ${Number(topLines[0][1])}; a module area below its own hierarchy total is the local-area reading, which shrinks when logic moves into a child module`)
 
-console.log(JSON.stringify({ quality: Number(areas[0][1]) }))
+console.log(JSON.stringify({ quality }))
