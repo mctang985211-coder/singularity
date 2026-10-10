@@ -260,7 +260,7 @@ async function main() {
     const decided = await commands.decideRound({ commandId: 'decide-1', roundId: 'round-1' })
     const decision = roundState('round-1').decision
     check('the decision names an admitted winner', decided.kind === STRATEGY_KINDS.roundDecided && decision.winner === 1, `winner ${decision.winner}`)
-    check('every declared slot is closed out with a reason', decision.outcomes.map(outcome => outcome.slot).join() === '0,1,2' && decision.outcomes.every(outcome => outcome.reason.length > 0), `${decision.outcomes.length} outcomes`)
+    check('every declared slot carries the disposition the projection read for it', decision.outcomes.length === before.slots.length && decision.outcomes.every(outcome => before.slots[outcome.slot].admissible === outcome.admitted), `${decision.outcomes.length} outcome(s) for ${before.slots.length} projected slot(s); disagreed: ${decision.outcomes.filter(outcome => before.slots[outcome.slot].admissible !== outcome.admitted).map(outcome => `slot ${outcome.slot} decided ${outcome.admitted}, projected ${before.slots[outcome.slot].admissible}`).join('; ') || 'none'}`)
     check('the winner is an admitted slot', decision.outcomes.find(outcome => outcome.slot === decision.winner)?.admitted === true)
     check('the decision records the band it was made under', decision.calibration.floor === FLOOR.floor && decision.calibration.source === FLOOR.source)
     const late = await refusalOf(() => submit('round-1', 0, { evaluationId: 'e-0', revision: CANDIDATE_0 }))

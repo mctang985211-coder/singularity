@@ -180,7 +180,9 @@ describe('select: admissibility before any comparison', () => {
       WEIGHTS,
     )
     expect(selection.winner).toBeNull()
-    expect(selection.outcomes.map((entry) => [entry.slot, entry.reason.length > 0])).toEqual([[0, true], [1, true]])
+    // The reason is the judgement, not merely a string: both slots are refused by the in-band rule,
+    // which is the fact a caller reads instead of a winner. A non-empty reason would not say that.
+    expect(selection.outcomes.map((entry) => entry.reason)).toEqual([expect.stringContaining('in-band candidate'), expect.stringContaining('in-band candidate')])
   })
 })
 

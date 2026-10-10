@@ -760,11 +760,18 @@ async function main() {
     const refusedRevision = roundStateOf('round-1').submissions.find(entry => entry.evaluationId === 'r1-c1')?.revision.revisionId
     check('the elected revision is not the one the round refused', electedRevision === 'r0002' && refusedRevision === 'r0003', `${electedRevision} vs ${refusedRevision}`)
     check('the winner is admitted with a frozen gain against the incumbent\'s aggregate below the cutoff', good.admissible === true && close(good.gain, 0.7 - 0.4), `gain ${good.gain}`)
-    check('every slot is closed out with a reason', projectedOne.outcomes.length === 3 && projectedOne.outcomes.every(outcome => typeof outcome.reason === 'string' && outcome.reason.length > 0))
+    check('every slot the plan declared is closed out exactly once, and the two dispositions per slot are distinct',
+      projectedOne.outcomes.map(outcome => outcome.slot).join() === [...projectedOne.slots].map(slot => slot.slot).sort().join() &&
+      projectedOne.outcomes.map(outcome => outcome.slot).join() === [...Array(roundStateOf('round-1').plan.candidates).keys()].join() &&
+      new Set(projectedOne.slots.map(slot => `${slot.slot}:${slot.admissible}`)).size === projectedOne.slots.length,
+      `${projectedOne.outcomes.length} outcome(s): ${projectedOne.outcomes.map(outcome => `slot ${outcome.slot}${outcome.admitted ? ' admitted' : ' refused'}`).join(', ')}`)
 
     await commands.decideRound({ commandId: nextId('decide-round-1'), roundId: 'round-1' })
     const decidedOne = decisionOf('round-1')
     check('the decision records the winner the projection implied', decidedOne.winner === 0, `winner ${decidedOne.winner}`)
+    check('the recorded decision is the projection, slot for slot and reason for reason',
+      JSON.stringify({ winner: decidedOne.winner, outcomes: decidedOne.outcomes }) === JSON.stringify({ winner: projectedOne.winner, outcomes: projectedOne.outcomes }),
+      `recorded ${decidedOne.outcomes.length} outcome(s), projected ${projectedOne.outcomes.length}; first difference at ${JSON.stringify(decidedOne.outcomes.findIndex((outcome, index) => JSON.stringify(outcome) !== JSON.stringify(projectedOne.outcomes[index])))}`)
     check('the decision freezes the band it was made under', decidedOne.calibration.floor === FLOOR.floor && decidedOne.calibration.source === FLOOR.source)
 
     // ---------------------------------------------------------------- 4. the controlled release

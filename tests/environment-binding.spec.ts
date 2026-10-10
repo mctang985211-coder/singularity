@@ -36,6 +36,8 @@ const OTHER_MANIFEST = { toolchain: 'node@20', files: ['src/a.ts'] } as const
 const SUBJECTS: Readonly<Record<string, string>> = { [ENVIRONMENT_ROLE]: 'environment-service' }
 
 let counter = 0
+/** The time stamped on the envelope that created `r0001` of `env-a` — read from the fact, not assumed. */
+let createdAt = ''
 
 function create(revisionId: string, manifest: unknown, subject: string): EmitInput {
   counter += 1
@@ -57,7 +59,7 @@ async function environments(): Promise<ReadonlyMap<string, EnvironmentState>> {
   const registry = new ProtocolRegistry()
   declareEnvironmentProtocol(registry)
   const log = new MemoryLog(registry, { subjects: SUBJECTS })
-  await log.emit(create(REVISION_ID, MANIFEST, ENVIRONMENT_ID))
+  createdAt = (await log.emit(create(REVISION_ID, MANIFEST, ENVIRONMENT_ID))).at
   await log.emit(create(OTHER_REVISION, OTHER_MANIFEST, ENVIRONMENT_ID))
   await log.emit(create(REVISION_ID, OTHER_MANIFEST, OTHER_ENVIRONMENT))
   return foldSubjects<EnvironmentState>(registry, log.entries(), ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)
@@ -69,7 +71,13 @@ describe('resolving one pin', () => {
   it('returns the created revision, whose manifest the caller never supplied', async () => {
     const revision = assertPinnedRevision(pinned, await environments(), WHERE)
 
-    expect([revision.revisionId, revision.contentDigest, revision.manifest, revision.at.length > 0]).toEqual([REVISION_ID, digestOf(MANIFEST), MANIFEST, true])
+    expect([revision.revisionId, revision.contentDigest, revision.manifest]).toEqual([REVISION_ID, digestOf(MANIFEST), MANIFEST])
+  })
+
+  it('returns it at the time its creating fact was stamped with, not merely at some time', async () => {
+    const revision = assertPinnedRevision(pinned, await environments(), WHERE)
+
+    expect(revision.at).toBe(createdAt)
   })
 
   it('refuses a pin on an environment no revision/created fact created', async () => {
