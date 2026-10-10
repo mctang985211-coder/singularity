@@ -617,8 +617,8 @@
       "edits": [
         {
           "file": "src/strategy/published-assets.ts",
-          "find": "    if (!sameRevision(elected.revision, { environmentId, revisionId: published.revisionId, digest: published.contentDigest })) continue",
-          "replace": "    if (elected.revision.revisionId !== published.revisionId) continue"
+          "find": "    if (!published.some(target => sameRevision(elected.revision, { environmentId, revisionId: target.revisionId, digest: target.contentDigest }))) continue",
+          "replace": "    if (!published.some(target => elected.revision.revisionId === target.revisionId)) continue"
         }
       ],
       "run": {
@@ -636,8 +636,8 @@
       "edits": [
         {
           "file": "src/strategy/published-assets.ts",
-          "find": "  if (published === undefined) return []",
-          "replace": "  if (published === undefined) return ['unattributed']"
+          "find": "  if (published.length === 0) return []",
+          "replace": "  if (published.length === 0) return ['unattributed']"
         }
       ],
       "run": {

@@ -358,6 +358,30 @@ describe('the projection decides admissibility before any argmax', async () => {
     expect(stateOf(lenient, second)?.decision?.calibration).toEqual({ floor: 0.2, source: 'declared' })
   })
 
+  it('reports a decided round from its record, and an open round as a preview', async () => {
+    const live = await deployment()
+    const roundId = await twoCandidateRound(live, { e0: { quality: 0.8 } })
+    const decided = await decideThrough(live, roundId)
+    expect(winnerOf(decided)).toBe(0)
+
+    // A closed round is read from its record, which the commit region verified against this very
+    // projection at its own cut: a caller's different calibration, or a measurement that arrived
+    // after the decision, cannot flip what the round decided.
+    const otherBasis: Calibration = { floor: 5, source: 'declared' }
+    const projected = projectRound(stateOf(live, roundId) as RoundState, sliceOf(live.table, live.store.load().entries()), otherBasis)
+    expect([projected.decided, projected.winner]).toEqual([true, 0])
+    expect(projected.calibration).toEqual(FLOOR)
+    live.table.evaluations.set('e-0', evaluation('e-0', { quality: 0 }))
+    const flipped = projectRound(stateOf(live, roundId) as RoundState, sliceOf(live.table, live.store.load().entries()), otherBasis)
+    expect([flipped.decided, flipped.winner]).toEqual([true, 0])
+
+    // An open round has no record: it is a preview, recomputed from the slice.
+    const openId = await openThrough(live, { round: 2 })
+    await submitThrough(live, openId, 0, { evaluationId: 'e-open' })
+    const preview = projectRound(stateOf(live, openId) as RoundState, sliceOf(live.table, live.store.load().entries()), live.calibration)
+    expect(preview.decided).toBe(false)
+  })
+
   it('refuses a decision the facts no longer imply, because a measurement moved after it was composed', async () => {
     const live = await deployment()
     const roundId = await openThrough(live, { candidates: 1, historyCutoff: 5 })

@@ -80,7 +80,8 @@ export interface RoundEvaluation extends EvaluationView {
  * out of the round's opening fact, so substituting today's head for the frozen position means
  * changing this file, not a caller's habit. `entries` is that same fixed log, and what counts as
  * *accepted* in it comes from `publishedAssetsBelow` — one owner of the definition, not a second
- * convention injected here (E1: novelty feeds selection, so two conventions mean two winners).
+ * convention injected here (E1: two conventions mean two histories, and every reader of a slot's
+ * novelty conditions on a different past).
  */
 export interface MeasureSlice {
   /** Every fact at the cut this slice was taken at. The round's cutoff is what narrows it. */
@@ -142,6 +143,8 @@ export interface RoundDecision {
   readonly slots: readonly SlotView[]
   readonly winner: number | null
   readonly outcomes: readonly Outcome[]
+  /** Whether this projection read the round's committed decision; an open round is a preview. */
+  readonly decided: boolean
 }
 
 /** One slot between "read the measurement" and "pool it": the reason, the gain and the reading. */
@@ -325,6 +328,13 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
  * `history.acceptedAssets` and the incumbent's aggregate come from **below the round's cutoff**, and
  * the cutoff is the round's own; the only way to read a later fact here would be to change this
  * function.
+ *
+ * A round that carries a decision is reported **from the record**: `decideRound` recomputed this very
+ * projection against its own cut and refused to commit a decision that disagreed, so the record is
+ * the decision's own recompute, done once where the store could check it. Reading the slice again
+ * here would let a fact that arrived after the decision — or a caller's different calibration —
+ * flip what a closed round is read as saying. An open round has no record and is a preview,
+ * labelled as one.
  */
 export function projectRound(state: RoundState, slice: MeasureSlice, calibration: Calibration): RoundDecision {
   const plan = requirePlan(state, `project round "${state.roundId}"`)
@@ -383,6 +393,10 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
 
   const selection = select(candidates, history, calibration, plan.weights)
 
+  // A closed round is read from its record, which the commit region verified against this very
+  // projection at its own cut. The slice above is a display of the slots as they read today; the
+  // decision is the fact, and a caller's calibration names a band, not the one the decision used.
+  const decided = state.decision
   return {
     roundId: state.roundId,
     round: plan.round,
@@ -391,10 +405,11 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
     explorationSlots: plan.explorationSlots,
     editBudget: plan.editBudget,
     historyCutoff: plan.historyCutoff,
-    calibration,
+    calibration: decided === undefined ? calibration : decided.calibration,
     caliber: plan.caliber,
     slots,
-    winner: selection.winner,
-    outcomes: selection.outcomes,
+    decided: decided !== undefined,
+    winner: decided === undefined ? selection.winner : decided.winner,
+    outcomes: decided === undefined ? selection.outcomes : decided.outcomes,
   }
 }

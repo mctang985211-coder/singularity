@@ -5,8 +5,8 @@
  * the value `noveltyOf` reads as `History.acceptedAssets`. It replaces an injected
  * `MeasureSlice.acceptedAssetsBelow` port that two wirings answered with two different conventions
  * — one folded `pointer/switched` and read the revision's manifest, one read a probe's own
- * `assets/published` facts — and because novelty feeds selection, two conventions can produce two
- * winners from one log (R03, R05).
+ * `assets/published` facts — and two conventions mean two histories, so every reader of a slot's
+ * novelty conditions on a different past (R03, R05).
  *
  * The expected values are hand-written asset-class literals: nothing here is computed by calling
  * the projection under test.
@@ -235,6 +235,36 @@ describe('the assets a frozen history counts as accepted', () => {
     switched(log, '', 'r0002')
 
     expect(publishedAssetsBelow(log.entries(), ENVIRONMENT, log.count)).toEqual(['skill'])
+  })
+
+  it('keeps an earlier adoption when a later round adopts on a new head, and a rollback erases nothing', () => {
+    const log = factsLog()
+    created(log, 'r-a')
+    created(log, 'r-b')
+    created(log, 'r-c')
+    switched(log, '', 'r-a')
+    elected(log, 'round-1', { round: 1, incumbent: 'r-a', revision: 'r-b', edits: [{ asset: 'skill', target: 'count' }] })
+    switched(log, 'r-a', 'r-b')
+    elected(log, 'round-2', { round: 2, incumbent: 'r-b', revision: 'r-c', edits: [{ asset: 'tool', target: 'tokenizer' }] })
+    switched(log, 'r-b', 'r-c')
+
+    // The second adoption does not erase the first: upstream counts accepted edits, not the
+    // current head (rrsi/history.py:129), and the skill stays adopted after the head has moved on.
+    expect(publishedAssetsBelow(log.entries(), ENVIRONMENT, log.count)).toEqual(['skill', 'tool'])
+
+    // A rollback publishes old content again; the adoptions the history already counted stand.
+    switched(log, 'r-c', 'r-a')
+    expect(publishedAssetsBelow(log.entries(), ENVIRONMENT, log.count)).toEqual(['skill', 'tool'])
+  })
+
+  it('counts nothing for an election whose revision the pointer never held', () => {
+    const log = factsLog()
+    created(log, 'r-a')
+    created(log, 'r-x')
+    switched(log, '', 'r-a')
+    elected(log, 'round-1', { round: 1, incumbent: 'r-a', revision: 'r-x', edits: [{ asset: 'tool', target: 'tokenizer' }] })
+
+    expect(publishedAssetsBelow(log.entries(), ENVIRONMENT, log.count)).toEqual([])
   })
 
   it('unions the classes of two rounds that elected the same revision, round order then declaration order', () => {
