@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  contractDigest,
   foldSubject,
   MemoryLog,
   projectReceipt,
@@ -20,6 +21,7 @@ import {
   TASK_PROTOCOL,
   TASK_VERSION,
   type ReceiptView,
+  type ProtocolRegistry,
   type TaskState,
   type TaskView,
 } from '../src/index.ts'
@@ -47,14 +49,14 @@ import {
 } from './task-fixtures.ts'
 
 /** Run the whole slice and fold it. */
-async function slice(): Promise<{ log: MemoryLog; state: TaskState }> {
+async function slice(): Promise<{ registry: ProtocolRegistry; log: MemoryLog; state: TaskState }> {
   const registry = taskRegistry()
   const log = new MemoryLog(registry, { subjects: SUBJECTS })
   for (const command of sliceCommands()) await log.emit(command)
 
   const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
   if (state === undefined) throw new Error('the slice must fold to a task state')
-  return { log, state }
+  return { registry, log, state }
 }
 
 describe('the task slice', () => {
@@ -87,38 +89,73 @@ describe('the task slice', () => {
   })
 
   it('derives the receipt from the log instead of storing it', async () => {
-    const { log, state } = await slice()
-    const receipt: ReceiptView = projectReceipt(state, RUN_ID, log.entries().length)
+    const { registry, log } = await slice()
+    const held = log.entries()
+    const receipt: ReceiptView = projectReceipt(registry, held, TASK_ID, RUN_ID)
 
-    // The receipt names the facts it accounts for (the committed cutoff) and the contract it answers
-    // to, and its identity is a content digest - so "fixed source" is a property a reader can check.
-    expect(receipt).toMatchObject({ status: 'verified', executor: { emitter: 'scheduler', actor: SCHEDULER }, contractDigest: projectTask(state).contractDigest, cutoff: log.entries().length, })
+    // The receipt answers to the contract it is derived under - digested here from the contract the
+    // fixture admitted, not read back out of the state the projection also reads - and its bound is
+    // the seven facts the slice committed, a hand-counted literal rather than the array's length.
+    expect(receipt).toMatchObject({ status: 'verified', executor: { emitter: 'scheduler', actor: SCHEDULER }, contractDigest: contractDigest(contract()), cutoff: 7 })
+    // Re-deriving from the prefix the bound names gives the same receipt: the two are one computation.
+    expect(receiptDigest(projectReceipt(registry, held.slice(0, receipt.cutoff), TASK_ID, RUN_ID))).toBe(receiptDigest(receipt))
     // Each criterion carries the verifier that decided it and the artifact content it judged.
     expect(receipt.criteria.map(entry => [entry.criterionId, entry.verdict, `${entry.verifierRef}@${entry.verifierVersion}`, entry.artifactDigest])).toEqual([
       ['correctness', 'pass', `${UNIT_VERIFIER}@1`, ARTIFACT],
       ['limits', 'pass', `${INTEGRATION_VERIFIER}@1`, ARTIFACT],
     ])
-    // What the attempt actually consumed: the declared inputs and the workspace it executed in.
-    expect(receipt.consumption).toEqual({ inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
-    expect(receiptDigest(receipt)).toMatch(/^[0-9a-f]{64}$/)
+    // Both criteria were judged on the declared inputs, so the consumption is the judged one.
+    expect(receipt.consumption).toEqual({ basis: 'judged', inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
   })
 
-  it('gives a different receipt for the same run at a different committed cutoff', async () => {
-    const { log, state } = await slice()
-    const atCutoff = receiptDigest(projectReceipt(state, RUN_ID, log.entries().length))
-    // One fewer fact is a different accounting: same run, different set of facts answered for.
-    expect(receiptDigest(projectReceipt(state, RUN_ID, log.entries().length - 1))).not.toBe(atCutoff)
-    // A cutoff that is not a committed bound is refused rather than rounded to one.
-    expect(refusalOf(() => projectReceipt(state, RUN_ID, 0)).code).toBe<RefusalCode>('malformed-payload')
+  it('derives no receipt from facts that stop before the run settled', async () => {
+    const { registry, log } = await slice()
+    const held = log.entries()
+
+    // A reader whose facts stop before the settlement holds a run that has not settled yet, and that
+    // prefix has no receipt in it. Deriving one anyway would carry the settlement the prefix does not
+    // hold - a receipt whose own evidence lies above the bound it claims to account for.
+    expect(refusalOf(() => projectReceipt(registry, held.slice(0, held.length - 1), TASK_ID, RUN_ID))).toMatchObject({
+      code: 'illegal-transition',
+      detail: expect.stringContaining('still running'),
+    })
   })
 
-  it('does not move a receipt at a cutoff because unrelated facts arrived later', async () => {
-    const { log, state } = await slice()
-    const cutoff = log.entries().length
-    const before = receiptDigest(projectReceipt(state, RUN_ID, cutoff))
+  it('derives no receipt from a prefix that holds no fact of the task', async () => {
+    const { registry, log } = await slice()
 
-    // A fact about another task, committed after the cutoff, is outside what this receipt accounts
-    // for - so the receipt for the same cutoff is unchanged, and a reader can rely on that.
+    // One fact of a seven-fact log holds no contract, no run and no verdict, so no receipt can be
+    // derived from it. The free parameter this replaces accepted "1" beside a head state and handed
+    // back the seq-4 verdict under a one-fact claim.
+    expect(refusalOf(() => projectReceipt(registry, log.entries().slice(0, 1), TASK_ID, RUN_ID)).code).toBe<RefusalCode>('unknown-run')
+  })
+
+  it('reports a run nothing has judged as consuming what it declared, not what it read', async () => {
+    const registry = taskRegistry()
+    const log = new MemoryLog(registry, { subjects: SUBJECTS })
+    await log.emit(admitted())
+    await log.emit(assigned())
+    await log.emit(started())
+    await log.emit(bubbleOpened())
+    await log.emit(failed('the attempt ended before anything was judged'))
+
+    // The bubble declared inputs and no verdict was ever formed on them: the receipt reports the
+    // attempt's own declaration as a declaration, with the workspace declared beside it.
+    expect(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID).consumption).toEqual({
+      basis: 'declared',
+      inputs: BUBBLE_INPUTS,
+      workspace: { kind: 'git', ref: 'refs/heads/main' },
+    })
+  })
+
+  it('does not move a receipt because facts outside its prefix arrived later', async () => {
+    const { registry, log } = await slice()
+    const held = log.entries()
+    const before = receiptDigest(projectReceipt(registry, held, TASK_ID, RUN_ID))
+
+    // A fact about another task, committed after the facts this reader holds, is outside what the
+    // receipt accounts for - so the same prefix still derives the same receipt, and a reader can rely
+    // on that without having kept a number around.
     await log.emit({
       commandId: 'other-task',
       protocol: TASK_PROTOCOL,
@@ -128,39 +165,36 @@ describe('the task slice', () => {
       payload: { contract: contract() },
     })
 
-    const refolded = foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
-    if (refolded === undefined) throw new Error('expected the task to still fold')
-    expect(receiptDigest(projectReceipt(refolded, RUN_ID, cutoff))).toBe(before)
-    // Reading it again at the new cutoff is a different accounting, which is the point of naming one.
-    expect(receiptDigest(projectReceipt(refolded, RUN_ID, log.entries().length))).not.toBe(before)
+    expect(receiptDigest(projectReceipt(registry, held, TASK_ID, RUN_ID))).toBe(before)
+    // A reader holding the longer prefix has a different accounting, which is what the bound names.
+    expect(receiptDigest(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID))).not.toBe(before)
   })
 
   it('reports a run that declared no execution context as having consumed nothing, not as unknown', async () => {
-    // A run that failed before a bubble was opened has an empty consumption, which is a fact about
-    // the attempt rather than a missing value to be invented.
+    // A run that failed before a bubble was opened has nothing declared and nothing judged, which is a
+    // fact about the attempt rather than a missing value to be invented.
     const registry = taskRegistry()
     const log = new MemoryLog(registry, { subjects: SUBJECTS })
     await log.emit(admitted())
     await log.emit(assigned())
     await log.emit(started())
     await log.emit(failed('no context was ever declared'))
-    const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
-    if (state === undefined) throw new Error('expected a folded task')
-    const receipt = projectReceipt(state, RUN_ID, log.entries().length)
-    expect(receipt.consumption).toEqual({ inputs: [], workspace: null })
+
+    expect(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID).consumption).toEqual({ basis: 'declared', inputs: [], workspace: null })
   })
 
   it('gives two independent readers the same receipt, before and after adopting the facts', async () => {
-    const { log, state } = await slice()
-    const fromMemory = receiptDigest(projectReceipt(state, RUN_ID, log.entries().length))
+    const { registry, log, state } = await slice()
+    const fromMemory = receiptDigest(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID))
 
-    // What a durable medium hands back must fold to the same task, and agree on the receipt.
-    const registry = taskRegistry()
-    const adopted = MemoryLog.adopt(log.entries(), registry, { subjects: SUBJECTS })
-    const refolded = foldSubject<TaskState>(registry, adopted.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
+    // What a durable medium hands back must fold to the same task under a second deployment's own
+    // declarations, and agree on the receipt.
+    const adoptedRegistry = taskRegistry()
+    const adopted = MemoryLog.adopt(log.entries(), adoptedRegistry, { subjects: SUBJECTS })
+    const refolded = foldSubject<TaskState>(adoptedRegistry, adopted.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     if (refolded === undefined) throw new Error('the adopted facts must fold to the same task')
 
-    expect(receiptDigest(projectReceipt(refolded, RUN_ID, log.entries().length))).toBe(fromMemory)
+    expect(receiptDigest(projectReceipt(adoptedRegistry, adopted.entries(), TASK_ID, RUN_ID))).toBe(fromMemory)
     expect(projectTask(refolded)).toEqual(projectTask(state))
   })
 
@@ -213,7 +247,7 @@ describe('the task slice', () => {
     const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     if (state === undefined) throw new Error('expected a folded task')
     // Both readings of the settled run say failed, rather than reading a failure out of a missing value ...
-    expect([projectTask(state).phase, projectReceipt(state, RUN_ID, log.entries().length).status]).toEqual(['failed', 'failed'])
+    expect([projectTask(state).phase, projectReceipt(registry, log.entries(), TASK_ID, RUN_ID).status]).toEqual(['failed', 'failed'])
     // ... and the failure recorded no reason, so the projection reports none instead of inventing one.
     expect(projectTask(state).runs[0]?.failureReason).toBeNull()
   })

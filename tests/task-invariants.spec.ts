@@ -184,10 +184,12 @@ describe('what the protocol does not know', () => {
 
   it('refuses to derive a receipt for a run that has not settled', async () => {
     const log = await running()
-    const state = foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
-    if (state === undefined) throw new Error('expected a folded task')
-    expect(refusalOf(() => projectReceipt(state, RUN_ID, log.entries().length))).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('still running') })
-    expect(refusalOf(() => projectReceipt(state, 'run-ghost', log.entries().length)).code).toBe<RefusalCode>('unknown-run')
+    const held = log.entries()
+    const registry = taskRegistry()
+    // The facts handed in are the whole input: a prefix that stops before the settlement yields no
+    // receipt, and a run the facts never mention has none either.
+    expect(refusalOf(() => projectReceipt(registry, held, TASK_ID, RUN_ID))).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('still running') })
+    expect(refusalOf(() => projectReceipt(registry, held, TASK_ID, 'run-ghost')).code).toBe<RefusalCode>('unknown-run')
   })
 
   it('declares exactly the nine kinds this slice needs, and no receipt kind', () => {

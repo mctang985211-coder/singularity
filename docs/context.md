@@ -317,6 +317,20 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 **一条流程要求**（审查者提的，我同意）：**变异脚本要进仓库**。现在它们是 `/tmp` 里的临时物，
 所以"N 个变异全 caught"这句话在仓库内**无法复核**——这正是本项目对别的东西一直在拒绝的那种声明。
 
+## 11d. F2 已修：receipt 的 cutoff 不再是一个可以被传错的参数
+
+`projectReceipt(state, runId, cutoff)` → **`projectReceipt(registry, entries, taskId, runId)`**：
+参数**删掉而不是校验**。界就是交给它的那批事实，所以 `cutoff: 1` 与 `9999` **不可表达**，
+而不是"被拒绝"；停在结算之前的 prefix 里**没有** receipt 可取（拒绝，不是回显）。
+消费变成 `{basis: 'declared' | 'judged', inputs, workspace}`：有判决时 inputs 取自**判决记录的
+`inputDigests`**（production.ts 从真正读过的字节哈希出来的），没有判决时说 `declared`。
+`slice-b.mjs` 第 7 节重写为按事实**自己记录的 seq** 校验，并**证明两条检查都能失败**（两条变异各自实测红了）。
+
+**同一形状的另外三处已被点名、未修**（下一轮）：`tests/environment-binding.spec.ts:72`
+（`at.length > 0` 与 `true` 比）、`tests/strategy-decision.spec.ts:183`（`reason.length > 0`）、
+`tests/control-store.spec.ts:175`（`…contractDigest).toBeDefined()`）——三条都是"存在即通过"，
+任何非空值都能过。**这不是 F2 那个自由参数的形状，是 `debugging.md` §3 的第三类。**
+
 ## 11c. 两个新的硬约束（F1 修完后出现，下一轮会撞上）
 
 1. **`src/strategy/view.ts` 正好卡在 400 行预算上**（门禁 >400 才红）。方向感知花了约 29 行净增，

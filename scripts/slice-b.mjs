@@ -19,7 +19,8 @@
  *      refused with the plan's own words;
  *   5. a parent is never complete because its children ended — the criterion the failed sub-task
  *      supported stays unsatisfied and is named;
- *   6. the receipt names the facts it accounts for, and what the attempt consumed.
+ *   6. the receipt names the fact prefix it was derived from, reproduces from that prefix, and
+ *      reports what was judged on the attempt's inputs as distinguished from what was only declared.
  *
  * Run: node scripts/slice-b.mjs
  *
@@ -36,7 +37,7 @@ import { fileURLToPath } from 'node:url'
 import { openPersistence } from './dsh-control-runtime.mjs'
 import { ProtocolRegistry } from '../src/protocol/registry.ts'
 import { ProtocolRefusal } from '../src/protocol/refusal.ts'
-import { declareTaskProtocol, TASK_PROTOCOL, TASK_VERSION } from '../src/task/protocol.ts'
+import { declareTaskProtocol, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION } from '../src/task/protocol.ts'
 import { declareEnvironmentProtocol, ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION } from '../src/environment/protocol.ts'
 import { declareAgentProtocol, AGENT_PROTOCOL, AGENT_VERSION } from '../src/agent/protocol.ts'
 import { createTaskCommands } from '../src/task/commands.ts'
@@ -375,13 +376,83 @@ async function main() {
     check('the stopped sub-task is listed as blocked with a reason', tree.blocked.some(entry => entry.taskId === CHILD_LIMITS))
 
     // ---------------------------------------------------------------- 7. the receipt
-    const countState = foldSubjects(registry, store.load().entries(), TASK_PROTOCOL, TASK_VERSION).get(CHILD_COUNT)
-    const cutoff = store.load().entries().length
-    const receipt = projectReceipt(countState, 'run-count', cutoff)
-    check('the receipt names the committed cutoff it accounts for', receipt.cutoff === cutoff)
-    check('the receipt records what the attempt consumed', receipt.consumption.inputs.length === 1 && receipt.consumption.inputs[0].name === 'words.txt')
+    // The committed prefix this reader holds. Both the receipt and the state below are derived from
+    // it, so the bound the receipt names is a property of the facts rather than a number passed in
+    // beside them - and both readings below are taken from the facts, not from that number.
+    const held = store.load().entries()
+    const countState = foldSubjects(registry, held, TASK_PROTOCOL, TASK_VERSION).get(CHILD_COUNT)
+    const receipt = projectReceipt(registry, held, CHILD_COUNT, 'run-count')
+    const named = held.slice(0, receipt.cutoff)
+    const lastSeq = held.at(-1)?.seq ?? -1
+
+    // Reading one: where the facts this reader holds end, by the sequence numbers the facts carry
+    // themselves. A bound that overstates or understates what was read fails here even though it
+    // reproduces itself, because the number it would have to match is the log's, not this probe's.
+    check(
+      'the bound the receipt names is one past the last fact read, by the facts own sequence numbers',
+      receipt.cutoff === lastSeq + 1,
+      `the receipt names ${receipt.cutoff}, but the facts this reader holds end at seq ${lastSeq}`,
+    )
+    // Reading two: re-deriving from exactly the prefix the bound names must give this receipt. A
+    // bound that is not the source of the receipt cannot reproduce it, and a projection that refuses
+    // to derive from the prefix it claims has named facts its receipt did not come from.
+    let rederived = null
+    try {
+      rederived = projectReceipt(registry, named, CHILD_COUNT, 'run-count')
+    } catch (error) {
+      if (!(error instanceof ProtocolRefusal)) throw error
+    }
+    check(
+      're-deriving from the prefix the receipt names gives the same receipt',
+      rederived !== null && receiptDigest(rederived) === receiptDigest(receipt),
+      `the receipt names ${receipt.cutoff} fact(s); re-deriving from those facts gives ${rederived === null ? 'no receipt' : `${receiptDigest(rederived).slice(0, 16)}…`} against ${receiptDigest(receipt).slice(0, 16)}…`,
+    )
+    // What the attempt consumed, checked against the facts below that bound rather than against what
+    // this probe passed in: the verdict fact for the run that was judged, and the bubble fact for the
+    // run nothing judged. Both lists below come off the log, and the verdict's is the one the
+    // verifier hashed from the bytes it read - which is also why the digest in it is hashed again
+    // here, from the file on disk.
+    const verdictFact = named.find(
+      entry => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.evidenceProduced && entry.subject === CHILD_COUNT,
+    )
+    check(
+      'the verdict below the bound is the one the receipt reports, judged on the inputs it recorded',
+      receipt.consumption.basis === 'judged' && JSON.stringify(receipt.consumption.inputs) === JSON.stringify(verdictFact?.payload.inputDigests),
+      `the receipt reads ${JSON.stringify(receipt.consumption)}; the verdict below its bound reads ${JSON.stringify(verdictFact?.payload.inputDigests ?? null)}`,
+    )
+    check(
+      'the judged input digest is the digest of the bytes on disk',
+      JSON.stringify(receipt.consumption.inputs) === JSON.stringify([{ name: 'words.txt', digest: sha256(await readFile(inputPath)) }]),
+      `the receipt reads ${JSON.stringify(receipt.consumption.inputs)}`,
+    )
+    const declaredBubble = held.find(
+      entry => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.bubbleOpened && entry.subject === CHILD_LIMITS,
+    )
+    const limitsReceipt = projectReceipt(registry, held, CHILD_LIMITS, 'run-limits')
+    check(
+      'a run nothing judged reports consumption as declared, and the declaration is the bubble fact',
+      limitsReceipt.consumption.basis === 'declared' && JSON.stringify(limitsReceipt.consumption.inputs) === JSON.stringify(declaredBubble?.payload.inputs),
+      `the receipt reads ${JSON.stringify(limitsReceipt.consumption)}; the bubble fact reads ${JSON.stringify(declaredBubble?.payload.inputs ?? null)}`,
+    )
     check('the receipt pins the artifact the verdict was formed on', receipt.criteria[0]?.artifactDigest === verdict.artifactDigest)
-    check('the same run at a different cutoff has a different receipt', receiptDigest(projectReceipt(countState, 'run-count', cutoff - 1)) !== receiptDigest(receipt))
+    check(
+      'a reader holding fewer facts gets a different accounting',
+      receiptDigest(projectReceipt(registry, held.slice(0, held.length - 1), CHILD_COUNT, 'run-count')) !== receiptDigest(receipt),
+    )
+    // A prefix that stops before the run has no receipt in it, so no bound can claim that source -
+    // and neither has one that holds the run but stops before its settlement, which is the bound a
+    // reader mid-run actually holds.
+    const noneYet = refusalOf(() => projectReceipt(registry, held.slice(0, 1), CHILD_COUNT, 'run-count'))
+    check('a prefix holding none of the run has no receipt to derive', noneYet.code === 'unknown-run', noneYet.code)
+    const settlement = held.find(
+      entry => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.runVerified && entry.subject === CHILD_COUNT,
+    )
+    const beforeSettling = refusalOf(() => projectReceipt(registry, held.slice(0, settlement?.seq ?? 0), CHILD_COUNT, 'run-count'))
+    check(
+      'a prefix that stops before the settlement has no receipt to derive',
+      beforeSettling.code === 'illegal-transition' && (beforeSettling.detail ?? '').includes('still running'),
+      `the prefix stops at ${settlement?.seq ?? 0}: ${beforeSettling.code} ${beforeSettling.detail}`,
+    )
 
     // ---------------------------------------------------------------- 8. the reader
     const view = projectTask(countState)
@@ -389,8 +460,8 @@ async function main() {
     check('a reader sees the implementation digest that decided it', view.criteria[0]?.implementationDigest === programDigest)
 
     console.log('')
-    console.log(`  facts ${cutoff}; parent complete=${tree.complete}; stopped=${stopped?.status}`)
-    console.log(`  receipt ${receiptDigest(receipt).slice(0, 16)}… (${receipt.status}, cutoff ${receipt.cutoff}, derived — never written)`)
+    console.log(`  facts ${held.length}; parent complete=${tree.complete}; stopped=${stopped?.status}`)
+    console.log(`  receipt ${receiptDigest(receipt).slice(0, 16)}… (${receipt.status}, ${receipt.cutoff} facts, consumption ${receipt.consumption.basis}, derived — never written)`)
 
     await store.close()
     await live.context.fiber.dispose()
