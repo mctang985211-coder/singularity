@@ -7,9 +7,8 @@
  * 1. **The gain is frozen, not recomputed.** Each candidate's gain is computed against the round's
  *    own `incumbent` and the aggregate that incumbent had **below the round's `historyCutoff`** —
  *    never against today's head. `review.md` R03 measured what recomputing costs: with A=0.6 and
- *    B=0.8, B's Δ was +0.2 before B was published and 0 after it, and A's moved from 0 to −0.2.
- *    Attribution, pruning and stall detection then read a different history depending on when they
- *    ran. Here the cutoff comes from the round's own opening fact and from nowhere else.
+ *    B=0.8, B's Δ was +0.2 before B was published and 0 after it, and A's moved from 0 to −0.2. Here
+ *    the cutoff comes from the round's own opening fact and from nowhere else.
  * 2. **Pooling needs one caliber.** Two candidates whose frozen calibers differ were measured under
  *    different questions, so their scores may not be compared: the projection refuses with
  *    `caliber-mismatch` and names the alternative (re-measure, or decide them in separate rounds).
@@ -17,24 +16,28 @@
  *    here from the measure projection's own `constraints` — `null` (not yet checked) is not `true` —
  *    and they are the inputs the decision layer uses to drop a candidate **before** any argmax. An
  *    incomplete measurement is inadmissible too, with the missing trial slots named: `review.md`
- *    R06's counterexample reported `quality` from the one observation it had while quietly dropping
- *    the plan's denominator.
+ *    R06's counterexample reported `quality` from the one observation it had while dropping the
+ *    plan's denominator.
  * 4. **The incumbent's own quality is a floor, and its band is the round's calibration.** `select`
  *    cannot enforce upstream's `S' >= S* - delta` (`rrsi/selection.py:107`): `S*` is not one of its
  *    inputs, so a candidate far below the incumbent can still be admitted when its cost saving is
  *    large enough. The floor therefore lives here, with the band taken from the round's own
- *    `Calibration` — a `measured` floor and a `declared` one behave differently because the value is
- *    the band, and the source is named in the reason (R06). Quality is floored; `constraintsMet` is
- *    not: a below-floor candidate and an out-of-bounds one carry two different reasons.
+ *    `Calibration`: a `measured` floor and a `declared` one behave differently, and the source is
+ *    named in the reason (R06).
+ * 5. **"Better" is decided once, at this boundary.** A round declares its metric's `direction`:
+ *    under `lower` (an error rate) the *smaller* measurement is the better candidate, and the argmax,
+ *    the floor and the gain all follow that one orientation. `round/opened` validated the member and
+ *    nothing read it, so a round declaring `direction: 'lower'` ranked raw quality and elected the
+ *    **worse** candidate. The fix is not to thread the direction into each comparison — every one of
+ *    them would be free to forget it, and `select` is frozen with no direction parameter (§11) — but
+ *    to normalise **once**, here, into the one space in which more is better. The raw measured
+ *    numbers still reach a reader: `SlotView.quality` and the reason strings are the metric's own
+ *    values; only the gain — the number the cost rule *reads* — is signed as the decision reads it.
  *
- * Every declared slot gets a decision and a reason, admitted or not: a slot nobody submitted to is
- * recorded as untested rather than left out. `winner: null` means nothing was admitted and the
- * incumbent stands.
- *
- * One consequence a first reader will meet: a round opened with `historyCutoff: 0` on a fresh log has
- * nothing below its cutoff, so the incumbent has no frozen aggregate, every slot has no frozen gain,
- * and the round can only retain the incumbent. That is the correct reading of a frozen history — the
- * cutoff has to be the position after the incumbent's own measurement — not a broken round.
+ * Every declared slot gets a decision and a reason, admitted or not, and `winner: null` means the
+ * incumbent stands. A round opened with `historyCutoff: 0` on a fresh log has nothing below its
+ * cutoff, so no slot has a frozen gain and the round can only retain the incumbent — the correct
+ * reading of a frozen history, not a broken round.
  *
  * @module singularity-core/strategy/view
  */
@@ -59,11 +62,10 @@ import { publishedAssetsBelow } from './published-assets.ts'
 /**
  * One evaluation as `src/measure/**` projects it (`docs/phase-cd-design.md` §5.4), plus the members
  * this slice needs to *anchor* it: the evaluation id, the two revisions, and the caliber digest §5.4
- * derives separately (`caliberDigestOf`).
- *
- * The two revisions are required because the caliber deliberately excludes them (§5.4): equal
- * calibers alone do not say the two candidates were drafted against **this round's** incumbent, and
- * a gain measured against a different baseline is not this round's gain (`review.md` R03).
+ * derives separately (`caliberDigestOf`). The two revisions are required because the caliber
+ * deliberately excludes them (§5.4): equal calibers alone do not say the two candidates were drafted
+ * against **this round's** incumbent, and a gain measured against a different baseline is not this
+ * round's gain (`review.md` R03).
  */
 export interface RoundEvaluation extends EvaluationView {
   readonly evaluationId: string
@@ -114,17 +116,18 @@ export interface SlotView {
   readonly cost: number | null
   readonly denominator: number | null
   readonly missingTrials: EvaluationView['missing']
-  /** `quality − the incumbent's frozen quality`, or `null` when either side is not measurable. */
+  /**
+   * The frozen gain: how much **better** this candidate measured than the incumbent, or `null` when
+   * either side is not measurable. One number in one convention — positive is an improvement —
+   * because the cost rule *reads* it: a rule that funds a better candidate cannot be handed a loss
+   * with a plus sign. `quality` above is the metric's own raw number; this one is not.
+   */
   readonly gain: number | null
   readonly costGain: number | null
   /** Structural asset classes of this candidate that were never accepted before (R05). */
   readonly novelty: number
-  /**
-   * Whether every hard constraint this evaluation judged is met. `false` is never compensable, so
-   * the decision layer drops such a candidate before any aggregate is compared — and this is the
-   * value that says so, filled from the measure projection's own `constraints` and not inferred from
-   * the aggregate.
-   */
+  /** Every hard constraint this evaluation judged is met. `false` is never compensable, so such a
+   *  candidate is dropped before any aggregate is compared; filled from the projection's `constraints`. */
   readonly constraintsMet: boolean
   readonly admissible: boolean
   /** Why this slot was not admitted; `null` exactly when it was. */
@@ -170,13 +173,27 @@ function describeRevision(revision: RevisionRef): string {
 }
 
 /**
+ * The one place a metric's direction is read: `+1` when a larger measurement is the better candidate,
+ * `-1` when a smaller one is. The plan's reader has already refused anything but these two members, so
+ * there is no third case to default.
+ */
+function directionSign(direction: RoundPlan['metric']['direction']): number {
+  return direction === 'lower' ? -1 : 1
+}
+
+/** A measurement in the one space every comparison in this round uses: more is better. */
+function better(quality: number, direction: RoundPlan['metric']['direction']): number {
+  return directionSign(direction) * quality
+}
+
+/**
  * Why one measured slot is not admissible, or `null` when it is.
  *
  * The order is the order of the questions a reader asks: is this measurement even about this
  * candidate (the two anchors), does it answer the question this round froze (its caliber), did a hard
  * constraint fail, is the measurement complete, is there a frozen baseline to make its gain a gain at
- * all, does its quality clear the incumbent's floor, and — last, because it is the least specific —
- * does the measure slice refuse it for a reason only it can see.
+ * all, does its quality clear the incumbent's floor, and — last, least specific — does the measure
+ * slice refuse it for a reason only it can see.
  */
 function inadmissibleReason(
   evaluation: RoundEvaluation,
@@ -210,10 +227,15 @@ function inadmissibleReason(
   if (incumbentAggregate === null)
     return `the incumbent ${describeRevision(plan.incumbent)} has no aggregate below the round's frozen history cutoff, so this candidate has no frozen gain to place against the noise floor; measure the incumbent first, or this round can only retain it`
   // Upstream's floor, which `select` cannot apply because `S*` is not one of its inputs: a candidate
-  // more than the band below the round's incumbent is not a candidate, however cheap it is.
-  const floor = incumbentAggregate.quality - calibration.floor
-  if (evaluation.quality < floor)
-    return `quality ${evaluation.quality.toFixed(4)} sits ${(floor - evaluation.quality).toFixed(4)} below the admissible floor ${floor.toFixed(4)} (round ${plan.round}'s incumbent ${incumbentAggregate.quality.toFixed(4)} less the ${calibration.source} noise band ${calibration.floor.toFixed(4)}); a cost saving below the floor is not a gain, so this candidate does not enter the comparison — improve it, or propose it in a round whose incumbent it can clear`
+  // more than the band below the round's incumbent is not a candidate, however cheap it is. Both
+  // sides are compared in the round's own direction, and the reason reports the metric's raw numbers:
+  // a reader of "0.7 is 0.1 above the floor 0.6" needs no sign convention to see why it is out.
+  const floor = better(incumbentAggregate.quality, plan.metric.direction) - calibration.floor
+  if (better(evaluation.quality, plan.metric.direction) < floor) {
+    const worse = plan.metric.direction === 'lower' ? 'above' : 'below'
+    const raw = incumbentAggregate.quality - calibration.floor
+    return `quality ${evaluation.quality.toFixed(4)} sits ${Math.abs(evaluation.quality - raw).toFixed(4)} ${worse} the admissible floor ${raw.toFixed(4)} (round ${plan.round}'s incumbent ${incumbentAggregate.quality.toFixed(4)} less the ${calibration.source} noise band ${calibration.floor.toFixed(4)}); a cost saving below the floor is not a gain, so this candidate does not enter the comparison — improve it, or propose it in a round whose incumbent it can clear`
+  }
   // Last, because it is the least specific: the round's own reading of the constraints, the trials
   // and the floor names what it can see itself, and this fallback carries a refusal only the measure
   // slice could know (a broken trial identity, an unbound input, a retired implementation).
@@ -230,25 +252,30 @@ function plannedOf(
   calibration: Calibration,
 ): PlannedSlot {
   const evaluation = slice.evaluationOf(submission.evaluationId)
-  // An unmeasured slot has met no constraint: absence of a judgement is not a passed one.
   if (evaluation === undefined) return { submission, evaluation, reason: null, gain: null, costGain: null, constraintsMet: false }
   const frozenCostGain =
     incumbentAggregate === null || evaluation.cost === null || incumbentAggregate.cost === null
       ? null
       : evaluation.cost - incumbentAggregate.cost
+  const direction = plan.metric.direction
   return {
     submission,
     evaluation,
     reason: inadmissibleReason(evaluation, submission, plan, incumbentAggregate, calibration),
-    gain: incumbentAggregate === null ? null : evaluation.quality - incumbentAggregate.quality,
+    // The one normalisation: the frozen gain the cost rule reads is a gain in the round's direction.
+    gain: incumbentAggregate === null ? null : better(evaluation.quality, direction) - better(incumbentAggregate.quality, direction),
     costGain: frozenCostGain,
     constraintsMet: evaluation.constraints.every(constraint => constraint.met === true),
   }
 }
 
-function measurementOf(slot: SlotView): Measurement | null {
+/**
+ * The measurement the decision layer reads, in the round's direction: `quality` is normalised so that
+ * more is better, and the trial counts are the projection's own.
+ */
+function measurementOf(slot: SlotView, direction: RoundPlan['metric']['direction']): Measurement | null {
   if (slot.quality === null || slot.denominator === null) return null
-  return { quality: slot.quality, cost: slot.cost, denominator: slot.denominator, missing: slot.missingTrials.length }
+  return { quality: better(slot.quality, direction), cost: slot.cost, denominator: slot.denominator, missing: slot.missingTrials.length }
 }
 
 function slotViewOf(planned: PlannedSlot, history: History): SlotView {
@@ -345,7 +372,9 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
       slot,
       exploratory: view.exploratory,
       assets: assetsOf(edits),
-      measurement: measurementOf(view),
+      // The argmax compares in the round's direction, so `select` needs no direction of its own: a
+      // lower error rate enters the ranking as the larger number.
+      measurement: measurementOf(view, plan.metric.direction),
       constraintsMet: view.constraintsMet,
       inadmissible: view.reason,
     }
