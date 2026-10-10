@@ -33,6 +33,14 @@
  *      `minQualityGain`, and this probe asserts that it reads as not having met the standard — a
  *      measured negative result, not a wiring claim (`review.md` §4 R09).
  *
+ *      **That assertion is this probe's verdict, and no product refuses a worse revision.** The
+ *      measurement surface accepts the below-bar revision, opens its evaluation, records both its
+ *      trials and its met hard constraint, exactly as it accepts the published one; nothing in
+ *      `src/` elects the better revision, and F adds no refusal. What is observed is that *this
+ *      comparison* reads the worse revision as not having met the frozen standard — the reading is
+ *      the experiment's, in the same sense as the aggregation. Calling the revision "refused" would
+ *      name a refusal that does not exist anywhere in the product.
+ *
  * **Holdout and solve are never pooled.** The two sets come out of the fixture as two lists, every
  * verdict names the set it belongs to, and the pooled numbers are computed per set. R08's rule is
  * why: data that has been fed back to the proposer has entered the search and may not be presented
@@ -239,8 +247,11 @@ async function main() {
   const { contentDigest: declared, ...body } = fixture
   const computedDigest = digestOf(body)
 
+  // Two checks, and deliberately not a third: `declared !== 'TBD'` used to sit between them and
+  // could never have been the first failure, because the check above already requires `declared` to
+  // equal a sha256 and no sha256 is that string. A check that cannot fail is not evidence, so it is
+  // gone rather than kept as a count.
   check('the fixture declares the content digest of its own body, recomputed here', declared === computedDigest, `declared ${declared}, recomputed ${computedDigest}`)
-  check('the fixture says "TBD" and the probe recomputes it', declared !== 'TBD', `declared ${declared}`)
   check('that recomputed digest is the one written down in this probe', computedDigest === FROZEN_FIXTURE_DIGEST, `recomputed ${computedDigest}, pinned ${FROZEN_FIXTURE_DIGEST}`)
 
   const solveSet = fixture.sets.solve
@@ -303,8 +314,64 @@ async function main() {
       await writeFile(methodPaths[`${side}:${taskId}`], `${JSON.stringify({ words: methodWordsOf(method.tag, layouts[taskId]) })}\n`, 'utf8')
     }
   }
-  check('every revision of the fixture has its method files on disk, each consumed by at least two tasks',
-    Object.keys(methodPaths).length > 0 && fixture.frozen.revisions.published.methods['f-task-three'].tag === 'strong')
+  // The label used to claim more than the predicate checked: it said every method file was on disk
+  // and each was consumed by at least two tasks, while the predicate read a key count and one tag
+  // that the fixture's digest has already frozen. Both are now facts about the paths written just
+  // above: one file per declared method, none missing, none extra, and the runs below name them.
+  const methodFilesOnDisk = new Set()
+  for (const side of ['baseline', 'published', 'below-bar'])
+    for (const [taskId, method] of Object.entries(fixture.frozen.revisions[side].methods))
+      methodFilesOnDisk.add(join(workspace, method.file))
+  check('every declared method has a file on disk, named by the revision that declares it and no other',
+    methodFilesOnDisk.size === Object.keys(methodPaths).length &&
+      Object.values(methodPaths).every(path => methodFilesOnDisk.has(path)) &&
+      new Set(Object.values(methodPaths)).size === Object.keys(methodPaths).length,
+    `${methodFilesOnDisk.size} declared files for ${Object.keys(methodPaths).length} method paths`)
+
+  // The instrument's bytes are not frozen by the fixture, and this check does not pretend they are:
+  // `frozenTools` below is built from the runtime digest, so a rebuilt meter moves both sides of the
+  // caliber comparison together. What *can* be shown, and is shown here, is that the number the
+  // instrument prints is a reading of the words in the file it is pointed at rather than of the
+  // probe's own naming. The reference is the task's own reference file, so the denominator is fixed
+  // at its four words, and the subjects are the reference itself, three of its words, two, one, none,
+  // and three of its words plus one word that wears the same naming convention but is in no
+  // reference at all.
+  //
+  // That last subject is the discriminating one, and the reason is precise: the stray word still
+  // wears `-t<digits>`, so a counter of that naming convention counts **four** hits where a reader of
+  // the file counts three. The construction round four used — count the probe's `-t<N>` occurrences
+  // out of the artifact text, divide by a hardcoded 4 — therefore returns 1, 3/4, 1/2, 1/4, 0 and
+  // **1**, and fails here while passing every other check in this probe. A meter that reads the file
+  // returns 3/4 for that subject, for the same reason it returns 3/4 for the one before it.
+  //
+  // This is not a proof that the instrument's bytes are bound to the fixture — nothing here is. A
+  // counter that derived its divisor from the reference file's length, or that filtered its tokens
+  // through the reference, would agree with a real meter on all six numbers. The limit is recorded in
+  // `docs/f-evidence.md` rather than claimed as covered.
+  const firstLayout = layouts[fixture.tasks[0].taskId]
+  const referenceSubject = join(workspace, fixture.tasks[0].inputs[1])
+  const subjectOf = async (name, words) => {
+    const target = join(root, `differential-${name}.txt`)
+    await writeFile(target, `${words.join(' ')}\n`, 'utf8')
+    return target
+  }
+  const threeOfFour = await subjectOf('three-of-four', firstLayout.targets.slice(0, 3))
+  const twoOfFour = await subjectOf('two-of-four', firstLayout.targets.slice(0, 2))
+  const oneOfFour = await subjectOf('one-of-four', firstLayout.targets.slice(0, 1))
+  const noneOfFour = await subjectOf('none-of-four', firstLayout.fillers)
+  const absentWord = await subjectOf('absent', [...firstLayout.targets.slice(0, 3), `${firstLayout.targets[0]}absent`])
+  const qualityOfSubject = async subject => {
+    const ran = await runProcess(process.execPath, [meterProgram, subject, referenceSubject, join(root, 'differential.log'), 'differential', 'measure'])
+    if (ran.code !== 0) return null
+    return JSON.parse(ran.stdout.trimEnd().split('\n')[0] ?? '{}').quality ?? null
+  }
+  const differentialSubjects = [referenceSubject, threeOfFour, twoOfFour, oneOfFour, noneOfFour, absentWord]
+  const differential = await Promise.all(differentialSubjects.map(qualityOfSubject))
+  const handDifferential = [1, 3 / 4, 2 / 4, 1 / 4, 0, 3 / 4]
+  check('the meter\'s number is a reading of the words in the file it is pointed at, not of the probe\'s own naming',
+    differential.every(quality => quality !== null) &&
+      differential.every((quality, index) => close(quality, handDifferential[index])),
+    `quality ${differential.join(' / ')} for the reference / three of its words / two / one / none / three of them plus one word in no reference; hand-computed ${handDifferential.join(' / ')}`)
 
   const registry = new ProtocolRegistry()
   declareTaskProtocol(registry)
@@ -400,6 +467,13 @@ async function main() {
     // The bubble every evaluation of every side declares: the fixture's frozen apparatus plus the
     // task's own inputs. Both sides of one task declare exactly this, which is what makes them two
     // answers to one question rather than two experiments.
+    //
+    // The digests here are the **runtime** bytes of the programs this probe just wrote, and the
+    // fixture freezes only their names and versions. That is a real limit and not a guarded one: if
+    // the meter's body changed, this digest and every caliber below would move together, so the
+    // caliber comparison cannot fail because a tool was rebuilt. The check that the instrument is
+    // not a stub is the reference differential above, which reads the instrument's own output; the
+    // limit itself is stated in `docs/f-evidence.md` rather than claimed as covered here.
     const frozenTools = [
       { name: SELECTOR, implementationDigest: selectorDigest, version: '1' },
       { name: METER, implementationDigest: meterDigest, version: '1' },
@@ -723,26 +797,54 @@ async function main() {
 
     // ------------------------------------------------- 5. the aggregation, and the frozen standards
     console.log('\n== the comparison: the probe aggregates, the fixture\'s standards decide')
-    const standards = fixture.frozen.standards ?? fixture.standards
+    // **One owner for the standard**, and it is the fixture's top-level `standards`. It decides the
+    // verdicts *and* is the standard the conclusion's identity names — the same binding, not two
+    // readings of the fixture that a fixture could make disagree. The line here used to be
+    // `fixture.frozen.standards ?? fixture.standards` while `conclusionInputOf` recorded
+    // `fixture.standards`, so a fixture carrying both had two owners: the conclusion named the one
+    // that did not decide. A fallback is what let the second owner exist, so there is no fallback.
+    const standards = fixture.standards
+    // The direction is read here, once, and it is consulted by `verdictOf` rather than passed
+    // through as context. Rounds three and four both found the same shape one layer apart: the
+    // caliber carried the orientation and the last consumer ranked without reading it. A number
+    // whose orientation is unstated is not a reading, so this refuses instead of defaulting.
+    const direction = fixture.frozen.metric.direction
+    const directionKnown = direction === 'higher' || direction === 'lower'
+    /** The one orientation of this comparison: `+1` when a larger number is better, `-1` when smaller is. */
+    const directionSign = direction === 'lower' ? -1 : 1
+    check('the fixture\'s metric states an orientation this comparison can read, and it is not defaulted',
+      directionKnown,
+      `direction ${JSON.stringify(direction ?? null)}`)
     const setOf = taskId => (holdoutSet.includes(taskId) ? 'holdout' : 'solve')
 
     /**
-     * One task's verdict, as this probe reads it: both sides' aggregates, the delta, and whether the
-     * fixture's standards say the bar was met.
+     * One task's verdict, as this probe reads it: both sides' aggregates, the delta **in the
+     * measurement's own direction**, and whether the fixture's standards say the bar was met.
+     *
+     * The orientation is the metric's, and it is what turns two numbers into a verdict: under
+     * `higher` the candidate wins by being larger, under `lower` by being smaller. `gain` was once
+     * `candidate.quality - baseline.quality` with the direction consulted nowhere but the passthrough
+     * into `openEvaluation`, which read "beats H0" for a method the fixture itself declared worse —
+     * the same defect as round three's H1, one layer out. Two directions that disagree are two
+     * calibers and this probe will not rank across them: `directionSign` is `-1` only for `lower`,
+     * and the check above refuses a fixture whose metric states neither.
      *
      * `worstCaseGain` is the honest floor rather than the point estimate. `quality` is
      * `observed / denominator`, so an incomplete candidate has already been charged for its missing
-     * slot; the floor charges it once more and then requires *that* number to clear the bar, so a
-     * comparison cannot clear `minQualityGain` on the strength of a planned trial nobody ran. The
-     * cost standard is a ceiling, so a side with an unknown cost cannot be shown to be inside it: an
-     * unknown cost reads as not met, exactly as `projectEvaluation` refuses to turn one into 0.
+     * slot; the floor charges it once more, **against the direction of improvement** — the `-0.5` is
+     * signed like the gain it is subtracted from, or under `lower` it would move the candidate *toward*
+     * the bar instead of away from it — and then requires *that* number to clear the bar, so a
+     * comparison cannot clear `minQualityGain` on the strength of a planned trial nobody ran. The cost
+     * standard is a ceiling, so a side with an unknown cost cannot be shown to be inside it: an unknown
+     * cost reads as not met, exactly as `projectEvaluation` refuses to turn one into 0.
      */
     const verdictOf = (label, candidateSide, taskId, bars) => {
       const baseline = sideReport(`${taskId}-baseline`)
       const candidate = sideReport(`${taskId}-${candidateSide}`)
-      const gain = candidate.quality - baseline.quality
+      const oriented = quality => directionSign * quality
+      const gain = oriented(candidate.quality) - oriented(baseline.quality)
       const missingShare = candidate.denominator === 0 ? 0 : (candidate.denominator - candidate.observed) / candidate.denominator
-      const worstCaseGain = gain - missingShare
+      const worstCaseGain = gain - directionSign * missingShare
       const complete = candidate.observed === candidate.denominator && baseline.observed === baseline.denominator
       const costsKnown = candidate.costPerTrial !== null && baseline.costPerTrial !== null
       const withinCost = costsKnown && candidate.costPerTrial - baseline.costPerTrial <= bars.maxCostIncrease
@@ -751,6 +853,7 @@ async function main() {
         label,
         taskId,
         bars,
+        direction,
         set: setOf(taskId),
         baseline: baseline.quality,
         candidate: candidate.quality,
@@ -814,9 +917,13 @@ async function main() {
         !close(pooled.quality, holdoutAggregate.quality),
       `pooled gain ${pooled.gain}, pooled quality ${pooled.quality}`)
 
-    check('the published method beats H0 on the solve set by the hand-computed margin',
-      close(solveAggregate.gain, 0.75) && close(solveAggregate.baseline, 0.25) && close(solveAggregate.quality, 1.0),
-      `gain ${solveAggregate.gain}`)
+    // The hand-computed values and the verdict's own number. The label used to say "by the
+    // hand-computed margin" while the predicate read only the two raw qualities and the baseline, so
+    // it did not read the margin it named; the margin term is now in the predicate, in the fixture's
+    // direction, which is also what keeps a `lower` fixture from inheriting `higher`'s verb.
+    check(`the published method ${direction === 'lower' ? 'is beaten by' : 'beats'} H0 on the solve set by the hand-computed margin`,
+      close(solveAggregate.gain, directionSign * 0.75) && close(solveAggregate.baseline, 0.25) && close(solveAggregate.quality, 1.0),
+      `gain ${solveAggregate.gain}, direction ${direction}`)
     check('the solve set meets the fixture\'s frozen standard on quality and stays inside its cost ceiling',
       solveAggregate.met === true && solveAggregate.worstCaseGain > standards.minQualityGain &&
         comparison.solve.every(verdict => verdict.costPerTrial[1] - verdict.costPerTrial[0] <= standards.maxCostIncrease),
@@ -867,8 +974,19 @@ async function main() {
 
     // The deliberately-below-bar measurement: a candidate that is not better than its baseline. Its
     // verdict must read as not met, and it must not be rescued by being "measured at all".
+    //
+    // "Worse" is read twice and independently: `verdict.gain < 0` is the comparison's own signed
+    // number, and the check below re-derives the ranking from the two views' raw qualities under the
+    // direction the views themselves carry — the same member the caliber is built from. A comparison
+    // that ignored the direction would call a 0.00 candidate better than a 0.25 baseline whenever the
+    // fixture said a smaller number wins, which is the defect round four proved at the consumer.
     const belowBarVerdict = comparison.belowBar[0]
-    check('a candidate measured to be worse than H0 reads as below the bar', belowBarVerdict.gain < 0 && belowBarVerdict.met === false, `gain ${belowBarVerdict.gain}`)
+    const belowBarViews = [views[`${belowBarTask}-baseline`], views[`${belowBarTask}-below-bar`]]
+    check('a candidate measured to be below H0 in the direction the fixture declares reads as below the bar',
+      belowBarVerdict.gain < 0 && belowBarVerdict.met === false &&
+        belowBarViews.every(view => view.direction === direction) &&
+        directionSign * belowBarViews[1].quality < directionSign * belowBarViews[0].quality,
+      `gain ${belowBarVerdict.gain}, direction ${direction}, candidate ${belowBarViews[1].quality} vs baseline ${belowBarViews[0].quality}`)
     check('that verdict is complete and admissible, so "not met" is about the standard and not about a missing trial',
       belowBarVerdict.complete === true && views[`${belowBarTask}-below-bar`].admissible === true, belowBarVerdict.complete ? '' : 'incomplete')
     check('the below-bar side was measured under the same caliber as the two sides it is compared against',
@@ -877,13 +995,19 @@ async function main() {
       measured.every(entry => evaluationOf(entry.planId).checks.length === judgement.length && evaluationOf(entry.planId).checks.every(check => check.met === true)),
       JSON.stringify(measured.map(entry => evaluationOf(entry.planId).checks.map(check => check.met))))
 
-    // Assertion 5: the conclusion's inputs are frozen identities, and replaying the same cutoff
+    // Assertion 5: the conclusion's inputs are frozen identities, and folding the same entries again
     // reproduces the same conclusion.
+    //
+    // `standards` is the binding the verdicts above decided under — the one owner, which is
+    // `fixture.standards` itself. It used to be `fixture.standards` here while `verdictOf` read
+    // `fixture.frozen.standards ?? fixture.standards`, two readings of the fixture that a fixture
+    // carrying both could make disagree, so one conclusion identity had two possible answers. What
+    // the conclusion names is what decided it.
     const conclusionInputOf = () => ({
       fixture: computedDigest,
       baseline: pinOf('baseline').digest,
       published: pinOf('published').digest,
-      standards: fixture.standards,
+      standards,
     })
     const digestOfConclusion = value =>
       digestOf({ input: conclusionInputOf(), solve: value.solve.map(verdict => [verdict.taskId, verdict.gain, verdict.met]), holdout: value.holdout.map(verdict => [verdict.taskId, verdict.gain, verdict.met]) })
@@ -894,16 +1018,42 @@ async function main() {
     // covers is a fact about the conclusion and not a fact about `digestOfConclusion` agreeing with
     // itself: dropping a member of `value` from the digest below changes this number.
     const handBuiltConclusion = digestOf({
-      input: { fixture: computedDigest, baseline: pinOf('baseline').digest, published: pinOf('published').digest, standards: fixture.standards },
+      input: { fixture: computedDigest, baseline: pinOf('baseline').digest, published: pinOf('published').digest, standards },
       solve: comparison.solve.map(verdict => [verdict.taskId, verdict.gain, verdict.met]),
       holdout: comparison.holdout.map(verdict => [verdict.taskId, verdict.gain, verdict.met]),
     })
     check('the conclusion\'s identity is the digest of the frozen input and every verdict it states',
       handBuiltConclusion === conclusion)
+    // One owner, and it is the *deciding* one: the standard named in the identity is the object the
+    // verdicts above were read under (same binding), and moving a member of that object — with the
+    // verdicts re-read under the moved object — moves the identity too. A second, hidden owner would
+    // be a second answer to "which standard decided", and the digest would not follow the one that
+    // did. The control is a *different* standard, not a copy of the same one.
+    const movedStandard = { ...standards, minQualityGain: standards.minQualityGain + 0.05 }
+    check('the conclusion\'s identity names the standard the verdicts decided under, not a second copy',
+      conclusionInputOf().standards === standards &&
+        digestOfConclusion(comparison) ===
+          digestOf({
+            input: { fixture: computedDigest, baseline: pinOf('baseline').digest, published: pinOf('published').digest, standards: fixture.standards },
+            solve: comparison.solve.map(verdict => [verdict.taskId, verdict.gain, verdict.met]),
+            holdout: comparison.holdout.map(verdict => [verdict.taskId, verdict.gain, verdict.met]),
+          }) &&
+        digestOfConclusion(comparison) !==
+          digestOf({
+            input: { fixture: computedDigest, baseline: pinOf('baseline').digest, published: pinOf('published').digest, standards: movedStandard },
+            solve: comparison.solve.map(verdict => [verdict.taskId, verdict.gain, verdict.met]),
+            holdout: comparison.holdout.map(verdict => [verdict.taskId, verdict.gain, verdict.met]),
+          }))
 
-    // The replay: the same cutoff, folded again from the same entries, aggregated again by the same
-    // probe. What is replayed is the reading, and the reading must not depend on when it was taken.
-    const cutoff = store.load().entries().length
+    // The replay: the log folded again from its own entries, aggregated again by the same probe. What
+    // is replayed is the reading, and the reading must not depend on when it was taken.
+    //
+    // There is deliberately no cutoff here. Two checks used to sit below — `cutoff ===
+    // store.load().entries().length` and a label saying there were facts above the cutoff — and both
+    // were pure reads of the same value with no writer between them, so the predicate was `x === x`,
+    // it could never fail, and its label asserted the opposite of the truth (the cutoff *was* the
+    // whole log: 51 facts, 0 above). A check that cannot fail is not evidence, and a replay that
+    // claims a scope it does not have is worse than one that claims none, so both are gone.
     const replayed = taskIds.map(taskId => ({
       taskId,
       baseline: projectEvaluation(foldSubjects(registry, store.load().entries(), MEASURE_PROTOCOL, MEASURE_VERSION).get(`${taskId}-baseline`)),
@@ -915,21 +1065,19 @@ async function main() {
         close(entry.published.quality, views[`${entry.taskId}-published`].quality) &&
         entry.baseline.observed === views[`${entry.taskId}-baseline`].observed &&
         entry.published.missing.length === views[`${entry.taskId}-published`].missing.length))
-    // Re-aggregate from the log at the cutoff and re-derive the conclusion from those verdicts: same
-    // inputs, same reading, same digest. The comparison below changes one verdict's answer without
-    // touching its numbers, so a conclusion digest that does not cover the answer is a digest that
-    // would call two different conclusions one.
+    // Re-derive the verdicts from the re-folded aggregates and the conclusion from those verdicts:
+    // same inputs, same reading, same digest. The comparison below changes one verdict's answer
+    // without touching its numbers, so a conclusion digest that does not cover the answer is a digest
+    // that would call two different conclusions one.
     const reread = taskIds.map(taskId => verdictOf('replay', 'published', taskId, standards))
     const rereadDigest = digestOfConclusion({ solve: reread.filter(verdict => verdict.set === 'solve'), holdout: reread.filter(verdict => verdict.set === 'holdout') })
     const flipped = verdict => ({ ...verdict, met: !verdict.met })
     const driftDigest = digestOfConclusion({ solve: reread.filter(verdict => verdict.set === 'solve').map(flipped), holdout: reread.filter(verdict => verdict.set === 'holdout').map(flipped) })
-    check('replaying the same cutoff reproduces the same conclusion, from the same frozen identities',
-      rereadDigest === conclusion && cutoff === store.load().entries().length,
+    check('re-folding the same entries reproduces the same conclusion, from the same frozen identities',
+      rereadDigest === conclusion,
       `${rereadDigest} vs ${conclusion}`)
     check('and the conclusion\'s identity covers the answer, not only the numbers',
       driftDigest !== conclusion)
-    check('and there are facts above the cutoff for the replay to be a claim about the cutoff',
-      store.load().entries().length === cutoff)
 
     // --------------------------------------------------------------------------- 6. replay from disk
     console.log('\n== replay: the same log reopened from its own bytes')
@@ -949,6 +1097,13 @@ async function main() {
       reopenedViews.every(([taskId, view]) => close(view.quality, views[`${taskId}-published`].quality)))
 
     // ------------------------------------------------------------------------- the readout
+    // The marker has to agree with the readout two lines below it. It used to say "under one
+    // caliber" while the solve set is measured under **three** — one per task, because a task's own
+    // inputs are part of the question — so the marker contradicted the readout it summarises. The
+    // verb is the fixture's orientation, so this line cannot claim "beats" for a fixture that says a
+    // smaller number is better.
+    const horizon = 'on the frozen solve set under the fixture\'s per-task calibers'
+    const verb = direction === 'lower' ? 'is beaten by' : 'beats'
     console.log('')
     console.log(`  fixture ${computedDigest}`)
     console.log(`  tasks ${taskIds.length} (solve ${solveSet.length}, holdout ${holdoutSet.length}); trials per side ${fixture.frozen.trials}`)
@@ -962,12 +1117,15 @@ async function main() {
     console.log('              deliberately not a gate because it needs network and credentials.')
     console.log('  unobserved: the behaviour regression half of F\'s exit condition is the four probes that already exist')
     console.log('              (control-probe, recovery-probe, slice-b, cd-probe); F adds no regression mechanism of its own.')
+    console.log('  unobserved: the instrument\'s bytes are not frozen by the fixture, so a rebuilt meter moves the caliber')
+    console.log('              digest on both sides instead of failing it; what is checked is that its number reads the')
+    console.log('              reference file it is handed. See docs/f-evidence.md.')
 
     if (failures.length > 0) {
       console.error(`\ndomain-probe: ${failures.length} check(s) failed: ${failures.join(' | ')}`)
       process.exitCode = 1
     } else {
-      console.log('\ndomain-probe: OK — the published method beats H0 on the frozen solve set under one caliber, and the frozen standards say so')
+      console.log(`\ndomain-probe: OK — the published method ${verb} H0 ${horizon}, and the frozen standards say so`)
     }
   } finally {
     try {
