@@ -1,0 +1,735 @@
+{
+  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim (mutate:fw-direction-sign-ignored is the one). What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
+  "claims": [
+    {
+      "id": "fw-fixture-standard-moved",
+      "rule": "the fixture's content digest is the comparison's identity",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "\"standards\": { \"minQualityGain\": 0.1, \"maxCostIncrease\": 0.15 }",
+          "replace": "\"standards\": { \"minQualityGain\": 0.2, \"maxCostIncrease\": 0.15 }"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the fixture declares the content digest of its own body"
+    },
+    {
+      "id": "fw-fixture-digest-moved",
+      "rule": "the digest is recomputed from the fixture's own body, not read out of it",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const computedDigest = digestOf(body)",
+          "replace": "const computedDigest = digestOf({ ...body, domain: 'f-domain-moved' })"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the fixture declares the content digest of its own body"
+    },
+    {
+      "id": "fw-pinned-literal-zeroed",
+      "rule": "the probe pins the fixture digest independently of the fixture file",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const FROZEN_FIXTURE_DIGEST = '2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b'",
+          "replace": "const FROZEN_FIXTURE_DIGEST = '0000000000000000000000000000000000000000000000000000000000000000'"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "that recomputed digest is the one written down in this probe"
+    },
+    {
+      "id": "fw-direction-unpinned",
+      "rule": "a fixture moved under a pinned digest is refused by the pin, not accepted",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "\"direction\": \"higher\"",
+          "replace": "\"direction\": \"lower\""
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the fixture declares the content digest of its own body"
+    },
+    {
+      "id": "fw-caliber-model-swapped",
+      "rule": "the caliber is the fixture's own, not merely two evaluations agreeing with each other",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "          model: fixture.frozen.model,\n",
+          "replace": "          model: 'probe-authored/another-model',\n"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "that caliber is the one the fixture froze"
+    },
+    {
+      "id": "fw-criterion-unknown",
+      "rule": "a hard constraint is one the frozen judgement declares, and one it does not is refused by name",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "\"criterionId\": \"bounded\"",
+          "replace": "\"criterionId\": \"bounded-other\""
+        },
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
+          "replace": "4039ccbf3d81d1080bb14ccc5ebde311b6b1bc4246209b78548cbbab66b4ee25"
+        },
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
+          "replace": "4039ccbf3d81d1080bb14ccc5ebde311b6b1bc4246209b78548cbbab66b4ee25"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "unknown-criterion"
+    },
+    {
+      "id": "fw-miss-not-planted",
+      "rule": "the planted miss really happens: the plan asks for a run that produces no number",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "    const modesOf = (taskId, side) => (side === 'published' && taskId === holdoutSet[0] ? ['measure', 'fail'] : ['measure', 'measure'])",
+          "replace": "    const modesOf = () => ['measure', 'measure']"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the planted miss really is planted",
+      "note": "the named check fails first; the probe then dies reading the miss it no longer has, which is the same mutation seen from the other side"
+    },
+    {
+      "id": "fw-slot-accounting-constant",
+      "rule": "every planned slot is an observation or a named miss, and the arithmetic can say no",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const accounts = claim => claim.observed + claim.missing.length === claim.denominator",
+          "replace": "const accounts = claim => claim.denominator >= 0"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "no slot anywhere is silently absent"
+    },
+    {
+      "id": "fw-miss-slot-unnamed",
+      "rule": "the empty slot is named where a reader of the report can find it, not merely counted",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "src/measure/view.ts",
+          "find": "missing.map(entry => `slot ${entry.slot} (${entry.reason})`).join('; ')",
+          "replace": "missing.map(entry => `a planned slot (${entry.reason})`).join('; ')"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the slot the plan left empty"
+    },
+    {
+      "id": "fw-trials-attempts-off-by-one",
+      "rule": "the planned slot count and the programs' own marker count agree",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "    trials: lines.filter(entry => entry.startsWith('meter:run:')).length,\n",
+          "replace": "    trials: lines.filter(entry => entry.startsWith('meter:run:')).length - 1,\n"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the measurement program was attempted once for every planned slot"
+    },
+    {
+      "id": "fw-holdout-becomes-solve",
+      "rule": "holdout and solve are recorded as separate readings, and a set that is not held out is caught",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "\"holdout\": [\"f-task-three\"]",
+          "replace": "\"holdout\": [\"f-task-one\", \"f-task-two\"]"
+        },
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
+          "replace": "4faeb36704353f892600a44d7e4a62362a6651649482acf9f4fe24d1b103d7c1"
+        },
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
+          "replace": "4faeb36704353f892600a44d7e4a62362a6651649482acf9f4fe24d1b103d7c1"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the two sets do not overlap"
+    },
+    {
+      "id": "fw-pooling-indistinguishable",
+      "rule": "a pooled reading of the two sets is a different number from either of them",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const pooled = aggregateOf(everyVerdict)",
+          "replace": "const pooled = aggregateOf(comparison.solve)"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "a pooled reading of the two sets is a different number"
+    },
+    {
+      "id": "fw-bar-equality",
+      "rule": "the bar is strict: raising it to the observed gain reads as not met",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const met = complete && worstCaseGain > bars.minQualityGain && withinCost",
+          "replace": "const met = complete && worstCaseGain >= bars.minQualityGain && withinCost"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "raising the quality bar over the same measurements"
+    },
+    {
+      "id": "fw-cost-ceiling-dead",
+      "rule": "the cost ceiling decides a verdict somewhere, and the run that shows it is in the probe",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const withinCost = costsKnown && candidate.costPerTrial - baseline.costPerTrial <= bars.maxCostIncrease",
+          "replace": "const withinCost = costsKnown"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the cost ceiling is load-bearing"
+    },
+    {
+      "id": "fw-missing-floor-dropped",
+      "rule": "an unrun slot cannot be read as an unremarkable one, in the direction the metric declares",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const worstCaseGain = gain - directionSign * missingShare",
+          "replace": "const worstCaseGain = gain"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the missing-slot floor is load-bearing"
+    },
+    {
+      "id": "fw-direction-flipped",
+      "rule": "the direction participates in the verdict: a method the fixture declares worse is not reported as beating H0",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "\"direction\": \"higher\"",
+          "replace": "\"direction\": \"lower\""
+        },
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
+          "replace": "58a5789a61506326fd025fc484543c5e031794e99eef67931618fa17aaa75f9a"
+        },
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
+          "replace": "58a5789a61506326fd025fc484543c5e031794e99eef67931618fa17aaa75f9a"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the solve set meets the fixture"
+    },
+    {
+      "id": "fw-direction-sign-inverted",
+      "rule": "the sign is the fixture's orientation, not a constant: the unflipped fixture must not inherit the other direction",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const directionSign = direction === 'lower' ? -1 : 1",
+          "replace": "const directionSign = direction === 'lower' ? 1 : -1"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the solve set meets the fixture"
+    },
+    {
+      "id": "fw-direction-sign-ignored",
+      "rule": "the direction participates in the verdict, so a sign that is read and then ignored is caught",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "\"direction\": \"higher\"",
+          "replace": "\"direction\": \"lower\""
+        },
+        {
+          "file": "tests/fixtures/f-domain.json",
+          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
+          "replace": "58a5789a61506326fd025fc484543c5e031794e99eef67931618fa17aaa75f9a"
+        },
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
+          "replace": "58a5789a61506326fd025fc484543c5e031794e99eef67931618fa17aaa75f9a"
+        },
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "const directionSign = direction === 'lower' ? -1 : 1",
+          "replace": "const directionSign = 1"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the solve set meets the fixture",
+      "expect": "missed",
+      "note": "REPRODUCED AND NOT CAUGHT. Every check in the probe is written in terms of the same `directionSign`, so forcing it constant keeps them self-consistent: with the fixture flipped to `lower` the probe still exits 0 and prints \"domain-probe: OK — the published method is beaten by H0 … and the frozen standards say so\" over a positive gain. The readout verb reads `direction` itself, so the marker contradicts its own numbers and nothing checks that. docs/f-evidence.md §5 recorded this mutation as caught with five failures; it is not, and the row now says so. What the fix does catch is the flipped fixture itself (mutate:fw-direction-flipped) and an inverted sign (mutate:fw-direction-sign-inverted)."
+    },
+    {
+      "id": "fw-meter-never-reads-reference",
+      "rule": "the instrument's number is a reading of the words in the file it is pointed at, not of the probe's own naming",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "  \"if (mode === 'fail') process.exit(3)\",\n  \"const selected = readFileSync(artifactPath, 'utf8').trim().split(/\\\\s+/).filter(Boolean)\",\n  \"const reference = readFileSync(referencePath, 'utf8').trim().split(/\\\\s+/).filter(Boolean)\",\n  'const hits = selected.filter(word => reference.includes(word)).length',\n  \"console.log(JSON.stringify({ quality: hits / reference.length, cost: selected.join(' ').length / 1000 }))\",",
+          "replace": "  \"if (mode === 'fail') process.exit(3)\",\n  \"const artifact = readFileSync(artifactPath, 'utf8')\",\n  \"const counted = (artifact.match(/-t[0-9]+/g) ?? []).length\",\n  \"console.log(JSON.stringify({ quality: counted / 4, cost: artifact.trim().length / 1000 }))\","
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the meter's number is a reading of the words"
+    },
+    {
+      "id": "fw-conclusion-drops-answer",
+      "rule": "the conclusion identity covers the answer, not only the numbers",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "solve: value.solve.map(verdict => [verdict.taskId, verdict.gain, verdict.met])",
+          "replace": "solve: value.solve.map(verdict => [verdict.taskId, verdict.gain])"
+        },
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "holdout: value.holdout.map(verdict => [verdict.taskId, verdict.gain, verdict.met])",
+          "replace": "holdout: value.holdout.map(verdict => [verdict.taskId, verdict.gain])"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the conclusion's identity is the digest of the frozen input"
+    },
+    {
+      "id": "fw-conclusion-drops-revisions",
+      "rule": "the conclusion names both revisions it is about, so its identity moves when one is dropped",
+      "doc": "docs/f-evidence.md",
+      "edits": [
+        {
+          "file": "scripts/domain-probe.mjs",
+          "find": "      baseline: pinOf('baseline').digest,\n      published: pinOf('published').digest,\n",
+          "replace": "      baseline: pinOf('baseline').digest,\n"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/domain-probe.mjs"
+        ]
+      },
+      "witness": "the conclusion's identity is the digest of the frozen input"
+    },
+    {
+      "id": "task-responsibility-gate",
+      "rule": "run/started accepts only the identity of the currently responsible agent",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/responsibility.ts",
+          "find": "export function requireResponsible(state: TaskState, actor: string, where: string): void {\n  const current = state.responsibility\n",
+          "replace": "export function requireResponsible(state: TaskState, actor: string, where: string): void {\n  const current = { agentId: 'anyone', agentIdentity: actor }\n"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-binding.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "task-verdict-input-binding",
+      "rule": "a verdict is bound to the inputs the run declared it executed against",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/run.ts",
+          "find": "      assertInputsBound(run.bubble, payload.inputDigests, where)\n",
+          "replace": "      void assertInputsBound\n"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-binding.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "task-any-terminal-satisfies",
+      "rule": "only a verified dependency satisfies a dependant: a failed or stopped one does not",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/tree.ts",
+          "find": "    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped')",
+          "replace": "    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked')"
+        },
+        {
+          "file": "src/task/tree.ts",
+          "find": "    const pending = dependencies.filter(({ view }) => view.status !== 'verified')",
+          "replace": "    const pending = dependencies.filter(({ view }) => view.status !== 'verified' && view.status !== 'failed' && view.status !== 'stopped')"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-tree.spec.ts"
+        ]
+      },
+      "witness": "×",
+      "note": "two edits, because the stopped case is caught by the `dead` filter first: flipping only the second filter leaves every spec green, which is itself worth recording — the two filters are not redundant, and the first one is what makes \"any terminal satisfies\" unreachable for `stopped`"
+    },
+    {
+      "id": "task-unverified-child-accepts",
+      "rule": "a parent criterion is satisfied by a verified sub-task, never by one that merely exists",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/tree.ts",
+          "find": "    const byChild = supportedBy.find(taskId => children.find(child => child.taskId === taskId)?.status === 'verified')",
+          "replace": "    const byChild = supportedBy.find(taskId => children.find(child => child.taskId === taskId)?.status !== 'missing')"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-tree.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "task-only-missing-propagates",
+      "rule": "a stopped dependency propagates through a chain and names each link, not only a missing one",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/tree.ts",
+          "find": "    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped')",
+          "replace": "    const dead = dependencies.filter(({ view }) => view.status === 'missing')"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-tree.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "control-barrier-ignored",
+      "rule": "a failed durability barrier is not acknowledged as a committed fact",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/control/session-store.ts",
+          "find": "      await this.#handle.flush()\n",
+          "replace": "      await this.#handle.flush().catch(() => {})\n"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/control-barrier.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "assets-head-cutoff",
+      "rule": "the head that counts is the one the log holds below the cutoff",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/strategy/published-assets.ts",
+          "find": "  const belowCutoff = entries.filter(entry => entry.seq < cutoff)",
+          "replace": "  const belowCutoff = entries.filter(() => true)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/published-assets.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "assets-election-cutoff",
+      "rule": "an election recorded above the cutoff may not add a class to a frozen history",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/strategy/published-assets.ts",
+          "find": "  for (const round of foldSubjects<RoundState>(FOLD, belowCutoff, STRATEGY_PROTOCOL, STRATEGY_VERSION).values()) {",
+          "replace": "  for (const round of foldSubjects<RoundState>(FOLD, entries, STRATEGY_PROTOCOL, STRATEGY_VERSION).values()) {"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/published-assets.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "assets-revision-content",
+      "rule": "the proposal matches on the whole revision, not on its id: content the head does not hold contributes nothing",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/strategy/published-assets.ts",
+          "find": "    if (!sameRevision(elected.revision, { environmentId, revisionId: published.revisionId, digest: published.contentDigest })) continue",
+          "replace": "    if (elected.revision.revisionId !== published.revisionId) continue"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/published-assets.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "assets-no-head-guess",
+      "rule": "a head no slot proposed contributes no classes, rather than a guess",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/strategy/published-assets.ts",
+          "find": "  if (published === undefined) return []",
+          "replace": "  if (published === undefined) return ['unattributed']"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/published-assets.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "assets-class-dedup",
+      "rule": "a class elected twice is one acceptance, and declaration order survives",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/strategy/published-assets.ts",
+          "find": "    for (const edit of elected.edits) if (!accepted.includes(edit.asset)) accepted.push(edit.asset)",
+          "replace": "    for (const edit of elected.edits) accepted.push(edit.asset)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/published-assets.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "round-novelty-publish-removed",
+      "rule": "novelty is counted against a real publication, so removing the publication turns the check red",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "scripts/round-probe.mjs",
+          "find": "    const pin = { environmentId: ENVIRONMENT, revisionId: PUBLISHED, digest: CANDIDATE_1.digest }\n    await release.draft({ commandId: 'draft-r0003', revision: pin })\n    await release.approve({ commandId: 'approve-r0003', environmentId: ENVIRONMENT, revisionId: PUBLISHED, draftDigest: pin.digest, approvedBy: 'human:alice', ask: { agent: ASKING_AGENT, toolName: 'release_approve' } })\n    await release.publish({ commandId: 'publish-r0003', environmentId: ENVIRONMENT, expected: '', to: PUBLISHED })\n",
+          "replace": "    const pin = { environmentId: ENVIRONMENT, revisionId: PUBLISHED, digest: CANDIDATE_1.digest }\n"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/round-probe.mjs"
+        ]
+      },
+      "witness": "an asset class the publication accepted is not novel"
+    },
+    {
+      "id": "round-novelty-below-cutoff",
+      "rule": "novelty reads the publication only below the round's cutoff",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "scripts/round-probe.mjs",
+          "find": "await open('round-published', 8, { candidates: 2, explorationSlots: 0 })",
+          "replace": "await open('round-published', 8, { candidates: 2, explorationSlots: 0, historyCutoff: 5 })"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/round-probe.mjs"
+        ]
+      },
+      "witness": "an asset class the publication accepted is not novel"
+    },
+    {
+      "id": "recovery-precondition-before-identity",
+      "rule": "cross-subject preconditions run after command identity, so a lost reply can be recovered",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/protocol/memory-log.ts",
+          "find": "    // Command identity: a repeated request returns its recorded fact; a different one is refused.\n    const requestDigest = digestOf({",
+          "replace": "    require?.()\n\n    // Command identity: a repeated request returns its recorded fact; a different one is refused.\n    const requestDigest = digestOf({"
+        },
+        {
+          "file": "src/protocol/memory-log.ts",
+          "find": "    require?.()\n\n    const body: EnvelopeBody = {",
+          "replace": "    const body: EnvelopeBody = {"
+        }
+      ],
+      "run": {
+        "kind": "node",
+        "args": [
+          "scripts/recovery-probe.mjs"
+        ]
+      },
+      "witness": "cannot start a run for sub-task",
+      "note": "the probe dies on the refusal the reorder produces instead of reporting a failed check, which is what \"以那句拒绝失败\" means: the recovery path is gone, and the store says so by name"
+    }
+  ]
+}

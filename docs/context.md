@@ -5,8 +5,14 @@
 > `docs/rrsi-upstream-reference.md`（上游逐行对照）、`docs/adr/`（已定决策）。
 > **`docs/debugging.md`（写代码前先读）**：六类缺陷的根因、"量不变量而不是量耗时"、
 > 变异证明配方、以及"不可能触发的规则要删掉而不是补测试"这条纪律。
+> **本文件有两类声明只有一个出处，并且不在正文里复述**（复述过的都漂了，见 §12.1 与 §13）：
+> **规模数字**（源文件 / spec 文件 / 测试 / 门禁）在 `tree-baseline.json`，由门禁 `tree-inventory`
+> 与本次构建实测比对；**变异声明**（哪条规则被哪次变异证明）在 `mutation-baseline.json`，
+> `node scripts/mutate.mjs <id>` 按需在副本上重跑，门禁 `mutation-claims` 每次检查每条声明是否
+> 仍然可应用、以及本文件里的结果声明是否点到了一个可跑的 id。**写进这两处的会被检查，写进散文的不会。**
 > 上一轮更新：2026-10-09（A 提交边界纠正；B 部分实现，剩余动作见 §11/§12）。
-> 本轮更新：控制路径收敛（一条决定/记录路径、一个队列、O(1) 提交），六处报告的缺陷逐条确认并修掉。
+> 本轮更新：控制路径收敛（一条决定/记录路径、一个队列、O(1) 提交），六处报告的缺陷逐条确认并修掉；
+> 以及第四轮审查点名的两笔债——散在散文里的规模数字、住在 `/tmp` 里的变异脚本——各自变成一个被门禁比对的账本。
 
 ---
 
@@ -35,7 +41,7 @@
 
 | 阶段 | 交付 | 退出条件 | 状态 |
 |---|---|---|---|
-| **A** | 专用控制 store、DSH 承载、串行提交、严格边界、命令结果识别 | 双进程互斥；并发命令正确；屏障失败不返回成功；提交后/答复前崩溃可识别原结果 | **完成纠正**：三个提交边界 P1 已修复，108 测试、9 门禁通过；实现限制与下一阶段见 §12 |
+| **A** | 专用控制 store、DSH 承载、串行提交、严格边界、命令结果识别 | 双进程互斥；并发命令正确；屏障失败不返回成功；提交后/答复前崩溃可识别原结果 | **完成纠正**：三个提交边界 P1 已修复；实现限制与下一阶段见 §12 |
 | **B** | 最小 E3、Task 分解与责任、初始不可变 Revision、最小 Bubble、真实 verifier 与固定来源 receipt | 根/子任务执行与依赖推进；产物独立验收；SIGKILL 后恢复同 session/责任/绑定 | **部分实现**：S1 与 S3 验证器部分已落地；S2/S4/S5/S6 待完成（**K1 尚未达到**） |
 | **C** | 冻结双侧输入、真实领域取数、非补偿约束、真实重复与噪声依据 | 好候选通过；高分越界拒绝；缺失分母正确；每份报告有真实 trials | 未开始 |
 | **D** | draft 状态机、E6 原生审批、决定重算、唯一指针切换 | 批准绑定具体差异；陈旧/内容变化拒绝；head 不引用半成品 | 未开始 |
@@ -52,7 +58,7 @@
 | E02 | 并发两次 emit → 两次成功、`seq=[0,0]`、重开 `chain-broken` | **已修**（提交队列）；回归：`gate.spec.ts` 的 `serializes concurrent commits` |
 | E03 | 用验证器名填 `actor` → 可达 verified | **已修**（emit 无 actor 参数；角色由 kind 声明、身份由部署绑定；reducer 同时校验角色与身份）；回归：`task-invariants.spec.ts` 的 identity 共享用例 + slice 冒烟 |
 | E04 | 合法日志换空注册表重开 → `unregistered-verifier` | **已修**（shape 纯函数 vs 可用性命令期检查）；回归：`replay never consults what this deployment can run today` |
-| E05 | 加 default-import 写者 + 仅注释中的导出引用 → 7/7 门禁通过 | **已修**（剥离注释/字符串；拒绝 default/namespace fs 导入）；回归：`gates.mjs --probe` 的两个探针文件 |
+| E05 | 加 default-import 写者 + 仅注释中的导出引用 → 当时全部门禁通过 | **已修**（剥离注释/字符串；拒绝 default/namespace fs 导入）；回归：`gates.mjs --probe` 的两个探针文件 |
 | E06 | unknown 字段被接受；`detail:123` 变空串；无 Run 的已准入 Task → `failed` | **已修**（载荷按 kind 闭合；错类型拒绝而非归一化；缺失理由保持缺失；新增 `awaiting-run`） |
 | E07 | `digestOf({v:NaN})===digestOf({v:null})`；`undefined` 同 `{}` | **已修**（`assertLosslessJson`）；回归：`refuses a content identity JSON cannot round-trip` |
 | E08 | `ruleFor('toString'\|'constructor'\|'__proto__')` 返回继承属性；`declare` 先改 owner 后拒绝 | **已修**（own-key 查询；全部校验成功后才发布）；回归：`refuses an inherited member name` + `declaration is all-or-nothing` |
@@ -164,21 +170,22 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 5. 当前代码状态（`pnpm verify` 全绿）
 
-`src`/`tests` 共 44 个 `.ts` 文件；**181 测试**；**10 门禁 + 门禁自检**（含 `dsh-alignment` 与三条跑真实进程的行为门禁）。
-**这份清单要按 §12.1 变成被门禁检查的账本**——它上一次是错的（见 §12.1 的实测）。
+**规模数字只有一个出处**：`tree-baseline.json`（`sourceFiles` / `specFiles` / `tests` / `gates`），由门禁 `tree-inventory` 与本次构建实测比对——`tests` 读的是 vitest 自己的 `list --json` 端口，不是数 `it(`。
+本文件在 §12.1 记的正是这份账本缺席时发生的事：那些数字在散文里漂过三次，**没有任何东西发现**，所以现在正文里不再写它们。
+**行为门禁与 `dsh-alignment` 都在 `pnpm verify` 的自动路径上**：行为门禁各带合成失败探针，`scripts/gates.mjs --probe` 打印哪些门禁是合成文件集够不到的（`tree-inventory`、`mutation-claims`、`protocol-inventory`、`evidence-budget`、`spec-density`、`dsh-alignment` 与各行为门禁）。
 
 **一条事实只有一条路径**（本轮收敛，`docs/debugging.md` 记了根因）：`MemoryLog.decide` 判全部规则并封信封但**不记录**，`record` 才让它进入日志。控制 store 的提交区是**全栈唯一队列**——它是唯一跨越真实写入的地方；命令层与 `MemoryLog` 自己的队列都已删除。读侧：`load()` 是一个真正的 **cut**（`stateAt(p,v,s,cut)`），头部读 O(1)，写侧提交的 reducer 调用数从 51 降到 **1**。
 
 - `src/protocol/{refusal,envelope,registry,fold,log}.ts` —— 一个拒绝契约、一个信封、一个版本闸+保证词表+发射者纪律、一个 fold 引擎、一条追加路径（提交队列 + 命令识别 + 提交前 dry-run）。
 - `src/task/{contract,protocol,view}.ts` —— 契约（shape 纯 / 可用性命令期）、5 种 kind、唯一读投影 + G4 派生 receipt。
-- `scripts/gates.mjs` —— **9 条门禁** + `--probe` 自检（每个静态检测器都必须能失败；三条读真实树的门禁各有独立探针）。新增的第 9 条 `control-store-probe` 跑 `scripts/control-probe.mjs`，它是阶段 A 四条退出条件**唯一**的端到端证据。**为什么要加它**：v2 版本变更把那个探针弄坏时，没有任何自动路径会报警，直到我手动跑它——「证据必须在每次提交上被机械检查」这条，我此前漏在了 `pnpm verify` 之外。
+- `scripts/gates.mjs` —— 全部门禁 + `--probe` 自检（每个静态检测器都必须能失败；读真实树或读自己账本的门禁各有独立探针）。`control-store-probe` 跑 `scripts/control-probe.mjs`，它是阶段 A 四条退出条件**唯一**的端到端证据。**为什么要加它**：v2 版本变更把那个探针弄坏时，没有任何自动路径会报警，直到我手动跑它——「证据必须在每次提交上被机械检查」这条，我此前漏在了 `pnpm verify` 之外。
 - `dsh-baseline.json` —— **DSH 基线的单一事实来源**；门禁 `dsh-alignment` 强制它。
 - `src/control/session-store.ts` + `scripts/control-probe.mjs` —— 控制 store 与双进程探针（见 §4.1）。
-- `tests/control-barrier.spec.ts` —— **屏障失败可失败性**（假介质：接受 append、屏障拒绝）+ 该用例自身的变异证明（见 §4.1 末尾表）。
+- `tests/control-barrier.spec.ts` —— **屏障失败可失败性**（假介质：接受 append、屏障拒绝）；三条用例各自断言一个失败模式，由 `pnpm test` 每次执行。**那次在 `/tmp` 里做过的变异没有留下产物**，所以这里不声称它；能按需重跑的是本账本里的 `mutate:control-barrier-ignored`（去掉对屏障失败的处理）。
 - `src/environment/{protocol,binding}.ts` + 两个 spec（**S1 已落地**）——修订一条被创建一次、**摘要由 reducer 自己算**（不可借身份）、同 id 同内容幂等 / 异内容 `revision-conflict`；`assertPinnedRevision` 与 `projectBindings` 判 `unknown-revision`（含继承键 `constructor` 用例；投影**拒绝**首个不可绑定的 run，不静默跳过）。
 - `src/verifier/implementation.ts` + `scripts/verifier-command.mjs` + 两个 spec（**S3 验证器半边已落地**）——部署声明 `implementationDigest` 与 selftest；`assertVerifierRunnable` 要求 selftest **既有 pass 又有 fail 样本**（"没失败过的门禁不算门禁"用在验证器上）；`runVerifierSelftest` 把"实现说谎"记为数据而不是抛出；真实执行器由退出码判决、**执行后**再哈希产物字节。
 - `src/task/shape.ts` —— 任务协议的共享形状读取器（从 `protocol.ts` 切出，因它越过 400 行门禁）。
-- `src/task/decomposition.ts` + `src/task/tree.ts` + 两个 spec（**S2 已落地**）——一条完整事实的分解（`dependsOn`/`supports`/`maxRuns`，无环、覆盖面、子 id 唯一，声明 `atomicFact`）与全日志投影 `projectTree`。**只有 `verified` 满足依赖**；停止/阻塞沿链具名传播；预算耗尽即 `stopped`；**父的完成是派生量，子任务结束永不等于父任务被接受**。三个承重性质各有变异证明：把“任何终止都算满足”（旧仓的 bug）、把“未 verified 的子任务算作接受判据”、把“只有 missing 才传播”分别注入，对应用例都失败。
+- `src/task/decomposition.ts` + `src/task/tree.ts` + 两个 spec（**S2 已落地**）——一条完整事实的分解（`dependsOn`/`supports`/`maxRuns`，无环、覆盖面、子 id 唯一，声明 `atomicFact`）与全日志投影 `projectTree`。**只有 `verified` 满足依赖**；停止/阻塞沿链具名传播；预算耗尽即 `stopped`；**父的完成是派生量，子任务结束永不等于父任务被接受**。三个承重性质各有可重跑的变异证明：把"任何终止都算满足"（旧仓的 bug）、把"未 verified 的子任务算作接受判据"、把"只有 missing 才传播"分别注入，对应用例都失败——`mutate:task-any-terminal-satisfies`、`mutate:task-unverified-child-accepts`、`mutate:task-only-missing-propagates`。
 
 **S2 的三条不变量（写在 reducer 里，必须保留）**：判据由它命名的验证器实现裁决；执行者不自判自己的 run（角色 + 身份双重校验）；每条判据都有 pass 才 verified（拒绝时点出缺哪条）。
 
@@ -277,7 +284,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 **本轮新增的观测**：
 - `scripts/slice-b.mjs`（门禁）——真实纵切 22 项全过：父提出分解 → 子有依赖与责任 → run 钉住真实 revision → bubble 声明真实输入 → **真实验证器 spawn 出去读产物并裁决** → verdict 落为事实 → 结算 → receipt（cutoff + 真实消费 + 产物摘要）。
-- `scripts/recovery-probe.mjs`（门禁）——两个边界各一次真实 SIGKILL，21 项全过。**它抓到我命令边界的一个真实缺陷**：前置条件原先在 store 解析命令身份之前求值，丢失答复因此无法通过命令面恢复；修法是把前置条件放进 append 路径（身份之后、reducer 之前），变异证明顺序改回去即以那句拒绝失败。
+- `scripts/recovery-probe.mjs`（门禁）——两个边界各一次真实 SIGKILL，21 项全过。**它抓到我命令边界的一个真实缺陷**：前置条件原先在 store 解析命令身份之前求值，丢失答复因此无法通过命令面恢复；修法是把前置条件放进 append 路径（身份之后、reducer 之前），可重跑的变异证明是 `mutate:recovery-precondition-before-identity`（顺序改回去即以那句拒绝失败）。
 - `scripts/model-smoke.mjs`——**真实模型补全**（宿主 profile 的 commandcode 路由，`deepseek/deepseek-v4.1-flash`），实测 16 chunks / 收敛 / `"four"` / 2956ms，只断言结构性三条。**两段**：§1 一次真实补全；§2 **真实模型驱动真实 agent turn**——手工挂载 runtime track 用的同一组插件（persistence/sessions/agents/llm/tools/systemPrompt/projections/agentLoop）但**不注册桩适配器**，实测 `turn/start … assistant/message … turn/end`，并从记录的 `assistant/message` 事件读出模型产出文本。断言只取结构性三条。**刻意不做门禁**（依赖网络与凭据）。
 
 **仍未做**：把"真实模型"与"真实 Task 管线"接成同一条（见 `k1-evidence.md` 倒数第二行，并注意不能断言判决为 pass）；group/router（上游没有，且无消费者）。
@@ -289,7 +296,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 **已完成（本轮）**：
 - **S2**（提交 `d07c148`）：`src/task/decomposition.ts` + `src/task/tree.ts`。一条完整事实的分解（`dependsOn`/`supports`/`maxRuns`，无环、覆盖面、子 id 唯一，声明 `atomicFact`）+ 全日志投影 `projectTree`。**只有 `verified` 满足依赖**，停止/阻塞沿链具名传播，预算耗尽即 `stopped`，父的完成是派生量。
 - **task@3 + agent@1**（提交 `bf1fdbf`）：`task/assigned`/`task/reassigned` + **`run/started` 的责任门**（只接受当前责任人的**身份**；新码 `not-responsible`）；`bubble/opened` + **verdict 的输入绑定**（新码 `evidence-input-mismatch`，同 subject 纯判）；`agent@1` 的 `agent/opened` **引用**真实 DSH 会话且**不声称存活**。一次升版本承载全部"改变历史解释"的变更，v1/v2 按 `version-mismatch` 具名拒绝、无兼容层。
-- 四条承重规则各有变异证明：去掉责任门、去掉输入绑定、把"任何终止都算满足依赖"、把"未 verified 的子任务算作接受判据"——每次都只有对应用例失败，文件逐字节还原。
+- 四条承重规则各有可重跑的变异证明：去掉责任门、去掉输入绑定、把"任何终止都算满足依赖"、把"未 verified 的子任务算作接受判据"——每次都只有对应用例失败（`mutate:task-responsibility-gate`、`mutate:task-verdict-input-binding`、`mutate:task-any-terminal-satisfies`、`mutate:task-unverified-child-accepts`），改动只落在副本上。
 
 **B 的最后一段已全部完成**（提交 `c26c0be`，证据见 `docs/k1-evidence.md`）：S6 真实纵切（`slice-b` 22 项）、两个边界各一次真实 SIGKILL（`recovery-probe` 21 项）、K1 12 场景逐条交回、完整 `pnpm verify` 输出。仍**未做**的是"真实模型 → 真实产物 → 我们的真实验证器 → 命令边界"接成一条（模型产出内容、真实验证器裁决、verdict 经命令边界落为事实；**不能断言判决为 pass**）——这一条属 C，见 §12。
 
@@ -316,12 +323,12 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
   而"改了成员却把账本留在同一版本"是**审查**要抓的，不是门禁。按"能用固定端口交流的不要用内部量"，
   不引入对 VCS 的耦合。
 
-**另一条实测**：`spec-budget` 现在 **0.849 / 0.85** —— 只剩一行测试的余量。下一条动测试的人会撞上。
+**另一条实测**：当时的 `spec-budget` 已经贴到它自己的天花板上（只剩一行的余量），下一条动测试的人会撞上。那条门禁后来因为分子里不只有 spec 而改名 `evidence-budget`；**比值与棘轮写在 `scripts/gates.mjs` 的 `EVIDENCE_BUDGET` 旁并由门禁每次打印，本文件不复述它们**。
 
 ## 11f. 第三轮审查后的状态（**E 全部完成；下一步是 F**）
 
 ```
-HEAD 4501434 · 工作树干净 · tsc 干净 · 323 测试 / 29 文件 · 18 门禁 · 8 个真实进程探针
+HEAD 4501434 · 工作树干净 · tsc 干净（规模数字见 `tree-baseline.json`；本文件不再复述，也不再声称"多少个真实进程探针"）
 ```
 
 **第三轮审查的 5 条全部修完**（B1/B2/H1/M1/M2，见 `docs/adversarial-review-3.md`）。
@@ -336,14 +343,14 @@ HEAD 4501434 · 工作树干净 · tsc 干净 · 323 测试 / 29 文件 · 18 �
 交付物 = **一个 fixture + 一个对照探针 + 一份证据文档**。
 
 **F 之前不要忘的三条约束**：
-1. **`spec-budget` 只剩约 11 行余量**（0.8487 / 0.85）。松它只有一条路：删掉说不出来
+1. **当时的 `spec-budget` 只剩约 11 行余量**。松它只有一条路：删掉说不出来
    外部事实的 spec 断言。**删源码会让它更紧**（比值是 specs ÷ src）——这个方向我写反过一次。
 2. **`src/strategy/view.ts` 恰好在 400 行**；任何净增都要先有等量删除。
 3. **审查已复现、尚未修的门禁弱点**（F4 加载荷成员不升版本、F5a 用 `X['declare']` 绕过账本、
    F5b `no-unreferenced-export` 只在名字唯一时抓得住、F5c 看不见 `await import('node:fs/promises')`）。
    这四条现在是**实测**不是推测。
-4. **变异脚本仍不在仓库里**，所以各处"N 个变异全 caught"在仓库内**无法复核**。
-   这是下一轮该补的：脚本进仓库，别只放 `/tmp`。
+4. **（已关闭，见 §13）变异脚本当时不在仓库里**，所以各处"N 个变异全部通过"在仓库内**无法复核**。
+   这一轮把声明搬进了 `mutation-baseline.json`，每条都有可跑的产物。
 
 **一条流程教训（值得留）**：`round-probe` 手写了一个真实投影的替身，投影一改它就静默过时；
 `cd-probe` spread 真实 `projectEvaluation`，**一行没改**。**替身会过期，真实调用不会。**
@@ -367,10 +374,11 @@ HEAD 4501434 · 工作树干净 · tsc 干净 · 323 测试 / 29 文件 · 18 �
 **F5 是门禁自身的第三个漏洞**（前两个都被自检抓到过）：`protocol-inventory` 只认字面名为 `protocol.ts`
 的文件、兜底正则也能绕过（`FOLD['declare']` 实测 18/18 全绿）；`no-unreferenced-export` 是文本匹配，
 **只在名字唯一时才抓得住**（旧仓 197 处导出的病只被部分覆盖）；`no-durable-writer` 看不见
-`await import('node:fs/promises')`。**8 条行为门禁的自检从不真的跑到脚本。**
+`await import('node:fs/promises')`。**当时行为门禁的自检从不真的跑到脚本**（第四轮 H-3 之后它们真的
+在无 `src/` 的副本上跑第二遍，见 §11f 与 `gates.mjs` 的 `notLoadBearingFindings`）。
 
 **一条流程要求**（审查者提的，我同意）：**变异脚本要进仓库**。现在它们是 `/tmp` 里的临时物，
-所以"N 个变异全 caught"这句话在仓库内**无法复核**——这正是本项目对别的东西一直在拒绝的那种声明。
+所以"N 个变异全部通过"这句话在仓库内**无法复核**——这正是本项目对别的东西一直在拒绝的那种声明。（本轮关闭：声明进 `mutation-baseline.json`，见 §13。）
 
 ## 11d. F2 已修：receipt 的 cutoff 不再是一个可以被传错的参数
 
@@ -390,7 +398,7 @@ HEAD 4501434 · 工作树干净 · tsc 干净 · 323 测试 / 29 文件 · 18 �
 
 1. **`src/strategy/view.ts` 卡在 400 行预算上**（门禁 >400 才红）。方向感知花了约 29 行净增，
    是用压缩该文件自己的说明文字换来的。**该文件下一次任何净增都必须先有等量的删除。**
-2. **`spec-budget` 只剩约 70 行余量**（棘轮 0.85）。
+2. **当时的 `spec-budget` 只剩约 70 行余量**（棘轮值写在那条门禁的常量旁，不在本文件里）。
 
    **更正**：我原先写"删掉没有消费者的源码同时能解救 spec 预算"——**这是反的**。
    门禁比的是 **specs ÷ src**：
@@ -422,10 +430,10 @@ HEAD 4501434 · 工作树干净 · tsc 干净 · 323 测试 / 29 文件 · 18 �
 
 ## 12. C/D 已落地并被门禁强制（提交见下）；剩余一项
 
-**绿色**：`tsc` 干净；**290 测试 / 25 文件**；**18 门禁**（9 条行为门禁全在自动路径上，每条都有合成
-失败探针）；8 个真实进程探针。协议：`measure@3`、`strategy@2`、`release@1`、`environment@2`、`task@4`。
+**绿色**：`tsc` 干净（规模数字见 `tree-baseline.json`，由 `tree-inventory` 与本次构建比对；行为门禁全在
+自动路径上，各带合成失败探针）。协议：`measure@3`、`strategy@2`、`release@1`、`environment@2`、`task@4`。
 
-**C/D 的退出条件现在由 `scripts/cd-probe.mjs`（门禁 `cd-probe`）端到端观测**，97 项检查、92 条事实：
+**C/D 的退出条件现在由 `scripts/cd-probe.mjs`（门禁 `cd-probe`）端到端观测**（检查数与事实数由探针自己打印）：
 3 个候选各自的 run 与 bubble 被同一轮池化并选出；一个 0.90 分的候选因自己的约束程序不通过而在
 **argmax 之前**出局；`trials=2` 只观测 1 次时 `denominator=2`、`quality=0.5`、缺失槽位具名；
 不同 model / 不同 tool 字节的候选被 `caliber-mismatch` 拒绝；第二轮以第一轮发布的修订为 incumbent，
@@ -440,14 +448,17 @@ novelty 按第一轮发布的资产类计数，增益相对第一轮 incumbent �
 4 个文件被误读（其中一个被删掉 56% 的文本），且**每一个文件的行号都是错的**。改成一次字符扫描 +
 12 条恶劣输入自检（可失败，按历史 bug 变异验证）。
 
-**spec 预算**：`docs/spec-policy.md` + 两条棘轮门禁。第一轮修剪把 **998 条断言删到 584**
-（−41%）、spec 6,909 → **6,407** 行、比值 0.877 → **0.809**，**没有删掉或拆开任何一条测试**。
-棘轮已降到 **0.85 / 5**。0.6 是方向不是可达目标——再删就是删覆盖。
+**spec 预算**：`docs/spec-policy.md` + 两条棘轮门禁（`spec-density` 与 `evidence-budget`）。第一轮修剪删的是
+说不出来外部事实的重复陈述，**没有删掉或拆开任何一条测试**；两个棘轮的当前值与实测值写在 `scripts/gates.mjs`
+的常量旁，并由门禁每次运行打印——**本文件不复述比值**。0.6 是方向不是可达目标——再删就是删覆盖。
 
 **`acceptedAssetsBelow` 已结清（E1，第一个按缝切片做的）**：注入端口**删除**，改成一个所有者一个推导
 —— `src/strategy/published-assets.ts` 的 `publishedAssetsBelow(entries, environmentId, cutoff)`。
 两个 wiring 各自发明的约定（一个从 `pointer/switched` + 清单推导，一个读探针自己协议里的
-`assets/published`）都已删除。8 条 spec、9 条变异全部 caught。
+`assets/published`）都已删除。8 条 spec 仍在；变异证明是账本里的五条，各自可重跑：
+`mutate:assets-head-cutoff`、`mutate:assets-election-cutoff`、`mutate:assets-revision-content`、
+`mutate:assets-no-head-guess`、`mutate:assets-class-dedup`。**原记录的"九条变异"没有留下可运行的产物**，
+所以那个数字不再保留：能跑的是这五条。
 
 **按缝切片的第一轮证明了这个顺序的价值**：实现方**按签字原文**实现，然后指出缝本身自相矛盾。
 三处修正已写回 `docs/tdd-seams.md`（a：第 2 步也要按 cutoff 界定，否则 cutoff 之上的选举仍能给冻结
@@ -456,15 +467,16 @@ novelty 按第一轮发布的资产类计数，增益相对第一轮 incumbent �
 
 **修掉的第二个"不可能失败的检查"**：`round-probe` 的 novelty 检查在接上 `entries` 之前**是空的**
 （日志里根本没有环境 head，`novelty 1` 来自空历史；把发布事实删掉它照样 `ok`）。现在它有真实发布
-（`release.draft → approve → publish`，真命令），删掉发布或把它移到 cutoff 之上都会红（2/2 caught）。
+（`release.draft → approve → publish`，真命令），删掉发布或把它移到 cutoff 之上都会红
+（`mutate:round-novelty-publish-removed`、`mutate:round-novelty-below-cutoff`）。
 `cd-probe` 的反事实同样重建为"同一份日志减去那一条 `pointer/switched`"，**实测** novelty 2/1。
 
 **下一批（已认，未做）**：E2 消费登记（R08：钉住 revision 不等于证明某个 Skill/Tool 被使用）、
 E3 轮次结案（R01：停滞要是事实而不是推断）。方法见 `docs/tdd-seams.md` §3。
 ## 12x. C/D 已落地（提交 `0f64df6`）；剩余两项在飞
 
-**绿色**：`tsc` 干净；**289 测试 / 25 文件**；**15 门禁**（7 条行为门禁全在自动路径上，每条都有合成失败探针）；
-7 个真实进程探针全过。新增协议：`measure@1`、`strategy@2`、`release@1`、`environment@2`；
+**绿色**：`tsc` 干净（规模数字见 `tree-baseline.json`，行为门禁全在自动路径上）；
+新增协议：`measure@1`、`strategy@2`、`release@1`、`environment@2`；
 账本 `protocol-baseline.json` 已同步（`protocol-inventory` 每次版本变更都会报）。
 
 **接口冻结被实现方推翻了四次，每次都写回契约**（`docs/phase-cd-design.md` 的 §5.1b/§7/§7b/§11）——
@@ -520,8 +532,9 @@ E3 轮次结案（R01：停滞要是事实而不是推断）。方法见 `docs/t
 
 ### 12.1 先修掉那个已经发生的病：账本会烂
 
-**实测**：`c26c0be` 时 `context.md` 声称"36 个文件 / 140 测试 / 9 门禁"；同一提交的真实值是
-**44 个 `.ts` 文件 / 177 测试 / 11 门禁**。差了 8 个文件、37 个测试、2 条门禁，**没有任何东西发现**。
+**实测**：这份工作记忆里的规模数字漂过**三次**，每一次都是"文档写的"与"同一提交的真实值"对不上，
+而**没有任何东西发现**。三次的完整数字记在 `tree-baseline.json` 的 `why` 里（那是它们唯一被检查的居所，
+正文里不再复述——复述就是下一次漂移的种子）。
 
 这正是旧仓"根因一：形状繁殖没有门禁"在**文档层**的复现：`no-unreferenced-export` 管住了导出，
 `dsh-baseline.json` + `dsh-alignment` 管住了版本路径，而"我们声明了多少种协议/kind、各自谁写谁读"
@@ -535,6 +548,10 @@ E3 轮次结案（R01：停滞要是事实而不是推断）。方法见 `docs/t
 - 文件里有而没声明 → "账本记着一个没人声明的形状"。
 
 形状与 `dsh-baseline.json` 相同，而那条路已经**抓到过一个真实错误**。这就是为什么选它，而不是再写一段散文。
+
+**同一个机制在第四轮之后补到了规模数字上**（`tree-baseline.json` + `tree-inventory`，见 §13）：
+那条门禁第一次运行就发现散文里的门禁数比实测少一条。选同一个形状的理由也一样——不是因为"账本更好看"，
+而是因为**只有被比对过的数字才不再是声明**。
 
 ### 12.2 高并行的前提：第 0 轮只冻接口（串行、小）
 
@@ -600,3 +617,51 @@ C 比 B 更依赖接口先定：四个工作流都要编译同一组类型。所
 2. **执行与结算边界各 SIGKILL 一次**：重启后同一 session/身份/责任/绑定可恢复；已提交结果不重复创建或结算；外部不确定操作明确呈现。
 3. **K1 12 场景逐条交回**：每条给出观测与证据引用（`review.md` §6 的表；1–5 由 A/S2 满足，6–12 归 B）。**独立探针不能替代产品执行闭环**——但 DSH 生命周期的崩溃恢复探针（并行路线）提供场景 9 的底层观测。
 4. 完整 `pnpm verify` + `node scripts/control-probe.mjs` 输出、固定提交。
+
+## 13. 两笔"没人检查的声明"各变成一个账本（第四轮 L-1 与"未验证"节）
+
+**L-1（规模数字在散文里漂了三次）**：数字现在只有一个出处 `tree-baseline.json`，门禁 `tree-inventory`
+每次用**本次构建的实测**与它比对。四个数各自的量法就是这条门禁的内容：`sourceFiles` / `specFiles`
+是本门禁自己的文件集；`tests` 走 vitest 自己的 `list --json` 端口，**不是数 `it(`**（`it.each` 会展开、
+被跳过的用例也算收集，数文本会得到另一个数）；`gates` 是本门禁自己的条数，**所以加一条门禁就是一次
+"要同时改账本"的公开动作**。测量不出来（vitest 缺席、树收集不了）是 finding，不是沉默——读不到的数和
+对上了的数是两件事。正文里的复述已删掉，另外这条门禁会扫本文与 `f-evidence.md` 里**再次出现的**规模数字，
+按的正是那三次漂移用过的拼写。**它抓不到**：换个说法的数字（"不到三十个 spec 文件"）、以及 list 之外的
+文档——那个 list 就是这两个文件，加一个是加一行。
+
+**"未验证"节（变异脚本住在 `/tmp`，所以"N 个变异全部通过"在仓库内无法复核）**：声明进
+`mutation-baseline.json`（35 条），harness 是 `scripts/mutate.mjs`。**它只写副本**：把树拷到系统临时目录、
+在副本上改、在副本上判定、删掉副本——本仓没有任何路径被打开写入，所以"逐字节还原"是性质而不是承诺
+（早先那条车道是改工作树再写回原字节，那种形状会在别的东西同时移动时丢工作）。判定是"非零退出**且**
+打印该声明点名的见证串"：套件加载失败记为 `broken`（不算抓住），命令通过记为 `MISSED`。
+门禁 `mutation-claims` 每次提交只做静态检查：每条声明的锚文本在树里**恰好出现一次**（声明烂掉的方式
+就是它不再改任何东西），文档里用英文结果词写的变异声明必须点到已登记的 id，登记的 id 必须有文档点名。
+**它抓不到**：换个说法的结果声明、**提交信息里的声明**（门禁读不到 git 历史）、以及最要紧的一条——
+"这次变异改的是被计算的值还是断言的形状"（`debugging.md` §4）；那是作者的事，所以每条声明都写着自己
+攻击的规则，harness 每次把规则打在判决旁边。
+
+**迁移的结果**（`node scripts/mutate.mjs --all`）：**34 条被抓住，1 条记录在案的失效**。
+
+- 逐行对照与原表的修正写在 `docs/f-evidence.md` §5.1 / §5.2；F 之外的部分（任务责任门、输入绑定、
+  依赖满足、屏障、accepted assets、两个探针、恢复顺序）各自有声明，id 就在上面各节正文里。
+- **没被抓住的那一条**：`mutate:fw-direction-sign-ignored`——把 `directionSign` 改成常量、fixture 翻成
+  `lower`。原表把它记为"抓住了（5 项失败）"，实测探针**退出 0**：探针自己的检查全部写成同一个符号的
+  函数，常量让它们自洽；标记行的动词是唯一直接读 `direction` 的地方，没有任何检查让动词与数字一致。
+  **这是第四轮 BL-1 修复的残留**，已点名、未修（`scripts/domain-probe.mjs` 是既有探针，本轮不动它）。
+- **删掉的声明**：`0.849 / 0.85` 一类改名或过期的数字；E1 里"九条变异"（没有留下产物的那几条，正文改成
+  能跑的五条）；原表里两行重复的结论变异合并成一条；"标准只有一个所有者"那行从变异表里移出（它是论证，
+  不是实验）。
+- **明确不能复核的**：提交信息里的变异声明（门禁不读 git 历史）；`docs/adversarial-review-2.md` /
+  `-4.md` 里审查者的观测记录——那是观测记录，不在本轮所有权内，也没有改。
+
+**一个必须点名的洞**：`mutation-baseline.json` 住在仓库根目录，而 `evidence-budget` 的分子只收
+`tests/**`、`tests/fixtures/**` 与 `scripts/*.mjs`——所以那几百行编辑数据**没有被预算收费**。
+它是账本（门禁比对的输入）而不是检查，与 `protocol-baseline.json` / `dsh-baseline.json` 同类；
+但"同类"不等于"已被覆盖"，所以这条洞写在 `EVIDENCE_BUDGET` 的 docstring 里，而不是留给下一轮发现。
+真正的理由很直接：把它塞进收费的 `scripts/mutate.mjs` 会让比值直接越过棘轮，而棘轮不许抬——
+所以要么删掉声明，要么把洞写下来。选后者，并且让 `mutation-claims` 每次检查它的内容（锚点、id、文档双向）。
+
+**留给下一轮的一条明确边界**：`tree-inventory` 里的 `tests` 是 **vitest 收集数**，不是"通过数"：
+一个既有用例从 pass 变成 skip 时这个数字不变，而"通过数"只有跑完整套件才知道——那是这条门禁刻意
+不付的代价（`pnpm verify` 里的 `vitest run` 才是那个读数）。要把它也纳入，就得让门禁跑测试套件，
+那会让每次 `pnpm gates` 多跑一遍全套；本条记在这里，不假装已经覆盖。

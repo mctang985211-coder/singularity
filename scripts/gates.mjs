@@ -2,42 +2,28 @@
 /**
  * The mechanical gates, and the self-test that proves they can fail.
  *
- * These are the first asset of this codebase, not an afterthought. The previous system had a good
- * design and still grew twelve persisted formats and 197 unreferenced exports, because only two
- * gates existed and neither constrained *shape proliferation*: adding a format cost nothing,
- * removing one cost a hand audit.
+ * These are the first asset of this codebase, not an afterthought: the previous system had a good
+ * design and still grew twelve persisted formats and 197 unreferenced exports, because only two gates
+ * existed and neither constrained *shape proliferation*.
  *
- * Three lessons are built in:
+ * Five lessons are built in; the round that produced each is recorded in `docs/context.md` §11g and
+ * in the review documents rather than repeated here in full:
  *
  * - **A gate that has never failed is not known to work.** `--probe` runs every detector against a
- *   synthetic file set that violates all of them. An earlier version of this file had a shortcut
- *   that made `no-unreferenced-export` unable to fail, and only the probe found it.
+ *   synthetic file set that violates all of them; it once found a shortcut that had made
+ *   `no-unreferenced-export` unable to fail.
  * - **Text matching is not symbol matching.** References are counted over source with comments and
- *   string literals stripped, because a name mentioned in a comment or a message is not a use — a
- *   counterexample that passed every gate before this. Round three went further: it added an export
- *   nothing imported and stayed green, because the *word* occurred elsewhere as a member name. An
- *   export is now counted only when another module binds that name through an import or a re-export
- *   that resolves to the declaring file, which a member name cannot imitate.
- * - **A pattern is a spelling, and a spelling is not a mechanism.** The same round declared a live
- *   protocol through `X['declare'](...)` and added an optional payload member with no version bump;
- *   both stayed green, because the only sweep was the regex `/\.declare\s*[<(]/` and the ledger
- *   compared `(protocol, version, kind)` while a payload's members live inside a parser function.
- *   Both are asked of the running code now: every `declare` call is observed on the one prototype it
- *   has to go through, whichever registry it lands on, and a kind's member set is read out of the
- *   parser's own refusal. What that still does not reach is written down where it is used.
- * - **A mechanism loses to a spelling only where the mechanism is not applied.** Round four defeated
- *   four of round three's closes by moving the same trick one step outside what the close looked at:
- *   a parser whose accepted set depends on the payload (the member set was sampled once), a module
- *   no load reaches (the text net under it was the spelling round three had already walked through),
- *   a barrel re-export (a re-export was counted as a use), a dynamic import whose argument is a
- *   concatenation (its first token was read as the whole target). Each is closed by asking the thing
- *   that can answer — the parser with a family of payloads, the module by loading it with its host
- *   imports stubbed, the re-export by requiring the re-exported name to be used somewhere, the import
- *   by reading the whole argument — and each close prints what it still cannot reach.
- * - **A verdict read as a substring is not a verdict.** Nine gates run a behavioural script and read
- *   a line it prints, and a one-line stub printing that line passed all of them, including the one
- *   that covers a whole phase's exit condition. So each of those gates now runs its script twice: a
- *   verdict is load-bearing only if it changes when the tree it judges changes.
+ *   literals stripped, and an export counts only when another module *binds* the name through an
+ *   import or a used re-export — a word occurring elsewhere as a member name is not a use.
+ * - **A pattern is a spelling, and a spelling is not a mechanism.** Three rounds walked through
+ *   spellings (`X['declare']`, a barrel re-export, a concatenated dynamic import). Each is asked of
+ *   the thing that can answer now — the running registry, the parser's own refusal, the whole import
+ *   argument — and what each still cannot reach is printed or written where it is used.
+ * - **A mechanism loses to a spelling only where the mechanism is not applied.** Every close states
+ *   its own boundary; a close without a stated boundary is the next round's finding.
+ * - **A verdict read as a substring is not a verdict.** Each behavioural gate runs its script twice,
+ *   once in a copy of this tree with `src/` removed: a verdict is load-bearing only if it changes when
+ *   the tree it judges changes.
  *
  * Usage:
  *   node scripts/gates.mjs           scan the real tree
@@ -95,19 +81,12 @@ function sourceFiles() {
 /**
  * Source with comments and string literal contents replaced by spaces, at exactly the input length.
  *
- * Lexical, not a parser, and honest about being approximate: a regex literal is not a literal here,
- * a `'` or `"` that does not close on its own line is not a string, and a `${…}` substitution inside
- * a template reads as literal text — so a name used only there is not a use. A real AST pass is the
- * next step if a bypass appears.
- *
- * One pass, because comments and literals are one lexical problem: which of `//`, `/*`, `'`, `"` and
- * `` ` `` opens anything depends on what is already open, and four sequential regexes cannot know
- * that. The version that stripped comments first read the `//` inside a template literal as a
- * comment, blanked the backtick that closed the template, and let the template rule swallow the
- * ninety lines that followed it — lines no detector ever saw.
- *
- * Length and line breaks survive, because the detectors read line numbers and offsets out of the
- * result: a comment or a literal body becomes spaces, never disappears.
+ * Lexical, not a parser, and honest about being approximate: a regex literal is not a literal here, a
+ * `'` or `"` that does not close on its own line is not a string, and a `${…}` substitution inside a
+ * template reads as literal text — so a name used only there is not a use. One pass, because which of
+ * `//`, `/*`, `'`, `"` and `` ` `` opens anything depends on what is already open; the four-regex
+ * version read a `//` inside a template as a comment and swallowed ninety lines no detector saw.
+ * Length and line breaks survive, because findings read line numbers out of the result.
  */
 function codeOnly(source) {
   const out = source.split('')
@@ -277,21 +256,13 @@ const ENTRY_POINT = 'src/index.ts'
 /**
  * The published surface a consumer outside this repository uses and nothing here binds.
  *
- * Round three made a name count as used when another module *binds* it, and wrote that a re-export
- * "counts where `X` is declared, and counting it twice would let a barrel file vouch for a name
- * nothing uses". Round four measured that the fix had landed on the declaring side only: the barrel's
- * `export { X } from './y.ts'` was still counted as a use of `y.ts`'s `X`, so any name re-exported by
- * `src/index.ts` was vouched for no matter how dead, while the same name without the barrel was
- * reported. The loop is closed on both sides now — a forwarding clause is a use only when the
- * forwarding module's own name is used — and what that leaves is this list.
- *
- * These are the names `src/index.ts` publishes that nothing in `src/`, `tests/` or the specs binds.
- * Their consumer is the host that mounts this plugin, which no gate in this repository can see, so
- * the honest treatment is a recorded act rather than a checked one: publishing a name nothing here
- * binds fails the gate unless the name is recorded here, and a recorded name that has since been
- * bound (or is no longer published) fails it too. It is a ratchet, like the evidence budget: it makes
- * publishing a name visible and deliberate, not impossible. A deliberate addition edits this list in
- * the same commit; that is the whole point of the list.
+ * These are the names `src/index.ts` publishes that nothing in `src/` or `tests/` binds. Their
+ * consumer is the host that mounts this plugin, which no gate here can see, so the honest treatment
+ * is a recorded act rather than a checked one: publishing an unbound name fails the gate unless the
+ * name is recorded here, and a recorded name that has since been bound (or is no longer published)
+ * fails it too. A ratchet, like the evidence budget: it makes publishing a name visible and
+ * deliberate, not impossible. The round-four bypass that produced the current shape (a barrel
+ * re-export vouching for a dead name) is recorded in `docs/context.md` §11g.
  */
 const PUBLISHED_WITHOUT_CONSUMER = new Set([
   'src/agent/protocol.ts\0AGENT_OPENED_MEMBERS',
@@ -337,20 +308,14 @@ const PUBLISHED_WITHOUT_CONSUMER = new Set([
 /**
  * Every export no other module binds, with the two ways a name can still be accounted for.
  *
- * Round two counted a name as used when the *word* appeared anywhere, so an export whose name was a
- * member name elsewhere stayed green. Round three replaced that with a binding check and round four
- * walked through what was left of it: a re-export counted as a binding of its target.
- *
- * A re-export is not a use. It is a *forwarding* of the name, and it is a use of the forwarded name
- * only when the forwarding module's own name is used, transitively, by an import: `src/task/protocol.ts`
- * re-exporting `RunStatus` from `run.ts` counts because a spec imports `RunStatus` from `protocol.ts`;
- * the barrel re-exporting a name nothing imports counts for nothing.
- *
- * What is left after that is the honest remainder — names the entry point publishes that nothing in
- * this repository binds, whose only consumer is outside it. No gate here can see that consumer, so
- * those are recorded in `PUBLISHED_WITHOUT_CONSUMER` rather than waved through, and the record is
- * checked in both directions. Both the record and the entry point are parameters, so the self-test
- * can hand this function a different one of either and watch it fire.
+ * A re-export is not a use: it is a *forwarding* of the name, and a use of the forwarded name only
+ * when the forwarding module's own name is used, transitively, by an import — `src/task/protocol.ts`
+ * re-exporting `RunStatus` counts because a spec imports it from there, and a barrel re-exporting a
+ * name nothing imports counts for nothing. What is left is the honest remainder: names the entry
+ * point publishes whose only consumer is outside this repository, recorded in
+ * `PUBLISHED_WITHOUT_CONSUMER` rather than waved through and checked in both directions. Both the
+ * record and the entry point are parameters, so the self-test can hand this function another one of
+ * either — the rounds that produced this shape are in `docs/context.md` §11g.
  */
 function unreferencedExportFindings(files, views, recorded) {
   const findings = []
@@ -580,6 +545,26 @@ const DETECTORS = [
     detect: (files, views) => specDensityFindings(files, views),
   },
   {
+    name: 'tree-inventory',
+    /** It measures the real tree and spawns vitest's collector, so its synthetic legs are its own. */
+    probeSeparately: true,
+    detect: (files, views) => [
+      ...treeInventoryFindings(readTreeLedger(), {
+        sourceFiles: files.length,
+        specFiles: files.filter(file => /^tests\/[^/]*\.spec\.ts$/.test(file)).length,
+        tests: collectedTestCount(),
+        gates: DETECTORS.length,
+      }),
+      ...countClaimFindings(),
+    ],
+  },
+  {
+    name: 'mutation-claims',
+    /** It reads the real ledger, the real tree and the real documents, so its legs are its own. */
+    probeSeparately: true,
+    detect: () => mutationClaimFindings(readMutationLedger()),
+  },
+  {
     name: 'dsh-alignment',
     realTree: true,
     detect: () => alignmentFindingsWith(readBaseline()),
@@ -596,53 +581,44 @@ const DETECTORS = [
 ]
 
 /**
- * The gates the synthetic file set cannot reach: they spawn real processes and read the real tree.
- *
- * The self-test filters them out **before** it scores anything. Running them first and discarding
- * the result afterwards is not the same thing: it ran three end-to-end scripts to completion, threw
- * their verdicts away, and then `pnpm gates` ran them a second time for real.
+ * The gates the synthetic file set cannot reach: they spawn real processes, read the real tree, or
+ * reduce over their own ledger. The self-test filters them out **before** it scores anything, and
+ * names each one in its skip line. Running them first and discarding the result afterwards is not the
+ * same thing: it ran three end-to-end scripts to completion, threw their verdicts away, and then
+ * `pnpm gates` ran them a second time for real.
  */
-const REAL_TREE_GATES = new Set(DETECTORS.filter(detector => detector.realTree === true).map(detector => detector.name))
 
 /**
  * The evidence budget, and its ratchet.
  *
- * Round four's seventh pattern: `sourceFiles()` scans `src/` and `tests/` `.ts` files, so `scripts/`
- * (fifteen files, seven thousand lines) and `tests/fixtures/*.json` were in no detector and no budget,
- * while `tests/*.spec.ts` was charged for every line and sat at 0.8489 against its 0.85 ratchet. The
- * phase delivered entirely in that unwatched lane — nine hundred and eighty-two probe lines, one
- * fixture, a verdict read by substring — was the phase whose checks the ratchet did not charge. The
- * ratchet did not merely fail to constrain that work; it made adding probe lines the cheapest way to
- * discharge an exit condition.
+ * Round four's seventh pattern: `sourceFiles()` scanned only `src/` and `tests/` `.ts` files, so
+ * `scripts/` and `tests/fixtures/*.json` were in no detector and no budget, while `tests/*.spec.ts`
+ * was charged for every line and sat one line under its 0.85 ratchet. The phase delivered in that
+ * unwatched lane — nine hundred probe lines, one fixture, a verdict read by substring — was the phase
+ * whose checks the ratchet did not charge, and adding probe lines was the cheapest way to discharge
+ * an exit condition.
  *
- * So the numerator is *evidence*, not specs: every `.ts` file under `tests/` (specs, fixtures and
- * helpers), every file under `tests/fixtures/` (JSON included, counted by line), and every `.mjs`
- * file directly under `scripts/`. The denominator stays the `.ts` files under `src/`. Not charged, and named so a reader can see the holes rather
- * than assume there are none: `docs/**`, and `scripts/` subdirectories (there are none today).
- *
- * Renaming the gate is part of the fix rather than tidying: a gate called `spec-budget` whose
- * numerator was not specs would be a printed claim that is not true, which is the defect this round
- * found in `protocol-inventory`'s note.
- *
- * The number jumps, and that is the honest number — the constraint was always there, it was simply
- * not being charged. Both measurements are recorded so the jump is visible rather than mysterious,
- * taken on the clean tree at the moment of the change (including this file, which is one of the
- * fifteen under `scripts/`, so a line added here is charged like any other line of evidence):
- * `tests/*.spec.ts` alone was 7,239 lines
- * against 8,530 of source, 0.8487 (the old ratchet, 0.85); all evidence is 15,962 against 8,530,
- * 1.8713 (this ratchet, rounded up at the fourth decimal, so a rounding can never be a quiet
- * widening).
+ * So the numerator is *evidence*: every `.ts` file under `tests/` (specs, fixtures, helpers), every
+ * file under `tests/fixtures/` (JSON included, by line), and every `.mjs` file directly under
+ * `scripts/`. The denominator stays the `.ts` files under `src/`. Not charged, named here so a reader
+ * sees the holes instead of assuming there are none: `docs/**`, `scripts/` subdirectories (there are
+ * none today), and the root ledgers (`protocol-baseline.json`, `dsh-baseline.json`,
+ * `tree-baseline.json`, `mutation-baseline.json`) — a ledger is an input a gate compares rather than a
+ * check, but a ledger that grows outside the budget is a hole to name, not to discover. Renaming the
+ * gate was part of the fix: a gate called `spec-budget` whose numerator was not specs is a printed
+ * claim that is not true.
  *
  * These are ratchets, not targets: the numbers came down from 0.88 and 7.8 by deleting restatement,
- * and may only go down further. Lowering one is part of the commit that makes it possible.
+ * and may only go down further; lowering one is part of the commit that makes it possible.
  *
- * The one stated allowance, and why it exists: the ratchet sits at 1.90 while the measurement that
- * set it was 1.8713, about 245 lines. This file is one of the charged fifteen, so with no allowance
- * every future detector and its probe leg would have to be paid for by deleting a line of evidence -
- * and the pressure that creates is against adding detectors, on the only file whose job is to keep
- * the others honest. The gap is stated here rather than left as drift, it is the only allowance in
- * the tree, and it shrinks first: lower the ratchet to the measured value whenever a commit makes
- * that possible, before lowering anything else.
+ * The one stated allowance: the ratchet sits at 1.90 while the measurement that set it was 1.8713,
+ * about 245 lines. This file is charged like any other evidence, so with no allowance every detector
+ * and its probe leg would have to be paid for by deleting a line of evidence — pressure against
+ * adding detectors, on the only file whose job is to keep the others honest. It shrinks first: lower
+ * the ratchet to the measured value whenever a commit makes that possible. The two ledgers added
+ * after round four (`tree-baseline.json` + `tree-inventory`, and `mutation-baseline.json` +
+ * `scripts/mutate.mjs` + `mutation-claims`) spent most of it; the measured ratio is stated in this
+ * gate's finding whenever it is over the ratchet, so it is not copied here where it could drift.
  */
 const EVIDENCE_BUDGET = 1.9
 const SPEC_DENSITY = 5
@@ -709,6 +685,75 @@ function specDensityFindings(files, views) {
   return findings
 }
 
+/**
+ * The tree ledger: the counts documents quote, in the one place this gate compares with the build.
+ *
+ * Three rounds watched the same numbers drift in `docs/context.md` — wrong three times, nothing
+ * noticed, because the numbers lived in prose. The counts live in `tree-baseline.json` now and this
+ * gate measures them: `tests` through vitest's own `list --json` port, because a text count of `it(`
+ * is a different number from the one `vitest run` reports, and a measurement that cannot be taken is a
+ * finding, never silence. The prose scan below is a declared spelling net over two named documents,
+ * not a check on the corpus; the reasoning and the limits are in `docs/context.md` §13.
+ */
+const TREE_LEDGER = 'tree-baseline.json'
+
+function readTreeLedger() {
+  return JSON.parse(readFileSync(join(ROOT, TREE_LEDGER), 'utf8'))
+}
+
+/** The test count as vitest collects it: the runner's own port, not a text count of `it(`. */
+function collectedTestCount() {
+  try {
+    const output = execFileSync(process.execPath, [join(ROOT, 'node_modules/vitest/vitest.mjs'), 'list', '--json'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 64 * 1024 * 1024,
+    })
+    const listed = JSON.parse(output.slice(output.indexOf('['), output.lastIndexOf(']') + 1))
+    return Array.isArray(listed) ? listed.length : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The ledger against this build, both directions. Parameterised so the self-test can hand it a wrong one. */
+function treeInventoryFindings(ledger, measured) {
+  const counts = ledger?.counts
+  if (counts === null || typeof counts !== 'object') return [`${TREE_LEDGER} has no counts object; the numbers documents quote are not in the one place this gate reads`]
+  const findings = []
+  for (const [name, value] of Object.entries(measured)) {
+    if (value === undefined) findings.push(`${name} could not be measured on this build, so ${TREE_LEDGER}'s number for it is unverified; a count nobody could read must not read as one that agreed`)
+    else if (!Object.hasOwn(counts, name)) findings.push(`${TREE_LEDGER} records no ${name}; every count in this file is compared with a measurement, so a missing row is a number nothing checks`)
+    else if (counts[name] !== value) findings.push(`${TREE_LEDGER} says ${name} is ${counts[name]}; this build measures ${value}. The counts are measured, not entered: state what the measurement says, and never in prose`)
+  }
+  for (const name of Object.keys(counts)) if (!Object.hasOwn(measured, name)) findings.push(`${TREE_LEDGER} records ${name}, which this gate does not measure; a number with no measurement is the defect this ledger replaced`)
+  return findings
+}
+
+/** The two documents that carry claims about this tree's size and its mutation evidence. */
+const CLAIM_DOCS = ['docs/context.md', 'docs/f-evidence.md']
+
+function readDocs() {
+  return CLAIM_DOCS.map(file => {
+    try { return { file, text: readFileSync(join(ROOT, file), 'utf8') } } catch { return { file, text: undefined } }
+  })
+}
+
+/** A count stated in prose, in one of the spellings the drift actually used: a net, not the mechanism. */
+const COUNT_CLAIM = /\d[\d,]*\s*(?:条\s*)?(?:测试|门禁|spec 文件|个\s*`?\.ts`?\s*文件)|\b\d[\d,]*\s+(?:tests?|gates?|spec files?)\b/
+
+function countClaimFindings(docs = readDocs()) {
+  const findings = []
+  for (const { file, text } of docs) {
+    if (text === undefined) findings.push(`${file} is one of the documents that quote this tree's counts and cannot be read; the numbers live in ${TREE_LEDGER}`)
+    else text.split('\n').forEach((line, index) => {
+      if (COUNT_CLAIM.test(line)) findings.push(`${file}:${index + 1} states a count in prose (${line.trim().slice(0, 60)}); the counts live in ${TREE_LEDGER} and this gate compares them with this build - state it there, or not at all`)
+    })
+  }
+  return findings
+}
+
 /** The one baseline file every other declaration must agree with. */
 const DSH_BASELINE = 'dsh-baseline.json'
 
@@ -721,6 +766,67 @@ const PROTOCOL_LEDGER = 'protocol-baseline.json'
 
 function readLedger() {
   return JSON.parse(readFileSync(join(ROOT, PROTOCOL_LEDGER), 'utf8'))
+}
+
+/**
+ * The mutation ledger: every claim that a mutation is caught, with the edits and the command that judge it.
+ *
+ * Rounds three and four both recorded that every "N mutations, all caught" here was unverifiable from
+ * inside the tree, because the scripts lived in `/tmp`. The claims live in `mutation-baseline.json`
+ * now and `scripts/mutate.mjs` runs one on demand in a copy of the tree; this gate is the cheap half,
+ * run on every commit: each claim still applies to this tree (its anchor occurs exactly once, so the
+ * mutation still moves something), and a document that states a result names a claim. The limits are
+ * in `docs/context.md` §13 — including the one that matters most: a claim in a commit message is
+ * outside every file this gate reads.
+ */
+const MUTATION_LEDGER = 'mutation-baseline.json'
+
+function readMutationLedger() {
+  return JSON.parse(readFileSync(join(ROOT, MUTATION_LEDGER), 'utf8'))
+}
+
+/** The one word a document uses to state a mutation result, and the id that must ride with it. */
+const MUTATION_CLAIM = /\bcaught\b/i
+const MUTATION_ID = /mutate:([a-z0-9][a-z0-9-]*)/g
+
+/** The ledger against the tree and the documents. Parameterised so the self-test can hand it either. */
+function mutationClaimFindings(ledger, docs = readDocs(), textOf = file => readFileSync(join(ROOT, file), 'utf8')) {
+  const findings = []
+  const claims = Array.isArray(ledger?.claims) ? ledger.claims : []
+  if (claims.length === 0) return [`${MUTATION_LEDGER} records no claims; a claim that names no script is a claim nobody can run`]
+  const ids = new Set()
+  for (const claim of claims) {
+    const where = `${MUTATION_LEDGER} ${claim?.id ?? '(no id)'}`
+    if (typeof claim?.id !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(claim.id)) {
+      findings.push(`${where}: every claim needs a stable id a document can name, and this one has none`)
+      continue
+    }
+    if (ids.has(claim.id)) findings.push(`${where}: two claims share this id, so naming it does not say which script runs`)
+    ids.add(claim.id)
+    if (!['node', 'vitest'].includes(claim.run?.kind) || !Array.isArray(claim.run?.args) || claim.run.args.length === 0)
+      findings.push(`${where}: names no runnable command; a claim runs as { "kind": "node" | "vitest", "args": [...] }`)
+    else for (const arg of claim.run.args) if (!arg.startsWith('-')) try { statSync(join(ROOT, arg)) } catch { findings.push(`${where}: would run ${arg}, which is not in this tree`) }
+    const edits = Array.isArray(claim.edits) ? claim.edits : []
+    if (edits.length === 0) findings.push(`${where}: names no edits, so nothing would be mutated`)
+    for (const edit of edits) {
+      let text
+      try { text = textOf(edit?.file) } catch { text = undefined }
+      if (typeof text !== 'string') { findings.push(`${where}: edits ${edit?.file}, which cannot be read, so the claim cannot be applied to this tree`); continue }
+      const hits = text.split(edit.find).length - 1
+      if (hits !== 1) findings.push(`${where}: ${edit.file} holds ${hits} matches of the text this claim replaces, and exactly one is required; the mutation no longer applies to the tree it claims to attack`)
+    }
+  }
+  const named = new Set()
+  for (const { file, text } of docs) {
+    if (text === undefined) { findings.push(`${file} is one of the documents that make mutation claims and cannot be read`); continue }
+    text.split('\n').forEach((line, index) => {
+      const here = [...line.matchAll(MUTATION_ID)].map(match => match[1])
+      for (const id of here) { named.add(id); if (!ids.has(id)) findings.push(`${file}:${index + 1} names ${`mutate:${id}`}, which ${MUTATION_LEDGER} does not record; a claim that names no runnable script is a claim nobody can run`) }
+      if (MUTATION_CLAIM.test(line) && here.length === 0) findings.push(`${file}:${index + 1} states a mutation result with no runnable claim (${line.trim().slice(0, 60)}); name it as mutate:<id> from ${MUTATION_LEDGER}, or state it in the ledger instead of in prose`)
+    })
+  }
+  for (const id of ids) if (!named.has(id)) findings.push(`${MUTATION_LEDGER} records ${id}, which no document names; a script nothing points at is not evidence a reader can find`)
+  return findings
 }
 
 /** A payload member no kind declares. The gate hands it to every parser, so the refusal names the closed set. */
@@ -749,23 +855,16 @@ function parseSample(rule, payload, where) {
 /**
  * What one kind's parser accepts at the top level, read out of the parser itself.
  *
- * `KindRule.parse` is a function, so a member set is not a value anybody can read — and a list
- * written beside the parser would be a second copy of the truth, free to drift from the check that
- * is enforced. The one honest source is the refusal the parser already produces: a payload carrying
- * a member no kind declares is refused by `assertClosedKeys` with `the shape is closed (known: …)`,
- * which is the parser naming its own member set. Round three added an optional member to
- * `release@1/release/drafted` with no version bump, and every gate stayed green because nothing
- * compared that set against anything.
+ * `KindRule.parse` is a function, so a member set is not a value anybody can read, and a list written
+ * beside it would be a second copy free to drift from the check that is enforced. The one honest
+ * source is the refusal the parser already produces: a payload carrying a member no kind declares is
+ * refused by `assertClosedKeys` with `the shape is closed (known: …)` — the parser naming its own set.
  *
- * Round four's BL-3: **one payload is a sample of one branch, not the member set.** A parser written
- * as `source['revision'] !== undefined ? ['runId', 'revision', 'operatorNote'] : ['runId', 'revision']`
- * answered `['revision', 'runId']` to the probe, the ledger agreed with that answer, and a fact
- * carrying `operatorNote` was committed and folded through the real store with all nineteen gates
- * green. What a parser accepts is a function of the payload it is handed, so the honest reading is a
- * family of payloads — the probe member alone, then the probe member beside every member the parser
- * has named so far, until the answer stops changing — and if two samples disagree, the accepted set
- * depends on the payload and there is no single member set to compare with the ledger. That is a
- * finding, not an average: the gate refuses to state a set it cannot read.
+ * What a parser accepts is a function of the payload, so one payload is a sample of one branch, not
+ * the member set (round four committed and folded a fact carrying a member the ledger did not list,
+ * because the single sample took the other branch). The reading is therefore a family of payloads —
+ * the probe member alone, then beside every member the parser has named so far, until the answer
+ * stops changing — and two disagreeing samples are a finding, not an average.
  *
  * Four answers, all meaningful: the closed set; `open` when the parser accepted the probe member, so
  * the payload is not closed at all; `unreadable` when it refused without naming a set, so the gate
@@ -932,32 +1031,26 @@ function retryUrl(url) {
 /**
  * What the code actually declares, asked of the running code rather than read out of the source.
  *
- * Three rounds found the same weakness three times, each time as a spelling: a declaration through
- * an exported `declare*Protocol` in a slice's `protocol.ts` (found), the same declaration on a
- * registry the module built for itself and reached with `X['declare'](…)` (missed, because the only
- * sweep was a text pattern), and the payload's member set (invisible, because it lives inside a
- * function). So this asks the runtime:
+ * Three rounds found the same weakness as three spellings (an exported declarer, `X['declare'](…)`,
+ * a payload's member set), so this asks the runtime instead:
  *
- * 1. **every module under `src` is imported**, with the one
- *    `ProtocolRegistry.prototype.declare` wrapped. A declaration is therefore observed however the
- *    call is spelled and whichever registry it lands on — `X.declare(…)`, `X['declare'](…)` and a
- *    destructured `declare` all arrive at the same method, and a registry built inside a module is
- *    no hiding place. A module whose host imports do not resolve here is imported *again* with those
- *    imports stubbed, so "this process cannot load it" is no longer a place the sweep stops;
- * 2. **every exported `declare*Protocol` is then called** with a registry of this gate's own, which
- *    is how a declaration that only happens when somebody calls it is seen at all;
+ * 1. **every module under `src` is imported**, with the one `ProtocolRegistry.prototype.declare`
+ *    wrapped, so a declaration is observed however it is spelled and whichever registry it lands on;
+ *    a module whose host imports do not resolve here is imported *again* with those imports stubbed,
+ *    so "this process cannot load it" is not a place the sweep stops;
+ * 2. **every exported `declare*Protocol` is then called** with a registry of this gate's own, which is
+ *    how a declaration that only happens when somebody calls it is seen at all;
  * 3. **each observed kind's member set is read from its parser** (`acceptedMembers` above), so a
- *    payload member is part of the declared surface the ledger compares — and a parser whose answer
- *    depends on the payload is refused rather than sampled.
+ *    payload member is part of the declared surface the ledger compares.
  *
  * What this does not catch, written down because a gate's coverage is part of what it promises:
  *
  * - a declaration that only runs on a path no load reaches — the sweep sees module load and the
- *   exported declarers, not every call site. The text sweep below is the net under it, and that net
- *   matches the dot spelling only, which round three defeated with `X['declare'](…)`;
+ *   exported declarers, not every call site. The text net below is the fallback, and that net matches
+ *   the dot spelling only, which round three defeated with `X['declare'](…)`;
  * - a module that cannot be loaded even with its host imports stubbed (a syntax error, a host import
- *   this scan did not see, a module that needs a real host to evaluate). It is reported as a finding
- *   naming exactly that, instead of being covered by the spelling-dependent net quietly;
+ *   this scan did not see, a module that needs a real host to evaluate): reported as a finding naming
+ *   exactly that, instead of being covered by the spelling-dependent net quietly;
  * - a payload member added to a **nested** closed shape (`contract.criteria[]`, `revision`, …): the
  *   parser answers for the members it reads at the top level, and reaching a nested set would mean
  *   synthesising a valid payload for every kind, which is a different and much larger mechanism.
@@ -1059,10 +1152,8 @@ async function declaredProtocols(
 /**
  * A module no load reached even with its host imports stubbed: a gap, reported rather than noted.
  *
- * The text net below still covers it, and that net matches the dot spelling only — so the honest
- * report is a finding that says so, not a note that reads as coverage. Round four's BL-4 was exactly
- * this: the note said "their declarations are read as text, not observed" without saying that the
- * text net had already been defeated, and one of the modules it named was not even read as text.
+ * The text net still covers it, and that net matches the dot spelling only — so the honest report is a
+ * finding that says so, not a note that reads as coverage. Round four's BL-4 was exactly this.
  */
 function unobservableDeclarations(unloaded) {
   return unloaded.map(
@@ -1073,12 +1164,9 @@ function unobservableDeclarations(unloaded) {
 
 /**
  * A declaration is written in a slice's `protocol.ts` — one conventional place — or a reader cannot
- * find it either.
- *
- * The sweep sees a declaration wherever it is written, so this is no longer what keeps the inventory
- * honest; the ledger comparison is. It stays because the *home* of a declared shape is something a
- * reader has to be able to predict, and because the text net under the sweep can enforce the same
- * rule, by name, for the modules that cannot be loaded.
+ * find it either. The sweep sees a declaration wherever it was written, so this is not what keeps the
+ * inventory honest (the ledger comparison is); it stays because the *home* of a shape is something a
+ * reader has to be able to predict, and because the text net can enforce the same rule by name.
  */
 function declarationSiteFindings(sites) {
   const findings = []
@@ -1093,12 +1181,10 @@ function declarationSiteFindings(sites) {
  * The net under the sweep: the modules the sweep could not account for are read as text instead.
  *
  * Spelling-dependent on purpose — the round-three bypass wrote `X['declare'](…)` *because* this
- * pattern cannot see it — so it is the fallback and never the mechanism. It covers the two groups
- * the sweep leaves open: a module this process cannot load (one importing the host's DSH packages),
- * and a module whose `declare` call only happens on a path no load reaches, which the sweep cannot
- * observe and which the rule above therefore never sees either. A file whose declaration the sweep
- * did observe is not scanned, so a spelling both mechanisms can see is reported once. The finding
- * says it is a text match rather than implying the check is stronger than it is.
+ * pattern cannot see it — so it is the fallback and never the mechanism. It covers the two groups the
+ * sweep leaves open: a module this process cannot load, and a module whose `declare` call only runs on
+ * a path no load reaches. A file the sweep did observe is not scanned, so one spelling is reported
+ * once, and the finding says it is a text match rather than implying more.
  */
 function declarationSitesOutsideProtocolModules(files) {
   const findings = []
@@ -1116,13 +1202,11 @@ function declarationTextFindings(file, source) {
 
 /**
  * Every declared kind must be in the ledger and every ledger row must be declared, **with the
- * payload's member set**, which is the half round three walked through: `release@1/release/drafted`
- * gained an optional member, the parser accepted it, it landed in state, and the gate compared only
- * `(protocol, version, kind)` while the file's own rule says a member addition is a version bump.
- *
- * Both directions matter, as before: one catches a shape added without a stated consumer, the other
- * a ledger that has drifted into fiction. Parameterised over both the ledger and the declarations so
- * the self-test can hand it a wrong one of either and watch it fire.
+ * payload's member set** — the half round three walked through, when `release@1/release/drafted`
+ * gained an optional member that landed in state while the gate compared only `(protocol, version,
+ * kind)`. Both directions matter: one catches a shape added without a stated consumer, the other a
+ * ledger drifted into fiction. Parameterised over both, so the self-test can hand it a wrong one of
+ * either and watch it fire.
  */
 function inventoryFindingsWith(ledger, declared) {
   const rows = Array.isArray(ledger?.protocols) ? ledger.protocols : []
@@ -1183,10 +1267,9 @@ function inventoryFindingsWith(ledger, declared) {
  * One kind's payload against its ledger row: the parser's own member set, both directions.
  *
  * The unreadable answers are findings rather than silence, because a shape the gate cannot read must
- * not read as a shape that is fine. `conditional` is the round-four case: the parser answered
- * differently to two payloads, so the accepted set is a function of the payload and the ledger can
- * only be compared with a set that exists. Reporting one branch's answer here is how a member the
- * ledger does not list stayed invisible while a real fact carried it.
+ * not read as a shape that is fine. `conditional` is the round-four case: two payloads got different
+ * answers, so the accepted set is a function of the payload and the ledger can only be compared with a
+ * set that exists — reporting one branch's answer is how an unlisted member stayed invisible.
  */
 function shapeFindings(where, kind, line) {
   if (kind.members.kind === 'open')
@@ -1276,16 +1359,10 @@ function alignmentFindingsWith(baseline) {
 }
 
 /**
- * One behavioural script, as a gate.
- *
- * These are the checks that observe the product doing something: the control store across real
- * processes (phase A), and the root/child slice with a real verifier (phase B). The first of them
- * was part of no automated path, so a task-protocol version bump broke it and nothing reported
- * that until it happened to be run by hand. A behavioural check belongs on the automated path, and
- * a script that prints its own verdict needs that verdict read rather than assumed.
- *
- * Parameterised over its runner so the self-test can hand it a synthetic failure, because these
- * gates read the real tree and the synthetic file set cannot reach them.
+ * One behavioural script, as a gate: the checks that observe the product doing something. The first
+ * of them was on no automated path, so a task-protocol version bump broke it and nothing reported
+ * that until somebody ran it by hand. Parameterised over its runner so the self-test can hand it a
+ * synthetic failure, because these gates read the real tree.
  */
 function scriptFindings(label, markers, run) {
   const findings = []
@@ -1312,15 +1389,11 @@ function runScript(name) {
 /**
  * A copy of this tree with `src/` taken away, for asking a behavioural script whether it judges.
  *
- * Round four's H-3: `ok domain-comparison` was a substring match on stdout, and a one-line script
- * printing that line passed it — the gate could not tell the 982-line probe from a stub, and that
- * gate covers phase F's entire exit condition. Nine gates read a script's verdict this way, and the
- * self-test never ran a script at all.
- *
- * A verdict is load-bearing only if it changes when the thing it judges changes, so every
- * behavioural script is run a second time in a copy of this tree whose `src/` is gone. A script that
- * judges the tree fails there; a script that prints a constant reports its marker there too, and that
- * is the finding. The copy is made once per run, lazily, and removed when the process exits.
+ * Round four's H-3: a verdict was a substring match on stdout, so a one-line stub printing the marker
+ * passed the gate that covers phase F's entire exit condition. A verdict is load-bearing only if it
+ * changes when the thing it judges changes, so every behavioural script runs a second time here: a
+ * script that judges the tree fails, a script that prints a constant reports its marker and is the
+ * finding. The copy is made once per run, lazily, and removed when the process exits.
  */
 function mirrorWithoutSource() {
   const mirror = mkdtempSync(join(tmpdir(), 'gates-mirror-'))
@@ -1346,13 +1419,10 @@ process.on('exit', () => {
 /**
  * The second run of one behavioural script: the same script, in a tree with no `src/`.
  *
- * A non-zero exit is the expected outcome and says the script is load-bearing. Reporting the marker
- * with exit 0 in a tree that has nothing to judge is the finding, and it says what it observed rather
- * than implying the script is fraudulent.
- *
- * What this does not catch, and the run therefore does not claim: a script that checks for `src/` and
- * prints its marker only when it is present is not distinguished from one that judges the tree. This
- * leg rules out a verdict that is a constant; it does not establish that a verdict is correct.
+ * A non-zero exit is the expected outcome and says the script is load-bearing; reporting the marker
+ * with exit 0 in a tree with nothing to judge is the finding. What this does not catch: a script that
+ * checks for `src/` and prints its marker only when it is present is not distinguished from one that
+ * judges the tree. This leg rules out a constant verdict; it does not establish a correct one.
  */
 function notLoadBearingFindings(label, markers, script, root) {
   let output
@@ -1442,7 +1512,10 @@ if (PROBE) {
   const results = scored.map(({ name, detect }) => ({ name, findings: detect(files, { raw, code }) }))
   let missed = 0
   console.log('gate self-test: every detector must fire on one violating file\n')
-  console.log(`  (not run here: ${[...REAL_TREE_GATES].join(', ')}; synthetic failing runs below)\n`)
+  // Every gate this file set cannot score is named, `probeSeparately` included: a gate that is
+  // skipped here and not named reads as a gate that passed.
+  const notScored = DETECTORS.filter(detector => detector.realTree === true || detector.probeSeparately === true).map(detector => detector.name)
+  console.log(`  (not run here: ${notScored.join(', ')}; synthetic failing runs below)\n`)
   for (const { name, findings } of results) {
     if (findings.length === 0) {
       missed += 1
@@ -1486,6 +1559,43 @@ if (PROBE) {
     } else {
       console.log(`  ok    ${name} fired (${findings.length} findings)`)
     }
+  }
+
+  // The tree ledger reduces to one measurement per count, so its legs hand it ledgers that disagree,
+  // a measurement that could not be taken, and a synthetic document for the prose scan.
+  const treeMeasured = { sourceFiles: 2, specFiles: 1, tests: 5, gates: 2 }
+  for (const [label, ledger, measured] of [
+    ['a count that disagrees with the measurement', { counts: { ...treeMeasured, tests: 4 } }, treeMeasured],
+    ['a count the ledger does not record', { counts: { sourceFiles: 2, specFiles: 1, gates: 2 } }, treeMeasured],
+    ['a count the ledger records and nothing measures', { counts: { ...treeMeasured, probes: 8 } }, treeMeasured],
+    ['a measurement that could not be taken', { counts: treeMeasured }, { ...treeMeasured, tests: undefined }],
+  ]) {
+    const findings = treeInventoryFindings(ledger, measured)
+    if (findings.length === 0) { missed += 1; console.log(`  FAIL  tree-inventory did not fire on ${label}`) }
+    else console.log(`  ok    tree-inventory fired on ${label} (${findings.length} findings)`)
+  }
+  for (const [label, text, expected] of [
+    ['a document stating a gate count in prose', 'the tree has 12 gates today\n', 1],
+    ['a document stating none', `the counts live in ${TREE_LEDGER}\n`, 0],
+  ]) {
+    const findings = countClaimFindings([{ file: 'docs/__probe.md', text }])
+    if (findings.length === expected) console.log(`  ok    tree-inventory handled ${label} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
+    else { missed += 1; console.log(`  FAIL  tree-inventory reported ${findings.length} findings on ${label}, expected ${expected}`) }
+  }
+
+  // The mutation ledger is checked against a tree it does not match and documents that name nothing
+  // a script can run, in both directions, with a control that must stay silent.
+  const probeMutations = { claims: [{ id: 'probe-claim', rule: 'the probe rule', witness: 'failed', run: { kind: 'node', args: ['scripts/gates.mjs', '--probe'] }, edits: [{ file: 'package.json', find: '"private": true', replace: '"private": false' }] }] }
+  const anchored = { 'package.json': '{"private": true}\n' }
+  for (const [label, docs, texts, expected] of [
+    ['a claim a document names whose edits still apply', [{ file: 'docs/x.md', text: 'caught `mutate:probe-claim`\n' }], anchored, 0],
+    ['a claim whose edit no longer applies to the tree', [{ file: 'docs/x.md', text: 'caught `mutate:probe-claim`\n' }], { 'package.json': '{"private": false}\n' }, 1],
+    ['a result stated with no runnable script', [{ file: 'docs/x.md', text: 'caught `mutate:probe-claim`\nnineteen mutations were caught\n' }], anchored, 1],
+    ['a ledger row no document names', [{ file: 'docs/x.md', text: 'no claims here\n' }], anchored, 1],
+  ]) {
+    const findings = mutationClaimFindings(probeMutations, docs, file => texts[file])
+    if (findings.length === expected) console.log(`  ok    mutation-claims handled ${label} (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
+    else { missed += 1; console.log(`  FAIL  mutation-claims reported ${findings.length} findings on ${label}, expected ${expected}: ${findings.join(' | ')}`) }
   }
 
   // Every code-reading detector reads this one function's output, and its contract is exact: the

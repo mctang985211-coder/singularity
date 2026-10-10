@@ -1,10 +1,12 @@
 # F 交回材料：固定领域任务集上的对照证据
 
 > 对应 [`review.md`](review.md) §5 阶段 F 的退出条件："恢复/边界行为满足新契约，真实质量和成本满足冻结标准"。
-> 复现命令：`node scripts/domain-probe.mjs`（52 项检查，自带真实进程与真实测量）。
+> 复现命令：`node scripts/domain-probe.mjs`（自报的检查数由探针自己打印，本文件不复述它）。
 > **F 没有新增协议，也没有改一行 `src/`**：交付物是 `tests/fixtures/f-domain.json`、
 > `scripts/domain-probe.mjs` 与本文。缝的复核结论见最后一节。
 > **尚未观测的项单列在最后，不混进已通过的条目。**
+> **本文不写"N 条变异抓住了"**：每条变异声明住在 `mutation-baseline.json`，用
+> `node scripts/mutate.mjs <id>` 按需重跑（§5）；门禁 `mutation-claims` 每次检查这些声明是否仍然可跑。
 >
 > 第四轮审查后本文件的修订（每一处都是删掉一句不成立的声明，或把它改成可被证伪的读法）：
 > ① 标记行与读数行不再说 "one caliber"（solve 集是在**每任务一条**口径下测的）；
@@ -13,6 +15,8 @@
 > 已删除，改为记录这个限制（工具摘要两侧都由运行时字节算出）；④ §4 标题原说本阶段不碰
 > `scripts/gates.mjs`，而 F 那次提交**确实**加了接线那一行，已改正；⑤ "故意更差的修订被拒"改成"被本探针
 > 读成未达标"（没有任何产品机制拒绝更差的修订）；⑥ 冻结标准只有一个所有者。
+> ⑦（本轮）§5 的变异表搬进 `mutation-baseline.json` 的 20 条声明，逐行对照见 §5.1；
+> **其中一条原记为"抓住了"的变异实测没有被抓住**，单列在 §5.2（`mutate:fw-direction-sign-ignored`），不修规则、也不假装它成立。
 
 ## 0. 一句话结论
 
@@ -25,7 +29,9 @@
 "更好"是 fixture 的 `metric.direction` 说的，不是本探针假定的：`verdictOf` 的增益是
 `sgn(direction) · (候选质量 − 基线质量)`，`lower` 就是"数更小者胜"。第四轮审查把 fixture 的
 direction 翻成 `lower`、用仓库自己的 `digestOf` 重算摘要、改掉探针里那一处字面量，探针就为"它自己
-声明更差的方法"报出 `met true`；现在同样的构造读成 `gain −0.75`、`met false`、退出码 1。
+声明更差的方法"报出 `met true`；现在同样的构造读成 `gain −0.75`、`met false`、退出码 1
+（可重跑：`node scripts/mutate.mjs fw-direction-flipped`）。**这条修复有一个记录在案的残留**——
+见 §5 末尾"记录在案的失效"。
 
 ## 1. 六条断言的观测值
 
@@ -120,44 +126,86 @@ direction 翻成 `lower`、用仓库自己的 `digestOf` 重算摘要、改掉�
   这两样东西。协调者若还要一条更严格的腿，可以把 marker 换成更长的整句；建议不要，因为探针的读数
   行会随版本变化。
 
-## 5. 变异证明（每条规则一行，实测）
+## 5. 变异证明：声明在 `mutation-baseline.json`，按需在副本上重跑
 
-配方：`/tmp/fw-mut.mjs`（把仓拷到 `/tmp` 副本上做替换，每处替换先 `assert 旧文本恰好出现一次`；
-翻转 direction 的那一条用仓库自己的 `digestOf` 重算 fixture 摘要并同时改掉探针里的字面量；
-改动全在副本上，**没有跑任何 git 写命令**）。判定用 `docs/debugging.md` §4：`caught` = 有 FAIL 且退出码非 0。
+**这里不再写"哪条变异被抓住了"这种句子。** 第三、四轮都记过同一件事：它点名不了任何脚本，所以在仓库内
+无法复核。现在每条声明都有可跑的产物，形状是 `{ id, rule, edits, run, witness }`——编辑（每处先断言
+"在树里恰好出现一次"）、判定命令、以及失败时必须打印的见证串：
 
-| 规则 | 变异 | 结果 |
+```
+node scripts/mutate.mjs --list    # 每条声明的规则
+node scripts/mutate.mjs <id>      # 跑一条
+node scripts/mutate.mjs --all     # 全跑（分钟级；刻意不进每次提交，那不是门禁该付的代价）
+```
+
+`scripts/mutate.mjs` **只写副本**：把树拷到系统临时目录、在副本上改、在副本上判定、删掉副本——
+本仓没有任何路径被打开写入，所以"逐字节还原"是性质而不是承诺（早先那条车道是改工作树再写回原字节，
+那种形状会在别的东西同时移动时丢工作）。判定口径是 `docs/debugging.md` §4 再加一条：
+**非零退出且打印该声明点名的见证串**才算抓住；套件加载失败/收集失败记为 `broken`（不算抓住），
+命令通过记为 `MISSED`。
+
+门禁 `mutation-claims` 每次提交检查两件事，**不跑变异**：每条声明的锚文本在树里**恰好出现一次**
+（否则这条声明已经不再改任何东西——这正是旧声明烂掉的方式），以及本文与 `context.md` 里**用英文
+结果词写出变异结果**的那一行必须点到一条已登记的 id；反向也查，登记的 id 必须有文档点名。
+（本文因此不再用那个词：声明与结果分开了，表里只写"哪条声明"，判决由 `node scripts/mutate.mjs` 打印——
+它打印的判决词与本文的中文措辞不是同一个字符串，这正是那条门禁的检查面，也是它的限度。）
+**它抓不到**：换个说法的结果声明（"全绿"、"19/19"）、**提交信息里的声明**（门禁读不到 git 历史）、
+以及"这次变异改的是被计算的值还是断言的形状"——那是作者的事（同一份 `debugging.md` §4），
+所以每条声明都写着自己攻击的规则，harness 每次把规则打在判决旁边。
+
+### 5.1 原表逐行迁到哪条声明
+
+| 规则 | 变异 | 声明 |
 |---|---|---|
-| fixture 内容摘要即对照身份 | fixture 里挪动一个冻结成员（`minQualityGain` 0.1→0.2），声明的摘要不动 | **caught**（3 项失败） |
-| 同上 | 让 `computedDigest` 与 body 差一位 | **caught**（2 项失败） |
-| 同上 | 把探针里手写的字面量改成全 0 | **caught**（1 项失败） |
-| 两侧口径是 fixture 冻的那条 | 口径摘要里把 `metric.direction` 改成 `lower` | **caught**（3 项失败） |
-| 同上 | 用别的 model 名去算 fixture 口径 | **caught**（3 项失败） |
-| 同上 | fixture 的判据 id 改成 `bounded-other` | **caught**（探针在 `checkConstraint` 处以 `unknown-criterion` 具名中止——是拒绝，不是静默通过） |
-| `trials` 次真实执行 | 把"测量程序自己记的尝试数"改成 off-by-one | **caught**（1 项失败） |
-| 缺失显式表示 | 取消埋下的 miss（`modesOf` 不再返回 `fail`） | **caught**（2 项失败） |
-| 槽位核算 | `observed + missing === denominator` 改成 `denominator >= 0` | **caught**（对照行的答案数组由 `[true,true,false,false]` 变成全 `true`）；改 off-by-one 也 **caught** |
-| 同上 | 取消"缺槽位必须点名 slot" | **caught**（1 项失败） |
-| holdout 与 solve 分开 | 把 holdout 集合换成 solve 集合 | **caught**（11 项失败） |
-| 同上 | 混池对照不再是另一个数 | **caught**（1 项失败） |
-| 标准判定达标 | `>` 改成 `>=`（门槛抬到恰好等于观测增益） | **caught**（1 项失败） |
-| 同上 | 成本上限不再生效 | **caught**（1 项失败） |
-| 同上 | 缺槽位不再扣分 | **caught**（1 项失败） |
-| 结论身份覆盖判定 | 摘要里去掉 `met`，只留 `taskId`/`gain` | **caught**（1 项失败） |
-| 同上 | 结论不再点名两个修订 | **caught**（1 项失败） |
-| 同上 | 结论把每个答案都翻过来仍算同一条 | **caught**（1 项失败） |
-| 冻结标准只有一个所有者 | 标准绑定被拆成两个（判决读一处、结论身份读另一处，且两者不同——审查的 M-1 构造） | **修复后不可表达**：判决与结论身份现在读的是同一个绑定，一个结论身份只有一种答案。这条检查能抓的是**代码演化**（将来有人把绑定拆开，`:conclusionInputOf().standards === standards` 会红）；**故意且协同的改动**（把绑定、结论、fixture 一起改到自洽）它抓不到——标准成员住在探针里，没有摘要钉子可以配。这一点记在"尚未观测"，不当作已解决。 |
-| 仪器在按文件内容产数 | meter 换成**从不打开参照文件**、只数探针自己 `-t<N>` 命名再除以 4 的实现（审查的 BL-2 构造） | **caught**（1 项失败：那个"不在任何参照里"的同名式词被它数成了命中） |
-| **方向参与判决** | 把 `directionSign` 改成常量为 `1`（读了方向但不用） | **caught**（5 项失败） |
-| 同上 | 用未翻转的 fixture，把符号反过来（`? 1 : 1`） | **caught**（5 项失败） |
-| 同上 | fixture 翻成 `lower` + 用仓库 `digestOf` 重算摘要 + 改探针字面量（审查的 BL-1 构造） | **修复前**：51/51、退出码 0、打印 "beats H0"；**修复后**：`gain −0.75`、`met false`、退出码 1、5 项失败 |
+| fixture 内容摘要即对照身份 | 挪动一个冻结成员（`minQualityGain` 0.1→0.2），声明的摘要不动 | `mutate:fw-fixture-standard-moved` |
+| 同上 | 让 `computedDigest` 与 body 差一位 | `mutate:fw-fixture-digest-moved` |
+| 同上 | 把探针里手写的字面量改成全 0 | `mutate:fw-pinned-literal-zeroed` |
+| 两侧口径是 fixture 冻的那条 | 只把 fixture 的 `metric.direction` 改成 `lower`（摘要不重算） | `mutate:fw-direction-unpinned` |
+| 同上 | 用别的 model 名去算 fixture 口径 | `mutate:fw-caliber-model-swapped` |
+| 同上 | fixture 的判据 id 改成 `bounded-other` | `mutate:fw-criterion-unknown`（探针在 `checkConstraint` 处以 `unknown-criterion` 具名中止——是拒绝，不是静默通过） |
+| `trials` 次真实执行 | 把"测量程序自己记的尝试数"改成 off-by-one | `mutate:fw-trials-attempts-off-by-one` |
+| 缺失显式表示 | 取消埋下的 miss（`modesOf` 不再返回 `fail`） | `mutate:fw-miss-not-planted` |
+| 槽位核算 | `observed + missing === denominator` 改成 `denominator >= 0` | `mutate:fw-slot-accounting-constant` |
+| 同上 | 缺槽位不再点名 slot | `mutate:fw-miss-slot-unnamed` |
+| holdout 与 solve 分开 | 把 holdout 集合换成 solve 集合 | `mutate:fw-holdout-becomes-solve` |
+| 同上 | 混池对照不再是另一个数 | `mutate:fw-pooling-indistinguishable` |
+| 标准判定达标 | `>` 改成 `>=`（门槛抬到恰好等于观测增益） | `mutate:fw-bar-equality` |
+| 同上 | 成本上限不再生效 | `mutate:fw-cost-ceiling-dead` |
+| 同上 | 缺槽位不再扣分 | `mutate:fw-missing-floor-dropped` |
+| 结论身份覆盖判定 | 摘要里去掉 `met`，只留 `taskId`/`gain` | `mutate:fw-conclusion-drops-answer` |
+| 同上 | 结论不再点名两个修订 | `mutate:fw-conclusion-drops-revisions` |
+| 方向参与判决 | fixture 翻成 `lower` + 用仓库 `digestOf` 重算摘要 + 改探针字面量 | `mutate:fw-direction-flipped` |
+| 同上 | 用未翻转的 fixture，把符号反过来 | `mutate:fw-direction-sign-inverted` |
+| 仪器在按文件内容产数 | meter 换成**从不打开参照文件**、只数 `-t<N>` 再除以 4 的实现（审查的 BL-2 构造） | `mutate:fw-meter-never-reads-reference` |
 
-**第四轮审查修正后每条断言都做过"关掉修复即失败"的对照**：方向断言关掉（`directionSign` 改成常量 `1`）
-→ **5 项失败**；仪器检查关掉（把 meter 换成审查那个从不读参照文件的构造）→ **1 项失败，且只有它失败**；
-用未翻转的 fixture 把符号反过来 → **5 项失败**。这三条对照改的都是**被计算的值**，不是断言里的形状。
-**唯一的例外是"标准只有一个所有者"**：它是一条结构性质，修复后要么成立、要么不可表达；那条检查能抓
-代码演化（两处绑定被拆开），抓不到协同的故意改动，所以按上面那行的写法记为"不可表达 + 剩余限制"，
-不假装做过一次关掉即失败的实验。
+每条的实测判决不在本文里复述——`node scripts/mutate.mjs --all` 打印的就是它，连同它抓到的检查名。
+原表每行的"（N 项失败）"也一并去掉：那个数字随探针的检查数漂，而它从来不是这条声明的内容。
+
+### 5.2 记录在案的失效（**复现出来了，但没被抓住**）
+
+原表把"把 `directionSign` 改成常量为 `1`（读了方向但不用）"记为**抓住了（5 项失败）**。
+**实测不是。** 它是 `mutate:fw-direction-sign-ignored`，账本里带 `expect: "missed"`：harness 会打印
+`missed`，把全文写到 `/tmp/mutate-fw-direction-sign-ignored.log`；如果将来它变成被抓住，
+harness 会报 `BROKEN`，因为"记录在案的失效已经不存在了"。
+
+为什么没抓住：探针自己的检查**全部**写成同一个 `directionSign` 的函数，所以把符号强制成常量让它们
+**自洽**——fixture 翻成 `lower` 之后探针仍然退出 0，打印
+`domain-probe: OK — the published method is beaten by H0 … and the frozen standards say so`，
+而增益是正的。标记行的动词读的是 `direction` 本身（不是 `directionSign`），于是读数自相矛盾，
+**没有任何检查反对它**。这是第四轮 BL-1 修复的残留：修复让方向**进入**判决，却没有让"读了方向、
+然后把符号丢掉"变成可观测的。原始 BL-1 构造（忽略方向的消费者）确实被 `fw-direction-flipped` 抓住，
+"符号反过来"被 `fw-direction-sign-inverted` 抓住，所以**修的是那两件**；这一件是新的、更窄的残余。
+
+**其余修正**：
+- 原表"同上 | 结论把每个答案都翻过来仍算同一条"与"结论身份覆盖判定 | 摘要里去掉 `met`"是**同一次变异的两面**，
+  合并为 `mutate:fw-conclusion-drops-answer`。
+- 原表"槽位核算 | 改 off-by-one 也被抓住"没有独立的变异（就是同一条算术的另一种写法），**删除**。
+- 原表"冻结标准只有一个所有者 | …**修复后不可表达**"**不是一次变异**，是一段论证：把两个绑定拆开在修复后
+  **不可表达**，所以没有可注入的东西。它现在仍是探针里的一句结构检查（判决与结论身份必须是同一个对象），
+  它的边界（抓代码演化，抓不到协同改动）留在"尚未观测"里，不再混在变异表里冒充一次实验。
+- 原表末段说"这三条对照改的都是**被计算的值**"（方向、符号、仪器）。**在方向那条上不成立**（见上），
+  符号与仪器两条成立；这段话现在只说成立的部分，失效的那条单列在这里。
+
 
 **过程中被变异/自检抓出的三个真缺陷**（都不是"补个测试"，是改代码）：
 
@@ -188,7 +236,7 @@ direction 翻成 `lower`、用仓库自己的 `digestOf` 重算摘要、改掉�
 | **"故意更差的修订被拒"不是产品行为** | 没有任何产品机制拒绝更差的修订：`measure@3` 照样接受 `below-bar` 那一侧、照开盘、照记两次 trial、硬约束也照过；`src/` 里没有"选出更好的修订"这件事，F 也没加。 | 被观测到的是**本探针的判决**读成"未达标"（`gain < 0`、`met false`），和聚合一样是**实验的**读数，不是产品不变式。`README`/提交信息里凡出现"被拒（refused）"的措辞，都应读成"这条对照把它读成未达标"。 |
 | **仪器（meter/selector/bounds）的字节没有被 fixture 冻结** | `frozenTools` 由**运行时** `sha256(meterProgram)` 构建，两端口径摘要一起动，所以"工具被重建"永远不会让口径比较失败——这不是 R08 挡住的事，本文件 §2 已把原来那句假声明删掉。 | 现有检查只能证明"仪器在按文件内容产数"（六个不同内容的文件 → `1 / 0.75 / 0.5 / 0.25 / 0 / 0.75`），能挡住"从不读参照文件、只数 `-t<N>`"这一类；**挡不住**"既数命名式词、又把除数从参照长度推出来"的实现，也挡不住协同改动。要真正冻住仪器需要新的所有者（把仪器字节或摘要写进 fixture），F 没做，也没声称做了。 |
 | **结论身份的"标准所有者唯一"没有摘要钉子** | 标准成员住在**探针**里（`fixture.standards` 一个绑定），不在被钉住的 fixture 里，所以没有"改了就红"的钉子。 | 这条检查能抓**代码演化**（将来把绑定拆成两处会红），抓不到"绑定、结论、fixture 一起改到自洽"。审查的 M-1 构造（让判决读 `frozen.standards`、结论读 `standards`）在修复后**不可表达**——不是因为被检查住了，而是因为只有一个所有者。 |
-| **方向断言挡的是"读错符号"，不是"fixture 说错方向"** | `met` 是"在这条冻结口径与这套冻结标准下，候选是否更好"，不是"候选客观上更好"。一个**故意**把 direction 写成 `lower` 并重算摘要的 fixture，语义上自洽，探针只能如实读它。 | 观测到的是"探针不再忽略方向"：同样的数字在 `higher` 下 `met true`、在 `lower` 下 `met false`、退出码 1。它**不是**"方向被外部验证过"。真实方向的来源仍是 fixture 的作者。**另有一处未观测**：翻成 `lower` 之后那 5 项失败是"这套方法在这个方向下确实更差"，所以这次构造证明的是**拒绝**，不是"一个真正 `lower` 的 fixture 能跑通"——后者需要另一套方法文件（更小的数才是好的），F 没有造它。 |
+| **方向断言挡的是"读错符号"，不是"fixture 说错方向"；而且它挡不住"读了方向再把符号丢掉"** | `met` 是"在这条冻结口径与这套冻结标准下，候选是否更好"，不是"候选客观上更好"。一个**故意**把 direction 写成 `lower` 并重算摘要的 fixture，语义上自洽，探针只能如实读它。 | 观测到的是"探针不再忽略方向"：同样的数字在 `higher` 下 `met true`、在 `lower` 下 `met false`、退出码 1。它**不是**"方向被外部验证过"。真实方向的来源仍是 fixture 的作者。**另有一处未观测**：翻成 `lower` 之后那几项失败是"这套方法在这个方向下确实更差"，所以这次构造证明的是**拒绝**，不是"一个真正 `lower` 的 fixture 能跑通"——后者需要另一套方法文件（更小的数才是好的），F 没有造它。**本轮又测出一条更窄的缺口**（§5.2，`mutate:fw-direction-sign-ignored`）：把符号强制成常量、fixture 翻成 `lower`，探针**全绿**——它自己的检查全部用同一个符号，因此自洽；标记行的动词才是唯一读 `direction` 的地方，而没有检查让动词与数字一致。这一条是第四轮修复的残留，本文件把它记在这里，不当作已覆盖。 |
 | **cost 的语义是本探针选的** | 度量单位与权重在 fixture 里冻结，`costPerTrial` 是本探针按"每 trial 均值"读的（避免 `trials` 一动就挪动上限）。 | 领域侧的"成本"（token、墙钟、钱）没有接进来；这里冻的是 `sum(选中词长)/1000`。换单位会换数字，不换结论结构。 |
 
 ## 6. 缝的复核：**零 src 改动，缝成立**
@@ -214,7 +262,7 @@ direction 翻成 `lower`、用仓库自己的 `digestOf` 重算摘要、改掉�
   如果将来要冻结 token 预算之类的量，那会是**新的口径成员**（`measure@4` 或 fixture 侧的新成员），
   而不是 F 现在能悄悄做到的。**F 没有把这个缺口当成已解决**。
 
-**没有新增协议、没有新增 helper 模块、没有新增拒绝码。** 唯一的代码是探针（1136 行，
-`scripts/domain-probe.mjs`；第四轮修正前是 982 行，增量全部是方向读取、仪器读数检查与删掉的两条
-不可能失败的检查），唯一的 spec 增量是 **0 行**：没有新增任何 `tests/*.spec.ts`，
-因此 `spec-budget` 棘轮（0.8487 对 0.85）一分未动。
+**没有新增协议、没有新增 helper 模块、没有新增拒绝码。** 唯一的代码是探针 `scripts/domain-probe.mjs`
+（它的行数不在本文复述：那是 `evidence-budget` 每次打印的分子的一部分），唯一的 spec 增量是 **0 行**：
+没有新增任何 `tests/*.spec.ts`，当时那条按 spec 行数收费的门禁一分未动（它后来因分子里不只有 spec
+而改名 `evidence-budget`，比值由门禁自己打印）。
