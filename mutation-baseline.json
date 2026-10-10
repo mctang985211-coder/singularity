@@ -782,5 +782,100 @@
       "run": { "kind": "vitest", "args": ["tests/gate.spec.ts"] },
       "witness": "\u00d7"
     }
-  ]
+,
+    {
+      "id": "protocol-nested-workspace-reader-widened",
+      "rule": "the workspace reader closes each entry with `nested.workspace`, the set the declaration handed it, rather than one member wider",
+      "doc": "docs/adversarial-review-8.md",
+      "edits": [
+        {
+          "file": "src/task/bubble.ts",
+          "find": "      assertClosedKeys(workspace, nested.workspace, `${where}.workspace`)",
+          "replace": "      assertClosedKeys(workspace, [...nested.workspace, 'note'], `${where}.workspace`)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-binding.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "protocol-nested-metric-reader-widened",
+      "rule": "the metric reader closes each entry with `nested.metric`, the set the declaration handed it, rather than one member wider",
+      "doc": "docs/adversarial-review-8.md",
+      "edits": [
+        {
+          "file": "src/measure/protocol.ts",
+          "find": "function metricOf(raw: unknown, where: string, members: MemberSet): EvaluationMetric {\n  const source = record(raw, where)\n  assertClosedKeys(source, members, where)",
+          "replace": "function metricOf(raw: unknown, where: string, members: MemberSet): EvaluationMetric {\n  const source = record(raw, where)\n  assertClosedKeys(source, [...members, 'note'], where)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/measure-slice.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "protocol-nested-weights-reader-widened",
+      "rule": "the weights reader closes each entry with `nested.weights`, the set the declaration handed it, rather than one member wider",
+      "doc": "docs/adversarial-review-8.md",
+      "edits": [
+        {
+          "file": "src/measure/protocol.ts",
+          "find": "  assertClosedKeys(source, members, where)\n  const quality = finite(source, 'quality', where)",
+          "replace": "  assertClosedKeys(source, [...members, 'note'], where)\n  const quality = finite(source, 'quality', where)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/measure-slice.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "protocol-nested-run-reader-widened",
+      "rule": "the `run` member of a plan is closed by `nested.run`, the set the declaration handed that reader, rather than one member wider",
+      "doc": "docs/adversarial-review-8.md",
+      "edits": [
+        {
+          "file": "src/measure/protocol.ts",
+          "find": "          assertClosedKeys(run, nested.run, `${where}.run`)",
+          "replace": "          assertClosedKeys(run, [...nested.run, 'note'], `${where}.run`)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/measure-slice.spec.ts"
+        ]
+      },
+      "witness": "×"
+    },
+    {
+      "id": "protocol-nested-outcome-reader-widened",
+      "rule": "the outcome reader closes each entry with `nested.outcomes`, the set the declaration handed it, rather than one member wider",
+      "doc": "docs/adversarial-review-8.md",
+      "edits": [
+        {
+          "file": "src/strategy/protocol.ts",
+          "find": "    assertClosedKeys(outcome, nested.outcomes, at)\n    const admitted = outcome['admitted']",
+          "replace": "    assertClosedKeys(outcome, [...nested.outcomes, 'note'], at)\n    const admitted = outcome['admitted']"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/strategy-round.spec.ts"
+        ]
+      },
+      "witness": "×"
+    }  ]
 }

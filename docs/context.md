@@ -732,6 +732,7 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
 | 第一轮审核与 K1/K2 检查点、阶段退出条件 | `docs/review.md` |
 | **八个出口各自是怎么被找到、又是怎么关的** | `docs/adversarial-review-2..8.md` |
 | **第八轮三条 blocking 的处理过程与还剩什么** | `docs/round-9-handoff.md`（交回材料） |
+| **第八轮 B2 关掉时每一处嵌套读者的证据** | 见本文件 §15 末尾那五条 `mutate:`（第九轮加的） |
 | **第一次真实模型驱动、指针真的移动的 RSI 回合** | `docs/live-campaign.md` + `docs/live-campaign.jsonl`（48 条原始事实） |
 | 写代码前必须读的行为纪律 | `docs/debugging.md`、`docs/spec-policy.md` |
 | 按缝切片的工作方式与已认的缝 | `docs/tdd-seams.md` |
@@ -759,6 +760,22 @@ token 且不校验），**但它举的实例不成立**。实例被收回，规�
    `src-names-no-durable-write`，七处文案改成"src/ 下的模块"。规则从来不是关于 `tests/` 的：
    测试与探针**必须**真的落到 `mkdtemp` 上才能行使沙箱。**仍然没有任何门禁会报"某个测试往仓库里
    写了一个文件"** —— 规则管的是产品。
+
+### 第八轮 B2 的收尾：五处嵌套读者各有一条实验（**第九轮按审查者的构造改的**）
+
+第八轮指出 `workspace` / `metric` / `weights` / `run` / `outcomes` 五处嵌套读者可以被放宽而全套绿。
+我第一版按"每条腿一个新 spec"估成 46 行、据此撤回；**第九轮审查者用同一批实验的一行断言版证明只要 5 行**，
+于是补上了：三条在 `tests/measure-slice.spec.ts`、一条在 `tests/strategy-round.spec.ts`、
+一条在 `tests/task-binding.spec.ts`，各自喂读者一个未声明成员并要求拒绝。五条断言各有一条声明：
+
+- `mutate:protocol-nested-workspace-reader-widened`
+- `mutate:protocol-nested-metric-reader-widened`
+- `mutate:protocol-nested-weights-reader-widened`
+- `mutate:protocol-nested-run-reader-widened`
+- `mutate:protocol-nested-outcome-reader-widened`
+
+**仍然没有证明的是**：把 `nested` **声明本身**放宽会不会被抓住 —— 实测是全绿，所以关掉这件事的
+始终是 spec，不是声明；`defineKind` 按路径强制那条方案 (a) 的否决理由仍未被实验支持。
 
 ### 第八轮三条 HIGH（**仍全部开着**，本轮没碰）
 

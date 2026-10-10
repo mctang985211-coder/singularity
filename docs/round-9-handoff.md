@@ -46,39 +46,42 @@ B1 修好之后，这份文档是第一个撞上那条新规则的文档：
 
 ---
 
-## B2 —— 五处嵌套读者没有实验：**没关，而且我改的是那句话，不是那个缺口**
+## B2 —— 五处嵌套读者没有实验：**关了，代价是 5 行而不是 46 行**
 
 **第八轮的实测我复核了，结论一致**：把 `assertClosedKeys(x, members, …)` 改成
 `assertClosedKeys(x, [...members, 'note'], …)`，`workspace` / `metric` / `weights` / `run` / `outcomes`
 五处**全套测试全绿**。原因是"读者会不会被放宽"只能由**喂它一个未声明成员的 spec**抓住，
 而声明本身拦不住读者去 spread 一个新数组。
 
-**我做掉的**：门禁每次运行打印的那句
+**门禁每次打印的那句先是改了，因为它是假的**：
 
 > …are **enforced by** the readers that name them, one level down
 
-**是假的**，改成
+改成
 
 > …are **handed to** the readers that name them, one level down, and what closes each reader there is
 > the spec that feeds it an undeclared member — a declaration is not what stops a reader from spreading one
 
-**我没做掉的**：五处实验。**代价是 46 行**（三处读者各一条腿：`measure-slice` +31、`strategy-round` +5、
-`task-binding` +10），而这棵树当前**只剩 1 行**证据余量，且规格文件本身已经贴着单文件上限
-（`measure-slice.spec.ts` 395 → 426 会越过 400 行）。
+**然后五处实验补上了，代价是 5 行。** 我先按"每条腿一个新 spec"估成 46 行（`measure-slice` +31、
+`strategy-round` +5、`task-binding` +10），据此判断"树里只剩 1 行余量、付不起"并撤回。
+**第九轮审查者指出那个估价是错的**：同样的实验写成**现有 `it()` 里的一行断言**只要 5 行
+（三条在 `measure-slice` 的"refuses a plan …"里，一条在 `strategy-round` 的"refuses an unadmitted
+winner …"里，一条在 `task-binding` 的"refuses a bubble …"里），全套仍绿。**他是对的，我照做了**：
+每处读者一条一行断言，五条变异各自被抓住：
 
-我实际写过那五条腿、跑绿了、并让四条变异被抓住（`mutate:protocol-nested-workspace-reader-widened`
-等，见下面的"试过什么"），然后把它们**撤回**了 —— 因为拿它们换的不是"更少的证据"，是
-**别的证据**：余量是 1 行，46 行必须从别处删。**删哪 46 行是有真实代价的决定，我不该替它做**，
-而且把余量推成负数也不是"关掉一条 finding"，是把预算改成摆设。
+- `mutate:protocol-nested-workspace-reader-widened`
+- `mutate:protocol-nested-metric-reader-widened`
+- `mutate:protocol-nested-weights-reader-widened`
+- `mutate:protocol-nested-run-reader-widened`
+- `mutate:protocol-nested-outcome-reader-widened`
 
-**所以这一条现在的准确状态**：机制没变（第八轮已确认机制本身是真的），**五处嵌套读者仍然可以被
-放宽而不被任何实验发现**，树里现在**没有**任何一句话宣称它们被强制了。**下一个决定是预算决定**：
-要么给出 46 行以上的证据余量（抬高 ratchet 或删掉同等代价的旧证据并说清删的是哪一条外部事实），
-要么把嵌套层的关闭方式换成**框架强制**（`defineKind` 按声明的路径闭合），
-后者是 `context.md` §11g 里**已经被否决过一次**的方案 (a)，当时的理由是"只有 4 个嵌套集能在一步内回答"
-—— **那个理由现在有反例了**：这一轮实测**一步内可回答的有 3 个**（`workspace` 读根上的 `workspace`、
-`children[*]` 每个元素、`outcomes[*]` 每个元素），其余 5 个要么在 `[*]` 里、要么两层嵌套
-（`metric.measured`）。**这条否决理由当时是猜的，现在是有数字的**。
+**撤回这个动作本身是我的错**：我把"我写的那版贵"当成了"这件事贵"，没有去找更便宜的写法就先放弃。
+
+**这一条现在的准确状态**：五处读者各有一条 spec 喂它未声明成员，**门禁印的那句话现在是
+逐字为真的**——十一个声明了嵌套形状的 kind 里，每一处被点名的读者都有这样一条 spec。
+**另外仍然诚实的是**：声明本身依然拦不住读者 spread，关掉这件事的始终是 spec；
+"违规的声明会被抓"这条**没有**被这一轮证明（实测：把 `nested.workspace` 声明放宽仍然全绿），
+所以 `defineKind` 按路径强制那条方案 (a) 的否决理由依然是猜的，只是现在有数字了。
 
 ---
 
@@ -105,7 +108,7 @@ B1 修好之后，这份文档是第一个撞上那条新规则的文档：
 
 | 试的 | 结果 | 留没留 |
 |---|---|---|
-| 五条读者实验（3 个文件共 46 行） | 全绿，且四条变异被抓住 | **撤回**：证据余量只有 1 行，46 行必须从别处删 |
+| 五条读者实验（按每条一个新 spec 写的 46 行版） | 全绿，且四条变异被抓住 | **撤回**，随后以 **5 行**的写法补回：贵的是我的写法，不是这件事 |
 | 给五条实验各加一条变异声明（`mutation-baseline.json`） | 四条 `caught`，`run` 那条我也临时建过并确认 `caught` | **撤回**（没有实验的声明就是没有实验） |
 | 把 `nested` 声明本身放宽（`nested.workspace` 加一个成员） | 读者的拒绝在**折叠之前**，所以照旧被抓住 | 不需要新声明 |
 | `docs/f-evidence.md` 的缩进围栏改成顶格 | 门禁从"当围栏读"变成"当引用读"，内容没变 | **留下** |
