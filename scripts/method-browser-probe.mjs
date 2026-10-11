@@ -237,6 +237,13 @@ async function assertExperiment(persistence, attachments, methods) {
   for (const [index, roundId] of ROUND_IDS.entries()) {
     const actual = evaluations.filter(value => value.evaluationId.startsWith(roundId + ':'))
     assert.deepEqual(actual.map(value => value.label), ['baseline', 'baseline', `good${index + 1}`, 'baseline', `bad${index + 1}`])
+    const incumbentTokens = actual[0].tokens
+    for (const slot of rounds[index].decision.slots) {
+      const candidate = actual.find(value => value.evaluationId === slot.evaluationId)
+      assert.equal(slot.cost, candidate.tokens, 'the round lost its exact native token measurement')
+      assert(Math.abs(slot.costGain - (candidate.tokens - incumbentTokens) / incumbentTokens) < 1e-9,
+        'the round compared absolute token counts against its relative cost allowance')
+    }
   }
   return { experiment: 'controlled letters engineering acceptance', formalDomainImprovement: false,
     rootSessionId: root.sessionId, model: root.events.findLast(event => event.type === 'request/header').data.header.config,
