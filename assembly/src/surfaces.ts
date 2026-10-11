@@ -10,11 +10,12 @@ import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { bindCaller, declareCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import type { PlanRecord, PlannedChild, Proposal, Status } from './driver.ts'
 import { taskIdOf, runIdOf } from './ids.ts'
-import { contractFor } from './inputs.ts'
+import { contractFor, resolveInputs } from './inputs.ts'
 import { record, text } from './shape.ts'
 import type { Scheduler } from './scheduler.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
 import { domainForRun, loadMethod, publishedMethod } from './method.ts'
+import { readTask, templateDeclaration } from './read.ts'
 function requirePlanner(apparatus: Apparatus, caller: Caller): void {
   if (apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, caller.agentId)?.role === 'child')
     refuse('illegal-transition', 'an assigned child executes its existing Task; only a root may propose or decompose')
@@ -35,6 +36,7 @@ export async function decompose(
   if (plans.some(plan => plan.children.some(child => child.taskId === input.taskId)))
     refuse('illegal-transition', 'this deployment does not decompose a child Task')
   if (!Array.isArray(input.children)) refuse('malformed-declaration', 'children must be a complete plan')
+  apparatus.budget?.assertPlan(input.children)
   const named = input.children.map((child: PlannedChild, index: number) => {
     const declared = record(child, `children[${index}]`)
     assertClosedKeys(declared, ['key', 'template', 'dependsOn', 'supports', 'maxRuns'], `children[${index}]`, 'malformed-declaration')
@@ -103,18 +105,24 @@ export async function propose(apparatus: Apparatus, caller: Caller, callId: stri
   const run = await startAttempt(apparatus, caller, taskId, callId, method)
   return { taskId, runId: run.runId, workspace: workspaceOf(apparatus, taskId, run.runId),
     criterionId: template.criterion.criterionId, phase: 'running', submission: template.submission, input: template.input.name, artifact: template.artifact,
-    templates: [...domain.templates.values()].map(template => ({ id: template.id, goal: template.goal, criterionId: template.criterion.criterionId, input: template.input })) }
+    inputContent: Buffer.from(await resolveInputs(apparatus, taskStateOf(apparatus, taskId).contract!, domain)[0]!.read()).toString('utf8'),
+    initialSource: template.initial === undefined ? null : Buffer.from(template.initial.bytes).toString('utf8'), rootTemplate: domain.rootTemplate,
+    templates: [...domain.templates.values()].map(templateDeclaration) }
 }
 export async function status(apparatus: Apparatus, caller: Caller, input: { readonly taskId: string }): Promise<Status> {
   const state = taskStateOf(apparatus, input.taskId)
-  if (state.responsibility?.agentId !== caller.agentId)
+  const directParent = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
+    .some(parent => parent.responsibility?.agentId === caller.agentId && parent.decomposition?.children.some(child => child.taskId === input.taskId))
+  if (state.responsibility?.agentId !== caller.agentId && !directParent)
     refuse('not-responsible', `task "${input.taskId}" is the responsibility of agent "${state.responsibility?.agentId ?? 'nobody'}", so agent "${caller.agentId}" cannot read it`)
   const view = projectTask(state)
+  const task = await readTask(apparatus, state)
   const latest = view.runs.at(-1)
-  if (latest === undefined || latest.status === 'running') return { phase: view.phase, runs: view.runs.length, receipt: null }
+  if (latest === undefined || latest.status === 'running') return { phase: view.phase, runs: view.runs.length, receipt: null, task }
   return {
     phase: view.phase,
     runs: view.runs.length,
     receipt: projectReceipt(apparatus.registry, apparatus.store.load().entries(), input.taskId, latest.runId),
+    task,
   }
 }

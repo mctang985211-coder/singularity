@@ -9,7 +9,6 @@ import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskSta
 import type { ReceiptView, TaskView } from '../../src/task/view.ts'
 import { callerOf, openApparatus } from './apparatus.ts'
 import type { Apparatus } from './apparatus.ts'
-import type { TaskTemplate } from './template.ts'
 import type { Domain } from './domain.ts'
 import type { Admission, Execution, TurnFailureHandler } from './execution.ts'
 import { repair } from './repair.ts'
@@ -25,6 +24,8 @@ import { createNativeSolve } from './native-solve.ts'
 import type { RoundDecision } from '../../src/strategy/view.ts'
 import { releaseMethod, type MethodRelease } from './method-release.ts'
 import type { ApprovalSeams } from '../../src/runtime/approval.ts'
+import { historyOf, type MethodHistory, type ReadTask, type TemplateDeclaration } from './read.ts'
+import { createCampaignBudget, type CampaignBudget, type CampaignLimits } from './budget.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { singularity: TaskService }
@@ -38,9 +39,9 @@ export interface TaskService {
 export interface AgentTaskSurface {
   propose(input: { readonly goal: string; readonly method?: RevisionRef }): Promise<Proposal>
   createMethod(input: MethodAssets): Promise<RevisionRef>
-  runMethod(input: { readonly taskId: string }): Promise<{ program: string; artifact: string }>
+  runMethod(input: { readonly taskId: string; readonly candidate?: string }): Promise<{ program: string; artifact: string }>
   evolve(input: EvolutionRound): Promise<RoundDecision>
-  history(): readonly RoundDecision[]
+  history(): Promise<MethodHistory>
   release(input: MethodRelease): Promise<{ revision: RevisionRef; approvalId: string }>
   decompose(input: { readonly taskId: string; readonly children: readonly PlannedChild[] }): Promise<PlanRecord>
   submit(input: { readonly taskId: string; readonly program: string }): Promise<Submission>
@@ -63,14 +64,19 @@ export interface Proposal {
   readonly submission: 'program' | 'source'
   readonly input: string
   readonly artifact: string
-  readonly templates: readonly { readonly id: string; readonly goal: string; readonly criterionId: string; readonly input: TaskTemplate['input'] }[]
+  readonly inputContent: string
+  readonly initialSource: string | null
+  readonly rootTemplate: string
+  readonly templates: readonly TemplateDeclaration[]
 }
 export interface Status {
   readonly phase: TaskView['phase']
   readonly runs: number
   readonly receipt: ReceiptView | null
+  readonly task: ReadTask
 }
 export interface DriverOptions {
+  readonly budget?: CampaignLimits
   readonly attachments: Apparatus['attachments']
   readonly controlId: string
   readonly workspaceRoot: string
@@ -81,14 +87,19 @@ export interface DriverOptions {
   readonly execution: (admission: Admission, onTurnFailure: TurnFailureHandler) => Execution
 }
 export interface TaskDriver extends TaskService {
+  readonly budget?: CampaignBudget
   activate(sessionId: string): Promise<void>
   close(): Promise<void>
 }
 
 export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
   const apparatus = await openApparatus(options.controlId, options.workspaceRoot, options.domain, options.persistence, options.attachments)
+  if (options.budget !== undefined) {
+    apparatus.budget = createCampaignBudget(apparatus, options.budget)
+    await apparatus.budget.restore()
+  }
   const admission: Admission = exec => {
-    if (exec.agent === undefined || ['singularity_task_status', 'singularity_propose_task', 'singularity_submit_program'].includes(exec.name)) return undefined
+    if (exec.agent === undefined || exec.name.startsWith('singularity_')) return undefined
     const tasks = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
     const owned = [...tasks.values()].filter(task => task.responsibility?.agentId === exec.agent!.id)
     const active = owned.flatMap(task => Object.values(task.runs).filter(run => run.status === 'running'))
@@ -140,6 +151,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     throw new AggregateError([error, ...cleanup.flatMap(result => result.status === 'rejected' ? [result.reason] : [])], 'driver recovery failed')
   }
   return {
+    ...(apparatus.budget === undefined ? {} : { budget: apparatus.budget }),
     activate: sessionId => work(async () => {
       const cut = apparatus.store.load()
       for (const task of cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()) {
@@ -152,17 +164,22 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       const agent = execution.assertCaller(exec)
       const caller = callerOf(agent)
       const signal = AbortSignal.any([controller.signal, exec.signal])
+      const criterion = apparatus.domain.templates.get(apparatus.domain.rootTemplate)!.criterion
+      const measurement = apparatus.domain.measurement
       const evolution = createEvolution({ store: apparatus.store, registry: apparatus.registry,
-        criterion: apparatus.domain.templates.get(apparatus.domain.rootTemplate)!.criterion,
-        rounds: 2, firstBudget: 3, minimumBudget: 3, calibration: { floor: 0, source: 'declared' },
+        criterion, metric: { measured: measurement?.criterion ?? { ...criterion, criterionId: `${criterion.criterionId}:quality` },
+          unit: measurement === undefined ? 'pass' : 'baseline area ratio', direction: measurement?.direction ?? 'higher' },
+        trials: measurement === undefined ? 1 : 2, weights: measurement === undefined ? { quality: 1, cost: 0 } : { quality: 100, cost: 15 },
+        rounds: 2, firstBudget: 3, minimumBudget: 3, calibration: { floor: measurement === undefined ? 0 : 0.01, source: 'declared' },
         loadMethod: async revision => (await loadMethod(apparatus, revision)).assets,
-        solve: createNativeSolve(apparatus, options.seams, agent, signal) })
+        solve: createNativeSolve(apparatus, options.seams, agent, signal, measurement === undefined ? undefined
+          : { digest: measurement.criterion.implementationDigest, measure: (source, signal) => measurement.measure(source, signal) }) })
       return {
         propose: input => work(() => propose(apparatus, caller, String(exec.callId), input)),
         createMethod: input => work(() => createMethod(apparatus, input)),
-        runMethod: input => work(() => runMethodTool(apparatus, caller, input.taskId, String(exec.callId), AbortSignal.any([controller.signal, exec.signal]))),
+        runMethod: input => work(() => runMethodTool(apparatus, caller, input.taskId, String(exec.callId), AbortSignal.any([controller.signal, exec.signal]), input.candidate)),
         evolve: input => work(() => evolution.runRound(input)),
-        history: () => evolution.history(),
+        history: () => historyOf(apparatus, evolution.history()),
         release: input => work(() => releaseMethod(apparatus, options.approvalSeams ?? {}, agent, String(exec.callId), input, signal)),
         decompose: input => work(() => decompose(apparatus, scheduler, caller, input)),
         submit: input => work(async () => {

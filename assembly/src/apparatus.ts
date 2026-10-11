@@ -16,6 +16,7 @@ import { createTaskCommands, type HeldAgent, type TaskCommands } from '../../src
 import type { Bubble } from '../../src/task/bubble.ts'
 import { declareTaskProtocol, SCHEDULER_ROLE, TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type TaskState } from '../../src/task/protocol.ts'
 import type { Domain } from './domain.ts'
+import type { CampaignBudget } from './budget.ts'
 
 export interface Apparatus {
   readonly persistence: SessionPersistence
@@ -29,6 +30,7 @@ export interface Apparatus {
   readonly environments: ReturnType<typeof createEnvironmentCommands>
   readonly agents: ReturnType<typeof createAgentNodeCommands>
   readonly held: Map<string, HeldAgent>
+  budget?: CampaignBudget
 }
 function subjectsOf(controlId: string, domain: Domain): Record<string, string> {
   const subjects: Record<string, string> = {
@@ -41,6 +43,10 @@ function subjectsOf(controlId: string, domain: Domain): Record<string, string> {
   }
   for (const verifier of domain.verifiers)
     subjects[verifierRoleOf({ verifierRef: verifier.ref, verifierVersion: verifier.version })] = `${controlId}:verifier:${verifier.ref}@${verifier.version}`
+  if (domain.measurement !== undefined) {
+    const criterion = domain.measurement.criterion
+    subjects[verifierRoleOf(criterion)] = `${controlId}:verifier:${criterion.verifierRef}@${criterion.verifierVersion}`
+  }
   return subjects
 }
 export async function openApparatus(controlId: string, workspaceRoot: string, domain: Domain, persistence: SessionPersistence,

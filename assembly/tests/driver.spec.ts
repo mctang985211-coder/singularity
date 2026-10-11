@@ -18,6 +18,7 @@ import { loadDomain } from '../src/domain.ts'
 import { openDriver, type TaskDriver } from '../src/driver.ts'
 import { taskIdOf } from '../src/ids.ts'
 import { spawnProcess } from '../src/process.ts'
+import type { Admission } from '../src/execution.ts'
 import { attachmentsAt, agentFor, execFor, factsOf, fakeExecution, FakePersistence, kindsOf, mount, serviceOf } from './seam.ts'
 
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
@@ -93,6 +94,40 @@ async function mounted() {
 }
 
 describe('the driver with explicit execution and persistence ports', () => {
+  it('keeps Method creation and real history available after a root Run settles', async () => {
+    root = await mkdtemp(join(tmpdir(), 'assembly-admission-'))
+    const medium = new FakePersistence()
+    let admission!: Admission
+    ownedDriver = await openDriver({ controlId: 'lib-1', workspaceRoot: root, domain: await loadDomain(REAL, spawnProcess),
+      persistence: medium as unknown as SessionPersistence, attachments: attachmentsAt(root), seams: {},
+      execution: selected => { admission = selected; return fakeExecution(selected) } })
+    const agent = agentFor('agent-7', 'session-9')
+    const surface = (id: string) => ownedDriver!.forCall(execFor(agent, id))
+    const proposal = await surface('propose').propose({ goal: 'count letters' })
+    await surface('submit').submit({ taskId: proposal.taskId, program: COUNTING })
+    for (const name of ['singularity_create_method', 'singularity_evolve_method', 'singularity_method_history', 'singularity_release_method'])
+      expect(admission({ ...execFor(agent, name), name } as never)).toBeUndefined()
+    expect(admission({ ...execFor(agent, 'write'), name: 'write_file' } as never)).toBe('this Run has closed write admission')
+    const method = await surface('method').createMethod({ rootTemplate: proposal.rootTemplate, templates: proposal.templates, skill: 'Inspect and count.', tool: COUNTING })
+    expect((await surface('history').history()).methods[0]?.reference).toEqual(method)
+  })
+  it('enforces the root Run cap through the actual proposal port and counts Task reuse', async () => {
+    root = await mkdtemp(join(tmpdir(), 'assembly-budget-'))
+    const medium = new FakePersistence()
+    ownedDriver = await openDriver({ controlId: 'lib-1', workspaceRoot: root, domain: await loadDomain(REAL, spawnProcess),
+      persistence: medium as unknown as SessionPersistence, attachments: attachmentsAt(root), seams: {}, execution: fakeExecution,
+      budget: { rootSolves: 2, children: 2, childRuns: 2, nativeTokens: 100 } })
+    const agent = agentFor('agent-7', 'session-9')
+    const surface = (id: string) => ownedDriver!.forCall(execFor(agent, id))
+    const first = await surface('first').propose({ goal: 'count letters' })
+    await surface('submit-first').submit({ taskId: first.taskId, program: COUNTING })
+    const second = await surface('second').propose({ goal: 'count letters' })
+    expect(second.taskId).toBe(first.taskId)
+    await surface('submit-second').submit({ taskId: second.taskId, program: COUNTING })
+    expect((await asyncRefusalOf(() => surface('third').propose({ goal: 'count letters' }))).code).toBe('budget-exhausted')
+    expect(ownedDriver.budget?.report().rootSolves).toBe(2)
+    expect(factsOf(medium).filter(fact => fact.kind === 'run/started')).toHaveLength(2)
+  })
   it('activates only the recorded parent session to recover an already published plan', async () => {
     const { parent, driver, agents, delivered, call } = await childrenRuntime()
     const proposal = await call(parent, 'propose').propose({ goal: 'count letters' })

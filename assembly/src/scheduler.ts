@@ -13,6 +13,7 @@ import { templateOf } from './domain.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
 import { schedulerMessage } from './scheduler-message.ts'
 import { domainForRun, methodOfRun } from './method.ts'
+import { resolveInputs } from './inputs.ts'
 
 export interface Scheduler {
   advance(parentTaskId: string): Promise<readonly string[]>
@@ -109,6 +110,8 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
         `This attempt uses Run directory ${workspace}. Use this explicit directory for every command and file operation; the session cwd is the Task directory.`,
         `This Task/Run is already started. Do not propose or decompose; solve and submit this exact taskId through singularity_submit_program. Attempt ${Object.keys(state.runs).length + (working === undefined ? 1 : 0)} of ${maxRuns}.`,
         'Input: ' + join(workspace, template.input.name),
+        'Input content:\n' + Buffer.from(await resolveInputs(apparatus, state.contract!, domain)[0]!.read()).toString('utf8'),
+        ...(template.initial === undefined ? [] : ['Initial source:\n' + Buffer.from(template.initial.bytes).toString('utf8')]),
         template.submission === 'program' ? 'Your Node ES module receives the input path in process.argv[2]; print the artifact to stdout.' : 'Your source is judged as written.',
         'The independent verifier judges artifact ' + join(workspace, template.artifact) + ' against ' + state.contract!.criteria.map(criterion => criterion.criterionId).join(', ') + '.',
         ...(previous?.failureCause === 'acceptance' ? [`Previous Run ${previous.runId} failed acceptance: ${previous.failureReason}. Correct the answer in this new Run; do not change prior Run files.`] : []),

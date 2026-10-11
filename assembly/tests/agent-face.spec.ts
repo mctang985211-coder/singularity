@@ -15,8 +15,12 @@ import type { AgentTaskSurface, Proposal, Status } from '../src/driver.ts'
 import { agentFor, execFor } from './seam.ts'
 
 const TOOLS = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program', 'singularity_task_status', 'singularity_create_method', 'singularity_run_method', 'singularity_evolve_method', 'singularity_method_history', 'singularity_release_method']
-const PROPOSAL: Proposal = { taskId: 'task-x', runId: 'run-x', workspace: '/w', criterionId: 'c', phase: 'running', submission: 'program', input: 'in/data', artifact: 'out', templates: [] }
-const STATUS: Status = { phase: 'running', runs: 1, receipt: null }
+const PROPOSAL: Proposal = { taskId: 'task-x', runId: 'run-x', workspace: '/w', criterionId: 'c', phase: 'running', submission: 'program', input: 'in/data', artifact: 'out',
+  inputContent: 'actual input', initialSource: null, rootTemplate: 'root', templates: [] }
+const STATUS: Status = { phase: 'running', runs: 1, receipt: null, task: {
+  taskId: 'task-x', goal: 'g', contractDigest: 'digest', admittedBy: 'scheduler', admittedAt: 'now', phase: 'running', criteria: [], runs: [],
+  contract: { goal: 'g', template: { id: 'root', digest: 'digest' }, inputs: [], criteria: [] }, agentId: 'a', sessionId: 's', decomposition: null,
+} }
 
 /** The services a mounted scope presents, with every registration the face makes. */
 function scope(surface: Partial<AgentTaskSurface>) {
@@ -55,7 +59,7 @@ describe('the agent face', () => {
   it('offers no parameter through which a caller could name itself', () => {
     const mounted = scope({})
     apply(mounted.ctx)
-    expect(mounted.tools.map(tool => Object.keys(tool.parameters.properties ?? {}))).toEqual([['goal', 'method'], ['taskId', 'children'], ['taskId', 'program'], ['taskId'], ['content'], ['taskId'], ['round'], [], ['release']])
+    expect(mounted.tools.map(tool => Object.keys(tool.parameters.properties ?? {}))).toEqual([['goal', 'method'], ['taskId', 'children'], ['taskId', 'program'], ['taskId'], ['content'], ['taskId', 'candidate'], ['round'], [], ['release']])
   })
 
   it('binds the surface from the call it received, not from the arguments it was given', async () => {
@@ -96,6 +100,13 @@ describe('the agent face', () => {
     apply(mounted.ctx)
     const answer = await toolNamed(mounted.tools, 'singularity_task_status').execute({ taskId: 't' }, execFor(agentFor('agent-7', 'session-9'), 'call-1'))
     expect(answerOf(answer)).toEqual(STATUS)
+  })
+
+  it('awaits sealed task and Method history before rendering the one public read port', async () => {
+    const history = { tasks: [STATUS.task], methods: [], decisions: [] }
+    const mounted = scope({ history: async () => history })
+    apply(mounted.ctx)
+    expect(answerOf(await toolNamed(mounted.tools, 'singularity_method_history').execute({}, execFor(agentFor('a', 's'), 'history')))).toEqual(history)
   })
 
   it('tells the model how its program will be run, rather than leaving it to guess', () => {
