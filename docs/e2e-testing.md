@@ -71,13 +71,23 @@ node scripts/method-browser-probe.mjs --output /tmp/singularity-method-review
 W5/W9 面板完整主链已实跑通过：`/tmp/singularity-w9-panel.log`、`/tmp/singularity-w9-panel.png`。
 日志核对真实 session、依赖来源、封存附件与页面完整 receipt，成功 marker 为 `panel-probe: OK`。
 
-W6—W9 Method 工程主链已通过：`/tmp/singularity-method-review/evidence.json`，最终阶段为
+W6—W9 受控 Method 工程演示已通过：`/tmp/singularity-method-review/evidence.json`，最终阶段为
 `published-head-next-run-verified`，探针 exit 0；截图为同目录的 `published-head-next-run.png`。
 两轮共十个独立原生求解会话，质量分别为 `[0,0,1,0,0]`；正确候选均被选中，相对冻结基线的 token 成本变化为 -19.39% / -6.52%。
 十次求解原始成本合计 88139 tokens；两次真人原生批准及 head 更新已核对。
 新独立会话未指定 Method，Run `run-9a75b8ead347739f` 默认消费发布的模板、Skill、Tool，并独立验收为 verified。
 本轮完整 build、64 文件 / 755 项测试、七项直接合同门禁通过；探针收口另通过 44 项相关浏览器检查。
-这些结果证明受控 letters 工程闭环；正式领域质量和成本改善尚未评测。
+这些结果仅证明受控 letters 工程演示，W9 完整领域 RSI 闭环尚未验收。
+真实验收必须从需求开始，由模型复用或新建任务、探索分解、逐层独立验收，再从真实执行历史提出方法候选。
+预设正确候选、故意错误基线和发布后单次成功均不能代替自主探索与效果验证。
+
+本轮真实需求冻结为优化 SHA256 W message schedule：只修改 `sha256_w_mem`，固定 core/K/测试台，
+保留端口、reset、SHA256/SHA224 与逐周期 W 时序；独立 W 序列验收、封存产物整核集成验收和父最终验收分别执行。
+整核面积读取完整 top 层次，正确上游基线为 64858.4544 µm²；相同工具/库/输入下按基线归一、越低越好，
+改善带预先声明为 1%，功能正确为硬约束，原生 token 成本沿用 RRSI 25% 上限。
+预算为两轮、每轮两个自主候选、每个候选与基线各两次独立求解；完整根求解最多 28 次，每次最多两个 child，
+每个 child 最多两个 Run，所有原生会话合计 150 万 tokens。发布后基线与赢家各两次独立求解比较效果。
+预算耗尽、无赢家、未改善如实报告，模型/provider 故障不自动刷重试。
 
 脚本故障、模型/provider 故障和领域拒绝需按控制事实与 transcript 分辨。失败不能通过再次执行已封存程序来掩盖。
 受控恢复和领域链证明工程行为；领域质量和成本效果仍须用 W6/W7 冻结的真实任务集、口径、预算与原始 trials 验证。
