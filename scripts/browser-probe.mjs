@@ -61,7 +61,7 @@ const DECOMPOSE_PROMPT = [
   'Then call singularity_task_status for the existing parent Task and report its receipt. Do not propose or decompose again.',
 ].join('\n')
 
-async function boot(port, extra = [], home = DSH_HOME) {
+export async function boot(port, extra = [], home = DSH_HOME) {
   const argv = ['--profile', PROFILE, ...extra, '--host', '127.0.0.1', '--port', String(port), '--no-open']
   const child = spawn(DSH_BIN, argv, { env: { ...process.env, DSH_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] })
   const server = { child, command: DSH_BIN + ' ' + argv.join(' '), output: '' }
@@ -88,7 +88,7 @@ async function boot(port, extra = [], home = DSH_HOME) {
   }
 }
 
-async function openApp(context, url) {
+export async function openApp(context, url) {
   const page = await context.newPage()
   await page.goto(url, { waitUntil: 'domcontentloaded' })
   await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
@@ -114,7 +114,7 @@ async function dismissFirstRun(page) {
   assert(quiet >= 3, 'first-run dialog did not close')
   return dismissed
 }
-async function selectPreset(page) {
+export async function selectPreset(page) {
   const seat = page.locator('button[title="Choose the agent preset for your new task"]').first()
   await seat.waitFor({ timeout: 30_000 })
   await seat.click()
@@ -139,14 +139,14 @@ async function chooseWorkspace(page, home) {
   await page.getByRole('button', { name: 'Open', exact: true }).click()
   await composerOf(page).waitFor({ timeout: 30_000 })
 }
-async function prepare(page, home) {
+export async function prepare(page, home) {
   const dismissed = await dismissFirstRun(page)
   await selectPreset(page)
   await chooseWorkspace(page, home)
   await expectSeat(page)
   return dismissed
 }
-async function send(page, prompt) {
+export async function send(page, prompt) {
   const composer = composerOf(page)
   await composer.waitFor({ timeout: 30_000 })
   await composer.fill(prompt)
@@ -163,30 +163,30 @@ async function waitForTools(page, names, timeout = TURN_TIMEOUT_MS) {
     assert(await page.locator('[data-tool="' + name + '"]').count() > 0, 'the turn ended before calling ' + name)
   }
 }
-async function settle(page, timeout = TURN_TIMEOUT_MS) {
+export async function settle(page, timeout = TURN_TIMEOUT_MS) {
   await page.waitForFunction(() => document.querySelector('button[aria-label="Stop generating"]') === null, null,
     { timeout })
   await page.waitForTimeout(1000)
 }
-async function kill(server) {
+export async function kill(server) {
   if (server.child.exitCode !== null || server.child.signalCode !== null) return
   server.child.kill('SIGTERM')
   const stopped = await Promise.race([server.exited.then(() => true), sleep(5000).then(() => false)])
   if (!stopped) { server.child.kill('SIGKILL'); await server.exited }
 }
-async function freePort() {
+export async function freePort() {
   const server = createServer()
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
   const port = server.address().port
   await new Promise(resolve => server.close(resolve))
   return port
 }
-async function readLog(persistence, sessionId) {
+export async function readLog(persistence, sessionId) {
   const { SessionId } = await dshModule('@deepseek-ai/dsh-session')
   const handle = await persistence.open(SessionId(sessionId), 'read')
   try { return (await handle.read()).events } finally { await handle.close() }
 }
-async function controlFacts(persistence) {
+export async function controlFacts(persistence) {
   const stored = await persistence.list()
   if (!stored.some(entry => entry.header.id === CONTROL_SESSION)) return []
   return (await readLog(persistence, CONTROL_SESSION)).map(event => {
@@ -719,7 +719,7 @@ async function runProbe(home, context, screenshot, stage, extra) {
   }
 }
 
-async function isolatedHome(stage) {
+export async function isolatedHome(stage) {
   const home = await mkdtemp(join(tmpdir(), 'singularity-browser-'))
   try {
     await copyFile(join(DSH_HOME, '.credentials.yaml'), join(home, '.credentials.yaml'))
