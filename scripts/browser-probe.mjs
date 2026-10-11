@@ -298,6 +298,10 @@ export async function coreRead(facts, domainDir, cutoff = facts.length) {
   for (const verifier of domain.verifiers)
     subjects[verifierRoleOf({ verifierRef: verifier.ref, verifierVersion: verifier.version })] =
       `singularity-local:verifier:${verifier.ref}@${verifier.version}`
+  if (domain.measurement !== undefined) {
+    const criterion = domain.measurement.criterion
+    subjects[verifierRoleOf(criterion)] = `singularity-local:verifier:${criterion.verifierRef}@${criterion.verifierVersion}`
+  }
   const log = MemoryLog.adopt(facts.slice(0, cutoff), registry, { subjects })
   const view = {
     entries: () => log.entries(),

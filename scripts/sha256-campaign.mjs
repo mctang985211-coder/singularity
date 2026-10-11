@@ -8,6 +8,7 @@ import { chromium } from 'playwright'
 import { dshModule, openPersistence } from './dsh-control-runtime.mjs'
 import { boot, controlFacts, coreRead, freePort, isolatedHome, kill, openApp, prepare,
   readLog, sealedDigestsOf, send, settle, toolFacts, assertToolHeader } from './browser-probe.mjs'
+import { inputSourcesOf } from './browser-probe.mjs'
 import { projectReceipt } from '../src/task/view.ts'
 
 const { lastAssistantStreamChunk } = await dshModule('@deepseek-ai/dsh-llm')
@@ -18,6 +19,35 @@ const ROUNDS = ['sha256-real-round-1', 'sha256-real-round-2']
 export const campaignBudget = { rootSolves: 28, children: 2, childRuns: 2, nativeTokens: 1500000 }
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 const redact = value => String(value).replaceAll(/([?&]token=)[A-Za-z0-9_-]+/g, '$1[redacted]')
+const stages = new WeakMap()
+async function sendStage(page, persistence, prompt) {
+  const cutoff = new Map((await persistence.list()).map(session => [String(session.header.id), session.eventCount]))
+  stages.set(page, { cutoff, prompt })
+  await send(page, prompt)
+}
+export function stageWitness(sessions, cutoff, prompt) {
+  for (const session of sessions) {
+    const input = session.events.find(event => event.seq >= (cutoff.get(session.sessionId) ?? 0) && event.type === 'user/message' &&
+      event.data.content.filter(part => part.type === 'text').map(part => part.text).join('') === prompt)
+    if (input !== undefined) return { entered: true, finished: session.events.some(event => event.seq > input.seq && event.type === 'turn/end') }
+  }
+  return { entered: false, finished: false }
+}
+export function comparisonSummary(trials) {
+  const group = label => {
+    const rows = trials.filter(trial => trial.label === label)
+    assert.equal(rows.length, 2, 'each comparison side requires two real trials')
+    return { trials: 2, functionalPassRate: rows.filter(row => row.receipt.status === 'verified').length / 2,
+      meanArea: rows.every(row => row.area !== null) ? rows.reduce((sum, row) => sum + row.area, 0) / 2 : null,
+      tokens: rows.every(row => row.accounting.tokens !== null) ? rows.reduce((sum, row) => sum + row.accounting.tokens, 0) : null }
+  }
+  const incumbent = group('incumbent'), published = group('published')
+  const relativeAreaChange = incumbent.meanArea === null || published.meanArea === null ? null : (published.meanArea - incumbent.meanArea) / incumbent.meanArea
+  const relativeTokenChange = incumbent.tokens === null || incumbent.tokens === 0 || published.tokens === null ? null : (published.tokens - incumbent.tokens) / incumbent.tokens
+  return { incumbent, published, relativeAreaChange, relativeTokenChange, declaredBand: 0.01,
+    outcome: incumbent.functionalPassRate === 1 && published.functionalPassRate === 1 && relativeAreaChange !== null && relativeAreaChange < -0.01 &&
+      relativeTokenChange !== null && relativeTokenChange <= 0.25 ? 'improved' : 'not-improved' }
+}
 
 export function campaignPrompt(stage, round) {
   if (stage === 'explore') return [
@@ -67,7 +97,7 @@ function rootsOf(facts) {
   const children = new Set(facts.filter(fact => fact.kind === 'task/decomposed').flatMap(fact => fact.payload.children.map(child => child.taskId)))
   return facts.filter(fact => fact.kind === 'run/started' && !children.has(fact.subject))
 }
-function assertExploration(facts) {
+function assertExploration(facts, recordedRuns) {
   const roots = rootsOf(facts)
   assert(roots.length >= 3 && roots.length <= 4, 'exploration must record three or four real root Runs')
   const taskIds = [...new Set(roots.map(fact => fact.subject))]
@@ -80,12 +110,24 @@ function assertExploration(facts) {
   assert(schedule !== undefined && integration !== undefined)
   assert.deepEqual(integration.dependsOn, [schedule.taskId])
   const start = facts.find(fact => fact.kind === 'run/started' && fact.subject === integration.taskId)
+  if (start === undefined) return { accepted: false, reason: 'integration never started after schedule acceptance' }
   const revision = facts.find(fact => fact.kind === 'revision/created' && fact.subject === start.payload.revision.environmentId && fact.payload.revisionId === start.payload.revision.revisionId)
   const source = revision.payload.manifest.inputSources[0]
   assert.equal(source.source.kind, 'artifact')
   assert.equal(source.source.taskId, schedule.taskId)
   const submission = facts.find(fact => fact.kind === 'run/submitted' && fact.subject === schedule.taskId && fact.payload.runId === source.source.runId)
   assert.equal(source.digest, submission.payload.submission.artifactDigest)
+  const layers = [schedule.taskId, integration.taskId, plan.subject].map(taskId => {
+    const accepted = recordedRuns.find(run => run.taskId === taskId && run.receipt.status === 'verified')
+    const criteria = declared(taskId).criteria
+    const verdicts = accepted === undefined ? [] : facts.filter(fact => fact.subject === taskId && fact.kind === 'evidence/produced' && fact.payload.runId === accepted.runId)
+    const met = accepted !== undefined && criteria.every(criterion => verdicts.some(fact => fact.payload.criterionId === criterion.criterionId && fact.payload.verdict === 'pass' &&
+      fact.payload.artifactDigest === accepted.receipt.submission.artifactDigest))
+    if (accepted !== undefined) inputSourcesOf(facts, taskId, accepted.receipt)
+    return { taskId, accepted: met, receipt: accepted?.receipt ?? null, verdicts }
+  })
+  assert.equal(declared(plan.subject).inputs[0].source.kind, 'protected')
+  return { accepted: layers.every(layer => layer.accepted), layers }
 }
 async function waitStage(persistence, page, stage, ready, timeout = 3600000) {
   const deadline = Date.now() + timeout
@@ -96,11 +138,12 @@ async function waitStage(persistence, page, stage, ready, timeout = 3600000) {
     assert(roots.length <= campaignBudget.rootSolves, 'root solve budget was exceeded')
     const next = `${roots.length} root Runs; ${facts.filter(fact => ['run/verified', 'run/failed'].includes(fact.kind)).length} terminal Runs`
     if (next !== progress) { process.stderr.write(`sha256-campaign: ${stage}: ${next}\n`); progress = next }
-    if (await ready(facts)) { await settle(page, 180000); return facts }
-    const generating = await page.locator('button[aria-label="Stop generating"]').count() > 0
+    const { cutoff, prompt } = stages.get(page)
+    const witnessed = stageWitness(await sessionsOf(persistence), cutoff, prompt)
+    if (witnessed.entered && await ready(facts)) { await settle(page, 180000); return facts }
     const activeRuns = facts.some(fact => fact.kind === 'run/started' && !facts.some(terminal => terminal.subject === fact.subject &&
       terminal.payload.runId === fact.payload.runId && ['run/verified', 'run/failed'].includes(terminal.kind)))
-    if (!generating && !activeRuns) throw new Error(`${stage} ended without its required real result`)
+    if (witnessed.finished && !activeRuns) throw new Error(`${stage} ended without its required real result`)
     await sleep(1000)
   }
   throw new Error(`${stage} exceeded its deadline`)
@@ -133,7 +176,7 @@ async function compareRun(page, home, medium, attachments, method, label, trial)
   await prepare(page, home)
   const before = (await controlFacts(medium.persistence)).length
   const goal = `SHA256 real requirement comparison ${label} trial ${trial}`
-  await send(page, [
+  await sendStage(page, medium.persistence, [
     'Solve the actual SHA256 area-reduction requirement again in this new native session, preserving the protected functional and cycle contract.',
     `Call singularity_propose_task exactly once with goal=${JSON.stringify(goal)}${method === undefined ? ' and omit method to load the published head.' : ` and method=${JSON.stringify(method)}.`}`,
     'Read actual inputs and consume the Method template, Skill and auxiliary Tool. Choose and submit your own final Verilog; use exact Task status and sealed child results when needed.',
@@ -183,18 +226,20 @@ async function run() {
     browser = await chromium.launch()
     page = await openApp(await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 900 } }), server.url)
     await prepare(page, isolated.home)
-    await send(page, campaignPrompt('explore'))
+    await sendStage(page, medium.persistence, campaignPrompt('explore'))
     await waitStage(medium.persistence, page, 'exploration', async facts => {
       const roots = rootsOf(facts)
       assert(roots.length <= 4, 'exploration used evaluation or comparison budget')
-      return roots.length > 0 && roots.every(started => facts.some(fact => fact.subject === started.subject &&
+      return roots.length >= 3 && roots.every(started => facts.some(fact => fact.subject === started.subject &&
         fact.payload.runId === started.payload.runId && ['run/verified', 'run/failed'].includes(fact.kind))) &&
         await page.locator('button[aria-label="Stop generating"]').count() === 0
     })
-    assertExploration(await controlFacts(medium.persistence))
-    await save(await evidenceOf(medium, attachments, 'exploration-complete'))
+    const exploration = await evidenceOf(medium, attachments, 'exploration-complete')
+    const acceptance = assertExploration(exploration.facts, exploration.runs)
+    await save({ ...exploration, acceptance, phase: acceptance.accepted ? 'exploration-complete' : 'exploration-unaccepted' })
+    if (!acceptance.accepted) return
     for (const round of [1, 2]) {
-      await send(page, campaignPrompt('round', round))
+      await sendStage(page, medium.persistence, campaignPrompt('round', round))
       await waitStage(medium.persistence, page, `round ${round}`, facts => facts.some(fact => fact.kind === 'round/decided' && fact.subject === ROUNDS[round - 1]))
       await save(await evidenceOf(medium, attachments, `round-${round}-complete`))
     }
@@ -207,7 +252,7 @@ async function run() {
     assert(evolve.every(result => result.value.incumbent.digest === incumbent.digest), 'rounds changed the unapproved incumbent')
     await page.screenshot({ path: join(output, 'two-rounds.png'), fullPage: true })
     await save({ ...experiment, phase: 'release-ready', selectedRoundId: selected.roundId })
-    await send(page, [
+    await sendStage(page, medium.persistence, [
       `Request singularity_release_method with release=${JSON.stringify(JSON.stringify({ bootstrap: incumbent }))}; wait for the real human answer.`,
       `Only after actual approval succeeds, request singularity_release_method with release=${JSON.stringify(JSON.stringify({ roundId: selected.roundId }))} and wait for the real human answer.`,
       'Do not approve on behalf of the human, run more tasks, change Methods or retry a denial.',
@@ -218,11 +263,11 @@ async function run() {
     for (const [label, method] of [['incumbent', incumbent], ['published', undefined]])
       for (const trial of [1, 2]) comparison.push(await compareRun(page, isolated.home, medium, attachments, method, label, trial))
     await page.screenshot({ path: join(output, 'published-comparison.png'), fullPage: true })
-    await save({ ...await evidenceOf(medium, attachments, 'published-comparison-complete'), selectedRoundId: selected.roundId, comparison })
+    await save({ ...await evidenceOf(medium, attachments, 'published-comparison-complete'), selectedRoundId: selected.roundId, comparison, summary: comparisonSummary(comparison) })
   } catch (error) {
-    if (page !== undefined && !page.isClosed()) await page.screenshot({ path: join(output, 'failure.png'), fullPage: true })
-    const evidence = medium === undefined ? {} : await evidenceOf(medium, medium.context.get('attachments'), 'stopped')
+    const evidence = medium === undefined ? {} : { facts: await controlFacts(medium.persistence), sessions: await sessionsOf(medium.persistence) }
     await save({ ...evidence, phase: 'stopped', error: redact(error.stack ?? error) })
+    if (page !== undefined && !page.isClosed()) await page.screenshot({ path: join(output, 'failure.png'), fullPage: true })
     throw error
   } finally {
     await browser?.close()
