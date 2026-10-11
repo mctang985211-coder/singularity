@@ -69,7 +69,7 @@ describe('the DSH execution port', () => {
     const unrelated = h.sessions.create(SessionId('unrelated'))
     unrelated.append('turn/start', { turn: 1 })
     unrelated.append('turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'other failure', code: 'UNKNOWN' } } })
-    for (const [index, kind] of (['completed', 'blocked', 'max-tokens', 'interrupted', 'forked'] as const).entries()) {
+    for (const [index, kind] of (['completed', 'blocked', 'interrupted', 'forked'] as const).entries()) {
       h.session.append('turn/start', { turn: index + 1 })
       h.session.append('turn/end', { turn: index + 1, reason: { kind } })
     }
@@ -78,6 +78,18 @@ describe('the DSH execution port', () => {
     h.session.append('turn/start', { turn: 6 })
     h.session.append('turn/end', { turn: 6, reason: { kind: 'aborted', reason: { kind: 'user' } } })
     expect(failures).toEqual([])
+  })
+
+  it('turns a turn ended at the output ceiling into one runtime failure', async () => {
+    const failures: TurnFailure[] = []
+    const h = harness(undefined, failure => { failures.push(failure) })
+    h.session.append('turn/start', { turn: 1 })
+    const capped = h.session.append('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
+    // A Run whose owning turn ended at the ceiling has no live turn left to settle it: the step was
+    // cut off mid-answer, nothing re-prompts the session, and the Run would otherwise stay `working`
+    // forever — the campaign that found this waited on it until its deadline.
+    expect(failures).toEqual([{ sessionId: 'root', turn: 1, seq: Number(capped.seq), reason: { kind: 'max-tokens' } }])
+    await h.execution.close()
   })
 
   it('rejects a stale session whose id now belongs to another registry agent', async () => {

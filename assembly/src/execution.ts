@@ -12,7 +12,15 @@ export interface TurnFailure {
   readonly sessionId: string
   readonly turn: number
   readonly seq: number
-  readonly reason: Extract<TurnEndReason, { kind: 'error' | 'aborted' }>
+  /**
+   * The endings that leave a working Run with no live turn able to settle it.
+   *
+   * `max-tokens` belongs here although the turn itself did not fail: the step reached its output
+   * ceiling, so the answer was cut off and nothing re-prompts the session. Ignoring it left the Run
+   * `working` forever — a real campaign waited on one until its deadline because neither a terminal
+   * fact nor a failure ever arrived.
+   */
+  readonly reason: Extract<TurnEndReason, { kind: 'error' | 'aborted' | 'max-tokens' }>
 }
 export type TurnFailureHandler = (failure: TurnFailure) => void
 export interface TranscriptSource {
@@ -89,10 +97,12 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
       reason: { kind: 'error', error: { code: 'DSH_AGENT_ERROR', message: error instanceof Error ? error.message : String(error) } } })
   })
   const ended = ctx.on('session/event', (session, event) => {
-    if (event.type !== 'turn/end' || (event.data.reason.kind !== 'error' && event.data.reason.kind !== 'aborted')) return
+    if (event.type !== 'turn/end') return
+    const reason = event.data.reason
+    if (reason.kind !== 'error' && reason.kind !== 'aborted' && reason.kind !== 'max-tokens') return
     const agent = ctx.agents.get(session.id)
     if (agent?.session !== session) return
-    report(agent, { sessionId: String(session.id), turn: event.data.turn, seq: Number(event.seq), reason: event.data.reason })
+    report(agent, { sessionId: String(session.id), turn: event.data.turn, seq: Number(event.seq), reason })
   })
   const close = (): Promise<void> => closing ??= (async () => {
     closed = true
