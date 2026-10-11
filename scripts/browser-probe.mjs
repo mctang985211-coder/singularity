@@ -12,6 +12,9 @@ import { chromium } from 'playwright'
 import { digestOf } from '../src/protocol/envelope.ts'
 import { AGENT_ROLE, declareAgentProtocol } from '../src/agent/protocol.ts'
 import { ENVIRONMENT_ROLE, declareEnvironmentProtocol } from '../src/environment/protocol.ts'
+import { declareMeasureProtocol } from '../src/measure/protocol.ts'
+import { declareStrategyProtocol } from '../src/strategy/protocol.ts'
+import { declareReleaseProtocol } from '../src/release/protocol.ts'
 import { MemoryLog } from '../src/protocol/memory-log.ts'
 import { ProtocolRegistry } from '../src/protocol/registry.ts'
 import { SCHEDULER_ROLE, declareTaskProtocol, verifierRoleOf } from '../src/task/protocol.ts'
@@ -28,6 +31,8 @@ const URL_PATTERN = /http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+/
 const TURN_TIMEOUT_MS = 300_000
 const G2_TIMEOUT_MS = 900_000
 const TOOLS = ['singularity_propose_task', 'singularity_submit_program', 'singularity_task_status']
+const DECLARED_TOOLS = [...TOOLS, 'singularity_decompose_task', 'singularity_create_method', 'singularity_run_method',
+  'singularity_evolve_method', 'singularity_method_history', 'singularity_release_method'].sort()
 const CONTROL_SESSION = 'singularity:control:singularity-local'
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -199,6 +204,11 @@ export function toolFacts(events) {
         : JSON.parse(event.data.message.content.map(part => part.text ?? '').join('')) }))
   return { calls, results }
 }
+export function assertToolHeader(header) {
+  const declaredTools = header.tools.map(tool => tool.name).sort()
+  assert.deepEqual(declaredTools, DECLARED_TOOLS, 'the Singularity preset must expose exactly its owned solve and method tools')
+  return declaredTools
+}
 export function inputSourcesOf(facts, taskId, receipt) {
   const contract = facts.find(fact => fact.kind === 'task/admitted' && fact.subject === taskId).payload.contract
   const started = facts.find(fact => fact.kind === 'run/started' && fact.subject === taskId && fact.payload.runId === receipt.runId)
@@ -280,6 +290,9 @@ export async function coreRead(facts, domainDir, cutoff = facts.length) {
   declareTaskProtocol(registry)
   declareAgentProtocol(registry)
   declareEnvironmentProtocol(registry)
+  declareMeasureProtocol(registry)
+  declareStrategyProtocol(registry)
+  declareReleaseProtocol(registry)
   const subjects = { [SCHEDULER_ROLE]: 'singularity-local:scheduler',
     [AGENT_ROLE]: 'singularity-local:runtime', [ENVIRONMENT_ROLE]: 'singularity-local:environment' }
   for (const verifier of domain.verifiers)
@@ -385,8 +398,7 @@ async function provenance(persistence, attachments, taskId, runId, sessionId, do
     assert.equal(criterion.verdict, 'pass')
   }
   const headers = transcript.filter(event => event.type === 'request/header').map(event => event.data.header)
-  for (const header of headers)
-    assert.deepEqual(header.tools.map(tool => tool.name).sort(), [...TOOLS, 'singularity_decompose_task'].sort(), 'the Singularity preset exposes an unowned execution capability')
+  for (const header of headers) assertToolHeader(header)
   const header = headers.at(-1)
   const bubble = facts.find(fact => fact.kind === 'bubble/opened' && fact.subject === taskId && fact.payload.runId === runId)
   assert.deepEqual(bubble.payload.model, { provider: header.config.provider, model: header.config.model },
@@ -620,8 +632,7 @@ async function runProbe(home, context, screenshot, stage, extra) {
       const safeTranscript = await readLog(medium.persistence, unaffectedSessionId)
       assert.equal(safeTranscript.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
       const header = transcript.findLast(event => event.type === 'request/header').data.header
-      const declaredTools = header.tools.map(tool => tool.name).sort()
-      assert.deepEqual(declaredTools, [...TOOLS, 'singularity_decompose_task'].sort())
+      const declaredTools = assertToolHeader(header)
       await mkdir(dirname(screenshot), { recursive: true })
       await page.screenshot({ path: screenshot, fullPage: true })
       const evidence = { leg: stage, host: server.command, hostPid: server.child.pid,

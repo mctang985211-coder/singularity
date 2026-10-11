@@ -10,14 +10,18 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { describe, it } from 'vitest'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { MemoryLog } from '../../src/protocol/memory-log.ts'
+import { declareMeasureProtocol, MEASURE_KINDS, MEASURE_PROTOCOL, MEASURE_VERSION } from '../../src/measure/protocol.ts'
+import { declareStrategyProtocol, STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_VERSION } from '../../src/strategy/protocol.ts'
+import { declareReleaseProtocol, releaseDraftOf, RELEASE_KINDS, RELEASE_PROTOCOL, RELEASE_VERSION } from '../../src/release/protocol.ts'
 import type { RunSubmission } from '../../src/task/run.ts'
 import type { SchedulerMessageSource } from '../src/scheduler-message.ts'
 import { sha256 } from '../src/ids.ts'
 import { admitted, contract, SUBJECTS, TASK_ID, taskRegistry } from '../../tests/task-fixtures.ts'
 const scriptPath = fileURLToPath(new URL('../../scripts/browser-probe.mjs', import.meta.url))
-const { inputSourcesOf, toolFacts, assertPlannedTasks, coreRead, sealedDigestsOf, schedulerEvidenceOf }: {
+const { inputSourcesOf, toolFacts, assertToolHeader, assertPlannedTasks, coreRead, sealedDigestsOf, schedulerEvidenceOf }: {
   inputSourcesOf(facts: readonly unknown[], taskId: string, receipt: unknown): unknown
   toolFacts(events: readonly unknown[]): { results: readonly { value: unknown }[] }
+  assertToolHeader(header: { tools: readonly { name: string }[] }): readonly string[]
   assertPlannedTasks(facts: readonly unknown[], parentTaskId: string): void
   coreRead(facts: readonly unknown[], domainDir: string, cutoff?: number): Promise<{ snapshot: unknown }>
   sealedDigestsOf(attachments: Pick<AttachmentStore, 'readFileStream'>, submission: Pick<RunSubmission,
@@ -95,6 +99,25 @@ describe('actual DSH tool results', () => {
   })
 })
 
+describe('native request tool ownership', () => {
+  const names = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program',
+    'singularity_task_status', 'singularity_create_method', 'singularity_run_method', 'singularity_evolve_method',
+    'singularity_method_history', 'singularity_release_method']
+  const headerOf = (tools: readonly string[]) => ({ tools: tools.map(name => ({ name })) })
+  it('requires the exact solve and method tool set independently of ordering', () => {
+    assert.deepEqual(assertToolHeader(headerOf([...names].reverse())), [...names].sort())
+  })
+  for (const missing of names) {
+    it(`rejects a request missing ${missing}`, () => {
+      assert.throws(() => assertToolHeader(headerOf(names.filter(name => name !== missing))))
+    })
+  }
+  it('rejects an additional execution tool and a duplicate owned tool', () => {
+    assert.throws(() => assertToolHeader(headerOf([...names, 'exec'])))
+    assert.throws(() => assertToolHeader(headerOf([...names, names[0]!])))
+  })
+})
+
 describe('the isolated model campaign executes the declared plan', () => {
   const plan = [
     { kind: 'task/admitted', subject: 'parent' },
@@ -118,6 +141,27 @@ it('serves core snapshot reads from a fixed durable cut of a real MemoryLog', as
   const read = await coreRead(log.entries(), domainDir, 1)
   assert.deepEqual(read.snapshot, { formatVersion: 2, controlId: 'singularity-local', cutoff: 1,
     tasks: [{ taskId: TASK_ID, goal: contract().goal, phase: 'awaiting-run', sessionId: null, template: contract().template, runs: [] }], plans: [] })
+})
+
+it('reads committed method measurement, strategy and release facts through the host registry', async () => {
+  const registry = taskRegistry()
+  declareMeasureProtocol(registry)
+  declareStrategyProtocol(registry)
+  declareReleaseProtocol(registry)
+  const log = new MemoryLog(registry, { subjects: { ...SUBJECTS, strategy: 'strategy' } })
+  const revision = { environmentId: 'methods', revisionId: 'method', digest: 'a'.repeat(64) }
+  log.emit({ commandId: 'measure', protocol: MEASURE_PROTOCOL, version: MEASURE_VERSION, kind: MEASURE_KINDS.evaluationOpened,
+    subject: 'evaluation', payload: { baseline: revision, candidate: revision, run: { taskId: 'task', runId: 'run' },
+      context: 'b'.repeat(64), metric: { measured: contract().criteria[0], unit: 'pass', direction: 'higher' },
+      weights: { quality: 1, cost: 0 }, trials: 1, judgement: [] } })
+  log.emit({ commandId: 'round', protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind: STRATEGY_KINDS.roundOpened,
+    subject: 'round', payload: { round: 1, incumbent: revision, candidates: 2, explorationSlots: 1, editBudget: 1,
+      historyCutoff: 1, caliber: 'c'.repeat(64), weights: { quality: 1, cost: 0 } } })
+  log.emit({ commandId: 'release', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.drafted,
+    subject: revision.environmentId, payload: releaseDraftOf(revision, { kind: 'bootstrap' }) })
+  const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
+  const read = await coreRead(log.entries(), domainDir)
+  assert.deepEqual(read.snapshot, { formatVersion: 2, controlId: 'singularity-local', cutoff: 3, tasks: [], plans: [] })
 })
 
 describe('browser evidence reads authoritative native file attachments', () => {
