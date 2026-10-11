@@ -13,10 +13,6 @@ import { projectTree } from '../../src/task/tree.ts'
 import { projectTask } from '../../src/task/view.ts'
 import type { Apparatus } from './apparatus.ts'
 
-/**
- * One committed cut, read-only. The panel, the probe and any future reader take this shape, so the
- * tools and the UI cannot disagree: they are not two projections of the same facts, they are one.
- */
 export interface ControlSnapshot {
   readonly formatVersion: 1
   readonly controlId: string

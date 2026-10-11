@@ -15,9 +15,12 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
     "client.js",
     "cordis.patch.yml",
+    "lib",
+    "panel.css",
+    "panel.html",
+    "panel.js",
     "presets"
   ],
   "dsh": {

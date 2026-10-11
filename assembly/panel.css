@@ -1,0 +1,105 @@
+/*
+ * The panel's own stylesheet.
+ *
+ * Self-contained on purpose. The page runs in an iframe, so the shell's custom properties are not
+ * inherited into it — a page that styled itself with `var(--dsw-…)` would silently fall back to
+ * nothing and look broken in exactly the way nobody would think to check. The values below are this
+ * page's own, and the theme follows the reader's system setting rather than the shell's.
+ */
+
+:root {
+  color-scheme: light dark;
+  --label-primary: #16181d;
+  --label-secondary: #454a55;
+  --label-caption: #737987;
+  --border: #00000014;
+  --surface: #ffffff;
+  --error: #b3261e;
+  --code: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --label-primary: #f2f4f8;
+    --label-secondary: #c3c8d4;
+    --label-caption: #8d94a3;
+    --border: #ffffff1f;
+    --surface: #16181d;
+    --error: #ff8b80;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--surface);
+  font: 13px/20px system-ui, sans-serif;
+  color: var(--label-secondary);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 20px;
+  box-sizing: border-box;
+}
+
+h1 {
+  font-size: 15px;
+  line-height: 22px;
+  color: var(--label-primary);
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: var(--label-primary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+button[disabled] {
+  color: var(--label-caption);
+  cursor: default;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+
+.spread {
+  justify-content: space-between;
+}
+
+.group {
+  margin: 8px 0 0;
+  font-weight: 500;
+  color: var(--label-primary);
+}
+
+.ruled {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  margin-top: 4px;
+}
+
+.id {
+  font-family: var(--code);
+  color: var(--label-primary);
+}
+
+.faded {
+  color: var(--label-caption);
+}
+
+.error {
+  color: var(--error);
+  white-space: pre-wrap;
+}

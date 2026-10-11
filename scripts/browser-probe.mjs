@@ -41,6 +41,8 @@ import { pathToFileURL } from 'node:url'
 
 import { chromium } from 'playwright'
 
+import { DSH_BIN, DSH_HOME } from './dsh-control-runtime.mjs'
+
 /** The profile both legs boot. Deployed by `scripts/deploy.mjs`. */
 export const PROFILE = 'singularity-next-web'
 /** The preset the assembly's preset row declares. */
@@ -109,8 +111,15 @@ export async function boot(port, extra = []) {
   // is refused as an unknown option, and a probe that guessed the order would fail as a boot error
   // rather than as the thing it was probing.
   const argv = ['--profile', PROFILE, ...extra, '--host', '127.0.0.1', '--port', String(port), '--no-open']
-  const command = `dsh ${argv.join(' ')}`
-  const child = spawn('dsh', argv, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+  const command = `${DSH_BIN} ${argv.join(' ')}`
+  // The private install's own binary, not `dsh` from PATH: a bare shell's `dsh` is the global harness, and
+  // it fails with `profile "singularity-next-web" does not exist` — a missing-deployment message for what
+  // is really the wrong binary.
+  // `DSH_HOME` is *set* on the child rather than inherited: this module resolves the home when the
+  // environment has none, and the server reads the variable itself — so passing `process.env` through
+  // unchanged would launch a server with no home at all, which is the same failure as the wrong binary
+  // wearing a different message. Everything else is inherited as it was.
+  const child = spawn(DSH_BIN, argv, { env: { ...process.env, DSH_HOME }, stdio: ['ignore', 'pipe', 'pipe'] })
   const server = { command, child, output: '' }
   child.stdout.on('data', chunk => (server.output += chunk))
   child.stderr.on('data', chunk => (server.output += chunk))
@@ -144,7 +153,12 @@ async function waitForUrl(server) {
 export async function openApp(context, url) {
   const page = await context.newPage()
   await page.goto(url, { waitUntil: 'domcontentloaded' })
-  await page.getByRole('button', { name: 'New Session' }).first().waitFor({ timeout: 60_000 })
+  // The shell's own label is "New session" with a lower-case s, and it is a real `button`'s
+  // `aria-label`. The capitalised spelling this used to look for did not match it: `getByRole` is
+  // case-insensitive but *substring*-matching by default, so it matched the sidebar's session list
+  // instead and the wait timed out on a page that had painted correctly. An exact name removes the
+  // ambiguity, and `data-tool` rows afterwards prove the turn really ran.
+  await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
   return page
 }
 
@@ -509,7 +523,7 @@ async function recoveryLeg(home, context, screenshot) {
 
     server = await boot(port)
     await page.goto(server.url, { waitUntil: 'domcontentloaded' })
-    await page.getByRole('button', { name: 'New Session' }).first().waitFor({ timeout: 60_000 })
+    await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
     await dismissFirstRun(page)
 
     // The resumed session renders turn one's own tool row before anything is sent. A fresh session
@@ -626,14 +640,15 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
  */
 const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 
-const home = process.env['DSH_HOME']
+// Resolved, never required: the same resolver the other probes use, and for the same reason — a gate
+// runner invokes a script with the environment it was started with, so requiring `DSH_HOME` here made
+// this probe refuse in exactly the place it is supposed to produce evidence.
+const home = DSH_HOME
 const recovery = process.argv.includes('--recovery')
 const screenshotFlag = process.argv.indexOf('--screenshot')
 if (!invokedDirectly) {
   // Imported: the steps above are the whole offering, and nothing below runs.
-} else if (home === undefined || home === '')
-  process.stderr.write("browser-probe: DSH_HOME is not set; source the deployment's environment (env.sh) before probing\n")
-else if (screenshotFlag !== -1 && process.argv[screenshotFlag + 1] === undefined)
+} else if (screenshotFlag !== -1 && process.argv[screenshotFlag + 1] === undefined)
   process.stderr.write('browser-probe: --screenshot needs a path\n')
 else {
   const screenshot =
@@ -642,7 +657,11 @@ else {
       : process.argv[screenshotFlag + 1]
   const browser = await chromium.launch()
   try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+    // The app's locale delegates to the browser when no preference is set, and a browser context
+    // inherits the machine's own — so without this, the probes' English accessors match on an en
+    // desktop and time out on a zh one. Pin the locale; the UI language is part of the probe's frame,
+    // not something it observes.
+    const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 900 } })
     await (recovery ? recoveryLeg(home, context, screenshot) : liveLeg(home, context, screenshot))
   } catch (error) {
     process.stderr.write(

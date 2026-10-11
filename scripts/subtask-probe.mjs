@@ -32,6 +32,7 @@ import { join } from 'node:path'
 import { chromium } from 'playwright'
 
 import { boot, prepare, send, waitForTools } from './browser-probe.mjs'
+import { DSH_HOME } from './dsh-control-runtime.mjs'
 
 /** The deployed profile, and the overlay this probe gives its own control. */
 const PROFILE = 'singularity-next-web'
@@ -147,7 +148,7 @@ async function controlFacts(home) {
  * gives each child its own workspace — so a child's directory carries its task id. That is how a child
  * session is told apart from the control's, without asking the deployment to describe itself.
  */
-async function childSessionsOf(home, taskIds) {
+async function childSessionsOf(home, taskIds, parentTaskId) {
   const root = join(home, 'sessions')
   const found = []
   for (const entry of await readdir(root).catch(() => [])) {
@@ -156,6 +157,10 @@ async function childSessionsOf(home, taskIds) {
       if (taskId === undefined) continue
       const decoded = await decode(join(root, entry, name, 'session.v4.jsonl.zstd'))
       if (decoded === undefined) continue
+      // The plan that opened it is in the session's own header, so a child of another plan is skipped
+      // rather than read: this run's plan is the only one whose children this probe has anything to say
+      // about, and a session it did not open says nothing about the rule under test.
+      if (parentTaskId !== undefined && !decoded.includes(parentTaskId)) continue
       const calls = []
       const refusals = []
       let instruction
@@ -217,8 +222,9 @@ async function resetControl(home) {
 }
 
 async function main() {
-  const home = process.env['DSH_HOME']
-  if (home === undefined || home === '') throw new Error("DSH_HOME is not set; source the deployment's environment before probing")
+  // Resolved rather than required, for the reason `dsh-control-runtime.mjs` gives: a gate runner has no
+  // `DSH_HOME` to pass, and a probe that refuses there is a gate that can never be green.
+  const home = DSH_HOME
 
   await resetControl(home)
   const overlay = await probeOverlay(home)
@@ -237,19 +243,32 @@ async function main() {
     check('the mounted plugin is this checkout, so the verdict is about the tree it names', linked === expected, `the profile links ${linked ?? 'nothing'}, and this probe is running from ${process.cwd()}`)
     if (linked !== expected) throw new Error(`the profile mounts ${linked ?? 'no plugin'}, not ${expected}: a verdict about another tree is not evidence about this one`)
 
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+    // The app's locale delegates to the browser when no preference is set, and a browser context
+    // inherits the machine's own — so without this, the probes' English accessors match on an en
+    // desktop and time out on a zh one. Pin the locale; the UI language is part of the probe's frame,
+    // not something it observes.
+    const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 900 } })
     const page = await context.newPage()
     await page.goto(server.url, { waitUntil: 'domcontentloaded' })
-    await page.getByRole('button', { name: 'New Session' }).first().waitFor({ timeout: 60_000 })
+    await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
     await prepare(page, home)
     await send(page, PLAN_PROMPT)
     await waitForTools(page, ['singularity_propose_task', 'singularity_decompose_task'])
-    // `decompose` does not answer until it has opened the sessions its plan made ready — opening a child
-    // composes an agent and delivers its first instruction, which is a turn — so the turn is waited out
-    // rather than slept over. A fixed sleep was enough for the plan to commit and not for the children to
-    // start, which made this probe report "no child session" for a run that was still opening them.
-    await page.waitForFunction(() => document.querySelector('button[aria-label="Stop generating"]') === null, undefined, { timeout: 900_000 })
-    await sleep(5_000)
+    // `decompose` does not answer until each ready child's first turn is over — `say` waits for the
+    // agent to go idle — so under a max-reasoning model the parent's own turn can outlast any fixed
+    // patience, and waiting for the turn's end times out on slow work rather than on a defect. What
+    // this probe claims is in the durable record, not in the parent's answer: poll, bounded, for the
+    // plan committed and the opened child's first turn done, both read from the flushed logs.
+    const deadline = Date.now() + 900_000
+    for (;;) {
+      const facts = await controlFacts(home)
+      const decomposed = facts.filter(fact => fact.kind === 'task/decomposed').at(-1)
+      const children = (decomposed?.payload?.children ?? []).map(child => child.taskId)
+      const opened = children.length === 2 ? await childSessionsOf(home, children, undefined) : []
+      if ((opened.length === 1 && opened[0].calls.length > 0) || Date.now() > deadline) break
+      await sleep(10_000)
+    }
+    if (Date.now() > deadline) console.log('  note  the plan or the child turn did not settle within the wait; the checks below report what is there')
 
     const toolText = await page.evaluate(() => [...document.querySelectorAll('[data-tool]')].map(node => node.textContent ?? '').join('\n'))
     const taskId = /"taskId":"(task-[0-9a-f]+)"/.exec(toolText)?.[1] ?? /\b(task-[0-9a-f]{8,})\b/.exec(toolText)?.[1]
@@ -294,15 +313,21 @@ async function main() {
       // open nothing, which is exactly the defect this probe caught the first time it ran. What makes
       // "each sub-task runs in its own DSH session" true is a session on disk whose dir is the child's
       // workspace, holding the instruction the scheduler composed and a tool call the child made.
-      const childSessions = await childSessionsOf(home, plan.children.map(child => child.taskId))
+      // Scoped to the plan just read, not to the control: a session directory is named for the workspace
+      // it was created in, and every run of this probe reuses the same workspace names, so an unscoped
+      // search finds a previous run's children and asserts about work this run never did.
+      const childSessions = await childSessionsOf(home, plan.children.map(child => child.taskId), join(home, 'workspaces', CONTROL))
       check('the deployment opened a session per ready sub-task, and not for the waiting one', childSessions.length === 1, `${childSessions.length} child session(s): ${JSON.stringify(childSessions.map(session => session.taskId))}`)
       if (childSessions.length > 0) {
         const child = childSessions[0]
         check('the child session carries the instruction the deployment composed', (child.instruction ?? '').includes('You are the agent responsible for the sub-task'), (child.instruction ?? '(no instruction delivered)').slice(0, 160))
         check('the child session ran a turn and called a tool of its own', child.calls.length > 0, `tool calls: ${JSON.stringify(child.calls)}`)
         // The identity the child presents is the session id derived from its task id, and its own task
-        // must be the one it can act on. A refusal here is the defect where the parent held the task.
-        check('the child could act on the task it was given, with no refusal naming responsibility', child.refusals.filter(refusal => refusal.includes('not-responsible')).length === 0, JSON.stringify(child.refusals.slice(0, 3)))
+        // must be the one it can act on. The defect this check exists for is the child refused as not
+        // responsible for its *own* task; a refusal for acting on some other task — a sibling's, say —
+        // is the fence working, so only a refusal naming the child's own task counts.
+        const identityDefect = child.refusals.filter(refusal => /task "(task-[0-9a-f]+)" is the responsibility/.exec(refusal)?.[1] === child.taskId)
+        check('the child could act on the task it was given, with no refusal naming responsibility', identityDefect.length === 0, JSON.stringify(child.refusals.slice(0, 3)))
       }
     }
 

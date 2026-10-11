@@ -316,6 +316,7 @@ export async function closeChildSession(agentId: string): Promise<void>
 | `mutate:assembly-m29-staging-writes-the-loader-bytes` | 工作区写入的是装载时摘要过的字节，不是重新读的源 | stages the bytes it digested even when the declared source has changed since |
 | `mutate:runtime-m30-seams-resolve-through-get` | 可选运行时缝一律经 `ctx.get` 解析（cordis 对未 inject 的服务做属性读会抛错） | throws on a property read, and answers undefined through get |
 | `mutate:assembly-m31-children-own-their-tasks` | 子任务归**做它的那个子会话**所有，不归规划它的父会话 | admits every sub-task a plan names, so the plan can actually run |
+| `mutate:assembly-m32-advance-after-settle` | 每次 run 结算后重扫计划（只有 verified 才解锁依赖，也只有这一刻能变成真） | re-scans the plan when a run settles, so a dependency that just verified can start |
 
 前两条是**在新表下重放同一批事实**：`from` 成员能挡住"名字指错人"，挡不住"不是这个人在做"，
 后者只有 actor 能表达，所以见证必须换一个可信身份表（换表这个动作本身就是事实，见上表 m25 那一行）。

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Singularity tasks</title>
+    <!--
+      The panel is a page of its own, served by this plugin at /singularity/panel and mounted in the
+      shell as an iframe. That is the structure the previous singularity's web surface used, and it is
+      the structure that keeps this page honest: it fetches the read route itself, with the browser's own
+      session, and it holds no reference to the shell's DOM, its React, or its module loader. A shell
+      restyle cannot break it, and a probe can open the page directly — which is how the panel's own
+      evidence is gathered, without driving a chat surface to reach a task list.
+    -->
+    <link rel="stylesheet" href="/singularity/panel/panel.css" />
+  </head>
+  <body>
+    <div id="root">reading…</div>
+    <script type="module" src="/singularity/panel/panel.js"></script>
+  </body>
+</html>

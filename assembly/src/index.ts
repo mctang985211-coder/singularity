@@ -9,7 +9,6 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
@@ -59,10 +58,12 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     persistence: ctx.sessionPersistence,
     seams: ctx as ChildSessionSeams,
   })
+  // No `advance` on this service: the driver advances the plans itself — after a decompose, after a run
+  // settles, and on the first call from a live agent — so an entry point here would be a second way to
+  // do one thing, with no caller. It comes back when something outside this package needs to ask for it.
   ctx.provide('singularity', {
     forCall: (exec: ToolRunContext) => driver.forCall(exec),
     read: () => driver.read(),
-    advance: (parent: Agent | undefined) => driver.advance(parent),
   })
   ctx.effect(() => () => driver.close())
 }

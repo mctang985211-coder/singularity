@@ -9,7 +9,6 @@
  * @module @dangosys/dsh-singularity-next/driver
  */
 
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
@@ -31,8 +30,6 @@ declare module '@deepseek-ai/cordis' {
 export interface TaskService {
   forCall(exec: ToolRunContext): AgentTaskSurface
   read(): Promise<ControlSnapshot>
-  /** Open a session for every ready sub-task that has none. `undefined` is refused, never defaulted. */
-  advance(parent: Agent | undefined): Promise<readonly string[]>
 }
 export interface AgentTaskSurface {
   propose(input: { readonly goal: string }): Promise<Proposal>
@@ -88,8 +85,6 @@ export interface DriverOptions {
 export interface TaskDriver {
   forCall(exec: ToolRunContext): AgentTaskSurface
   read(): Promise<ControlSnapshot>
-  /** Open a session for every ready sub-task that has none, under this deployer's own agent. */
-  advance(parent: Agent | undefined): Promise<readonly string[]>
   close(): Promise<void>
 }
 
@@ -102,14 +97,28 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       const caller = callerOf(exec.agent)
       const callId = String(exec.callId)
       return {
-        propose: input => propose(apparatus, caller, input),
+        propose: async input => {
+          // A live agent is what a child session needs to exist under, and this is the first moment one
+          // exists after a mount — so the re-scan the design calls for happens here. A plan committed
+          // before a restart has ready children and no sessions, and nothing else would ever open them:
+          // `decompose` is over, and `settled` only re-scans for a parent this process has seen.
+          await scheduler.advance(exec.agent)
+          return await propose(apparatus, caller, input)
+        },
         decompose: input => decompose(apparatus, scheduler, caller, exec.agent, input),
-        submit: input => submitTo(apparatus, caller, callId, input),
+        submit: async input => {
+          const answer = await submitTo(apparatus, caller, callId, input)
+          // A run just settled, so the plan it belongs to may have made its dependents ready — only a
+          // verified run satisfies a dependency, and this is the only moment that can become true. A
+          // child that fails to start is reported by the scan itself and does not become this call's
+          // outcome: the run settled, and the model must read nothing else from this answer.
+          await scheduler.settled()
+          return answer
+        },
         status: input => status(apparatus, caller, input),
       }
     },
     read: async () => snapshotOf(apparatus),
-    advance: parent => scheduler.advance(parent),
     close: async () => {
       // The children go first: each holds a session write lease this process took, and the store's own
       // close would leave those leases with no owner if the process outlived them.

@@ -61,6 +61,19 @@ function modelOf(parent: Agent): { provider: string; model: string } {
 export interface Scheduler {
   /** Open a session for every ready sub-task that has none. Idempotent: the session set is the state. */
   advance(parent: Agent | undefined): Promise<readonly string[]>
+  /**
+   * Re-scan the plans after a run settled, under the parent this scheduler last opened children with.
+   *
+   * **This is what makes a dependency mean anything.** Only a verified run satisfies a sub-task, so a
+   * child that verifies makes its dependents `ready` — and if nothing re-scans at that moment, the plan
+   * commits, the first sub-task runs, and the rest of it never starts. Advancing only from `decompose`
+   * would leave every dependency in the system decorative.
+   *
+   * The parent is the one the plan was advanced under rather than the agent that settled the run: a
+   * child is the plan's child, and opening its sibling under the child's own session would make every
+   * sub-task a grandchild of the one before it.
+   */
+  settled(): Promise<readonly string[]>
   /** Stop and release every child this scheduler opened. Returns the exits that failed, by name. */
   close(): Promise<readonly string[]>
 }
@@ -82,21 +95,43 @@ export type OpenChild = (request: ChildSessionRequest) => Promise<ChildSession>
  */
 export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams, open: OpenChild = request => openChildSession(seams, request)): Scheduler {
   const live = new Map<string, ChildSession>()
+  let parent: Agent | undefined
+  const openReady = async (under: Agent): Promise<readonly string[]> => {
+    const opened: string[] = []
+    for (const plan of projectTree(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION))) {
+      for (const child of plan.children) {
+        if (child.status !== 'ready' || live.has(child.taskId)) continue
+        try {
+          opened.push(await openOne(apparatus, under, live, child.taskId, open))
+        } catch (error) {
+          // One child that cannot open does not stop its siblings, and the failure is named rather than
+          // swallowed. This matters most in the settle path: the run that just settled *did* settle, and
+          // an unrelated child's failure must not be reported to the model as its submission failing —
+          // nor may it silently prevent the rest of the plan from starting. `advance` is idempotent, so
+          // the child that failed is retried by the next scan while this one carries on.
+          process.stderr.write(
+            `singularity: sub-task "${child.taskId}" could not be started (${plan.parentTaskId}); its plan is unaffected and the next advance retries it: ${error instanceof Error ? error.message : String(error)}\n`,
+          )
+        }
+      }
+    }
+    return opened
+  }
   return {
-    advance: async parent => {
-      if (parent === undefined)
+    advance: async given => {
+      if (given === undefined)
         refuse(
           'malformed-declaration',
           'a plan is ready to be advanced with no parent agent to open child sessions under; a child is somebody\'s child, and one opened without a parent would have no preset, no route and no write-lease owner',
         )
-      const opened: string[] = []
-      for (const plan of projectTree(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION))) {
-        for (const child of plan.children) {
-          if (child.status !== 'ready' || live.has(child.taskId)) continue
-          opened.push(await openOne(apparatus, parent, live, child.taskId, open))
-        }
-      }
-      return opened
+      parent = given
+      return await openReady(given)
+    },
+    settled: async () => {
+      // Nothing was ever advanced, so this deployment holds no plan whose children this process could
+      // open — and saying so is better than returning an empty list that reads like "nothing was ready".
+      if (parent === undefined) return []
+      return await openReady(parent)
     },
     close: async () => {
       const failures: string[] = []

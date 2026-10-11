@@ -58,7 +58,7 @@ import {
   send,
   waitForTools,
 } from './browser-probe.mjs'
-import { openPersistence } from './dsh-control-runtime.mjs'
+import { DSH_HOME, openPersistence } from './dsh-control-runtime.mjs'
 
 // The hook in `dsh-control-runtime.mjs` only resolves modules imported after it runs, so everything that
 // reaches a DSH package is imported here rather than in a hoisted static block.
@@ -76,6 +76,14 @@ const CHECKOUT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const CONTROL = 'singularity-local'
 /** The route the panel reads, and the panel's own id, as `web.ts` and `client.js` declare them. */
 const TASKS_ROUTE = '/singularity/tasks'
+/**
+ * The panel's own page, served by the web row of the same plugin.
+ *
+ * The panel is a page this package serves and the shell mounts in an iframe — the structure the previous
+ * singularity's web surface used — so this probe opens the page itself rather than driving the shell to
+ * render it. That is what makes the panel's evidence independent of the chat surface.
+ */
+const PANEL_PATH = '/singularity/panel/'
 const PANEL_ID = 'singularity-tasks'
 /** The tools one turn must call, for the panel to have an id the agent itself minted. */
 const TOOLS = ['singularity_propose_task', 'singularity_submit_program', 'singularity_task_status']
@@ -282,21 +290,28 @@ async function settle(page) {
  * and paints its cutoff as `—` until the fetch resolves, so reading it straight after the click would
  * describe a panel that has not answered yet — and would look exactly like a panel that cannot.
  */
-async function openPanel(page) {
-  const row = page.getByRole('button', { name: 'Tasks', exact: true })
-  try {
-    await row.first().waitFor({ timeout: 30_000 })
-  } catch {
-    const labels = await page
-      .locator('[aria-label]')
-      .evaluateAll(nodes => [...new Set(nodes.map(node => node.getAttribute('aria-label')))])
-    throw new ProbeError(`the sidebar has no panel row labelled "Tasks"; its labels are ${JSON.stringify(labels)}`)
-  }
-  await row.first().click()
+/**
+ * Open the panel the way it is actually opened: navigate its own page.
+ *
+ * **The panel is a page this package serves, mounted in the shell as an iframe** — the structure the
+ * previous singularity's web surface used. So this probe navigates to `/singularity/panel/` directly and
+ * asserts on the page, not on the shell's rendering of it. Before this, the only way to reach the task
+ * list was to drive the shell (open a session, pick a preset, choose a workspace), which made the panel's
+ * evidence depend on a chat surface that has nothing to do with it: when the shell changed its own
+ * welcome screen, this probe timed out waiting for a control the panel never owned.
+ *
+ * The frame's own load is checked, because a page that failed to load renders nothing and would read as
+ * a panel with no rows.
+ */
+async function openPanel(page, origin) {
+  const url = `${origin}${PANEL_PATH}`
+  const response = await page.goto(url, { waitUntil: 'domcontentloaded' })
+  if (response === null || !response.ok()) throw new ProbeError(`the panel page at ${url} answered ${response?.status() ?? 'nothing'}`)
   try {
     await panelOf(page).first().waitFor({ timeout: 30_000 })
   } catch {
-    throw new ProbeError('the row was clickable but no panel rendered')
+    const text = await page.evaluate(() => document.body.innerText)
+    throw new ProbeError(`the panel page loaded but rendered no panel element; the page said ${JSON.stringify(text.slice(0, 200))}`)
   }
   try {
     await page.waitForFunction(
@@ -316,6 +331,17 @@ async function openPanel(page) {
         : `the panel rendered but its first read never landed; it is showing ${JSON.stringify(state.text.slice(0, 200))}`,
     )
   }
+}
+
+/** A stable digest of one projection, for the evidence line: equal digests are equal bodies. */
+function digestOf(value) {
+  const text = JSON.stringify(value)
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `${hash.toString(16).padStart(8, '0')}:${text.length}`
 }
 
 /**
@@ -343,7 +369,10 @@ const panelState = page =>
       childPairs: [...panel.querySelectorAll('[data-child]')].map(
         node => `${node.getAttribute('data-child')}:${node.getAttribute('data-status')}`,
       ),
-      text: (panel.textContent ?? '').trim(),
+      // The first 400 characters only: the one question this is asked is "is the panel a rendering, or the
+      // raw JSON body", and a whole page's text answered it while adding a quarter of a megabyte per read
+      // to the evidence. A body that leaked through would show in the first line of it.
+      text: (panel.textContent ?? '').trim().slice(0, 400),
     }
   })
 
@@ -374,8 +403,9 @@ async function refresh(page) {
 /* ------------------------------------------------------------------------------------ the run */
 
 async function main() {
-  const home = process.env['DSH_HOME']
-  if (home === undefined || home === '') throw new ProbeError("DSH_HOME is not set; source the deployment's environment (env.sh) before probing")
+  // Resolved by the one module that knows the private install: a gate runner invokes this script with the
+  // environment it was started with, so requiring `DSH_HOME` here made the gate red in a bare shell.
+  const home = DSH_HOME
   const domainDir = join(CHECKOUT, 'deployment', 'domain', 'letters')
   const screenshotFlag = process.argv.indexOf('--screenshot')
   const screenshot = screenshotFlag === -1 ? join(home, 'artifacts', 'panel-probe.png') : process.argv[screenshotFlag + 1]
@@ -399,10 +429,14 @@ async function main() {
     const mounted = join(CHECKOUT, 'assembly')
     if (linked !== mounted) throw new ProbeError(`the profile mounts ${linked ?? 'no plugin'}, not ${mounted}: a verdict about another tree is not evidence about this one`)
 
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+    // The app's locale delegates to the browser when no preference is set, and a browser context
+    // inherits the machine's own — so without this, the probes' English accessors match on an en
+    // desktop and time out on a zh one. Pin the locale; the UI language is part of the probe's frame,
+    // not something it observes.
+    const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 900 } })
     const page = await context.newPage()
     await page.goto(server.url, { waitUntil: 'domcontentloaded' })
-    await page.getByRole('button', { name: 'New Session' }).first().waitFor({ timeout: 60_000 })
+    await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
 
     // ---- the fence, before anything else reads the route --------------------------------------
     // A request from this process carries no cookie. If that were served, every content check below
@@ -461,8 +495,12 @@ async function main() {
 
     // ---- (b) the body equals core's own projection of the same cut ---------------------------
     const expected = await projectionAt(home, domainDir, served.body.cutoff)
-    evidence.route = served.body
-    evidence.core = expected.snapshot
+    // Counts and digests, not the bodies. The comparison below is what asserts equality; keeping both
+    // whole projections in the evidence printed a megabyte per run for two numbers that already say it,
+    // and buried the checks a reader came for. The digest is here so a later run can be compared against
+    // this one without the bodies being kept.
+    evidence.route = { cutoff: served.body.cutoff, tasks: served.body.tasks.length, plans: served.body.plans.length, digest: digestOf(served.body) }
+    evidence.core = { cutoff: expected.snapshot.cutoff, committed: expected.committed, digest: digestOf(expected.snapshot) }
     check(
       '(b) the route is a projection of a cut this log can produce',
       served.body.cutoff === expected.snapshot.cutoff,
@@ -489,7 +527,7 @@ async function main() {
     )
 
     // ---- (c) the panel renders the agent's own task, and prints the cutoff it read ------------
-    await openPanel(page)
+    await openPanel(page, origin)
     const opened = await panelState(page)
     if (opened === null) throw new ProbeError('the panel element vanished between opening it and reading it')
     evidence.panelAfterOpen = opened
@@ -521,10 +559,12 @@ async function main() {
     // because "the panel listed rows" would pass without this run's plan having been rendered at all.
     const ownPlan = served.body.plans.find(plan => plan.parentTaskId === agentTaskId)
     const routePairs = new Set(served.body.plans.flatMap(plan => plan.children.map(child => `${child.taskId}:${child.status}`)))
-    evidence.ownPlan = ownPlan ?? null
+    evidence.ownPlan = ownPlan === undefined ? null : { parentTaskId: ownPlan.parentTaskId, children: ownPlan.children.length }
     evidence.ownPlanChildren = (ownPlan?.children ?? []).map(child => `${child.taskId}:${child.status}`)
     evidence.routePairCount = routePairs.size
-    evidence.panelChildren = opened.childPairs
+    // The pairs the panel listed that this control's own plans do not carry, if any: the evidence says
+    // what would be wrong rather than restating every row the panel drew.
+    evidence.panelPairsNotInRoute = opened.childPairs.filter(pair => !routePairs.has(pair))
     check(
       '(c) the route carries the plan the agent declared in its second turn',
       ownPlan !== undefined && ownPlan.children.length > 0,
@@ -537,13 +577,13 @@ async function main() {
     )
     check(
       "(c) the panel shows this run's sub-task, with the status the route recorded",
-      evidence.ownPlanChildren.length > 0 && evidence.ownPlanChildren.some(pair => evidence.panelChildren.includes(pair)),
-      `the route's children for that plan are ${JSON.stringify(evidence.ownPlanChildren)}, the panel showed ${JSON.stringify(evidence.panelChildren)}`,
+      evidence.ownPlanChildren.length > 0 && evidence.ownPlanChildren.some(pair => opened.childPairs.includes(pair)),
+      `the route's children for that plan are ${JSON.stringify(evidence.ownPlanChildren)}, and the panel listed ${String(opened.childPairs.length)} pair(s)`,
     )
     check(
       '(c) every sub-task the panel listed is a child some plan carries, at the status the route recorded',
       opened.childPairs.length > 0 && opened.childPairs.every(pair => routePairs.has(pair)),
-      `the panel said ${JSON.stringify(evidence.panelChildren)}; the route's ${String(routePairs.size)} (child,status) pair(s) are ${JSON.stringify([...routePairs])}`,
+      `the panel listed ${String(opened.childPairs.length)} pair(s) the route does not carry: ${JSON.stringify(evidence.panelPairsNotInRoute.slice(0, 8))}`,
     )
 
     // ---- (d) reading the panel commits no facts ----------------------------------------------
@@ -581,10 +621,10 @@ async function main() {
 
     // ---- (e) a reload re-reads, and re-executes nothing ---------------------------------------
     const beforeReload = await committedCount(home)
-    await page.reload({ waitUntil: 'domcontentloaded' })
-    await page.getByRole('button', { name: 'New Session' }).first().waitFor({ timeout: 60_000 })
-    await dismissFirstRun(page)
-    await openPanel(page)
+    // The reload is the *panel page's* reload, because that is the page under test: reloading the shell
+    // to reach the panel again would re-mount the frame, which is a different thing from the page
+    // reading itself a second time, and the claim here is about the page.
+    await openPanel(page, origin)
     const reloaded = await panelState(page)
     const afterReload = await committedCount(home)
     evidence.cutAfterReload = afterReload

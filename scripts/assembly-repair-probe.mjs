@@ -33,7 +33,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { openPersistence } from './dsh-control-runtime.mjs'
+import { DSH_HOME, openPersistence } from './dsh-control-runtime.mjs'
 
 // The hook above only resolves modules imported after it runs, so everything that reaches a DSH package
 // is imported here rather than in the hoisted static block.
@@ -48,8 +48,7 @@ const { declareTaskProtocol, SCHEDULER_ROLE, TASK_KINDS, TASK_PROTOCOL, TASK_VER
 const { projectReceipt } = await import('../src/task/view.ts')
 
 const CHECKOUT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const HOME = process.env['DSH_HOME']
-if (HOME === undefined || HOME === '') throw new Error('DSH_HOME is not set; source /home/ROXY/singularity-next/env.sh first')
+const HOME = DSH_HOME
 const PROFILE = 'singularity-next-web'
 const CONTROL = 'singularity-recovery-probe'
 const WORKSPACE_ROOT = join(HOME, 'workspaces', CONTROL)

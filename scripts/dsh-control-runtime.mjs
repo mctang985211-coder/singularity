@@ -18,12 +18,34 @@
  * @module singularity-core/scripts/dsh-control-runtime
  */
 
+import { homedir } from 'node:os'
 import { register } from 'node:module'
 import { join } from 'node:path'
 
 /** The installed build. Overridable so a different host profile can point the probe somewhere else. */
 export const DSH_INSTALLED =
   process.env['DSH_CONTROL_INSTALLED'] ?? '/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai'
+
+/**
+ * The private harness home a probe drives.
+ *
+ * **Resolved, never required.** A probe that refuses without `DSH_HOME` cannot be a gate: the gate runner
+ * invokes scripts with the environment it was started with, and a bare shell has no `DSH_HOME` — so the
+ * probe would refuse in exactly the place it is supposed to produce evidence. The default is the private
+ * install this repository is built against, and the override exists for a second deployment. What it
+ * refuses is the opposite mistake: the *global* `~/.dsh`, where this project never writes, because a
+ * probe that ran against it would report on somebody else's home.
+ */
+export const DSH_HOME = (() => {
+  const configured = process.env['DSH_HOME']
+  if (configured !== undefined && configured !== '' && configured !== join(homedir(), '.dsh')) return configured
+  const fallback = '/home/ROXY/singularity-next/home'
+  if (configured === join(homedir(), '.dsh'))
+    throw new Error(
+      `DSH_HOME is the global harness home (${configured}); this project never writes there — unset it or point it at ${fallback}`,
+    )
+  return fallback
+})()
 
 const HOOK = `
 import { createRequire } from 'node:module'
@@ -60,3 +82,13 @@ export async function openPersistence(root, compression = 'none') {
   await context.plugin(JsonlSessionPersistence, { root, compression })
   return { context, persistence: context.sessionPersistence }
 }
+
+/**
+ * The `dsh` binary of that same private install.
+ *
+ * **Not `dsh` from PATH.** A bare shell resolves the *global* harness binary, whose profiles are its own:
+ * the boot then fails with `profile "singularity-next-web" does not exist`, which reads as a missing
+ * deployment rather than as the wrong binary — and it is exactly the failure a gate runner hits, because
+ * the gate has no `env.sh` to have put the private one first. The install is a sibling of the home.
+ */
+export const DSH_BIN = process.env['DSH_BIN'] ?? join(DSH_HOME, '..', 'dsh', 'node_modules', '.bin', 'dsh')

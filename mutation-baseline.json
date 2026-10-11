@@ -1898,6 +1898,25 @@
         ]
       },
       "witness": "admits every sub-task a plan names, so the plan can actually run"
+    },
+    {
+      "id": "assembly-m32-advance-after-settle",
+      "rule": "a plan is re-scanned after a run settles, because only a verified sub-task makes its dependents ready",
+      "doc": "docs/phase-g2-design.md",
+      "edits": [
+        {
+          "file": "assembly/src/driver.ts",
+          "find": "await scheduler.settled()",
+          "replace": "void scheduler"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/driver.spec.ts"
+        ]
+      },
+      "witness": "re-scans the plan when a run settles, so a dependency that just verified can start"
     }
   ]
 }

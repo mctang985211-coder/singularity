@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChildSession, ChildSessionRequest } from '../../src/runtime/child-session.ts'
 import { asyncRefusalOf } from '../../tests/fixtures.ts'
@@ -130,13 +130,44 @@ describe('which sub-tasks get a session', () => {
       }
     }
     const scheduler = createScheduler(apparatus, {} as never, open)
-    // A failure that is not a refusal propagates as itself, untouched: this module does not dress an
-    // upstream error as one of its own codes, and a caller sees what actually went wrong.
-    await expect(scheduler.advance(agentFor('agent-1', 'session-1'))).rejects.toThrow('the child could not be composed')
-    // And it is not remembered as a live session — a child whose instruction never landed holds no lease
-    // this process can address again — so the next advance is free to try again.
+    // A child that cannot be started is reported by the scan and does not abort it: the failure is named
+    // on stderr, the plan is left alone, and the returned set is what actually opened. That is the rule
+    // that keeps a settle from turning one child's bad luck into the model's submission failing.
+    const written: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(chunk => {
+      written.push(String(chunk))
+      return true
+    })
+    let first: readonly string[]
+    try {
+      first = await scheduler.advance(agentFor('agent-1', 'session-1'))
+    } finally {
+      spy.mockRestore()
+    }
+    expect([first, written.filter(line => line.includes('could not be started')).length]).toEqual([[], 1])
+    // And the failed child is not remembered as a live session — a child whose instruction never landed
+    // holds no lease this process can address again — so the next advance tries it again.
     const second = await scheduler.advance(agentFor('agent-1', 'session-1'))
     expect([attempts, second]).toEqual([2, ['child-a']])
+  })
+
+  it('re-scans after a settle, and only under a parent it was advanced with', async () => {
+    const apparatus = await apparatusWith([
+      { taskId: 'child-a', dependsOn: [], supports: ['letters'], maxRuns: 1 },
+      { taskId: 'child-b', dependsOn: ['child-a'], supports: ['letters'], maxRuns: 1 },
+    ])
+    const { opened, open } = recorder()
+    const scheduler = createScheduler(apparatus, {} as never, open)
+    const parent = agentFor('agent-1', 'session-1')
+
+    // Only `a` is ready, so only `a` opens: the dependency holds and `b` waits.
+    expect(await scheduler.advance(parent)).toEqual(['child-a'])
+    // Advancing again opens nothing new, and the re-scan after a settle finds no newly ready child while
+    // `a` is unverified — the half a naive "advance on any settle" would get wrong, because a dependency
+    // is satisfied by a *verified* run and by nothing else.
+    expect(await scheduler.advance(parent)).toEqual([])
+    expect(await scheduler.settled()).toEqual([])
+    expect(opened).toHaveLength(1)
   })
 
   it('writes the material the sub-task is judged on before it is told the workspace is ready', async () => {

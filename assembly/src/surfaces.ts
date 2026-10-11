@@ -12,6 +12,8 @@ import { mkdir } from 'node:fs/promises'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
 import { refuse } from '../../src/protocol/refusal.ts'
+import { projectTree } from '../../src/task/tree.ts'
+import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { projectReceipt, projectTask } from '../../src/task/view.ts'
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { bindCaller, declareCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
@@ -47,6 +49,10 @@ export async function decompose(
   await bindCaller(apparatus, caller)
   const commands = apparatus.tasks.forAgent(caller.agentId)
   const declared = apparatus.domain.inputs[0]!
+  // This phase's tree is one parent deep: a sub-task is worked, not re-planned. The entry refuses a
+  // nested decomposition instead of committing a grandchild plan nobody schedules.
+  if (projectTree(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)).some(plan => plan.children.some(child => child.taskId === input.taskId)))
+    refuse('illegal-transition', `task "${input.taskId}" is already a sub-task of a plan; this deployment does not decompose a sub-task`)
 
   // One entry per sub-task the model asked for: a stable id derived from its key, a contract from the
   // deployment's own criterion, and a workspace staged from the same material its parent's was.

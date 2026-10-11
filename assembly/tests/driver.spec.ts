@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { TASK_KINDS } from '../../src/task/protocol.ts'
 import { asyncRefusalOf, refusalOf } from '../../tests/fixtures.ts'
@@ -68,18 +68,17 @@ describe('one caller through the host plugin', () => {
     const { surface, medium } = await mounted()
     const agent = agentFor('agent-7', 'session-9')
     const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'count the letters' })
-    // This deployment mounts no preset registry, so the plan commits and then the *session* is refused by
-    // name. That is the split this case is about: the plan is a fact either way, and only starting it needs
-    // a runtime that can compose a child.
-    await asyncRefusalOf(() =>
-      surface.forCall(execFor(agent, 'call-2')).decompose({
-        taskId: proposal.taskId,
-        children: [
-          { key: 'first', goal: 'count them', dependsOn: [], supports: ['letters'], maxRuns: 1 },
-          { key: 'second', goal: 'check the count', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
-        ],
-      }),
-    )
+    // This deployment mounts no preset registry, so the plan commits and every child session fails to open
+    // — reported per child by the scan, which is what the empty `opened` says. The plan is a fact either
+    // way: only starting it needs a runtime that can compose a child.
+    const planned = await surface.forCall(execFor(agent, 'call-2')).decompose({
+      taskId: proposal.taskId,
+      children: [
+        { key: 'first', goal: 'count them', dependsOn: [], supports: ['letters'], maxRuns: 1 },
+        { key: 'second', goal: 'check the count', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
+      ],
+    })
+    expect(planned).toEqual({ taskId: proposal.taskId, opened: [] })
     // A plan whose children were never admitted declares work that can never start: the tree shows them
     // `missing`, never `ready`, and the plan sits there looking like a decision. So every child the plan
     // names has its own admitted, assigned task — and the ids are derived from the keys, not the keys.
@@ -108,6 +107,36 @@ describe('one caller through the host plugin', () => {
     // Every holder other than the parent is a child node that was opened under its own identity, so the
     // session presenting it can act on the task it was given.
     expect(holders.filter(holder => holder !== parentNode).every(holder => childNodes.includes(holder))).toBe(true)
+  })
+
+  it('re-scans the plan when a run settles, so a dependency that just verified can start', async () => {
+    const { surface } = await mounted()
+    const agent = agentFor('agent-7', 'session-9')
+    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'count the letters' })
+    await surface.forCall(execFor(agent, 'call-2')).decompose({
+      taskId: proposal.taskId,
+      children: [{ key: 'first', goal: 'count them', dependsOn: [], supports: ['letters'], maxRuns: 1 }],
+    })
+
+    // The scan's own report is the observable. This deployment mounts no preset registry, so a ready
+    // child cannot actually be opened here — the scan finds it, tries, and says so by name. What the
+    // assertion reads is therefore not "a session opened" (which this deployment cannot do) but "the
+    // plan was re-scanned at all", which is exactly the rule: without the re-scan after a settle, the
+    // report below never appears, and a plan whose dependency has just verified would stall forever.
+    const written: string[] = []
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(chunk => {
+      written.push(String(chunk))
+      return true
+    })
+    try {
+      const answer = await surface.forCall(execFor(agent, 'call-3')).submit({ taskId: proposal.taskId, program: COUNTING })
+      // The settlement is the model-visible outcome, and it is not affected by the child that could not
+      // start: the run was judged, and this call says so.
+      expect(answer).toMatchObject({ verdict: 'pass', phase: 'verified' })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(written.filter(line => line.includes('could not be started')).length).toBe(1)
   })
 
   it('records a verified run whose verdict comes from the domain verifier', async () => {
