@@ -19,6 +19,12 @@ import { decompose, propose, status } from './surfaces.ts'
 import { submit, type Submission } from './submission.ts'
 import { createMethod, type MethodAssets } from './method.ts'
 import { methodSkill, observeMethodSkill, runMethodTool } from './method-run.ts'
+import { loadMethod } from './method.ts'
+import { createEvolution, type EvolutionRound } from './evolution.ts'
+import { createNativeSolve } from './native-solve.ts'
+import type { RoundDecision } from '../../src/strategy/view.ts'
+import { releaseMethod, type MethodRelease } from './method-release.ts'
+import type { ApprovalSeams } from '../../src/runtime/approval.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { singularity: TaskService }
@@ -33,6 +39,9 @@ export interface AgentTaskSurface {
   propose(input: { readonly goal: string; readonly method?: RevisionRef }): Promise<Proposal>
   createMethod(input: MethodAssets): Promise<RevisionRef>
   runMethod(input: { readonly taskId: string }): Promise<{ program: string; artifact: string }>
+  evolve(input: EvolutionRound): Promise<RoundDecision>
+  history(): readonly RoundDecision[]
+  release(input: MethodRelease): Promise<{ revision: RevisionRef; approvalId: string }>
   decompose(input: { readonly taskId: string; readonly children: readonly PlannedChild[] }): Promise<PlanRecord>
   submit(input: { readonly taskId: string; readonly program: string }): Promise<Submission>
   status(input: { readonly taskId: string }): Promise<Status>
@@ -68,6 +77,7 @@ export interface DriverOptions {
   readonly domain: Domain
   readonly persistence: SessionPersistence
   readonly seams: ChildSessionSeams
+  readonly approvalSeams?: ApprovalSeams
   readonly execution: (admission: Admission, onTurnFailure: TurnFailureHandler) => Execution
 }
 export interface TaskDriver extends TaskService {
@@ -90,6 +100,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     return undefined
   }
   const active = new Set<Promise<unknown>>()
+  const observations = new Set<Promise<void>>()
   const lifecycleErrors = new Set<unknown>()
   const controller = new AbortController()
   let closing: Promise<void> | undefined
@@ -140,12 +151,23 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     forCall: exec => {
       const agent = execution.assertCaller(exec)
       const caller = callerOf(agent)
+      const signal = AbortSignal.any([controller.signal, exec.signal])
+      const evolution = createEvolution({ store: apparatus.store, registry: apparatus.registry,
+        criterion: apparatus.domain.templates.get(apparatus.domain.rootTemplate)!.criterion,
+        rounds: 2, firstBudget: 3, minimumBudget: 3, calibration: { floor: 0, source: 'declared' },
+        loadMethod: async revision => (await loadMethod(apparatus, revision)).assets,
+        solve: createNativeSolve(apparatus, options.seams, agent, signal) })
       return {
         propose: input => work(() => propose(apparatus, caller, String(exec.callId), input)),
         createMethod: input => work(() => createMethod(apparatus, input)),
         runMethod: input => work(() => runMethodTool(apparatus, caller, input.taskId, String(exec.callId), AbortSignal.any([controller.signal, exec.signal]))),
+        evolve: input => work(() => evolution.runRound(input)),
+        history: () => evolution.history(),
+        release: input => work(() => releaseMethod(apparatus, options.approvalSeams ?? {}, agent, String(exec.callId), input, signal)),
         decompose: input => work(() => decompose(apparatus, scheduler, caller, input)),
         submit: input => work(async () => {
+          await Promise.all([...observations])
+          if (lifecycleErrors.size > 0) throw new AggregateError([...lifecycleErrors], 'native observation failed')
           const cutoff = apparatus.store.load().entries().length
           let answer: Submission
           try { answer = await submit(apparatus, execution, caller, exec, input, AbortSignal.any([controller.signal, exec.signal])) }
@@ -170,11 +192,16 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     },
     read: () => snapshotOf(apparatus),
     skill: agentId => work(() => methodSkill(apparatus, agentId)),
-    observe: (sessionId, event) => work(async () => {
-      if (event.type !== 'system/message') return
-      const prompt = event.data.message.content.map(part => part.type === 'text' ? part.text : '').join('')
-      await observeMethodSkill(apparatus, sessionId, prompt, `system/message:${sessionId}/${event.seq}`)
-    }),
+    observe: (sessionId, event) => {
+      const pending = work(async () => {
+        if (event.type !== 'system/message') return
+        const prompt = event.data.message.content.map(part => part.type === 'text' ? part.text : '').join('')
+        await observeMethodSkill(apparatus, sessionId, prompt, `system/message:${sessionId}/${event.seq}`)
+      })
+      observations.add(pending)
+      void pending.then(() => observations.delete(pending), error => { observations.delete(pending); lifecycleErrors.add(error) })
+      return pending
+    },
     close: () => closing ??= (async () => {
       controller.abort(new Error('the driver is unloading'))
       const failed: unknown[] = []

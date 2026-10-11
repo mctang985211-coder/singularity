@@ -18,6 +18,7 @@ import { declareTaskProtocol, SCHEDULER_ROLE, TASK_PROTOCOL, TASK_VERSION, verif
 import type { Domain } from './domain.ts'
 
 export interface Apparatus {
+  readonly persistence: SessionPersistence
   readonly attachments: Pick<AttachmentStore, 'saveFile' | 'readFileStream'>
   readonly controlId: string
   readonly workspaceRoot: string
@@ -54,6 +55,7 @@ export async function openApparatus(controlId: string, workspaceRoot: string, do
   const store = await ControlSessionStore.open({ persistence, controlId, registry, subjects: subjectsOf(controlId, domain), cwd: workspaceRoot })
   const held = new Map<string, HeldAgent>()
   return {
+    persistence,
     attachments,
     controlId,
     workspaceRoot,

@@ -39,6 +39,7 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     persistence: ctx.sessionPersistence,
     attachments: ctx.attachments,
     seams: ctx as ChildSessionSeams,
+    approvalSeams: { approval: ctx.get('approval') as import('../../src/runtime/approval.ts').ApprovalSeams['approval'], feed: ctx },
     execution: (admission, onTurnFailure) => createExecution(ctx, admission, onTurnFailure),
   })
   ctx.provide('singularity', {

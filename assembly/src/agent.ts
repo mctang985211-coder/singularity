@@ -30,6 +30,12 @@ Root agents use singularity_decompose_task to select host templates, dependencie
 Use singularity_create_method to admit one complete Method JSON with rootTemplate, templates, skill
 and tool (Node ES module). A proposal may pin its returned method reference; otherwise it uses the
 published head. singularity_run_method executes the exact pinned tool and returns its program/result.
+Use singularity_evolve_method with a complete round JSON to compare at least two admitted candidates
+against one incumbent through real independent solves. This letters engineering path uses two rounds,
+three edits per candidate, independent pass/fail quality, native token cost and a declared zero noise floor.
+Read singularity_method_history before proposing a later round so it uses the frozen earlier decisions.
+singularity_release_method accepts a bootstrap reference for an empty library or a committed roundId;
+it presents the actual contents, changes and measurement to the human through native approval.
 Assigned children execute their existing Task/Run using submit/status; they cannot propose or decompose.
 Only a verified producer's sealed artifact can become a dependent Run's input. supports describes
 work toward a parent criterion; children never supply the parent's verdict. After all children verify,
@@ -105,6 +111,24 @@ export function apply(ctx: Context): void {
       description: 'Execute this working Run’s pinned Method tool against its actual input. Returns program and stdout; submit the program for independent acceptance.',
       parameters: { taskId: { type: 'string', description: 'Your working Task.', required: true } }, output,
       execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).runMethod(args))),
+    })),
+    ctx.tools.register(defineTool({
+      name: 'singularity_evolve_method',
+      description: 'Run a bounded letters engineering comparison. Each candidate and incumbent execute in independent real DSH sessions with independent acceptance and native token cost. Returns the committed decision.',
+      parameters: { round: { type: 'string', description: 'JSON {roundId,round,incumbent,candidates,explorationSlots}; at least two candidates, round 1 or 2.', required: true } }, output,
+      execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).evolve(JSON.parse(args.round)))),
+    })),
+    ctx.tools.register(defineTool({
+      name: 'singularity_method_history',
+      description: 'Read frozen committed round decisions, including outcomes and calibration. Use this history when proposing the next round.',
+      parameters: {}, output,
+      execute: async (_args, exec) => JSON.stringify(ctx.singularity.forCall(exec).history()),
+    })),
+    ctx.tools.register(defineTool({
+      name: 'singularity_release_method',
+      description: 'Request native human approval for {bootstrap:MethodRef} in an empty library or {roundId} with a committed winner. Publishes only the approved exact contents and decision; refusal leaves the head unchanged.',
+      parameters: { release: { type: 'string', description: 'JSON {bootstrap:{environmentId,revisionId,digest}} or {roundId}.', required: true } }, output,
+      execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).release(JSON.parse(args.release)))),
     })),
     ctx.systemPrompt.section({ name: 'singularity:policy', order: ctx.systemPrompt.getSectionOrder('TOOL_SUBAGENT'), text: GUIDANCE }),
   ]

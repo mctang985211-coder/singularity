@@ -26,11 +26,11 @@ export async function decompose(
   input: { readonly taskId: string; readonly children: readonly PlannedChild[] },
 ): Promise<PlanRecord> {
   const state = taskStateOf(apparatus, input.taskId)
-  const parentRun = Object.values(state.runs).findLast(run => run.status === 'running') ?? Object.values(state.runs).at(-1)!
-  const domain = await domainForRun(apparatus, parentRun)
   requirePlanner(apparatus, caller)
   if (state.responsibility?.agentId !== caller.agentId)
     refuse('not-responsible', 'the caller is not responsible for this Task')
+  const parentRun = Object.values(state.runs).findLast(run => run.status === 'running') ?? Object.values(state.runs).at(-1)!
+  const domain = await domainForRun(apparatus, parentRun)
   const plans = projectTree(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION))
   if (plans.some(plan => plan.children.some(child => child.taskId === input.taskId)))
     refuse('illegal-transition', 'this deployment does not decompose a child Task')
@@ -98,7 +98,7 @@ export async function propose(apparatus: Apparatus, caller: Caller, callId: stri
   const commands = apparatus.tasks.forAgent(caller.agentId)
   if (apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId) === undefined)
     await commands.admit({ commandId: `propose:${runId}`, taskId,
-      contract: contractFor(domain, template, input.goal) })
+      contract: contractFor(domain, template, method === undefined ? input.goal : `${input.goal}\n${template.goal}`) })
   await commands.assign({ commandId: `assign:${taskId}`, taskId, agentId: caller.agentId })
   const run = await startAttempt(apparatus, caller, taskId, callId, method)
   return { taskId, runId: run.runId, workspace: workspaceOf(apparatus, taskId, run.runId),
