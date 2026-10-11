@@ -3,25 +3,29 @@ import { join } from 'node:path'
 
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../../src/environment/protocol.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
-import type { RunState } from '../../src/task/protocol.ts'
+import type { RevisionRef, RunState } from '../../src/task/protocol.ts'
 import { taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import { templateOf } from './domain.ts'
 import { resolveInputs } from './inputs.ts'
 import { runIdOf, sha256 } from './ids.ts'
 import { prepareWorkspace } from './workspace.ts'
+import { loadMethod } from './method.ts'
+import { consumeMethod } from './method-run.ts'
 
 export const workspaceOf = (apparatus: Apparatus, taskId: string, runId: string): string =>
   join(apparatus.workspaceRoot, 'tasks', taskId, 'runs', runId)
 
-export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId: string, operationId: string): Promise<RunState> {
+export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId: string, operationId: string, method?: RevisionRef): Promise<RunState> {
   const runId = runIdOf(apparatus.controlId, caller.sessionId, operationId)
   const state = taskStateOf(apparatus, taskId)
   const recorded = state.runs[runId]
   if (recorded?.bubble !== undefined) return recorded
   const contract = state.contract!
-  const template = templateOf(apparatus.domain, contract.template)
-  const inputs = resolveInputs(apparatus, contract)
+  const domain = method === undefined ? apparatus.domain : (await loadMethod(apparatus, method)).domain
+  const template = templateOf(domain, contract.template)
+  const inputs = resolveInputs(apparatus, contract, domain)
   const manifest = { task: taskId, taskTemplate: contract.template,
+    ...(method === undefined ? {} : { method }),
     inputSources: inputs.map(({ name, digest, source }) => ({ name, digest, source })) }
   const basis = sha256(JSON.stringify(manifest))
   const revisionId = `rev-${basis.slice(0, 16)}`
@@ -41,6 +45,7 @@ export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId:
       inputs: inputs.map(({ name, digest }) => ({ name, digest })),
       workspace: { kind: 'dir', ref: workspace }, model: caller.model,
       tools: [{ name: 'node', version: process.version, implementationDigest: await toolchainDigest() }], conditions: [] })
+    if (method !== undefined) await consumeMethod(apparatus, taskId, taskStateOf(apparatus, taskId).runs[runId]!, 'template', `template:${method.digest}/${template.id}`)
   } catch (error) {
     await commands.failRun({ commandId: `prepare-failed:${taskId}/${runId}`, taskId, runId, reason: String(error) })
     throw error

@@ -27,6 +27,9 @@ this Run's workspace, input, artifact, submission kind and the supported templat
 For a program submission, provide a Node ES module; process.argv[2] is the input path and stdout is
 the artifact. A source submission is judged as written.
 Root agents use singularity_decompose_task to select host templates, dependencies, supports and Run budgets.
+Use singularity_create_method to admit one complete Method JSON with rootTemplate, templates, skill
+and tool (Node ES module). A proposal may pin its returned method reference; otherwise it uses the
+published head. singularity_run_method executes the exact pinned tool and returns its program/result.
 Assigned children execute their existing Task/Run using submit/status; they cannot propose or decompose.
 Only a verified producer's sealed artifact can become a dependent Run's input. supports describes
 work toward a parent criterion; children never supply the parent's verdict. After all children verify,
@@ -40,9 +43,14 @@ export function apply(ctx: Context): void {
         description: 'Propose one task to the Singularity pipeline. It is admitted with the criterion this deployment holds and you become responsible for it. Returns the task id, the workspace prepared with the material the task is judged on, and the criterion the answer is judged against.',
         parameters: {
           goal: { type: 'string', description: 'What the task is for, in one sentence.', required: true },
+          method: {
+            type: 'object', description: 'Exact admitted Method reference for an experiment; omit to use the published head.',
+            properties: { environmentId: { type: 'string', required: true }, revisionId: { type: 'string', required: true }, digest: { type: 'string', required: true } },
+            additionalProperties: false,
+          },
         },
         output,
-        execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).propose({ goal: args.goal }))),
+        execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).propose({ goal: args.goal, ...(args.method === undefined ? {} : { method: args.method }) }))),
     })),
     ctx.tools.register(defineTool({
         name: 'singularity_decompose_task',
@@ -85,6 +93,18 @@ export function apply(ctx: Context): void {
         parameters: { taskId: { type: 'string', description: 'The task id the proposal returned.', required: true } },
         output,
         execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).status({ taskId: args.taskId }))),
+    })),
+    ctx.tools.register(defineTool({
+      name: 'singularity_create_method',
+      description: 'Admit an immutable Method with rootTemplate, templates, skill and tool. Templates use the deployment schema and independent verifiers; protected inputs and acceptance cannot be changed.',
+      parameters: { content: { type: 'string', description: 'Complete Method JSON.', required: true } }, output,
+      execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).createMethod(JSON.parse(args.content)))),
+    })),
+    ctx.tools.register(defineTool({
+      name: 'singularity_run_method',
+      description: 'Execute this working Run’s pinned Method tool against its actual input. Returns program and stdout; submit the program for independent acceptance.',
+      parameters: { taskId: { type: 'string', description: 'Your working Task.', required: true } }, output,
+      execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).runMethod(args))),
     })),
     ctx.systemPrompt.section({ name: 'singularity:policy', order: ctx.systemPrompt.getSectionOrder('TOOL_SUBAGENT'), text: GUIDANCE }),
   ]

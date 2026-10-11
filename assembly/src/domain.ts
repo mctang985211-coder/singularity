@@ -62,6 +62,15 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
   const root = templates.get(rootTemplate)
   if (root === undefined) refuse('malformed-declaration', `task.json.rootTemplate names absent template ${JSON.stringify(rootTemplate)}`)
   if (root.input.source.kind !== 'protected') refuse('malformed-declaration', 'the root template must read a protected source')
+  const domain = { dir, rootTemplate, inputs, templates, verifiers }
+  assertTemplateSources(domain)
+  return domain
+}
+export function assertTemplateSources(domain: Domain): void {
+  const { templates, inputs, rootTemplate } = domain
+  const root = templates.get(rootTemplate)
+  if (root === undefined) refuse('malformed-declaration', 'the root template is absent')
+  if (root.input.source.kind !== 'protected') refuse('malformed-declaration', 'the root template must read a protected source')
   for (const template of templates.values()) {
     const source = template.input.source
     if (source.kind === 'protected' ? !inputs.some(input => input.ref === source.ref) : !templates.has(source.template))
@@ -76,7 +85,6 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
       current = templates.get(current.input.source.template)!
     }
   }
-  return { dir, rootTemplate, inputs, templates, verifiers }
 }
 export function templateOf(domain: Domain, reference: TaskTemplateRef): TaskTemplate {
   const template = domain.templates.get(reference.id)

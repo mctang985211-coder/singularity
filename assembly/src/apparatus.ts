@@ -6,7 +6,10 @@ import { createAgentNodeCommands } from '../../src/agent/commands.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, AGENT_ROLE, declareAgentProtocol } from '../../src/agent/protocol.ts'
 import { ControlSessionStore } from '../../src/control/session-store.ts'
 import { createEnvironmentCommands } from '../../src/environment/commands.ts'
-import { declareEnvironmentProtocol, ENVIRONMENT_ROLE } from '../../src/environment/protocol.ts'
+import { declareEnvironmentProtocol, ENVIRONMENT_ROLE, PUBLISHER_ROLE } from '../../src/environment/protocol.ts'
+import { declareMeasureProtocol } from '../../src/measure/protocol.ts'
+import { declareStrategyProtocol, STRATEGY_ROLE } from '../../src/strategy/protocol.ts'
+import { declareReleaseProtocol, APPROVER_ROLE } from '../../src/release/protocol.ts'
 import { ProtocolRegistry } from '../../src/protocol/registry.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { createTaskCommands, type HeldAgent, type TaskCommands } from '../../src/task/commands.ts'
@@ -31,6 +34,9 @@ function subjectsOf(controlId: string, domain: Domain): Record<string, string> {
     [SCHEDULER_ROLE]: `${controlId}:scheduler`,
     [AGENT_ROLE]: `${controlId}:runtime`,
     [ENVIRONMENT_ROLE]: `${controlId}:environment`,
+    [STRATEGY_ROLE]: `${controlId}:strategy`,
+    [PUBLISHER_ROLE]: `${controlId}:publisher`,
+    [APPROVER_ROLE]: `${controlId}:approver`,
   }
   for (const verifier of domain.verifiers)
     subjects[verifierRoleOf({ verifierRef: verifier.ref, verifierVersion: verifier.version })] = `${controlId}:verifier:${verifier.ref}@${verifier.version}`
@@ -42,6 +48,9 @@ export async function openApparatus(controlId: string, workspaceRoot: string, do
   declareTaskProtocol(registry)
   declareAgentProtocol(registry)
   declareEnvironmentProtocol(registry)
+  declareMeasureProtocol(registry)
+  declareStrategyProtocol(registry)
+  declareReleaseProtocol(registry)
   const store = await ControlSessionStore.open({ persistence, controlId, registry, subjects: subjectsOf(controlId, domain), cwd: workspaceRoot })
   const held = new Map<string, HeldAgent>()
   return {

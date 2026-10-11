@@ -44,6 +44,19 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
   ctx.provide('singularity', {
     forCall: (exec: ToolRunContext) => driver.forCall(exec),
     read: () => driver.read(),
+    skill: (agentId: string) => driver.skill(agentId),
+    observe: (sessionId: string, event: import('@deepseek-ai/dsh-session').SessionEvent) => driver.observe(sessionId, event),
+  })
+  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
+    const prompt = await next()
+    if (context.agent !== undefined) {
+      const skill = await driver.skill(String(context.agent.id))
+      if (skill !== undefined) prompt.sections.push({ name: 'singularity:method', text: skill, interpolate: false })
+    }
+    return prompt
+  })
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'system/message') void driver.observe(String(session.id), event).catch(error => ctx.logger.error(error))
   })
   ctx.on('agent/created', async ({ agent }) => { await driver.activate(String(agent.session.id)); return undefined })
   ctx.effect(() => () => driver.close())

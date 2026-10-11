@@ -4,7 +4,7 @@ import { contractDigest } from '../../src/task/contract.ts'
 import { assertDecomposition } from '../../src/task/decomposition.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { projectTree } from '../../src/task/tree.ts'
-import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
+import { TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from '../../src/task/protocol.ts'
 import { projectReceipt, projectTask } from '../../src/task/view.ts'
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { bindCaller, declareCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
@@ -14,6 +14,7 @@ import { contractFor } from './inputs.ts'
 import { record, text } from './shape.ts'
 import type { Scheduler } from './scheduler.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
+import { domainForRun, loadMethod, publishedMethod } from './method.ts'
 function requirePlanner(apparatus: Apparatus, caller: Caller): void {
   if (apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, caller.agentId)?.role === 'child')
     refuse('illegal-transition', 'an assigned child executes its existing Task; only a root may propose or decompose')
@@ -25,6 +26,8 @@ export async function decompose(
   input: { readonly taskId: string; readonly children: readonly PlannedChild[] },
 ): Promise<PlanRecord> {
   const state = taskStateOf(apparatus, input.taskId)
+  const parentRun = Object.values(state.runs).findLast(run => run.status === 'running') ?? Object.values(state.runs).at(-1)!
+  const domain = await domainForRun(apparatus, parentRun)
   requirePlanner(apparatus, caller)
   if (state.responsibility?.agentId !== caller.agentId)
     refuse('not-responsible', 'the caller is not responsible for this Task')
@@ -37,7 +40,7 @@ export async function decompose(
     assertClosedKeys(declared, ['key', 'template', 'dependsOn', 'supports', 'maxRuns'], `children[${index}]`, 'malformed-declaration')
     const key = text(declared, 'key', `children[${index}]`)
     const id = text(declared, 'template', `children[${index}]`)
-    const template = apparatus.domain.templates.get(id)
+    const template = domain.templates.get(id)
     if (template === undefined) refuse('malformed-declaration', 'unknown child template: ' + id)
     return { key, taskId: taskIdOf(apparatus.controlId, input.taskId, key), template, child }
   })
@@ -59,7 +62,7 @@ export async function decompose(
       if (matches.length !== 1) refuse('malformed-declaration', 'artifact input requires exactly one dependency with template ' + source.template)
       producer = matches[0]!.taskId
     }
-    return { taskId: entry.taskId, contract: contractFor(apparatus.domain, entry.template, entry.template.goal, producer) }
+    return { taskId: entry.taskId, contract: contractFor(domain, entry.template, entry.template.goal, producer) }
   })
   if (state.decomposition !== undefined) {
     if (digestOf(state.decomposition.children) !== digestOf(children) || prepared.some(entry =>
@@ -81,24 +84,26 @@ export async function decompose(
   return { taskId: input.taskId, opened: await scheduler.advance(input.taskId) }
 }
 
-export async function propose(apparatus: Apparatus, caller: Caller, callId: string, input: { readonly goal: string }): Promise<Proposal> {
-  const taskId = taskIdOf(apparatus.controlId, caller.agentId, input.goal)
+export async function propose(apparatus: Apparatus, caller: Caller, callId: string, input: { readonly goal: string; readonly method?: RevisionRef }): Promise<Proposal> {
+  const method = input.method ?? publishedMethod(apparatus)
+  const domain = method === undefined ? apparatus.domain : (await loadMethod(apparatus, method)).domain
+  const taskId = taskIdOf(apparatus.controlId, caller.agentId, input.goal + (method === undefined ? '' : '\u0000' + method.digest))
   const runId = runIdOf(apparatus.controlId, caller.sessionId, callId)
   const previous = apparatus.store.committedOf(`start:${runId}`)
   if (previous !== undefined && previous.subject !== taskId)
     refuse('command-conflict', 'the proposal call was committed for a different goal')
   requirePlanner(apparatus, caller)
   await bindCaller(apparatus, caller)
-  const template = apparatus.domain.templates.get(apparatus.domain.rootTemplate)!
+  const template = domain.templates.get(domain.rootTemplate)!
   const commands = apparatus.tasks.forAgent(caller.agentId)
   if (apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId) === undefined)
     await commands.admit({ commandId: `propose:${runId}`, taskId,
-      contract: contractFor(apparatus.domain, template, input.goal) })
+      contract: contractFor(domain, template, input.goal) })
   await commands.assign({ commandId: `assign:${taskId}`, taskId, agentId: caller.agentId })
-  const run = await startAttempt(apparatus, caller, taskId, callId)
+  const run = await startAttempt(apparatus, caller, taskId, callId, method)
   return { taskId, runId: run.runId, workspace: workspaceOf(apparatus, taskId, run.runId),
     criterionId: template.criterion.criterionId, phase: 'running', submission: template.submission, input: template.input.name, artifact: template.artifact,
-    templates: [...apparatus.domain.templates.values()].map(template => ({ id: template.id, goal: template.goal, criterionId: template.criterion.criterionId, input: template.input })) }
+    templates: [...domain.templates.values()].map(template => ({ id: template.id, goal: template.goal, criterionId: template.criterion.criterionId, input: template.input })) }
 }
 export async function status(apparatus: Apparatus, caller: Caller, input: { readonly taskId: string }): Promise<Status> {
   const state = taskStateOf(apparatus, input.taskId)

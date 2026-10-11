@@ -15,6 +15,7 @@ import type { Execution } from './execution.ts'
 import { sha256 } from './ids.ts'
 import { spawnProcess } from './process.ts'
 import { sealFiles, withSealedWorkspace } from './sealed.ts'
+import { domainForRun } from './method.ts'
 
 export interface Submission {
   readonly taskId: string
@@ -40,7 +41,7 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
     refuse('not-responsible', 'the caller is not responsible for this task')
   const run = Object.values(state.runs).find(run => run.status === 'running')
   if (run === undefined) refuse('illegal-transition', 'the task has no working Run; propose a new attempt before submitting')
-  const template = templateOf(apparatus.domain, state.contract!.template)
+  const template = templateOf(await domainForRun(apparatus, run), state.contract!.template)
   const commands = apparatus.tasks.forAgent(caller.agentId)
   const reservation = await commands.beginSubmission({ commandId: requestId, taskId: request.taskId, runId: run.runId, requestId, requestDigest })
   if (!reservation.fresh) refuse('illegal-transition', 'this submission is in flight; do not execute it again')
@@ -88,7 +89,7 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
 }
 
 export async function judgeAndRecord(apparatus: Apparatus, taskId: string, run: RunState, signal?: AbortSignal): Promise<void> {
-  const template = templateOf(apparatus.domain, taskStateOf(apparatus, taskId).contract!.template)
+  const template = templateOf(await domainForRun(apparatus, run), taskStateOf(apparatus, taskId).contract!.template)
   const declared: BubbleInput = run.bubble!.inputs[0]!
   const judged = await withSealedWorkspace(apparatus, run, template, workspace => runProductionVerdict({ runId: run.runId, criterion: template.criterion, implementations: apparatus.domain.verifiers,
     inputs: [declared], workspace, artifactPath: template.artifact,

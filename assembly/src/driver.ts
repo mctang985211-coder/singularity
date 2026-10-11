@@ -1,10 +1,11 @@
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
-import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
+import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from '../../src/task/protocol.ts'
 import type { ReceiptView, TaskView } from '../../src/task/view.ts'
 import { callerOf, openApparatus } from './apparatus.ts'
 import type { Apparatus } from './apparatus.ts'
@@ -16,6 +17,8 @@ import { createScheduler, DispatchError } from './scheduler.ts'
 import { snapshotOf, type ControlSnapshot } from './snapshot.ts'
 import { decompose, propose, status } from './surfaces.ts'
 import { submit, type Submission } from './submission.ts'
+import { createMethod, type MethodAssets } from './method.ts'
+import { methodSkill, observeMethodSkill, runMethodTool } from './method-run.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { singularity: TaskService }
@@ -23,9 +26,13 @@ declare module '@deepseek-ai/cordis' {
 export interface TaskService {
   forCall(exec: ToolRunContext): AgentTaskSurface
   read(): Promise<ControlSnapshot>
+  skill(agentId: string): Promise<string | undefined>
+  observe(sessionId: string, event: SessionEvent): Promise<void>
 }
 export interface AgentTaskSurface {
-  propose(input: { readonly goal: string }): Promise<Proposal>
+  propose(input: { readonly goal: string; readonly method?: RevisionRef }): Promise<Proposal>
+  createMethod(input: MethodAssets): Promise<RevisionRef>
+  runMethod(input: { readonly taskId: string }): Promise<{ program: string; artifact: string }>
   decompose(input: { readonly taskId: string; readonly children: readonly PlannedChild[] }): Promise<PlanRecord>
   submit(input: { readonly taskId: string; readonly program: string }): Promise<Submission>
   status(input: { readonly taskId: string }): Promise<Status>
@@ -135,6 +142,8 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       const caller = callerOf(agent)
       return {
         propose: input => work(() => propose(apparatus, caller, String(exec.callId), input)),
+        createMethod: input => work(() => createMethod(apparatus, input)),
+        runMethod: input => work(() => runMethodTool(apparatus, caller, input.taskId, String(exec.callId), AbortSignal.any([controller.signal, exec.signal]))),
         decompose: input => work(() => decompose(apparatus, scheduler, caller, input)),
         submit: input => work(async () => {
           const cutoff = apparatus.store.load().entries().length
@@ -160,6 +169,12 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       }
     },
     read: () => snapshotOf(apparatus),
+    skill: agentId => work(() => methodSkill(apparatus, agentId)),
+    observe: (sessionId, event) => work(async () => {
+      if (event.type !== 'system/message') return
+      const prompt = event.data.message.content.map(part => part.type === 'text' ? part.text : '').join('')
+      await observeMethodSkill(apparatus, sessionId, prompt, `system/message:${sessionId}/${event.seq}`)
+    }),
     close: () => closing ??= (async () => {
       controller.abort(new Error('the driver is unloading'))
       const failed: unknown[] = []

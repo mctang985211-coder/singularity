@@ -38,12 +38,12 @@ export function assertTemplateContract(domain: Domain, contract: TaskContract): 
   return template
 }
 
-export function resolveInputs(apparatus: Apparatus, contract: TaskContract): readonly PreparedInput[] {
-  const consumer = assertTemplateContract(apparatus.domain, contract)
+export function resolveInputs(apparatus: Apparatus, contract: TaskContract, domain: Domain = apparatus.domain): readonly PreparedInput[] {
+  const consumer = assertTemplateContract(domain, contract)
   return contract.inputs.map(input => {
     const source = input.source
     if (source.kind === 'protected') {
-      const protectedInput = apparatus.domain.inputs.find(input => input.ref === source.ref)
+      const protectedInput = domain.inputs.find(input => input.ref === source.ref)
       if (protectedInput?.digest !== source.digest)
         refuse('evidence-input-mismatch', 'the deployment no longer declares the frozen input ' + input.name)
       return { name: input.name, digest: protectedInput.digest, read: async () => protectedInput.bytes, source }

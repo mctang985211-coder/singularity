@@ -14,7 +14,7 @@ import { apply, inject, name } from '../src/agent.ts'
 import type { AgentTaskSurface, Proposal, Status } from '../src/driver.ts'
 import { agentFor, execFor } from './seam.ts'
 
-const TOOLS = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program', 'singularity_task_status']
+const TOOLS = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program', 'singularity_task_status', 'singularity_create_method', 'singularity_run_method']
 const PROPOSAL: Proposal = { taskId: 'task-x', runId: 'run-x', workspace: '/w', criterionId: 'c', phase: 'running', submission: 'program', input: 'in/data', artifact: 'out', templates: [] }
 const STATUS: Status = { phase: 'running', runs: 1, receipt: null }
 
@@ -46,7 +46,7 @@ const toolNamed = (tools: readonly ToolDefinition[], wanted: string): ToolDefini
 const answerOf = (value: unknown): unknown => JSON.parse(String(value))
 
 describe('the agent face', () => {
-  it('registers the four tools and one prompt section into the scope it is mounted in', () => {
+  it('registers task and Method tools and one prompt section into the scope it is mounted in', () => {
     const mounted = scope({})
     apply(mounted.ctx)
     expect([mounted.tools.map(tool => tool.name), mounted.sections.map(section => section.name)]).toEqual([TOOLS, ['singularity:policy']])
@@ -55,7 +55,7 @@ describe('the agent face', () => {
   it('offers no parameter through which a caller could name itself', () => {
     const mounted = scope({})
     apply(mounted.ctx)
-    expect(mounted.tools.map(tool => Object.keys(tool.parameters.properties ?? {}))).toEqual([['goal'], ['taskId', 'children'], ['taskId', 'program'], ['taskId']])
+    expect(mounted.tools.map(tool => Object.keys(tool.parameters.properties ?? {}))).toEqual([['goal', 'method'], ['taskId', 'children'], ['taskId', 'program'], ['taskId'], ['content'], ['taskId']])
   })
 
   it('binds the surface from the call it received, not from the arguments it was given', async () => {

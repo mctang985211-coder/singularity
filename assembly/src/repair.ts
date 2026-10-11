@@ -13,6 +13,7 @@ import { list, record, text } from './shape.ts'
 import { judgeAndRecord } from './submission.ts'
 import type { TaskTemplate } from './template.ts'
 import { sealedBytes } from './sealed.ts'
+import { domainForRun } from './method.ts'
 
 export async function repair(apparatus: Apparatus): Promise<void> {
   for (const [taskId, state] of apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)) {
@@ -56,7 +57,7 @@ async function frozenFailure(apparatus: Apparatus, state: TaskState, run: RunSta
       return 'unrecoverable-submission: the deployment no longer declares the frozen input ' + declaredInput.name
   }
   let template: TaskTemplate
-  try { template = assertTemplateContract(apparatus.domain, contract) } catch (error) {
+  try { template = assertTemplateContract(await domainForRun(apparatus, run), contract) } catch (error) {
     if (!(error instanceof ProtocolRefusal)) throw error
     return 'unrecoverable-template: ' + error.refusal.detail
   }
@@ -73,7 +74,7 @@ async function frozenFailure(apparatus: Apparatus, state: TaskState, run: RunSta
     return 'unrecoverable-revision: the Run revision is missing or has a different content identity'
   try {
     const manifest = record(revision.manifest, 'Run revision')
-    assertClosedKeys(manifest, ['task', 'taskTemplate', 'inputSources'], 'Run revision', 'malformed-declaration')
+    assertClosedKeys(manifest, ['task', 'taskTemplate', 'inputSources', 'method'], 'Run revision', 'malformed-declaration')
     if (manifest['task'] !== state.taskId || digestOf(manifest['taskTemplate']) !== digestOf(contract.template))
       return 'unrecoverable-revision: the revision belongs to a different Task or template'
     const sources = list(manifest['inputSources'], 'Run revision.inputSources')

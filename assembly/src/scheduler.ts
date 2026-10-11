@@ -12,6 +12,7 @@ import { declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
 import { templateOf } from './domain.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
 import { schedulerMessage } from './scheduler-message.ts'
+import { domainForRun, methodOfRun } from './method.ts'
 
 export interface Scheduler {
   advance(parentTaskId: string): Promise<readonly string[]>
@@ -73,7 +74,9 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
   }
   const dispatch = async (parentTaskId: string, parent: Agent, taskId: string, maxRuns: number): Promise<void> => {
     const state = taskStateOf(apparatus, taskId)
-    const template = templateOf(apparatus.domain, state.contract!.template)
+    const parentRun = Object.values(taskStateOf(apparatus, parentTaskId).runs).find(run => run.status === 'running')!
+    const domain = await domainForRun(apparatus, parentRun)
+    const template = templateOf(domain, state.contract!.template)
     const childId = state.responsibility!.agentId
     const node = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, childId)!
     const previous = Object.values(state.runs).findLast(run => run.status !== 'running')
@@ -87,7 +90,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
         refuse('malformed-declaration', 'the dispatch agent has no model route')
       declareCaller(apparatus, childId)
       const run = attempt ??= await startAttempt(apparatus, { agentId: childId, sessionId: node.sessionId, model: { provider: route.provider!, model: route.model! } },
-        taskId, taskId + ':attempt:' + Object.values(state.runs).length)
+        taskId, taskId + ':attempt:' + Object.values(state.runs).length, methodOfRun(apparatus, parentRun))
       const workspace = workspaceOf(apparatus, taskId, run.runId)
       if (run.bubble === undefined) refuse('illegal-transition', 'the working Run has no prepared execution bubble')
       const model = run.bubble.model
