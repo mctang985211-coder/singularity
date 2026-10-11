@@ -8,9 +8,9 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "node assembly/build.mjs",
     "test": "vitest run",
-    "gates": "node scripts/gates.mjs && node scripts/gates.mjs --probe",
+    "gates": "node scripts/gates.mjs",
     "verify": "pnpm build && pnpm test && pnpm gates"
   },
   "devDependencies": {

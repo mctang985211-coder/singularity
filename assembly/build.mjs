@@ -1,66 +1,104 @@
 #!/usr/bin/env node
-/**
- * Build the assembly into three loadable modules.
- *
- * The package cannot be shipped as TypeScript. It imports `src/**` with `.ts` specifiers — that is how
- * this repository runs its own tests, through a loader hook — and Node refuses to strip types inside
- * `node_modules`, which is where a profile resolves a bundle from. So the package is **bundled**: one
- * entry file per face, every relative import inlined or emitted once beside them, and every
- * `@deepseek-ai/*` package left external because the host profile provides those at runtime and a copy
- * inside the bundle would be a second cordis.
- *
- * Three entries, because the three faces are mounted at different places in a profile: `lib/index.js`
- * provides the `singularity` service, `lib/agent.js` turns it into tools inside a mounted agent's
- * scope, and `lib/web.js` adds the read route to a profile that has a Web server. The Web row is
- * separate so a profile without one mounts the package rather than a plugin that activates and then
- * cannot find the seam it declares. `package.json` maps them to `.`, `./agent` and `./web`.
- *
- * The panel's client bundle is deliberately **not** an entry here: the host reads that file verbatim
- * and there is no bundler at runtime, so the file in the tree is the artifact
- * (`docs/phase-g2-design.md` §4).
- *
- * The bundler is `vite`, a devDependency of this repository, resolved through the ordinary module
- * graph. A checkout with no `node_modules` fails here with Node's own `ERR_MODULE_NOT_FOUND`, which
- * names the package that is missing.
- *
- * Usage: node assembly/build.mjs
- *
- * @module singularity-core/assembly/build
- */
-
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
-
+/** Typecheck both packages, bundle host exports, and bind every shipped asset to its source bytes. */
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { readdir, readFile, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { Script } from 'node:vm'
 import { build } from 'vite'
 
-const here = dirname(fileURLToPath(import.meta.url))
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const FACES = ['.', './agent', './web', './client']
+const RECORD = 'assembly/lib/build.json'
 
-await build({
-  configFile: false,
-  root: here,
-  logLevel: 'warn',
-  build: {
-    outDir: join(here, 'lib'),
-    emptyOutDir: true,
-    minify: false,
-    target: 'node22',
-    lib: {
-      entry: {
-        index: join(here, 'src/index.ts'),
-        agent: join(here, 'src/agent.ts'),
-        web: join(here, 'src/web.ts'),
+async function filesAt(root, directory) {
+  const files = []
+  for (const entry of await readdir(join(root, directory), { withFileTypes: true })) {
+    const path = directory + '/' + entry.name
+    files.push(...entry.isDirectory() ? await filesAt(root, path) : [path])
+  }
+  return files.sort()
+}
+
+async function inputsAt(root) {
+  return [...await filesAt(root, 'src'), ...await filesAt(root, 'assembly/src'), ...await filesAt(root, 'assembly/presets'),
+    'package.json', 'pnpm-lock.yaml', 'tsconfig.json', 'assembly/tsconfig.json', 'assembly/build.mjs', 'assembly/package.json',
+    'assembly/client.js', 'assembly/panel.js', 'assembly/panel.css', 'assembly/panel.html', 'assembly/cordis.patch.yml'].sort()
+}
+
+async function hashes(root, files) {
+  return Object.fromEntries(await Promise.all(files.map(async file =>
+    [file, createHash('sha256').update(await readFile(join(root, file))).digest('hex')])))
+}
+
+async function loadExports(root) {
+  const packageFile = join(root, 'assembly/package.json')
+  const manifest = JSON.parse(await readFile(packageFile, 'utf8'))
+  const resolvePackage = createRequire(packageFile)
+  for (const face of FACES) {
+    assert.equal(typeof manifest.exports[face], 'string', 'assembly/package.json must export ' + face)
+    const path = resolvePackage.resolve(manifest.name + (face === '.' ? '' : face.slice(1)))
+    if (face === './client') new Script(await readFile(path, 'utf8'), { filename: path })
+    else assert.equal(typeof (await import(pathToFileURL(path).href)).apply, 'function', face + ' has no plugin apply export')
+  }
+  const { DSH_INSTALLED } = await import('../scripts/dsh-control-runtime.mjs')
+  const privatePackages = createRequire(join(DSH_INSTALLED, 'resolve.cjs'))
+  const load = name => import(pathToFileURL(privatePackages.resolve(name)).href)
+  const [{ Context }, { Loader }, { ClientModuleRegistry }] = await Promise.all([
+    load('@deepseek-ai/cordis'), load('@deepseek-ai/cordis-plugin-loader'), load('@deepseek-ai/dsh-client-modules'),
+  ])
+  const context = new Context()
+  try {
+    await context.plugin(Loader, { baseUrl: pathToFileURL(packageFile).href })
+    await context.loader.create({ name: manifest.name, config: {} })
+    await context.loader.await()
+    await context.plugin(ClientModuleRegistry)
+    const modules = context.get('clientModules')
+    assert.equal(modules.clientPath(manifest.name), resolvePackage.resolve(manifest.name + '/client'))
+    const entry = modules.graph().entries.find(entry => entry.id === manifest.name)
+    const response = await modules.fetchBundle(new Request(new URL(entry.url, 'http://build.local')))
+    assert.equal(response.status, 200, 'native client registry refused the built client')
+    assert((await response.text()).includes(await readFile(modules.clientPath(manifest.name), 'utf8')),
+      'native client registry did not serve the exported client bytes')
+  } finally { await context.fiber.dispose() }
+}
+
+export async function checkBuild(root = ROOT) {
+  const record = JSON.parse(await readFile(join(root, RECORD), 'utf8'))
+  assert.deepEqual(await hashes(root, await inputsAt(root)), record.inputs, 'assembly build is stale: source bytes changed')
+  const outputs = (await filesAt(root, 'assembly/lib')).filter(file => file !== RECORD)
+  assert.deepEqual(await hashes(root, outputs), record.outputs, 'assembly build is stale: artifact bytes changed')
+  await import('../scripts/dsh-control-runtime.mjs')
+  await loadExports(root)
+}
+
+export async function buildAssembly(root = ROOT) {
+  const inputs = await hashes(root, await inputsAt(root))
+  for (const config of ['tsconfig.json', 'assembly/tsconfig.json'])
+    execFileSync(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--noEmit', '-p', config],
+      { cwd: root, stdio: 'inherit' })
+  const here = join(root, 'assembly')
+  await build({
+    configFile: false, root: here, logLevel: 'warn',
+    build: {
+      outDir: join(here, 'lib'), emptyOutDir: true, minify: false, target: 'node22',
+      lib: {
+        entry: { index: join(here, 'src/index.ts'), agent: join(here, 'src/agent.ts'), web: join(here, 'src/web.ts') },
+        formats: ['es'], fileName: (_format, entryName) => `${entryName}.js`,
       },
-      formats: ['es'],
-      fileName: (_format, entryName) => `${entryName}.js`,
+      rollupOptions: { external: id => id.startsWith('@deepseek-ai/') || id.startsWith('node:') },
     },
-    rollupOptions: {
-      // The host profile provides every DSH package. Bundling one would give the process a second
-      // cordis and a second service registry, which is the one thing an assembly must not do. Node's
-      // own modules are external too: a browser-compatibility stub for `node:fs` is a module that
-      // silently does nothing, and an assembly that reads no file cannot build a workspace.
-      external: id => id.startsWith('@deepseek-ai/') || id.startsWith('node:'),
-    },
-  },
-})
+  })
+  assert.deepEqual(await hashes(root, await inputsAt(root)), inputs, 'source bytes changed during the build')
+  const outputs = await hashes(root, await filesAt(root, 'assembly/lib'))
+  await writeFile(join(root, RECORD), JSON.stringify({ inputs, outputs }, null, 2) + '\n')
+  await checkBuild(root)
+}
 
-console.log('assembly: built lib/index.js, lib/agent.js and lib/web.js')
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await (process.argv.includes('--check') ? checkBuild() : buildAssembly())
+  console.log('assembly: root + assembly checked; ./agent, ./web, ./client and root export loadable; source/artifact digests verified')
+}

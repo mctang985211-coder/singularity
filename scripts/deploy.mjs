@@ -1,34 +1,7 @@
 #!/usr/bin/env node
-/**
- * Materialise the deployment's DSH profile: one profile directory in the deployment's
- * `$DSH_HOME`, holding the two files `dsh --profile <name>` reads plus the linked root that
- * mounts this checkout's assembly package.
- *
- * **Why a script and not `dsh plugin add`.** The plugin manager shells out to pnpm against a
- * registry. This deployment must never fetch anything: the assembly is this checkout, and every
- * `@deepseek-ai/*` package it imports is provided by the running DSH installation. So the profile is
- * written by hand — the profile manifest, the deployment's patch layer, and a symlink under the
- * profile's `node_modules` pointing at `assembly/`. That symlink is what DSH calls a **linked root**:
- * it resolves the plugin's own `@deepseek-ai/*` imports against the installation instead of against
- * anything downloaded, which is why the assembly's `peerDependencies` must list every package it
- * imports.
- *
- * **What is written.** `deployment/profile/` is the template; two tokens in it (`@@CHECKOUT@@`,
- * `@@DSH_HOME@@`) are substituted with this checkout and this home, because neither path can be
- * committed. The profile directory is removed and rewritten whole: it is generated, so a stale copy is
- * a profile that boots last week's composition.
- *
- * **What it refuses.** A missing `$DSH_HOME`, the global `~/.dsh` home, a template that would not
- * mount this package, a bundle patch or exported face the manifest promises and the tree does not
- * have, and any token left unsubstituted. Each refusal names the one thing that is wrong and exits
- * non-zero; nothing here is repaired by a fallback.
- *
- * Usage: node scripts/deploy.mjs   (after `node assembly/build.mjs`)
- *
- * @module singularity-core/scripts/deploy
- */
-
+/** Materialise the private profile only after all exports and build digests verify. */
 import { existsSync } from 'node:fs'
+import { checkBuild } from '../assembly/build.mjs'
 import { mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -67,14 +40,8 @@ if (homeDir === join(homedir(), '.dsh'))
 
 const assemblyManifest = JSON.parse(await readFile(join(assemblyDir, 'package.json'), 'utf8'))
 
-// Every face the package exports must be built, and every patch the bundle declares must be on disk:
-// DSH skips a bundle whose patch file is unreadable, and it says so only on the boot's stderr.
-for (const face of ['.', './agent']) {
-  const artifact = assemblyManifest.exports?.[face]
-  if (typeof artifact !== 'string') refuse(`assembly/package.json does not export ${face}`)
-  if (!existsSync(join(assemblyDir, artifact)))
-    refuse(`assembly${artifact.replace(/^\./, '')} is missing for export ${face}; run 'node assembly/build.mjs' first`)
-}
+await checkBuild(root)
+
 const declaredPatch = assemblyManifest.dsh?.bundle?.patch
 const patchFiles = typeof declaredPatch === 'string' ? [declaredPatch] : declaredPatch
 if (!Array.isArray(patchFiles) || patchFiles.length === 0)
