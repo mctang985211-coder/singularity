@@ -39,6 +39,7 @@ const RUN_MODEL = 'run-model'
 const RUN_TOOLS = 'run-tools'
 const RUN_BARE = 'run-bare'
 const RUN_INPUTS = 'run-inputs'
+const INPUT_TASK = TASK + '-inputs'
 const METER = 'meter'
 const BOUNDS = 'bounds'
 const METER_DIGEST = 'a'.repeat(64)
@@ -51,7 +52,7 @@ const ARTIFACT = 'd'.repeat(64)
 const REVISION = { environmentId: 'lib-1', revisionId: 'r0001', digest: 'e'.repeat(64) }
 const OTHER_REVISION = { environmentId: 'lib-1', revisionId: 'r0002', digest: 'f'.repeat(64) }
 const BUBBLE_INPUTS = [{ name: 'words.txt', digest: '1'.repeat(64) }]
-/** A different dataset for the same task: the same question only if the inputs did not matter. */
+/** A different protected dataset has a separate immutable Task contract. */
 const OTHER_INPUTS = [{ name: 'words.txt', digest: '2'.repeat(64) }]
 /** The manifest a run declares: the model, each tool's content digest, and the conditions. */
 const BUBBLE = { model: 'model-1', tools: [{ name: 'count', implementationDigest: METER_DIGEST, version: '1' }], conditions: ['no-network'] }
@@ -64,11 +65,11 @@ const bubbleOf = (runId: string, overrides: Manifest) => ({
 const RUNS: readonly (readonly [string, Manifest | null])[] = [
   [RUN, {}], [RUN_SAME, {}], [RUN_MODEL, { model: 'model-2' }],
   [RUN_TOOLS, { tools: [{ name: 'count', implementationDigest: UNHELD_DIGEST, version: '1' }] }], [RUN_BARE, null],
-  [RUN_INPUTS, { inputs: OTHER_INPUTS }],
 ]
 const CONTRACT = {
   goal: 'count the words',
-  inputs: ['words.txt'],
+  template: { id: 'count', digest: '3'.repeat(64) },
+  inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: BUBBLE_INPUTS[0]!.digest } }],
   criteria: [{ criterionId: 'counted', statement: 'the count is right', verifierRef: METER, verifierVersion: '1', implementationDigest: METER_DIGEST }],
 }
 
@@ -118,6 +119,15 @@ async function openLive(meterIdentity = METER_ACTOR, boundsIdentity = BOUNDS_ACT
   ]
   for (const [index, fact] of facts.entries())
     await store.emit({ commandId: `fixture-${index}`, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: TASK, ...fact })
+  const otherInputs: readonly { readonly kind: string; readonly payload: unknown }[] = [
+    { kind: TASK_KINDS.admitted, payload: { contract: { ...CONTRACT, inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'other-words', digest: OTHER_INPUTS[0]!.digest } }] } } },
+    { kind: TASK_KINDS.assigned, payload: { agentId: AGENT, agentIdentity: SCHEDULER } },
+    { kind: TASK_KINDS.runStarted, payload: { runId: RUN_INPUTS, revision: REVISION } },
+    { kind: TASK_KINDS.bubbleOpened, payload: bubbleOf(RUN_INPUTS, { inputs: OTHER_INPUTS }) },
+    { kind: TASK_KINDS.runFailed, payload: { runId: RUN_INPUTS, reason: 'fixture attempt complete' } },
+  ]
+  for (const [index, fact] of otherInputs.entries())
+    await store.emit({ commandId: `other-input-${index}`, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: INPUT_TASK, ...fact })
   const measure = createMeasureCommands({
     store,
     registry,
@@ -401,7 +411,7 @@ describe('the measurement slice', () => {
     await plan(instance, { commandId: 'open-tools', evaluationId: FIFTH, trials: 2, run: { taskId: TASK, runId: RUN_TOOLS } })
     expect(caliberDigestOf(stateOf(instance, FIFTH))).not.toBe(first)
     // The dataset is part of the question: other inputs, another caliber, so no pooling.
-    await plan(instance, { commandId: 'open-inputs', evaluationId: SEVENTH, trials: 2, run: { taskId: TASK, runId: RUN_INPUTS } })
+    await plan(instance, { commandId: 'open-inputs', evaluationId: SEVENTH, trials: 2, run: { taskId: INPUT_TASK, runId: RUN_INPUTS } })
     expect(caliberDigestOf(stateOf(instance, SEVENTH))).not.toBe(first)
     await plan(instance, { commandId: 'open-trials', evaluationId: SIXTH, trials: 3 })
     expect(caliberDigestOf(stateOf(instance, SIXTH))).not.toBe(first)

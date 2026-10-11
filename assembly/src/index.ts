@@ -1,13 +1,3 @@
-/**
- * The host plugin: one control store, one driver, one service.
- *
- * The member set is closed — schemastery validates types, not names, so an unknown key refuses here,
- * before anything opens. The tools belong to the agent face (`./agent`); this entry owns the store and
- * recovery, and registers nothing globally.
- *
- * @module @dangosys/dsh-singularity-next
- */
-
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'

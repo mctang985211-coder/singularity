@@ -135,7 +135,7 @@ describe('a plan is presented with its gates, not its hopes', () => {
 })
 
 describe('a parent is accepted by verification, never by its children ending', () => {
-  it('requires every criterion to be accepted by a verified supporting sub-task', async () => {
+  it('keeps verified child support separate from the parent\'s own acceptance', async () => {
     const registry = taskRegistry()
     const log = await planned(registry)
     for (const [taskId, contractCriterion, runId] of [
@@ -148,8 +148,9 @@ describe('a parent is accepted by verification, never by its children ending', (
     }
 
     const view = tree(registry, log)
-    expect(view.criteria.map(entry => `${entry.criterionId}:${entry.satisfiedBy}`)).toEqual([`counts:${CHILD_A}`, `limits:${CHILD_B}`])
-    expect(view.complete).toBe(true)
+    expect(view.criteria.map(entry => entry.satisfiedBy)).toEqual([null, null])
+    expect(view.criteria.map(entry => entry.supportedBy)).toEqual([[CHILD_A], [CHILD_B]])
+    expect(view.complete).toBe(false)
   })
 
   it('does not accept a criterion whose supporting sub-task merely stopped', async () => {
@@ -163,7 +164,7 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(failed(CHILD_B, 'b1', 'the limit check never ran'))
 
     const view = tree(registry, log)
-    expect(view.criteria.map(entry => `${entry.criterionId}:${entry.satisfiedBy}`)).toEqual(['counts:' + CHILD_A, 'limits:null'])
+    expect(view.criteria.map(entry => `${entry.criterionId}:${entry.satisfiedBy}`)).toEqual(['counts:null', 'limits:null'])
     expect(statusOf(view, CHILD_B)?.status).toBe('stopped')
     expect(view.complete).toBe(false)
   })
@@ -173,23 +174,20 @@ describe('a parent is accepted by verification, never by its children ending', (
     const log = treeLog(registry)
     await log.emit(admit(PARENT, parentContract()))
     await log.emit(assigned(PARENT))
-    // One sub-task carries `counts`; the parent's own run carries `limits`.
+    // The child supports `counts`; the parent independently judges both criteria.
     await log.emit(decompose(PARENT, [{ taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1 }]))
     await log.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
     await log.emit(assigned(CHILD_A))
     await openRun(log, CHILD_A, 'a1')
     await log.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
     await log.emit(verified(CHILD_A, 'a1'))
-    // The parent's own run must judge *every* criterion of the parent's contract before it may
-    // settle verified - the protocol refuses a partial settlement - so it accepts both here, and
-    // `counts` is still credited to the verified sub-task that declared it.
     await openRun(log, PARENT, 'p1')
     await log.emit(judge(PARENT, 'p1', 'counts', UNIT_VERIFIER))
     await log.emit(judge(PARENT, 'p1', 'limits', INTEGRATION_VERIFIER))
     await log.emit(verified(PARENT, 'p1'))
 
     const view = tree(registry, log)
-    expect(view.criteria.map(entry => `${entry.criterionId}:${entry.satisfiedBy}`)).toEqual([`counts:${CHILD_A}`, 'limits:own-run'])
+    expect(view.criteria.map(entry => `${entry.criterionId}:${entry.satisfiedBy}`)).toEqual(['counts:p1', 'limits:p1'])
     expect(view.complete).toBe(true)
   })
 
@@ -203,14 +201,21 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(judge(CHILD_B, 'b1', 'part-b', INTEGRATION_VERIFIER))
     await log.emit(verified(CHILD_B, 'b1'))
 
-    const accepted = tree(registry, log)
-    expect(accepted.complete).toBe(true)
+    await openRun(log, PARENT, 'p1')
+    await log.emit(judge(PARENT, 'p1', 'counts', UNIT_VERIFIER))
+    await log.emit(judge(PARENT, 'p1', 'limits', INTEGRATION_VERIFIER))
+    await log.emit(verified(PARENT, 'p1'))
+    expect(tree(registry, log).complete).toBe(true)
 
-    // The same acceptance, but B never verified: a criterion cannot be accepted on its behalf.
+    // The parent's acceptance does not remove the requirement that B also verifies.
     const partial = await planned(registry)
     await openRun(partial, CHILD_A, 'a1')
     await partial.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
     await partial.emit(verified(CHILD_A, 'a1'))
+    await openRun(partial, PARENT, 'p1')
+    await partial.emit(judge(PARENT, 'p1', 'counts', UNIT_VERIFIER))
+    await partial.emit(judge(PARENT, 'p1', 'limits', INTEGRATION_VERIFIER))
+    await partial.emit(verified(PARENT, 'p1'))
     expect(tree(registry, partial).complete).toBe(false)
   })
 })

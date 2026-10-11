@@ -41,11 +41,13 @@ export {
   CRITERION_MEMBERS,
   type AcceptanceCriterion,
   type TaskContract,
+  type TaskTemplateRef,
+  type TaskInputSource,
   type VerifierRegistry,
 } from './task/contract.ts'
 export { digest, maybeText, record, requireContractOf, requireRun, settled, text } from './task/shape.ts'
 export {
-  assertDecompositionAgainst,
+  assertDecomposition,
   decomposedKind,
   DECOMPOSITION_CHILD_MEMBERS,
   DECOMPOSITION_MEMBERS,

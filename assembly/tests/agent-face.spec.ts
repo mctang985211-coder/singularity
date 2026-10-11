@@ -15,7 +15,7 @@ import type { AgentTaskSurface, Proposal, Status } from '../src/driver.ts'
 import { agentFor, execFor } from './seam.ts'
 
 const TOOLS = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program', 'singularity_task_status']
-const PROPOSAL: Proposal = { taskId: 'task-x', runId: 'run-x', workspace: '/w', criterionId: 'c', phase: 'running' }
+const PROPOSAL: Proposal = { taskId: 'task-x', runId: 'run-x', workspace: '/w', criterionId: 'c', phase: 'running', submission: 'program', input: 'in/data', artifact: 'out', templates: [] }
 const STATUS: Status = { phase: 'running', runs: 1, receipt: null }
 
 /** The services a mounted scope presents, with every registration the face makes. */
@@ -46,7 +46,7 @@ const toolNamed = (tools: readonly ToolDefinition[], wanted: string): ToolDefini
 const answerOf = (value: unknown): unknown => JSON.parse(String(value))
 
 describe('the agent face', () => {
-  it('registers the three tools and one prompt section into the scope it is mounted in', () => {
+  it('registers the four tools and one prompt section into the scope it is mounted in', () => {
     const mounted = scope({})
     apply(mounted.ctx)
     expect([mounted.tools.map(tool => tool.name), mounted.sections.map(section => section.name)]).toEqual([TOOLS, ['singularity:policy']])
@@ -64,6 +64,18 @@ describe('the agent face', () => {
     const exec = execFor(agentFor('agent-7', 'session-9'), 'call-1')
     const answer = await toolNamed(mounted.tools, 'singularity_propose_task').execute({ goal: 'g' }, exec)
     expect([mounted.calls[0], answerOf(answer)]).toEqual([exec, PROPOSAL])
+  })
+
+  it('selects a host template and preserves the dependency plan without a model goal', async () => {
+    const children = [{ key: 'extract', template: 'extract-letters', dependsOn: [], supports: ['letters'], maxRuns: 1 }]
+    let received: unknown
+    const mounted = scope({ decompose: async input => { received = input; return { taskId: input.taskId, opened: [] } } })
+    apply(mounted.ctx)
+    const tool = toolNamed(mounted.tools, 'singularity_decompose_task')
+    expect(Object.keys((tool.parameters as { properties: { children: { items: { properties: object } } } }).properties.children.items.properties))
+      .toEqual(['key', 'template', 'dependsOn', 'supports', 'maxRuns'])
+    await tool.execute({ taskId: 'parent', children }, execFor(agentFor('a', 's'), 'plan'))
+    expect(received).toEqual({ taskId: 'parent', children })
   })
 
   it('returns a domain refusal as the answer the model reads', async () => {
@@ -90,10 +102,6 @@ describe('the agent face', () => {
     const mounted = scope({})
     apply(mounted.ctx)
     const described = toolNamed(mounted.tools, 'singularity_submit_program').description
-    // The tool says what it does with a submission and what is not part of it. It no longer promises a
-    // runtime: the deployment's domain declares whether the text is run or judged as written, so a
-    // description that named node's ES modules would be a claim this package cannot keep for a `source`
-    // domain — and the model would be told the wrong thing about its own submission.
     expect([/workspace/.test(described), /criterion's own verifier/.test(described), /standard error/.test(described)]).toEqual([true, true, true])
   })
 

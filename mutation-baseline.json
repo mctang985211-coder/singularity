@@ -517,13 +517,13 @@
     },
     {
       "id": "task-unverified-child-accepts",
-      "rule": "a parent criterion is satisfied by a verified sub-task, never by one that merely exists",
+      "rule": "a verified child contributes support but cannot replace the parent's independent acceptance",
       "doc": "docs/context.md",
       "edits": [
         {
           "file": "src/task/tree.ts",
-          "find": "    const byChild = supportedBy.find(taskId => children.find(child => child.taskId === taskId)?.status === 'verified')",
-          "replace": "    const byChild = supportedBy.find(taskId => children.find(child => child.taskId === taskId)?.status !== 'missing')"
+          "find": "      satisfiedBy: byOwnRun?.runId ?? null,",
+          "replace": "      satisfiedBy: byOwnRun?.runId ?? supportedBy.find(taskId => children.find(child => child.taskId === taskId)?.status === 'verified') ?? null,"
         }
       ],
       "run": {
@@ -532,7 +532,7 @@
           "tests/task-tree.spec.ts"
         ]
       },
-      "witness": "does not accept a criterion whose supporting sub-task merely stopped"
+      "witness": "keeps verified child support separate from the parent's own acceptance"
     },
     {
       "id": "task-only-missing-propagates",
@@ -1336,8 +1336,8 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "if (recorded.status !== 'running') return answerOf(apparatus, state, recorded.runId)",
-          "replace": "if (false) return answerOf(apparatus, state, recorded.runId)"
+          "find": "if (recorded.status !== 'running') return answerOf(state, recorded.runId)",
+          "replace": "if (false) return answerOf(state, recorded.runId)"
         }
       ],
       "run": {
@@ -1374,7 +1374,7 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, apparatus.domain.inputs[0]!.path)] }, signal)",
+          "find": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, template.input.name)] }, signal)",
           "replace": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, filePath] }, signal)"
         }
       ],
@@ -1564,8 +1564,8 @@
       "edits": [
         {
           "file": "assembly/src/surfaces.ts",
-          "find": "if (state.responsibility?.agentId !== caller.agentId)",
-          "replace": "if (false)"
+          "find": "const state = taskStateOf(apparatus, input.taskId)\n  if (state.responsibility?.agentId !== caller.agentId)\n    refuse('not-responsible', `task",
+          "replace": "const state = taskStateOf(apparatus, input.taskId)\n  if (false)\n    refuse('not-responsible', `task"
         }
       ],
       "run": {
@@ -1635,12 +1635,17 @@
     },
     {
       "id": "assembly-m18-frozen-name-not-declared",
-      "rule": "a run frozen against an input this deployment no longer declares settles failed by name",
+      "rule": "recovery fails a Run whose protected input is no longer deployed even when its own frozen bytes remain intact",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "if (!domain.inputs.some(declared => declared.path === input.name && declared.digest === input.digest))",
+          "find": "if (!apparatus.domain.inputs.some(input => input.ref === declared.ref && input.digest === declared.digest))",
+          "replace": "if (false)"
+        },
+        {
+          "file": "assembly/src/inputs.ts",
+          "find": "if (contractDigest(contract) !== contractDigest(expected))",
           "replace": "if (false)"
         }
       ],
@@ -1678,7 +1683,7 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "  if (recorded !== undefined) {\n    if (recorded.request!.digest !== requestDigest) refuse('command-conflict', 'this submission was committed with different content')\n    if (recorded.status !== 'running') return answerOf(apparatus, state, recorded.runId)\n    refuse('illegal-transition', 'this submission is in flight; do not execute it again')\n  }\n",
+          "find": "  if (recorded !== undefined) {\n    if (recorded.request!.digest !== requestDigest) refuse('command-conflict', 'this submission was committed with different content')\n    if (recorded.status !== 'running') return answerOf(state, recorded.runId)\n    refuse('illegal-transition', 'this submission is in flight; do not execute it again')\n  }\n",
           "replace": ""
         }
       ],
@@ -1697,8 +1702,8 @@
       "edits": [
         {
           "file": "assembly/src/attempt.ts",
-          "find": "const basis = sha256(`${apparatus.domain.templateDigest}\\u0000${taskId}`)",
-          "replace": "const basis = sha256(apparatus.domain.templateDigest)"
+          "find": "const basis = sha256(JSON.stringify(manifest))",
+          "replace": "const basis = sha256(JSON.stringify(contract.template))"
         }
       ],
       "run": {
@@ -1787,13 +1792,18 @@
     },
     {
       "id": "assembly-m27-initial-source-not-overwritten",
-      "rule": "preparing a workspace never overwrites a submission with the seed again",
+      "rule": "Run preparation refuses existing frozen inputs and source rather than overwriting them",
       "doc": "docs/phase-g2-design.md",
       "edits": [
         {
           "file": "assembly/src/workspace.ts",
-          "find": "await writeFile(seed, domain.initial.bytes, { flag: 'wx' })",
-          "replace": "await writeFile(seed, domain.initial.bytes)"
+          "find": "await writeFile(seed, template.initial.bytes, { flag: 'wx' })",
+          "replace": "await writeFile(seed, template.initial.bytes)"
+        },
+        {
+          "file": "assembly/src/workspace.ts",
+          "find": "await writeFile(target, input.bytes, { flag: 'wx' })",
+          "replace": "await writeFile(target, input.bytes)"
         }
       ],
       "run": {
@@ -1802,17 +1812,17 @@
           "assembly/tests/workspace.spec.ts"
         ]
       },
-      "witness": "leaves a submission in place when the workspace is prepared again"
+      "witness": "refuses to prepare an existing Run workspace and preserves its frozen files"
     },
     {
       "id": "assembly-m28-one-input",
-      "rule": "a domain declares exactly one input, because the command template's {input} names exactly one staged path",
+      "rule": "each template binds one input through the closed name/source shape; undeclared additional input members are refused",
       "doc": "docs/phase-g2-design.md",
       "edits": [
         {
-          "file": "assembly/src/domain.ts",
-          "find": "if (inputs.length !== 1)",
-          "replace": "if (false)"
+          "file": "assembly/src/template.ts",
+          "find": "  assertClosedKeys(input, ['name', 'source'], `${at}.input`, 'malformed-declaration')\n",
+          "replace": ""
         }
       ],
       "run": {
@@ -1821,7 +1831,7 @@
           "assembly/tests/domain.spec.ts"
         ]
       },
-      "witness": "refuses a domain that declares more than one input, by name"
+      "witness": "refuses an undeclared input member"
     },
     {
       "id": "assembly-m29-staging-writes-the-loader-bytes",
@@ -1829,18 +1839,18 @@
       "doc": "docs/phase-g2-design.md",
       "edits": [
         {
-          "file": "assembly/src/workspace.ts",
-          "find": "await writeFile(target, input.bytes)",
-          "replace": "await writeFile(target, await readFile(input.sourcePath))"
+          "file": "assembly/src/inputs.ts",
+          "find": "bytes: protectedInput.bytes",
+          "replace": "bytes: await readFile(join(apparatus.domain.dir, protectedInput.sourcePath))"
         }
       ],
       "run": {
         "kind": "vitest",
         "args": [
-          "assembly/tests/workspace.spec.ts"
+          "assembly/tests/inputs.spec.ts"
         ]
       },
-      "witness": "stages the bytes it digested even when the declared source has changed since"
+      "witness": "uses loader-sealed protected bytes after the domain source file changes"
     },
     {
       "id": "runtime-m30-seams-resolve-through-get",
@@ -1868,8 +1878,8 @@
       "edits": [
         {
           "file": "assembly/src/surfaces.ts",
-          "find": "agentId: agentOf.get(entry.taskId)!",
-          "replace": "agentId: caller.agentId"
+          "find": "taskId: entry.taskId, agentId })",
+          "replace": "taskId: entry.taskId, agentId: caller.agentId })"
         }
       ],
       "run": {
@@ -1974,6 +1984,25 @@
         ]
       },
       "witness": "rejects an interior sequence collision even when the last sequence matches the array length"
+    },
+    {
+      "id": "assembly-w3-child-cannot-fork-root",
+      "rule": "a durable assigned child cannot create another root Task to bypass its committed plan and budget",
+      "doc": "docs/e2e-testing.md",
+      "edits": [
+        {
+          "file": "assembly/src/surfaces.ts",
+          "find": "if (apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, caller.agentId)?.role === 'child')",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/decomposition.spec.ts"
+        ]
+      },
+      "witness": "refuses an assigned child proposing another root Task before binding or admitting it"
     }
   ]
 }

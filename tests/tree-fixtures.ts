@@ -2,8 +2,7 @@
  * A parent task with a declared plan, and the sub-tasks it names.
  *
  * Two sub-tasks, one dependency between them, and one parent criterion each — the smallest shape
- * that can show a dependency gating, a criterion being supported by verification rather than by a
- * sub-task merely ending, and a budget actually running out.
+ * that can show dependency gating, contribution attribution, and a budget actually running out.
  *
  * Every fact is emitted for an explicit subject, because a decomposition's whole point is that the
  * parent and its children are different subjects in one log.
@@ -43,7 +42,8 @@ export const CHILD_C = 'task-child-c'
 export function parentContract(): TaskContract {
   return {
     goal: 'ship a word counter in two parts',
-    inputs: ['fixture/words.txt'],
+    template: { id: 'parent', digest: '1'.repeat(64) },
+    inputs: [{ name: 'fixture/words.txt', source: { kind: 'protected', ref: 'words', digest: 'f'.repeat(64) } }],
     criteria: [
       {
         criterionId: 'counts',
@@ -67,7 +67,8 @@ export function parentContract(): TaskContract {
 export function childContract(criterionId: string, verifierRef: string, implementationDigest: string): TaskContract {
   return {
     goal: `do ${criterionId}`,
-    inputs: ['fixture/words.txt'],
+    template: { id: criterionId, digest: '2'.repeat(64) },
+    inputs: [{ name: 'fixture/words.txt', source: { kind: 'protected', ref: 'words', digest: 'f'.repeat(64) } }],
     criteria: [{ criterionId, statement: `the sub-task's own ${criterionId} check`, verifierRef, verifierVersion: '1', implementationDigest }],
   }
 }

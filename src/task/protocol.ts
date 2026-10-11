@@ -22,7 +22,7 @@ import {
 export type { EvidenceRecord, RunState, RunStatus, RunSubmission } from './run.ts'
 
 export const TASK_PROTOCOL = 'task'
-export const TASK_VERSION = 6
+export const TASK_VERSION = 7
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'
@@ -130,6 +130,9 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
               'illegal-transition',
               `task "${state.taskId}" already carries a contract admitted at ${state.admittedAt ?? 'an unrecorded time'}; a later contract is a different task`,
             )
+          for (const input of payload.contract.inputs)
+            if (input.source.kind === 'artifact' && input.source.taskId === envelope.subject)
+              refuse('malformed-contract', `task "${envelope.subject}" declares its own artifact as input "${input.name}"`)
           return {
             taskId: envelope.subject,
             contract: payload.contract,

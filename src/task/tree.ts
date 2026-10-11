@@ -3,19 +3,15 @@
  *
  * This is a **whole-log** read, which the task protocol did not have before. It exists because the
  * questions it answers are cross-subject by nature: whether a sub-task exists, whether what it
- * depends on has verified, and whether the parent's criteria are actually accepted by anything.
+ * depends on has verified, and whether the parent's own Run accepted its criteria.
  * Those cannot be decided by a per-subject reducer, and copying the answers onto the parent subject
  * would record the same fact twice.
  *
  * Two rules carry the weight:
  *
- * 1. **Only `verified` satisfies a dependency.** A dependency that ended any other way leaves its
- *    dependents blocked, named, and never started — the behaviour the frozen repo got right
- *    (`child.ts:576-582,658-663`) and the one thing about its coordination worth copying.
- * 2. **A parent is never complete because its children ended.** Completion is *derived*: every
- *    criterion of the parent's own contract must be accepted, either by a verified sub-task that
- *    declared it supports that criterion, or by the parent's own verified run. Nothing is
- *    persisted, so there is no completion fact that could be declared early.
+ * 1. **Only `verified` satisfies a dependency.** Other outcomes leave dependents waiting or blocked.
+ * 2. **A parent is independently accepted.** Its own verified Run decides its criteria.
+ *    Child support describes contribution; it cannot replace the parent's judgement.
  *
  * The projection is for reading and diagnosis. Enforcement of the same conditions happens at the
  * serial command boundary, which is the only place a check can stop work from starting.
@@ -49,7 +45,7 @@ export interface TreeCriterionView {
   readonly criterionId: string
   /** Sub-tasks that declared they support this criterion, in declaration order. */
   readonly supportedBy: readonly string[]
-  /** The verified sub-task that accepted it, `own-run`, or null while nothing has. */
+  /** The parent's verified Run that accepted this criterion, or null. */
   readonly satisfiedBy: string | null
 }
 
@@ -133,7 +129,7 @@ function projectOne(parent: TaskState, tasks: ReadonlyMap<string, TaskState>): T
       lastOutcome: outcomeOf(runs),
     }
 
-    // A sub-task that is not an admitted task accepts nothing, whoever declared it.
+    // An unadmitted child cannot run.
     if (childState === undefined || childState.contract === undefined)
       return { ...shape, status: 'missing', reason: `sub-task "${entry.taskId}" is declared but has no admitted contract, so it cannot be started` }
 
@@ -171,14 +167,13 @@ function projectOne(parent: TaskState, tasks: ReadonlyMap<string, TaskState>): T
   const parentRuns = runsOf(parent)
   const criteria: TreeCriterionView[] = contract.criteria.map(criterion => {
     const supportedBy = children.filter(child => child.supports.includes(criterion.criterionId)).map(child => child.taskId)
-    const byChild = supportedBy.find(taskId => children.find(child => child.taskId === taskId)?.status === 'verified')
-    const byOwnRun = parentRuns.some(
+    const byOwnRun = parentRuns.find(
       run => run.status === 'verified' && run.evidence.some(entry => entry.criterionId === criterion.criterionId && entry.verdict === 'pass'),
     )
     return {
       criterionId: criterion.criterionId,
       supportedBy,
-      satisfiedBy: byChild ?? (byOwnRun ? 'own-run' : null),
+      satisfiedBy: byOwnRun?.runId ?? null,
     }
   })
 

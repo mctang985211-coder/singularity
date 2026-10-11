@@ -244,8 +244,8 @@ describe('submission freezes the attempt', () => {
     expect((await commands.beginSubmission(parentSubmit)).envelope.kind).toBe('run/submitting')
   })
 
-  it('rejects task v5 rather than guessing a submission', () => {
-    expect(TASK_VERSION).toBe(6)
-    expect(refusalOf(() => taskRegistry().ruleFor(TASK_PROTOCOL, 5, TASK_KINDS.runStarted))).toMatchObject({ code: 'version-mismatch' })
+  it('rejects task v6 rather than guessing a template or input source', () => {
+    expect(TASK_VERSION).toBe(7)
+    expect(refusalOf(() => taskRegistry().ruleFor(TASK_PROTOCOL, 6, TASK_KINDS.runStarted))).toMatchObject({ code: 'version-mismatch' })
   })
 })

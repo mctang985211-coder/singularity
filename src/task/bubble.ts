@@ -138,7 +138,7 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
     },
     reduce: (state, envelope, payload) => {
       const where = `${kind} #${envelope.seq}`
-      requireContractOf(state, where, envelope.subject)
+      const contract = requireContractOf(state, where, envelope.subject)
       const run = requireRun(state, payload.runId, where)
       // The execution context belongs to the attempt, and the attempt to the agent answerable for
       // it: nobody else declares what this run executed against.
@@ -152,6 +152,13 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
           'illegal-transition',
           `${where} opens a second execution context for run "${payload.runId}" (the first was opened at ${run.bubble.at}); an execution happened in one context`,
         )
+      if (payload.inputs.length !== contract.inputs.length)
+        refuse('evidence-input-mismatch', `${where} declares ${payload.inputs.length} inputs, but the Task declares ${contract.inputs.length}`)
+      for (const [index, input] of contract.inputs.entries()) {
+        const bound = payload.inputs[index]!
+        if (bound.name !== input.name || (input.source.kind === 'protected' && bound.digest !== input.source.digest))
+          refuse('evidence-input-mismatch', `${where} does not bind the declared source of input "${input.name}"`)
+      }
       return {
         ...state,
         runs: {

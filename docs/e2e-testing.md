@@ -1,58 +1,55 @@
-# 实跑测试方法与 G2 卡点归因（2026-10-11）
+# 私有 DSH 实跑测试
 
-## 一、实跑测试的具体方法
+开发、构建 peers 和产品运行都使用 `/home/ROXY/singularity-next/`。旧 harness 只供只读参考。
+浏览器探针从私有配置创建临时 home，加载安装的 `singularity-next-web` profile 与本仓库已构建插件；
+结束时关闭自己的 server、browser 和临时 home。
 
-**前置（一次性确认）**：
+## 一轮代码验证
 
-- 私有 DSH 环境：`. /home/ROXY/singularity-next/env.sh`（PATH、`DSH_HOME` 指向私有 home、yingjun 路由四变量）；
-- 无其他 dsh 进程占用同一 home（`pgrep -af "dsh --profile"` 只应看到自己的）；
-- 插件产物新鲜：`node assembly/build.mjs`（门禁 `assembly-built` 会查，stale 直接报）。
-
-**日常验证循环**（每轮全部跑，显式复核 exit code）：
+先按目标合同写失败 spec，再实现最小改动。收口时分别检查 core 和 assembly，不能用根类型检查代替 assembly：
 
 ```bash
-. /home/ROXY/singularity-next/env.sh
 cd /home/ROXY/code/singularity-core
-node assembly/build.mjs      # 重编 lib（探针挂的是这份产物）
-npx tsc --noEmit             # 类型，0 错
-npx vitest run               # 432 用例
-node scripts/gates.mjs       # 26 条门禁，exit 0 为过
+pnpm build
+pnpm exec tsc --noEmit -p assembly/tsconfig.json
+pnpm test
+node assembly/build.mjs
+node scripts/gates.mjs --probe
+git diff --check
 ```
 
-**26 条门禁里真正的"实跑"部分**：
+`--probe` 只验证检测器能失败；全量门禁是 `node scripts/gates.mjs`，其中含真实模型和浏览器调用。
+必要检查通过后再启动对应产品探针；没有新改动或未解决问题时，不重复扩跑。
 
-- 9 条行为探针（`control-probe` / `slice-b` / `recovery` / `strategy-vectors` / `measure` / `round` /
-  `release` / `cd` / `domain`）：真实 JSONL 控制 store、真实 core 命令、临时工作区，不调真模型；
-- **2 条真端到端浏览器门禁**：
-  - `panel-probe`：启动真部署 profile → Playwright 真开浏览器 → 真 UI 新会话 → 驱动根 prompt →
-    断言面板/读路由/工具读的是**同一个 cut**；
-  - `subtask-probe`：真模型一整轮——propose → decompose → **真子 DSH 会话被开出来** → 子模型真调
-    工具干活 → 从已落盘的控制日志与子会话日志断言：计划提交、依赖成立、每 ready 子一个会话、
-    指令已送达、无身份拒绝。判决走 letters 判据验证器，receipt 经读路由可读。
+## 浏览器验收入口
 
-单跑探针：`node scripts/panel-probe.mjs`（`--screenshot <path>` 可留证）。探针开头自动清理自己
-control 的旧账，结尾 SIGKILL 自己起的 server。
+```bash
+node scripts/browser-probe.mjs --screenshot /tmp/singularity-live.png
+node scripts/browser-probe.mjs --recovery --screenshot /tmp/singularity-working.png
+node scripts/browser-probe.mjs --submitted --screenshot /tmp/singularity-submitted.png
+node scripts/browser-probe.mjs --aborted --screenshot /tmp/singularity-aborted.png
+node scripts/browser-probe.mjs --decompose --screenshot /tmp/singularity-chain.png
+node scripts/browser-probe.mjs --panel --screenshot /tmp/singularity-panel.png
+```
 
-**判绿看最后一行 `xxx-probe: OK`，不要信管道后的 exit code。**
+每次只选择一个 mode。核对进程 exit code、脱敏 JSON 来源与对应成功 marker；不能仅凭截图或 marker 判断通过。
+源码解析、控制事实前缀、session transcript、磁盘摘要及正式 receipt 必须一致。
 
-## 二、G2 执行者为什么卡了这么久
+- 默认：真实 propose → submit → status，程序实际执行且经独立 verifier。
+- `--recovery`：working Run 在飞 SIGKILL 后，恢复相同 session、Task、Run 和工作区。
+- `--submitted`：封存提交后 SIGKILL，恢复原 submission/source，仅结算与只读 status，不重复执行程序。
+- `--aborted`：原生 Stop 关联准确 session 的 Run failed，另一 session 的 working Task 不变。
+- `--decompose`：`extract-letters` 独立验收 ASCII 保序提取；`count-letters` 使用准确 producer Task/Run 的封存字节和摘要，独立验收计数；父继续对原保护输入独立提交。
+- `--panel`：执行同一完整领域链，再比对 API/core 同 cut、页面所有 Task/Run/依赖/判据行，以及刷新和重载无事实写入。
 
-五个原因叠加，按权重排：
+本轮父可在完整计划内创建任务并选择已声明模板；持久 role 为 child 的调用方只执行分配任务，不能另开根 Task 或发布计划。
+自创 TaskTemplate 的准入和评估归 W6。定向反例：`mutate:assembly-w3-child-cannot-fork-root`。
 
-1. **脏环境掩埋真根因**。两个手动启动的主部署 server（无 overlay）在私有 home 上活了 3+ 小时，
-   与探针共写同一 home。超时、日志污染、误判混在一起——表象是"探针不稳定"，实际是环境在动。
-   **教训：手动起的部署用完必须关；跑探针前先确认 home 上没有别的 dsh 进程。**
-2. **locale 根因不可见**。app 无显式偏好时把 UI 语言委托浏览器，Playwright 默认 context 继承
-   系统 zh-CN，探针的英文定位器全部失配。不做"钉 locale 对照实验"这个根因不会自己浮出来。
-   现已修：三个浏览器探针钉 `locale: 'en-US'`。
-3. **三条门禁互锁的磨盘**。修探针加行 → budget 红 → 删行 → spec 破。必须先拿到一条腿的确定绿
-   再动下一条，不能在三扇门之间循环。
-4. **失败时无诊断信息可看**。gates 失败 tail 只有 3 行，探针 stderr 里 `zstd -dc` 自带的进度行
-   恰好 3 行，真实失败被完全掩埋，只能盲猜重跑。现已加宽到 15 行。
-5. **模型漫游没和协议缺陷分开**。子模型会读兄弟任务、嵌套分解、烧预算重试。一次红跑的失败里
-   混着三类问题：真缺口（嵌套未拒绝）、断言混渥（把围栏正常工作当缺陷）、作用域靠运气
-   （父 id 只在拒绝文本里碰巧出现）。分类修，不要合并修。
+W3 的分解验收由第二个用户 turn 让父继续提交，不作为 W4 自动唤醒或同会话有界重试的证据。
+原 `panel-probe.mjs` 与 `subtask-probe.mjs` 已删除；门禁目标名称保留，调用统一浏览器入口的对应 mode。
 
-结构性背景：G2 的证据腿是真浏览器+真模型门禁，一轮全量 gates 10-15 分钟，慢同步点（等父回合
-结束，max 思考强度下 3-15+ 分钟波动）让偶然性与确定性 bug 混在一起。subtask-probe 现已改为
-轮询主张事实（计划已提交 + 子首回合完成，读已落盘日志），不再等父回合结束。
+## 证据边界
+
+脚本故障、模型/provider 故障和领域拒绝需按控制事实与 transcript 分辨。失败不能通过再次执行已封存程序来掩盖。
+受控恢复和领域链证明工程行为；领域质量和成本效果仍须用 W6/W7 冻结的真实任务集、口径、预算与原始 trials 验证。
+当前完成状态与证据入口见 [context.md](context.md)，其余包顺序见 [assembly-blueprint §9](assembly-blueprint.md#9-剩余构建顺序与检查点)。

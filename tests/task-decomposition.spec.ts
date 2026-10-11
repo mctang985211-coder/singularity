@@ -18,7 +18,8 @@ import {
   TASK_VERSION,
   type TaskState,
 } from '../src/index.ts'
-import { asyncRefusalOf } from './fixtures.ts'
+import { asyncRefusalOf, refusalOf } from './fixtures.ts'
+import { assertDecomposition } from '../src/task/decomposition.ts'
 import {
   admit,
   CHILD_A,
@@ -51,6 +52,19 @@ const child = (taskId: string, extra: Partial<{ dependsOn: readonly string[]; su
 })
 
 describe('a decomposition is one complete fact', () => {
+  it('validates the whole plan through the same pure port before any preparation', () => {
+    expect(assertDecomposition(plan(), parentContract(), PARENT)).toEqual(plan())
+    for (const [children, code] of [
+      [[], 'malformed-payload'],
+      [[child(PARENT)], 'malformed-payload'],
+      [[child(CHILD_A), child(CHILD_A)], 'malformed-payload'],
+      [[child(CHILD_A, { dependsOn: ['outside'] })], 'malformed-payload'],
+      [[child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })], 'cyclic-dependency'],
+      [[child(CHILD_A, { supports: ['unknown'] })], 'unknown-criterion'],
+      [[{ ...child(CHILD_A), extra: true }], 'malformed-payload'],
+    ] as const) expect(refusalOf(() => assertDecomposition(children, parentContract(), PARENT)).code).toBe(code)
+  })
+
   it('folds the declared plan onto the parent, and claims business atomicity', async () => {
     const registry = taskRegistry()
     const log = await decomposed(plan(), registry)

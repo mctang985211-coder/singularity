@@ -44,6 +44,7 @@ function check(label, condition, detail) {
 }
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+const TEMPLATE = { id: 'root-child-probe', digest: sha256(await readFile(new URL(import.meta.url))) }
 
 /** The adapter executes a shell line, so every path in it is quoted rather than pasted. */
 const shellQuote = value => `'${String(value).replaceAll("'", `'\\''`)}'`
@@ -186,19 +187,20 @@ async function main() {
       taskId: PARENT,
       contract: {
         goal: 'report the word count of the fixture',
-        inputs: ['words.txt'],
+        template: TEMPLATE,
+        inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }],
         criteria: [criterion('counted', 'the artifact holds the fixture\'s word count'), criterion('bounded', 'the artifact rejects an oversized input')],
       },
     })
     await commands.admit({
       commandId: 'admit-count',
       taskId: CHILD_COUNT,
-      contract: { goal: 'count the words', inputs: ['words.txt'], criteria: [criterion('counted', 'the artifact holds the count')] },
+      contract: { goal: 'count the words', template: TEMPLATE, inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }], criteria: [criterion('counted', 'the artifact holds the count')] },
     })
     await commands.admit({
       commandId: 'admit-limits',
       taskId: CHILD_LIMITS,
-      contract: { goal: 'bound the input size', inputs: ['words.txt'], criteria: [criterion('bounded', 'the artifact refuses oversized input')] },
+      contract: { goal: 'bound the input size', template: TEMPLATE, inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }], criteria: [criterion('bounded', 'the artifact refuses oversized input')] },
     })
 
     // A plan: counting first, then the limit check, each supporting one criterion of the parent.
@@ -328,7 +330,7 @@ async function main() {
     const afterCount = treeOf()[0]
     check('verifying the dependency lets the dependent become ready', afterCount.children.find(child => child.taskId === CHILD_LIMITS)?.status === 'ready')
     check('the parent is not complete while a criterion is unaccepted', afterCount.complete === false)
-    check('the accepted criterion is credited to the sub-task that declared it', afterCount.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy === CHILD_COUNT)
+    check('the verified child contributes support while the parent awaits its own verdict', afterCount.criteria.find(entry => entry.criterionId === 'counted')?.supportedBy.includes(CHILD_COUNT) && afterCount.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy === null)
 
     // ---------------------------------------------------------------- 6. the budget really stops
     await commands.startRun({ commandId: 'start-limits', taskId: CHILD_LIMITS, runId: 'run-limits', revision: pin })
@@ -354,29 +356,20 @@ async function main() {
     check('the stopped sub-task is listed as blocked with a reason', tree.blocked.some(entry => entry.taskId === CHILD_LIMITS))
 
     // ---------------------------------------------------------------- 7. the receipt
-    // The committed prefix this reader holds. Both the receipt and the state below are derived from
-    // it, so the bound the receipt names is a property of the facts rather than a number passed in
-    // beside them - and both readings below are taken from the facts, not from that number.
     const held = store.load().entries()
     const countState = foldSubjects(registry, held, TASK_PROTOCOL, TASK_VERSION).get(CHILD_COUNT)
     const receipt = projectReceipt(registry, held, CHILD_COUNT, 'run-count')
     const named = held.slice(0, receipt.cutoff)
-    const lastSeq = held.at(-1)?.seq ?? -1
-
-    // Reading one: the bound is a function of the facts, not of the array a caller chose. Three
-    // readings of the same number, none of which is the receipt's own: the log's last sequence
-    // number, the array's length, and the fact that this array is a prefix at all (its last fact's
-    // seq is its length - 1). Each fails alone: a projection that returned the array's length is
-    // caught by the first, one that returned a constant by all three.
+    const settlement = held.find(entry => entry.kind === TASK_KINDS.runVerified && entry.subject === CHILD_COUNT)
     check(
-      'the bound the receipt names is one past the last fact read, by the facts own sequence numbers',
-      receipt.cutoff === lastSeq + 1,
-      `the receipt names ${receipt.cutoff}, but the facts this reader holds end at seq ${lastSeq}`,
+      'the receipt stops at its own committed settlement',
+      receipt.cutoff === settlement.seq + 1 && named.at(-1).seq === settlement.seq,
+      `the receipt names ${receipt.cutoff}, settlement is #${settlement.seq}`,
     )
     check(
-      'the bound is the array this reader holds, not a number beside it',
-      receipt.cutoff === held.length && held.at(-1)?.seq === held.length - 1,
-      `the receipt names ${receipt.cutoff} over ${held.length} fact(s) ending at seq ${held.at(-1)?.seq}`,
+      'later facts about the other child stay outside the receipt',
+      receipt.cutoff < held.length && held.slice(receipt.cutoff).every(entry => entry.subject === CHILD_LIMITS),
+      `receipt ${receipt.cutoff}, current log ${held.length}`,
     )
     // Reading two: re-deriving from exactly the prefix the bound names must give this receipt. A
     // bound that is not the source of the receipt cannot reproduce it, and a projection that refuses
@@ -408,7 +401,7 @@ async function main() {
     }
     check(
       'a subject-filtered array derives no receipt rather than a different bound',
-      apart === null && apartRefusal?.code === 'unknown-run' && (apartRefusal.detail ?? '').includes('prefix'),
+      apart === null && apartRefusal?.code === 'chain-broken' && (apartRefusal.detail ?? '').includes('prefix'),
       apart === null ? `${apartRefusal?.code}: ${apartRefusal?.detail}` : `it derived cutoff ${apart.cutoff} over ${held.filter(entry => entry.subject === CHILD_COUNT).length} fact(s)`,
     )
     // What the attempt consumed, checked against the facts below that bound rather than against what
@@ -452,17 +445,14 @@ async function main() {
     )
     check('the artifact the verdict fact records is the digest of the bytes on disk', loggedArtifact === sha256(await readFile(artifactPath)), loggedArtifact)
     check(
-      'a reader holding fewer facts gets a different accounting',
-      receiptDigest(projectReceipt(registry, held.slice(0, held.length - 1), CHILD_COUNT, 'run-count')) !== receiptDigest(receipt),
+      'removing an unrelated late fact keeps the same frozen receipt',
+      receiptDigest(projectReceipt(registry, held.slice(0, held.length - 1), CHILD_COUNT, 'run-count')) === receiptDigest(receipt),
     )
     // A prefix that stops before the run has no receipt in it, so no bound can claim that source -
     // and neither has one that holds the run but stops before its settlement, which is the bound a
     // reader mid-run actually holds.
     const noneYet = refusalOf(() => projectReceipt(registry, held.slice(0, 1), CHILD_COUNT, 'run-count'))
     check('a prefix holding none of the run has no receipt to derive', noneYet.code === 'unknown-run', noneYet.code)
-    const settlement = held.find(
-      entry => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.runVerified && entry.subject === CHILD_COUNT,
-    )
     const beforeSettling = refusalOf(() => projectReceipt(registry, held.slice(0, settlement?.seq ?? 0), CHILD_COUNT, 'run-count'))
     check(
       'a prefix that stops before the settlement has no receipt to derive',

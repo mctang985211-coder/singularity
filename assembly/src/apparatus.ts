@@ -54,7 +54,6 @@ export async function openApparatus(controlId: string, workspaceRoot: string, do
 }
 export interface Caller {
   readonly agentId: string
-  /** What a responsibility check compares a task's holder against. */
   readonly sessionId: string
   /** The model route its requests run under: the producer a bubble must name. */
   readonly model: string

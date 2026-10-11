@@ -144,7 +144,8 @@ export async function planned(live: Deployment, maxRuns = 1) {
     taskId: CHILD,
     contract: {
       goal: 'do the counting part',
-      inputs: ['fixture/words.txt'],
+      template: parentContract().template,
+      inputs: parentContract().inputs,
       criteria: [{ criterionId: 'part', statement: 'the part counts', verifierRef: UNIT_VERIFIER, verifierVersion: '1', implementationDigest: UNIT_IMPLEMENTATION }],
     },
   })

@@ -178,7 +178,20 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         model: input.model,
         tools: input.tools,
         conditions: input.conditions,
-      }, as),
+      }, as, () => {
+        const cut = cutOf(options)
+        const task = cut.task(input.taskId)
+        if (task?.contract === undefined)
+          refuse('illegal-transition', `cannot open a bubble for task "${input.taskId}": it has no admitted contract`)
+        for (const declared of task.contract.inputs) {
+          if (declared.source.kind !== 'artifact') continue
+          const producer = cut.task(declared.source.taskId)
+          const digest = input.inputs.find(bound => bound.name === declared.name)?.digest
+          if (producer === undefined || !Object.values(producer.runs).some(run =>
+            run.status === 'verified' && run.submission !== undefined && run.submission.artifactDigest === digest))
+            refuse('evidence-input-mismatch', `input "${declared.name}" requires the sealed artifact of verified task "${declared.source.taskId}"`)
+        }
+      }),
 
     beginSubmission: async (input, as) => {
       let fresh = false
@@ -345,7 +358,7 @@ function requirePlanAllows(cut: Cut, taskId: string): void {
     'illegal-transition',
     `cannot start a run for task "${taskId}": its own sub-task ${running
       .map(child => `"${child.taskId}"`)
-      .join(', ')} ${running.length === 1 ? 'is' : 'are'} running, and the parent does not work on an acceptance it has delegated while the delegate is still working — wait for the sub-task to settle`,
+      .join(', ')} ${running.length === 1 ? 'is' : 'are'} running; wait for delegated work to settle`,
   )
 }
 

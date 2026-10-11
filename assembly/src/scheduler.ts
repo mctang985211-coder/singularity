@@ -8,6 +8,7 @@ import { refuse } from '../../src/protocol/refusal.ts'
 import { projectTree } from '../../src/task/tree.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
+import { templateOf } from './domain.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
 
 export interface Scheduler {
@@ -35,6 +36,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
   }
   const openOne = async (parent: Agent, taskId: string): Promise<string> => {
     const state = taskStateOf(apparatus, taskId)
+    const template = templateOf(apparatus.domain, state.contract!.template)
     const childId = state.responsibility!.agentId
     const node = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, childId)!
     const header = parent.session.requestHeader()
@@ -52,8 +54,10 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
         'You are responsible for task ' + taskId + ', Run ' + run.runId + '.',
         'Goal: ' + state.contract!.goal,
         'Workspace: ' + workspace,
-        'Solve the task and submit through singularity_submit_program.',
-        'The independent verifier judges artifact ' + apparatus.domain.artifact + ' against ' + state.contract!.criteria.map(criterion => criterion.criterionId).join(', ') + '.',
+        'This Task/Run is already started. Do not propose or decompose; solve and submit this exact taskId through singularity_submit_program.',
+        'Input: ' + template.input.name,
+        template.submission === 'program' ? 'Your Node ES module receives the input path in process.argv[2]; print the artifact to stdout.' : 'Your source is judged as written.',
+        'The independent verifier judges artifact ' + template.artifact + ' against ' + state.contract!.criteria.map(criterion => criterion.criterionId).join(', ') + '.',
       ].join('\n'))
     } catch (error) {
       const failures: unknown[] = [error]

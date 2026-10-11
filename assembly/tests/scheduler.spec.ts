@@ -7,6 +7,7 @@ import type { ChildSessionRequest, ChildSession } from '../../src/runtime/child-
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { bindCaller, declareCaller, openApparatus, taskStateOf } from '../src/apparatus.ts'
 import { createScheduler } from '../src/scheduler.ts'
+import { contractFor } from '../src/inputs.ts'
 import { loadDomain } from '../src/domain.ts'
 import { spawnProcess } from '../src/process.ts'
 import { agentFor, factsOf, FakePersistence } from './seam.ts'
@@ -22,7 +23,7 @@ async function setup() {
   const apparatus = await openApparatus('scheduler', root, domain, medium as never)
   const parent = agentFor('parent', 'parent-session')
   await bindCaller(apparatus, { agentId: parent.id, sessionId: parent.session.id, model: 'test/model' })
-  const contract = { goal: 'count letters', inputs: domain.inputs.map(input => input.path), criteria: [domain.criterion] }
+  const contract = contractFor(domain, domain.templates.get(domain.rootTemplate)!, 'count letters')
   await apparatus.tasks.admit({ commandId: 'parent-admit', taskId: 'parent-task', contract })
   await apparatus.tasks.assign({ commandId: 'parent-assign', taskId: 'parent-task', agentId: parent.id })
   const childId = String(agentSessionIdOf('child-task'))

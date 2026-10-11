@@ -10,8 +10,8 @@
  * - a decomposition is declared **once**; a later one is refused rather than merged;
  * - every `dependsOn` names a child this same fact declares, so B has no dependency reaching
  *   outside the declared set and can therefore be checked here at all;
- * - `supports` names criteria of the **parent's own contract**, so "which sub-task accepts which
- *   part of the parent's goal" is a claim the parent's contract can refuse;
+ * - `supports` names contributions to criteria of the **parent's own contract**; the parent still
+ *   needs its own independent verification;
  * - the graph is **acyclic**;
  * - `maxRuns` is the sub-task's declared budget, and no kind can raise it.
  *
@@ -23,9 +23,7 @@
  * **Who may plan.** The fact is stamped with its emitter's actor, and the reducer requires that
  * actor to be the task's current holder. A plan decides what work will happen and who it will be
  * attributed to, which is a decision about the holder's own task, so the holder is the one who
- * makes it — the same reason a transfer requires the holder. This is the rule the pre-assembly
- * review left open (`assembly-review.md` A01): without it, any bound agent could plan work onto
- * another agent's task and the log would attribute the plan to nobody the task belongs to.
+ * makes it — the same reason a transfer requires the holder.
  *
  * @module singularity-core/task/decomposition
  */
@@ -38,7 +36,7 @@ import type { TaskState } from './protocol.ts'
 import { requireResponsible } from './responsibility.ts'
 import { record, requireContractOf, text } from './shape.ts'
 
-/** One declared sub-task: what it is, what must verify before it, what it accepts, its budget. */
+/** One declared sub-task: dependencies, parent contributions and its fixed attempt budget. */
 export interface DecompositionChild {
   readonly taskId: string
   /** Child task ids that must be **verified** before this one may start. */
@@ -114,7 +112,7 @@ function assertAcyclic(children: readonly DecompositionChild[], where: string): 
       refuse('cyclic-dependency', `${where} declares a dependency cycle: ${[...path.slice(path.indexOf(taskId)), taskId].join(' -> ')}`)
     onPath.add(taskId)
     path.push(taskId)
-    for (const dependency of dependencies.get(taskId) ?? []) visit(dependency)
+    for (const dependency of dependencies.get(taskId)!) visit(dependency)
     path.pop()
     onPath.delete(taskId)
     settled.add(taskId)
@@ -122,14 +120,33 @@ function assertAcyclic(children: readonly DecompositionChild[], where: string): 
   for (const entry of children) visit(entry.taskId)
 }
 
-/**
- * Check the parts of a decomposition that need the parent's contract.
- *
- * Kept separate and exported so the command boundary can run the same rule against the contract it
- * is about to admit, instead of discovering an unknown criterion after the fact was written.
- */
-export function assertDecompositionAgainst(children: readonly DecompositionChild[], contract: TaskContract, where: string): void {
+function childrenOf(raw: unknown, where: string, members: MemberSet): readonly DecompositionChild[] {
+  if (!Array.isArray(raw) || raw.length === 0)
+    refuse('malformed-payload', `${where} must declare at least one sub-task; an empty decomposition plans nothing`)
+  const children = raw.map((entry, index) => child(entry, `${where}[${index}]`, members))
+  const ids = new Set<string>()
   for (const entry of children) {
+    if (ids.has(entry.taskId))
+      refuse('malformed-payload', `${where} declares "${entry.taskId}" twice; one sub-task has one plan entry`)
+    ids.add(entry.taskId)
+  }
+  return children
+}
+
+/** Pure preflight and replay use the same complete plan rules. */
+export function assertDecomposition(raw: unknown, contract: TaskContract, parentTaskId: string): readonly DecompositionChild[] {
+  const where = `decomposition of "${parentTaskId}"`
+  const children = childrenOf(raw, where, DECOMPOSITION_CHILD_MEMBERS)
+  const declared = new Set(children.map(entry => entry.taskId))
+  for (const entry of children) {
+    if (entry.taskId === parentTaskId)
+      refuse('malformed-payload', `${where} declares "${entry.taskId}" as its own sub-task`)
+    for (const dependency of entry.dependsOn) {
+      if (dependency === entry.taskId)
+        refuse('malformed-payload', `${where} sub-task "${entry.taskId}" depends on itself`)
+      if (!declared.has(dependency))
+        refuse('malformed-payload', `${where} sub-task "${entry.taskId}" depends on "${dependency}", which this decomposition does not declare`)
+    }
     for (const criterionId of entry.supports) {
       if (!contract.criteria.some(criterion => criterion.criterionId === criterionId))
         refuse(
@@ -138,6 +155,8 @@ export function assertDecompositionAgainst(children: readonly DecompositionChild
         )
     }
   }
+  assertAcyclic(children, where)
+  return children
 }
 
 /**
@@ -158,17 +177,7 @@ export function decomposedKind(kind: string, emitter: string): KindRule<TaskStat
     parse: (raw, _where, nested) => {
       const where = `${kind} payload`
       const source = record(raw, where)
-      const rawChildren = source['children']
-      if (!Array.isArray(rawChildren) || rawChildren.length === 0)
-        refuse('malformed-payload', `${where}.children must declare at least one sub-task; an empty decomposition plans nothing`)
-      const children = rawChildren.map((entry, index) => child(entry, `${where}.children[${index}]`, nested.children))
-      const ids = new Set<string>()
-      for (const entry of children) {
-        if (ids.has(entry.taskId))
-          refuse('malformed-payload', `${where}.children declares "${entry.taskId}" twice; one sub-task has one plan entry`)
-        ids.add(entry.taskId)
-      }
-      return { children }
+      return { children: childrenOf(source['children'], `${where}.children`, nested.children) }
     },
     reduce: (state, envelope, payload) => {
       const where = `${kind} #${envelope.seq}`
@@ -182,23 +191,7 @@ export function decomposedKind(kind: string, emitter: string): KindRule<TaskStat
           `${where} decomposes task "${envelope.subject}" again (declared at ${state.decomposition.at}); a plan is fixed once declared`,
         )
 
-      const declared = new Set(payload.children.map(entry => entry.taskId))
-      for (const entry of payload.children) {
-        if (entry.taskId === envelope.subject)
-          refuse('malformed-payload', `${where} declares "${entry.taskId}" as its own sub-task; a task cannot be its own child`)
-        for (const dependency of entry.dependsOn) {
-          if (dependency === entry.taskId)
-            refuse('malformed-payload', `${where} sub-task "${entry.taskId}" depends on itself`)
-          if (!declared.has(dependency))
-            refuse(
-              'malformed-payload',
-              `${where} sub-task "${entry.taskId}" depends on "${dependency}", which this decomposition does not declare; a dependency outside the declared set could never be checked here`,
-            )
-        }
-      }
-      assertDecompositionAgainst(payload.children, contract, where)
-      assertAcyclic(payload.children, where)
-      return { ...state, decomposition: { children: payload.children, at: envelope.at } }
+      return { ...state, decomposition: { children: assertDecomposition(payload.children, contract, envelope.subject), at: envelope.at } }
     },
   })
 }

@@ -21,6 +21,7 @@ import { agentFor, execFor, factsOf, fakeExecution, FakePersistence, kindsOf, mo
 
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const sha256 = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
+const EXTRACTING = "import { readFileSync } from 'node:fs'; process.stdout.write((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).join(''))"
 const COUNTING = "import { readFileSync } from 'node:fs'; process.stdout.write(String((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).length))"
 let root: string | undefined
 let context: Context | undefined
@@ -103,7 +104,7 @@ describe('the driver with explicit execution and persistence ports', () => {
     const proposal = await call('propose').propose({ goal: 'count the letters' })
     const refusal = await asyncRefusalOf(() => call('plan').decompose({
       taskId: proposal.taskId,
-      children: [{ key: 'first', goal: 'count them', dependsOn: [], supports: ['letters'], maxRuns: 1 }],
+      children: [{ key: 'first', template: 'extract-letters', dependsOn: [], supports: ['letters'], maxRuns: 1 }],
     }))
     expect(refusal.code).toBe('malformed-declaration')
     expect(factsOf(medium).some(fact => fact.kind === TASK_KINDS.decomposed)).toBe(true)
@@ -115,8 +116,8 @@ describe('the driver with explicit execution and persistence ports', () => {
     const first = taskIdOf('lib-1', proposal.taskId, 'first')
     const second = taskIdOf('lib-1', proposal.taskId, 'second')
     expect(await call(parent, 'plan').decompose({ taskId: proposal.taskId, children: [
-      { key: 'first', goal: 'count letters first', dependsOn: [], supports: ['letters'], maxRuns: 1 },
-      { key: 'second', goal: 'count letters next', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
+      { key: 'first', template: 'extract-letters', dependsOn: [], supports: ['letters'], maxRuns: 1 },
+      { key: 'second', template: 'count-letters', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
     ] })).toMatchObject({ opened: [first] })
     for (const taskId of [first, second])
       expect(factsOf(medium).find(fact => fact.subject === taskId && fact.kind === TASK_KINDS.assigned)?.payload)
@@ -124,7 +125,7 @@ describe('the driver with explicit execution and persistence ports', () => {
     const before = medium.events.length
     expect(await asyncRefusalOf(() => call(parent, 'foreign-submit').submit({ taskId: first, program: COUNTING }))).toMatchObject({ code: 'not-responsible' })
     expect(medium.events.length).toBe(before)
-    expect(await call(agents.get(String(agentSessionIdOf(first)))!, 'child-submit').submit({ taskId: first, program: COUNTING }))
+    expect(await call(agents.get(String(agentSessionIdOf(first)))!, 'child-submit').submit({ taskId: first, program: EXTRACTING }))
       .toMatchObject({ taskId: first, verdict: 'pass', phase: 'verified' })
   })
 
@@ -134,20 +135,33 @@ describe('the driver with explicit execution and persistence ports', () => {
     const first = taskIdOf('lib-1', proposal.taskId, 'first')
     const second = taskIdOf('lib-1', proposal.taskId, 'second')
     await call(parent, 'plan').decompose({ taskId: proposal.taskId, children: [
-      { key: 'first', goal: 'count letters first', dependsOn: [], supports: ['letters'], maxRuns: 1 },
-      { key: 'second', goal: 'count letters next', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
+      { key: 'first', template: 'extract-letters', dependsOn: [], supports: ['letters'], maxRuns: 1 },
+      { key: 'second', template: 'count-letters', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
     ] })
     expect(delivered.map(entry => entry.sessionId)).toEqual([String(agentSessionIdOf(first))])
-    const firstAnswer = await call(agents.get(String(agentSessionIdOf(first)))!, 'first-submit').submit({ taskId: first, program: COUNTING })
+    const firstAnswer = await call(agents.get(String(agentSessionIdOf(first)))!, 'first-submit').submit({ taskId: first, program: EXTRACTING })
     expect(firstAnswer).toMatchObject({ verdict: 'pass', phase: 'verified' })
     expect(firstAnswer.dispatchError).toBeUndefined()
     expect(delivered.map(entry => entry.sessionId)).toEqual([String(agentSessionIdOf(first)), String(agentSessionIdOf(second))])
-    expect(JSON.stringify(delivered[1]!.message)).toContain('count letters next')
+    expect(JSON.stringify(delivered[1]!.message)).toContain('in/letters.txt')
     const secondRun = factsOf(medium).find(fact => fact.subject === second && fact.kind === TASK_KINDS.runStarted)
     expect(secondRun?.actor).toBe('lib-1:agent:' + String(agentSessionIdOf(second)))
     expect(secondRun?.seq).toBeGreaterThan(factsOf(medium).find(fact => fact.subject === first && fact.kind === TASK_KINDS.runVerified)!.seq)
+    const secondBubble = factsOf(medium).find(fact => fact.subject === second && fact.kind === TASK_KINDS.bubbleOpened)!.payload as { workspace: { ref: string }; inputs: unknown[] }
+    const extracted = (await readFile(join(REAL, 'samples/source.txt'), 'utf8')).match(/[A-Za-z]/g)!.join('')
+    expect(await readFile(join(secondBubble.workspace.ref, 'in/letters.txt'), 'utf8')).toBe(extracted)
+    expect(secondBubble.inputs).toEqual([{ name: 'in/letters.txt', digest: sha256(extracted) }])
+    const manifest = factsOf(medium).filter(fact => fact.kind === 'revision/created').at(-1)!.payload
+    expect(manifest).toMatchObject({ manifest: { inputSources: [{ name: 'in/letters.txt', digest: sha256(extracted),
+      source: { kind: 'artifact', taskId: first, runId: firstAnswer.runId } }] } })
     expect(await call(agents.get(String(agentSessionIdOf(second)))!, 'second-submit').submit({ taskId: second, program: COUNTING }))
       .toMatchObject({ taskId: second, verdict: 'pass', phase: 'verified' })
+    const plan = (await ownedDriver!.read()).plans[0]!
+    expect(plan).toMatchObject({ complete: false, criteria: [{ criterionId: 'letters', satisfiedBy: null }] })
+    expect(await call(parent, 'parent-submit').submit({ taskId: proposal.taskId, program: COUNTING }))
+      .toMatchObject({ verdict: 'pass', phase: 'verified' })
+    expect((await ownedDriver!.read()).plans[0]).toMatchObject({ complete: true,
+      criteria: [{ criterionId: 'letters', satisfiedBy: proposal.runId }] })
   })
 
   it('settles the proposal Run from the independent verifier output', async () => {
@@ -180,9 +194,9 @@ describe('the driver with explicit execution and persistence ports', () => {
     await call('submit-first').submit({ taskId: first.taskId, program: COUNTING })
     const second = await call('second').propose({ goal: 'another goal' })
     const manifests = factsOf(medium).filter(fact => fact.kind === 'revision/created')
-      .map(fact => (fact.payload as { manifest: { taskTemplate: string; task: string } }).manifest)
+      .map(fact => (fact.payload as { manifest: { taskTemplate: {id: string; digest: string}; task: string } }).manifest)
     expect(manifests.map(manifest => manifest.task)).toEqual([first.taskId, second.taskId])
-    expect(new Set(manifests.map(manifest => manifest.taskTemplate)).size).toBe(1)
+    expect(new Set(manifests.map(manifest => JSON.stringify(manifest.taskTemplate))).size).toBe(1)
   })
 
   it('reads the settled receipt without committing any new fact', async () => {

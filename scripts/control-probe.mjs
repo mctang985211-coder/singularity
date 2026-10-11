@@ -4,7 +4,8 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,7 +21,8 @@ const RUN = 'probe-run-1'
 const REVISION = { environmentId: 'probe-library', revisionId: 'r0001', digest: 'a'.repeat(64) }
 const CONTRACT = {
   goal: 'carry a control fact through a DSH session',
-  inputs: ['probe/input.txt'],
+  template: { id: 'control-probe', digest: createHash('sha256').update(await readFile(HERE)).digest('hex') },
+  inputs: [],
   criteria: [
     {
       criterionId: 'observed',
@@ -275,6 +277,10 @@ async function probe() {
 
     // -----------------------------------------------------------------------
     section('5. the successor can append new facts, so the takeover is functional')
+    await successor.emit({
+      commandId: 'finish-probe-run-1', protocol: TASK_PROTOCOL, version: TASK_VERSION,
+      kind: TASK_KINDS.runFailed, subject: TASK, payload: { runId: RUN, reason: 'the first attempt was interrupted' },
+    })
     const next = await successor.emit({
       commandId: 'probe-command-2',
       protocol: TASK_PROTOCOL,
@@ -287,7 +293,7 @@ async function probe() {
     const finalRead = (await verifier.read()).events.length
     await verifier.close()
     console.log(`  successor appended ${TASK_KINDS.runStarted} #${next.seq}; the stored log now holds ${finalRead} events`)
-    check('the successor appended a new fact that a fresh read handle sees', finalRead === after.length + 1)
+    check('the successor settled the interrupted Run and appended a new attempt that a fresh read handle sees', finalRead === after.length + 2)
   } catch (error) {
     failures.push('the probe did not run to completion')
     console.log(`\nFAIL  the probe did not run to completion: ${error?.stack ?? String(error)}`)

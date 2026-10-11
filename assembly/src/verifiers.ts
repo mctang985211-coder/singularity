@@ -9,6 +9,7 @@
  */
 
 import { refuse } from '../../src/protocol/refusal.ts'
+import { assertClosedKeys } from '../../src/protocol/envelope.ts'
 import { runVerifierCommand, type VerifierProcess } from '../../src/verifier/command.ts'
 import type { VerifierInput, VerifierSelftestSample, VerifierVerdict } from '../../src/verifier/implementation.ts'
 import type { DomainVerifier } from './domain.ts'
@@ -21,6 +22,7 @@ async function samplesOf(dir: string, entries: readonly unknown[], where: string
   for (const [index, entry] of entries.entries()) {
     const at = `${where}.selftest[${index}]`
     const declared = record(entry, at)
+    assertClosedKeys(declared, ['name', 'artifact', 'argv', 'expected'], at, 'malformed-declaration')
     const name = text(declared, 'name', at)
     const artifact = inside(dir, text(declared, 'artifact', at), `${at}.artifact`)
     const declaredArgv = list(declared['argv'], `${at}.argv`).map((argument, position) => nonEmpty(argument, `${at}.argv[${position}]`))
@@ -41,6 +43,7 @@ async function samplesOf(dir: string, entries: readonly unknown[], where: string
 }
 export async function verifierOf(dir: string, entry: unknown, where: string, runProcess: VerifierProcess): Promise<DomainVerifier> {
   const declared = record(entry, where)
+  assertClosedKeys(declared, ['ref', 'version', 'program', 'args', 'selftest'], where, 'malformed-declaration')
   const program = inside(dir, text(declared, 'program', where), `${where}.program`)
   const args = list(declared['args'], `${where}.args`).map((argument, index) => nonEmpty(argument, `${where}.args[${index}]`))
   for (const [index, argument] of args.entries()) {

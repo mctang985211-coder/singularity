@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Real private-profile G1 smoke, working/submitted crash recovery, or native --aborted lifecycle. */
+/** Private DSH browser evidence: G1, G2 decomposition/panel, crash recovery, and native cancellation. */
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -10,14 +10,23 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 
 import { digestOf } from '../src/protocol/envelope.ts'
+import { AGENT_ROLE, declareAgentProtocol } from '../src/agent/protocol.ts'
+import { ENVIRONMENT_ROLE, declareEnvironmentProtocol } from '../src/environment/protocol.ts'
+import { MemoryLog } from '../src/protocol/memory-log.ts'
+import { ProtocolRegistry } from '../src/protocol/registry.ts'
+import { SCHEDULER_ROLE, declareTaskProtocol, verifierRoleOf } from '../src/task/protocol.ts'
+import { projectReceipt } from '../src/task/view.ts'
+import { loadDomain, templateOf } from '../assembly/src/domain.ts'
 import { runIdOf, sha256 } from '../assembly/src/ids.ts'
+import { snapshotOf } from '../assembly/src/snapshot.ts'
 import { DSH_BIN, DSH_HOME, dshModule, openPersistence } from './dsh-control-runtime.mjs'
 
-export const PROFILE = 'singularity-next-web'
-export const PRESET_NAME = 'Singularity Next'
-export const BOOT_TIMEOUT_MS = 120_000
-export const URL_PATTERN = /http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+/
+const PROFILE = 'singularity-next-web'
+const PRESET_NAME = 'Singularity Next'
+const BOOT_TIMEOUT_MS = 120_000
+const URL_PATTERN = /http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+/
 const TURN_TIMEOUT_MS = 300_000
+const G2_TIMEOUT_MS = 900_000
 const TOOLS = ['singularity_propose_task', 'singularity_submit_program', 'singularity_task_status']
 const CONTROL_SESSION = 'singularity:control:singularity-local'
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -36,8 +45,15 @@ const PROPOSE_PROMPT = [
   'The domain will later run a submitted Node ES module as node program.mjs <input path>.',
   'Do not submit a program in this turn. Report its taskId and runId.',
 ].join('\n')
+const DECOMPOSE_PROMPT = [
+  'Call singularity_propose_task once to count ASCII letters in the protected source.',
+  'Then call singularity_decompose_task for that taskId with exactly this plan:',
+  '{"children":[{"key":"extract","template":"extract-letters","dependsOn":[],"supports":["letters"],"maxRuns":1},',
+  '{"key":"count","template":"count-letters","dependsOn":["extract"],"supports":["letters"],"maxRuns":1}]}',
+  'Do not submit the parent program in this turn. Report the plan result.',
+].join('\n')
 
-export async function boot(port, extra = [], home = DSH_HOME) {
+async function boot(port, extra = [], home = DSH_HOME) {
   const argv = ['--profile', PROFILE, ...extra, '--host', '127.0.0.1', '--port', String(port), '--no-open']
   const child = spawn(DSH_BIN, argv, { env: { ...process.env, DSH_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] })
   const server = { child, command: DSH_BIN + ' ' + argv.join(' '), output: '' }
@@ -64,13 +80,13 @@ export async function boot(port, extra = [], home = DSH_HOME) {
   }
 }
 
-export async function openApp(context, url) {
+async function openApp(context, url) {
   const page = await context.newPage()
   await page.goto(url, { waitUntil: 'domcontentloaded' })
   await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
   return page
 }
-export async function dismissFirstRun(page) {
+async function dismissFirstRun(page) {
   const dismissed = []
   let quiet = 0
   for (let attempt = 0; attempt < 60 && quiet < 3; attempt++) {
@@ -90,18 +106,18 @@ export async function dismissFirstRun(page) {
   assert(quiet >= 3, 'first-run dialog did not close')
   return dismissed
 }
-export async function selectPreset(page) {
+async function selectPreset(page) {
   const seat = page.locator('button[title="Choose the agent preset for your new task"]').first()
   await seat.waitFor({ timeout: 30_000 })
   await seat.click()
   await page.locator('[role="menuitem"]', { hasText: PRESET_NAME }).first().click({ timeout: 20_000 })
   await expectSeat(page)
 }
-export async function expectSeat(page) {
+async function expectSeat(page) {
   await page.waitForFunction(name => [...document.querySelectorAll('button[title="Choose the agent preset for your new task"]')]
     .some(button => button.innerText.includes(name)), PRESET_NAME, { timeout: 20_000 })
 }
-export async function chooseWorkspace(page, home) {
+async function chooseWorkspace(page, home) {
   if (await composerOf(page).count()) return
   await page.getByRole('button', { name: 'Choose workspace' }).last().click()
   const edit = page.getByRole('button', { name: 'Edit path' })
@@ -115,14 +131,14 @@ export async function chooseWorkspace(page, home) {
   await page.getByRole('button', { name: 'Open', exact: true }).click()
   await composerOf(page).waitFor({ timeout: 30_000 })
 }
-export async function prepare(page, home) {
+async function prepare(page, home) {
   const dismissed = await dismissFirstRun(page)
   await selectPreset(page)
   await chooseWorkspace(page, home)
   await expectSeat(page)
   return dismissed
 }
-export async function send(page, prompt) {
+async function send(page, prompt) {
   const composer = composerOf(page)
   await composer.waitFor({ timeout: 30_000 })
   await composer.fill(prompt)
@@ -132,16 +148,16 @@ export async function send(page, prompt) {
   await page.waitForFunction(count => document.querySelector('button[aria-label="Stop generating"]') !== null ||
     document.querySelectorAll('[data-tool]').length > count, before, { timeout: 60_000 })
 }
-export async function waitForTools(page, names) {
+async function waitForTools(page, names, timeout = TURN_TIMEOUT_MS) {
   for (const name of names) {
     await page.waitForFunction(tool => document.querySelector('[data-tool="' + tool + '"]') !== null ||
-      document.querySelector('button[aria-label="Stop generating"]') === null, name, { timeout: TURN_TIMEOUT_MS })
+      document.querySelector('button[aria-label="Stop generating"]') === null, name, { timeout })
     assert(await page.locator('[data-tool="' + name + '"]').count() > 0, 'the turn ended before calling ' + name)
   }
 }
-async function settle(page) {
+async function settle(page, timeout = TURN_TIMEOUT_MS) {
   await page.waitForFunction(() => document.querySelector('button[aria-label="Stop generating"]') === null, null,
-    { timeout: TURN_TIMEOUT_MS })
+    { timeout })
   await page.waitForTimeout(1000)
 }
 async function kill(server) {
@@ -180,6 +196,65 @@ export function toolFacts(events) {
         : JSON.parse(event.data.message.content.map(part => part.text ?? '').join('')) }))
   return { calls, results }
 }
+export function inputSourcesOf(facts, taskId, receipt) {
+  const contract = facts.find(fact => fact.kind === 'task/admitted' && fact.subject === taskId).payload.contract
+  const started = facts.find(fact => fact.kind === 'run/started' && fact.subject === taskId && fact.payload.runId === receipt.runId)
+  assert.deepEqual(started.payload.revision, receipt.revision)
+  const revision = facts.find(fact => fact.kind === 'revision/created' && fact.subject === receipt.revision.environmentId &&
+    fact.payload.revisionId === receipt.revision.revisionId)
+  assert.equal(digestOf(revision.payload.manifest), receipt.revision.digest, 'the Run revision differs from its durable input manifest')
+  const manifest = revision.payload.manifest
+  assert.equal(manifest.task, taskId)
+  assert.deepEqual(manifest.taskTemplate, contract.template)
+  assert.equal(manifest.inputSources.length, contract.inputs.length)
+  assert.deepEqual(manifest.inputSources.map(({ name, digest }) => ({ name, digest })), receipt.consumption.inputs)
+  for (const [index, input] of contract.inputs.entries()) {
+    const bound = manifest.inputSources[index]
+    assert.equal(bound.name, input.name)
+    if (input.source.kind === 'protected') {
+      assert.deepEqual(bound.source, input.source)
+      assert.equal(bound.digest, input.source.digest)
+    } else {
+      assert.equal(bound.source.kind, 'artifact')
+      assert.equal(bound.source.taskId, input.source.taskId)
+      const producer = facts.find(fact => fact.kind === 'run/verified' && fact.subject === bound.source.taskId &&
+        fact.payload.runId === bound.source.runId)
+      assert(producer !== undefined && producer.seq < revision.seq && revision.seq < started.seq,
+        'the consumed producer Run was not verified before its input revision and dependent Run')
+      const sealed = facts.find(fact => fact.kind === 'run/submitted' && fact.subject === bound.source.taskId &&
+        fact.payload.runId === bound.source.runId)
+      assert.equal(sealed.payload.submission.artifactDigest, bound.digest, 'the consumed input differs from the verified producer artifact')
+    }
+  }
+  return manifest.inputSources
+}
+export function assertPlannedTasks(facts, parentTaskId) {
+  const plan = facts.find(fact => fact.kind === 'task/decomposed' && fact.subject === parentTaskId)
+  const allowed = [parentTaskId, ...plan.payload.children.map(child => child.taskId)].sort()
+  const admitted = facts.filter(fact => fact.kind === 'task/admitted').map(fact => fact.subject).sort()
+  assert.deepEqual(admitted, allowed, 'the delegated model admitted a Task outside the declared campaign plan')
+}
+export async function coreRead(facts, domainDir, cutoff = facts.length) {
+  assert(Number.isInteger(cutoff) && cutoff >= 0 && cutoff <= facts.length, 'the route serves an uncommitted cutoff')
+  const domain = await loadDomain(domainDir, () => { throw new Error('a read invoked a verifier') })
+  const registry = new ProtocolRegistry()
+  declareTaskProtocol(registry)
+  declareAgentProtocol(registry)
+  declareEnvironmentProtocol(registry)
+  const subjects = { [SCHEDULER_ROLE]: 'singularity-local:scheduler',
+    [AGENT_ROLE]: 'singularity-local:runtime', [ENVIRONMENT_ROLE]: 'singularity-local:environment' }
+  for (const verifier of domain.verifiers)
+    subjects[verifierRoleOf({ verifierRef: verifier.ref, verifierVersion: verifier.version })] =
+      `singularity-local:verifier:${verifier.ref}@${verifier.version}`
+  const log = MemoryLog.adopt(facts.slice(0, cutoff), registry, { subjects })
+  const view = {
+    entries: () => log.entries(),
+    entriesOf: (protocol, version) => log.entriesOf(protocol, version),
+    stateOf: (protocol, version, subject) => log.stateAt(protocol, version, subject, cutoff),
+    statesOf: (protocol, version) => log.statesAt(protocol, version, cutoff),
+  }
+  return { domain, registry, log, snapshot: await snapshotOf({ controlId: 'singularity-local', domain, store: { load: () => view } }) }
+}
 async function waitForRun(persistence, page, stage, exclude = []) {
   const deadline = Date.now() + TURN_TIMEOUT_MS
   while (Date.now() < deadline) {
@@ -216,9 +291,14 @@ async function provenance(persistence, taskId, runId, sessionId, domainDir) {
   const facts = await controlFacts(persistence)
   const transcript = await readLog(persistence, sessionId)
   const tool = toolFacts(transcript)
+  const core = await coreRead(facts, domainDir)
+  const receipt = projectReceipt(core.registry, core.log.entries(), taskId, runId)
   const status = tool.results.findLast(result => result.name === 'singularity_task_status' && result.value.receipt?.taskId === taskId)
-  const receipt = status?.value.receipt
-  assert(receipt !== undefined, 'the actual tool transcript contains no receipt for the Task')
+  const node = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.sessionId === sessionId).payload
+  const assignment = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === taskId).payload
+  assert.equal(node.agentId, assignment.agentId)
+  if (node.role === 'root') assert(status !== undefined, 'the actual root tool transcript contains no receipt for the Task')
+  if (status !== undefined) assert.deepEqual(status.value.receipt, receipt, 'the tool receipt differs from the committed projection')
   assert.equal(receipt.runId, runId)
   assert.equal(receipt.status, 'verified')
   const runs = facts.filter(fact => fact.kind === 'run/started' && fact.subject === taskId)
@@ -227,8 +307,11 @@ async function provenance(persistence, taskId, runId, sessionId, domainDir) {
   const submitted = facts.find(fact => fact.kind === 'run/submitted' && fact.subject === taskId)
   const terminal = facts.find(fact => fact.kind === 'run/verified' && fact.subject === taskId)
   const proposed = tool.results.find(result => result.name === 'singularity_propose_task' && result.value.taskId === taskId && result.value.runId === runId)
-  assert(proposed !== undefined, 'the actual proposal result is not linked to this Run')
-  assert.equal(runId, runIdOf('singularity-local', sessionId, proposed.callId))
+  if (node.role === 'root') {
+    assert(proposed !== undefined, 'the actual proposal result is not linked to this Run')
+    assert.equal(runId, runIdOf('singularity-local', sessionId, proposed.callId))
+  }
+  assert.equal(receipt.executor.actor, assignment.agentIdentity)
   assert.equal(runs[0].commandId, 'start:' + runId)
   const submissionCall = tool.calls.find(call => call.data.name === 'singularity_submit_program' &&
     'submit-' + sha256(JSON.stringify(['singularity-local', sessionId, call.data.callId])) === submitted.payload.submission.requestId)
@@ -243,38 +326,176 @@ async function provenance(persistence, taskId, runId, sessionId, domainDir) {
   assert.equal(receipt.source.sessionId, sessionId)
   const source = receipt.source
   assert(submissionCall.seq < source.eventCount, 'the sealed source excludes its own submission call')
-  assert(status.seq >= source.eventCount, 'the status result precedes the frozen source')
+  if (status !== undefined) assert(status.seq >= source.eventCount, 'the status result precedes the frozen source')
   const prefix = transcript.slice(0, source.eventCount)
   assert.equal(prefix.length, source.eventCount)
   assert.equal(source.digest, digestOf({ sessionId, eventCount: source.eventCount, events: prefix }))
   assert(transcript.length > source.eventCount, 'receipt source was not sealed before later transcript events')
-  const descriptor = JSON.parse(await readFile(join(domainDir, 'task.json'), 'utf8'))
+  const contract = facts.find(fact => fact.kind === 'task/admitted' && fact.subject === taskId).payload.contract
+  const template = templateOf(core.domain, contract.template)
+  const inputSources = inputSourcesOf(facts, taskId, receipt)
   const workspace = receipt.consumption.workspace.ref
   const disk = {
-    programDigest: sha256(await readFile(join(workspace, descriptor.workspace.file))),
-    artifactDigest: sha256(await readFile(join(workspace, descriptor.workspace.artifact))),
-    inputDigests: await Promise.all(descriptor.inputs.map(async input => ({ name: input.path, digest: sha256(await readFile(join(workspace, input.path))) }))),
+    programDigest: sha256(await readFile(join(workspace, template.file))),
+    artifactDigest: sha256(await readFile(join(workspace, template.artifact))),
+    inputDigests: await Promise.all(contract.inputs.map(async input => ({ name: input.name, digest: sha256(await readFile(join(workspace, input.name))) }))),
   }
   assert.equal(disk.programDigest, receipt.submission.programDigest)
   assert.equal(disk.artifactDigest, receipt.submission.artifactDigest)
   assert.deepEqual(disk.inputDigests, receipt.submission.inputDigests)
   assert.deepEqual(disk.inputDigests, receipt.consumption.inputs)
+  for (const bound of inputSources) {
+    if (bound.source.kind === 'protected')
+      assert.equal(bound.digest, core.domain.inputs.find(input => input.ref === bound.source.ref).digest)
+  }
   for (const criterion of receipt.criteria) {
-    const verifier = descriptor.verifiers.find(verifier => verifier.ref === criterion.verifierRef)
-    assert.equal(criterion.implementationDigest, sha256(await readFile(join(domainDir, verifier.program))))
+    const verifier = core.domain.verifiers.find(verifier => verifier.ref === criterion.verifierRef)
+    assert.equal(criterion.implementationDigest, sha256(await readFile(verifier.program)))
     assert.equal(criterion.artifactDigest, disk.artifactDigest)
+    assert.equal(criterion.verdict, 'pass')
   }
   const headers = transcript.filter(event => event.type === 'request/header').map(event => event.data.header)
   for (const header of headers)
     assert.deepEqual(header.tools.map(tool => tool.name).sort(), [...TOOLS, 'singularity_decompose_task'].sort(), 'the Singularity preset exposes an unowned execution capability')
   const header = headers.at(-1)
   const declaredTools = header.tools.map(tool => tool.name).sort()
-  return { receipt, tools: tool.calls.map(call => call.data.name),
+  return { receipt, template: contract.template, inputSources, tools: tool.calls.map(call => call.data.name),
     nativeErrors: tool.results.filter(result => result.value.isError === true),
     calls: tool.calls.map(call => ({ callId: call.data.callId, name: call.data.name, turn: call.data.turn, seq: call.seq })),
-    provenance: { proposalCallId: proposed.callId, submissionCallId: submissionCall.data.callId, statusCallId: status.callId,
+    provenance: { proposalCallId: proposed?.callId ?? null, submissionCallId: submissionCall.data.callId, statusCallId: status?.callId ?? null,
       startedSeq: runs[0].seq, submittedSeq: submitted.seq, terminalSeq: terminal.seq, disk },
     declaredTools, model: header.config, controlFactCount: facts.length, currentTranscriptEvents: transcript.length }
+}
+
+async function decompositionEvidence(persistence, page, domainDir) {
+  await send(page, DECOMPOSE_PROMPT)
+  await waitForTools(page, ['singularity_propose_task', 'singularity_decompose_task'], G2_TIMEOUT_MS)
+  const turnDeadline = Date.now() + G2_TIMEOUT_MS
+  while (await page.locator('button[aria-label="Stop generating"]').count() > 0) {
+    const progress = await controlFacts(persistence)
+    const plan = progress.find(fact => fact.kind === 'task/decomposed')
+    if (plan !== undefined) assertPlannedTasks(progress, plan.subject)
+    assert(!progress.some(fact => fact.kind === 'run/failed'), 'a delegated Run failed during the decomposition turn')
+    assert(Date.now() < turnDeadline, 'the decomposition turn did not settle before its deadline')
+    await sleep(100)
+  }
+  await settle(page, G2_TIMEOUT_MS)
+  let facts = await controlFacts(persistence)
+  const started = facts.find(fact => fact.kind === 'run/started')
+  assert(started !== undefined, 'the decomposition recorded no parent Run')
+  const plan = facts.find(fact => fact.kind === 'task/decomposed' && fact.subject === started.subject)
+  assert(plan !== undefined, 'the parent recorded no complete decomposition')
+  assertPlannedTasks(facts, started.subject)
+  assert.equal(plan.payload.children.length, 2)
+  const children = plan.payload.children.map(child => ({ ...child,
+    contract: facts.find(fact => fact.kind === 'task/admitted' && fact.subject === child.taskId).payload.contract }))
+  const extract = children.find(child => child.contract.template.id === 'extract-letters')
+  const count = children.find(child => child.contract.template.id === 'count-letters')
+  assert(extract !== undefined && count !== undefined, 'the plan omitted an independently judged template')
+  assert.deepEqual(extract.dependsOn, [])
+  assert.deepEqual(count.dependsOn, [extract.taskId])
+  assert.deepEqual(count.contract.inputs[0].source, { kind: 'artifact', taskId: extract.taskId })
+  for (const child of children) { assert.equal(child.maxRuns, 1); assert.deepEqual(child.supports, ['letters']) }
+  const deadline = Date.now() + G2_TIMEOUT_MS
+  while (!children.every(child => facts.some(fact => fact.kind === 'run/verified' && fact.subject === child.taskId))) {
+    assert(!facts.some(fact => fact.kind === 'run/failed'), 'a delegated Run failed before its producer chain completed')
+    assert(Date.now() < deadline, 'both delegated tasks did not verify before the deadline')
+    await sleep(100)
+    facts = await controlFacts(persistence)
+    assertPlannedTasks(facts, started.subject)
+  }
+  assert(!facts.some(fact => fact.kind === 'run/submitted' && fact.subject === started.subject),
+    'the parent submitted before its independent final acceptance turn')
+  const holder = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === started.subject).payload.agentId
+  const sessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === holder).payload.sessionId
+  const parentTools = toolFacts(await readLog(persistence, sessionId))
+  const decomposition = parentTools.results.find(result => result.name === 'singularity_decompose_task' && result.value.taskId === started.subject)
+  assert(decomposition !== undefined, 'the native root transcript contains no successful decomposition result')
+  const delegated = []
+  for (const child of children) {
+    const owner = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === child.taskId).payload.agentId
+    const childSessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === owner).payload.sessionId
+    const run = facts.find(fact => fact.kind === 'run/started' && fact.subject === child.taskId)
+    assert(run !== undefined, 'a planned task has no actual Run')
+    delegated.push({ taskId: child.taskId, runId: run.payload.runId, sessionId: childSessionId,
+      ...await provenance(persistence, child.taskId, run.payload.runId, childSessionId, domainDir) })
+  }
+  assert.equal(new Set([sessionId, ...delegated.map(child => child.sessionId)]).size, 3,
+    'the parent and both child tasks did not run in distinct native sessions')
+  await send(page, 'Both delegated Tasks verified. Independently submit a Node ES module for the existing parent Task ' +
+    started.subject + ' using singularity_submit_program. It runs as node program.mjs <input path>; import node:fs and ' +
+    'print only the ASCII letter count of its protected source. Then call singularity_task_status for its receipt. Do not propose or decompose again.')
+  await waitForTools(page, TOOLS, G2_TIMEOUT_MS)
+  await settle(page, G2_TIMEOUT_MS)
+  const parent = await provenance(persistence, started.subject, started.payload.runId, sessionId, domainDir)
+  const lastChildCutoff = Math.max(...delegated.map(child => child.receipt.cutoff))
+  assert(parent.provenance.submittedSeq >= lastChildCutoff, 'the parent receipt preceded delegated acceptance')
+  assert(parent.receipt.criteria.every(criterion => criterion.verifierRef === 'letters'), 'child criteria replaced the parent independent verifier')
+  assert.notEqual(parent.receipt.source.digest, delegated[1].receipt.source.digest)
+  return { taskId: started.subject, runId: started.payload.runId, sessionId,
+    plan: { callId: decomposition.callId, seq: plan.seq, children: plan.payload.children }, delegated, ...parent }
+}
+
+const panelState = page => page.evaluate(() => {
+  const panel = document.querySelector('[data-panel="singularity-tasks"]')
+  const text = marker => panel.querySelector(marker)?.textContent.trim() ?? null
+  return { reads: Number(panel.getAttribute('data-reads')), controlId: text('[data-control]'), cutoff: text('[data-cutoff]'),
+    error: text('[data-error]'), refresh: panel.querySelector('[data-refresh]') !== null,
+    tasks: [...panel.querySelectorAll('[data-task]')].map(task => ({ taskId: task.getAttribute('data-task'), phase: task.getAttribute('data-phase'),
+      runs: [...task.querySelectorAll('[data-run]')].map(run => ({ runId: run.getAttribute('data-run'), status: run.getAttribute('data-status') })) })),
+    plans: [...panel.querySelectorAll('[data-plan]')].map(plan => ({ parentTaskId: plan.getAttribute('data-plan'), complete: plan.getAttribute('data-complete'),
+      children: [...plan.querySelectorAll('[data-child]')].map(child => ({ taskId: child.getAttribute('data-child'), status: child.getAttribute('data-status') })),
+      criteria: [...plan.querySelectorAll('[data-criterion]')].map(criterion => ({ criterionId: criterion.getAttribute('data-criterion'),
+        satisfiedBy: criterion.getAttribute('data-satisfied-by') })) })) }
+})
+async function landedPanel(page, reads = 0) {
+  await page.waitForFunction(previous => Number(document.querySelector('[data-panel="singularity-tasks"]')?.getAttribute('data-reads')) > previous,
+    reads, { timeout: 30_000 })
+  return await panelState(page)
+}
+function assertPanel(state, snapshot) {
+  assert.equal(state.error, null)
+  assert.equal(state.refresh, true)
+  assert.equal(state.controlId, snapshot.controlId)
+  assert.equal(state.cutoff, String(snapshot.cutoff))
+  assert.deepEqual(state.tasks, snapshot.tasks.map(task => ({ taskId: task.taskId, phase: task.phase,
+    runs: task.runs.map(run => ({ runId: run.runId, status: run.status })) })))
+  assert.deepEqual(state.plans, snapshot.plans.map(plan => ({ parentTaskId: plan.parentTaskId, complete: String(plan.complete),
+    children: plan.children.map(child => ({ taskId: child.taskId, status: child.status })),
+    criteria: plan.criteria.map(criterion => ({ criterionId: criterion.criterionId, satisfiedBy: criterion.satisfiedBy ?? '' })) })))
+}
+async function panelEvidence(persistence, page, origin, domainDir) {
+  const bare = await fetch(origin + '/singularity/tasks', { redirect: 'manual' })
+  assert([401, 403].includes(bare.status), 'the task read route served a request without the browser cookie')
+  const served = await page.evaluate(async () => {
+    const read = await fetch('/singularity/tasks', { headers: { accept: 'application/json' } })
+    const posted = await fetch('/singularity/tasks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    return { status: read.status, type: read.headers.get('content-type'), body: await read.json(),
+      postStatus: posted.status, allow: posted.headers.get('allow') }
+  })
+  assert.equal(served.status, 200)
+  assert.equal(served.type.split(';', 1)[0], 'application/json')
+  assert.equal(served.postStatus, 405)
+  assert.equal(served.allow, 'GET')
+  const facts = await controlFacts(persistence)
+  const core = await coreRead(facts, domainDir, served.body.cutoff)
+  assert.deepEqual(served.body, core.snapshot, 'the route and core disagree at the same committed cut')
+  assert.equal(facts.length, served.body.cutoff)
+  const response = await page.goto(origin + '/singularity/panel/', { waitUntil: 'domcontentloaded' })
+  assert(response.ok(), 'the panel page did not load')
+  const opened = await landedPanel(page)
+  assertPanel(opened, served.body)
+  assert.equal((await controlFacts(persistence)).length, facts.length, 'opening the panel wrote control facts')
+  await page.locator('[data-refresh]').click()
+  const refreshed = await landedPanel(page, opened.reads)
+  assertPanel(refreshed, served.body)
+  assert.equal((await controlFacts(persistence)).length, facts.length, 'refreshing the panel wrote control facts')
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  const reloaded = await landedPanel(page)
+  assertPanel(reloaded, served.body)
+  assert.equal((await controlFacts(persistence)).length, facts.length, 'reloading the panel executed or wrote work')
+  return { unauthenticatedStatus: bare.status, routeStatus: served.status, postStatus: served.postStatus, allow: served.allow,
+    cutoff: served.body.cutoff, snapshotDigest: digestOf(served.body), opened, refreshed, reloaded }
 }
 
 async function runProbe(home, context, screenshot, stage, extra) {
@@ -282,9 +503,22 @@ async function runProbe(home, context, screenshot, stage, extra) {
   let server = await boot(port, extra, home)
   const medium = await openPersistence(join(home, 'sessions'), 'zstd')
   let before
+  let page
   try {
-    const page = await openApp(context, server.url)
+    page = await openApp(context, server.url)
     const dismissedFirstRun = await prepare(page, home)
+    if (stage === 'decompose' || stage === 'panel') {
+      const domainDir = join(ROOT, 'deployment/domain/letters')
+      const result = await decompositionEvidence(medium.persistence, page, domainDir)
+      const panel = stage === 'panel' ? await panelEvidence(medium.persistence, page, new URL(server.url).origin, domainDir) : null
+      await mkdir(dirname(screenshot), { recursive: true })
+      await page.screenshot({ path: screenshot, fullPage: true })
+      const evidence = { leg: stage, host: server.command, hostPid: server.child.pid, origin: new URL(server.url).origin,
+        chromium: context.browser().version(), preset: PRESET_NAME, dismissedFirstRun, screenshot, ...result, panel }
+      process.stdout.write(JSON.stringify(evidence, null, 2) + '\n')
+      process.stdout.write(stage === 'panel' ? 'panel-probe: OK\n' : 'subtask-probe: OK\n')
+      return evidence
+    }
     if (stage === 'aborted') {
       await send(page, PROPOSE_PROMPT)
       await waitForTools(page, ['singularity_propose_task'])
@@ -395,6 +629,10 @@ async function runProbe(home, context, screenshot, stage, extra) {
     process.stdout.write(JSON.stringify(evidence, null, 2) + '\n')
     return evidence
   } catch (error) {
+    if (page !== undefined && !page.isClosed()) {
+      await mkdir(dirname(screenshot), { recursive: true })
+      await page.screenshot({ path: screenshot, fullPage: true })
+    }
     const facts = await controlFacts(medium.persistence)
     const sessions = await medium.persistence.list()
     const failures = []
@@ -408,7 +646,7 @@ async function runProbe(home, context, screenshot, stage, extra) {
         calls: tool.calls.map(event => ({ seq: event.seq, turn: event.data.turn, name: event.data.name, callId: event.data.callId })),
         results: tool.results })
     }
-    process.stdout.write(JSON.stringify({ leg: stage ?? 'live', failure: diagnosticOf(error), crash: before ?? null, sessions: failures,
+    process.stdout.write(JSON.stringify({ leg: stage ?? 'live', failure: diagnosticOf(error), screenshot, crash: before ?? null, sessions: failures,
       control: facts.map(fact => ({ seq: fact.seq, kind: fact.kind, subject: fact.subject, payload: fact.payload })) }, null, 2) + '\n')
     throw error
   } finally {
@@ -450,8 +688,10 @@ async function isolatedHome(stage) {
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  assert(['--recovery', '--submitted', '--aborted'].filter(flag => process.argv.includes(flag)).length <= 1, 'select one lifecycle boundary')
-  const stage = process.argv.includes('--aborted') ? 'aborted' : process.argv.includes('--submitted') ? 'submitted' : process.argv.includes('--recovery') ? 'working' : undefined
+  const modes = new Map([['--recovery', 'working'], ['--submitted', 'submitted'], ['--aborted', 'aborted'], ['--decompose', 'decompose'], ['--panel', 'panel']])
+  const selected = [...modes].filter(([flag]) => process.argv.includes(flag))
+  assert(selected.length <= 1, 'select one browser evidence mode')
+  const stage = selected[0]?.[1]
   const screenshotIndex = process.argv.indexOf('--screenshot')
   assert(screenshotIndex === -1 || process.argv[screenshotIndex + 1] !== undefined, '--screenshot requires a path')
   const screenshot = screenshotIndex === -1 ? join(tmpdir(), 'singularity-browser-' + (stage ?? 'live') + '.png') : process.argv[screenshotIndex + 1]

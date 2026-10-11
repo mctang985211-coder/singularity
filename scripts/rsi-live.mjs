@@ -24,7 +24,7 @@
  *   3. the criterion's verifier — a real program the criterion pins by content digest — is **spawned**
  *      through the production verdict path to judge that artifact, reads the bytes on disk, and exits
  *      with its verdict;
- *   4. the verdict is recorded **once**, in `task@5`, as the evidence fact it is;
+ *   4. the verdict is recorded **once**, as a Task evidence fact;
  *   5. the measurement records the numbers through its own command boundary and checks the hard
  *      constraint, **citing that verdict's digest** rather than recording a second judgment;
  *   6. the round pools the candidate against one incumbent, elects it, the release path drafts it, the
@@ -84,6 +84,7 @@ const CONDITIONS = 'deterministic'
 const INPUT_NAME = 'in/input.txt'
 const ADAPTER = join(new URL('.', import.meta.url).pathname, 'verifier-command.mjs')
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+const TEMPLATE = { id: 'rsi-live-probe', digest: sha256(await readFile(new URL(import.meta.url))) }
 const shellLine = argv => argv.map(entry => JSON.stringify(String(entry))).join(' ')
 
 /** The input the whole campaign is about: letters, digits, spaces, punctuation and newlines. */
@@ -367,7 +368,8 @@ async function main() {
     // the order the campaign actually works in.
     const contractOf = () => ({
       goal: 'report the number of letters in the input',
-      inputs: [INPUT_NAME],
+      template: TEMPLATE,
+      inputs: [{ name: INPUT_NAME, source: { kind: 'protected', ref: INPUT_NAME, digest: INPUTS[0].digest } }],
       criteria: [{ criterionId: 'counted', statement: metric.measured.statement, verifierRef: PRODUCER, verifierVersion: '1', implementationDigest: verifierDigest }],
     })
     for (const [index, fact] of [
@@ -744,8 +746,8 @@ async function main() {
     check('the campaign ran inside a plan: two delegated attempts, the second depending on the first',
       tree !== undefined && tree.children.map(child => child.taskId).join(',') === `${ATTEMPT1},${ATTEMPT2}` &&
       tree.children[1].dependsOn.join(',') === ATTEMPT1 && tree.children[1].runsUsed === 1)
-    check('the root\'s criterion was satisfied by the first attempt\'s verified run, credited to the sub-task',
-      tree?.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy === ATTEMPT1,
+    check('the first attempt supports the root criterion without replacing its independent verdict',
+      tree?.criteria.find(entry => entry.criterionId === 'counted')?.supportedBy.includes(ATTEMPT1) && tree?.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy === null,
       String(tree?.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy))
     // The receipt is derived twice from the committed prefix — once from the prefix that ends at the
     // settlement (round two's facts are not in it) and once from the whole log — and both derivations

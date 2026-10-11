@@ -61,7 +61,8 @@ export function taskRegistry(): ProtocolRegistry {
 export function contract(): TaskContract {
   return {
     goal: 'implement a word counter',
-    inputs: ['fixture/words.txt'],
+    template: { id: 'word-counter', digest: '1'.repeat(64) },
+    inputs: [{ name: 'fixture/words.txt', source: { kind: 'protected', ref: 'words', digest: 'f'.repeat(64) } }],
     criteria: [
       {
         criterionId: 'correctness',

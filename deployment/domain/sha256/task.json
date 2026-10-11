@@ -1,21 +1,33 @@
 {
+  "rootTemplate": "sha256-schedule",
   "inputs": [
     {
-      "path": "tb/tb_sha256_w_mem_selfcheck.v",
+      "ref": "testbench",
       "from": "tb/tb_sha256_w_mem_selfcheck.v"
     }
   ],
-  "workspace": {
-    "submission": "source",
-    "file": "rtl/sha256_w_mem.v",
-    "artifact": "rtl/sha256_w_mem.v",
-    "initial": "seed/sha256_w_mem.v"
-  },
-  "criteria": [
+  "templates": [
     {
-      "criterionId": "w-schedule",
-      "statement": "the edited module produces the message schedule every published NIST vector requires, as the protected self-checking testbench compares it round by round",
-      "verifier": "functional"
+      "id": "sha256-schedule",
+      "goal": "implement the SHA256 message schedule under the protected NIST selfcheck",
+      "input": {
+        "name": "tb/tb_sha256_w_mem_selfcheck.v",
+        "source": {
+          "kind": "protected",
+          "ref": "testbench"
+        }
+      },
+      "workspace": {
+        "submission": "source",
+        "file": "rtl/sha256_w_mem.v",
+        "artifact": "rtl/sha256_w_mem.v",
+        "initial": "seed/sha256_w_mem.v"
+      },
+      "criterion": {
+        "criterionId": "w-schedule",
+        "statement": "the edited module produces the message schedule every published NIST vector requires, as the protected self-checking testbench compares it round by round",
+        "verifier": "functional"
+      }
     }
   ],
   "verifiers": [
@@ -23,74 +35,57 @@
       "ref": "functional",
       "version": "1",
       "program": "functional.mjs",
-      "args": ["{artifact}", "{input}"],
+      "args": [
+        "{artifact}",
+        "{input}"
+      ],
       "selftest": [
         {
           "name": "accepts the unmodified upstream module",
           "expected": "pass",
           "artifact": "seed/sha256_w_mem.v",
-          "argv": ["seed/sha256_w_mem.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+          "argv": [
+            "seed/sha256_w_mem.v",
+            "tb/tb_sha256_w_mem_selfcheck.v"
+          ]
         },
         {
           "name": "rejects a module whose schedule is wrong in one round",
           "expected": "fail",
           "artifact": "samples/fail-w_mem.v",
-          "argv": ["samples/fail-w_mem.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+          "argv": [
+            "samples/fail-w_mem.v",
+            "tb/tb_sha256_w_mem_selfcheck.v"
+          ]
         },
         {
           "name": "rejects a wrong module that also prints the pass line itself",
           "expected": "fail",
           "artifact": "samples/fail-printing-cheat.v",
-          "argv": ["samples/fail-printing-cheat.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+          "argv": [
+            "samples/fail-printing-cheat.v",
+            "tb/tb_sha256_w_mem_selfcheck.v"
+          ]
         },
         {
           "name": "rejects a module that ends the simulation early, which exits zero and never compares a word",
           "expected": "fail",
           "artifact": "samples/fail-early-finish.v",
-          "argv": ["samples/fail-early-finish.v", "tb/tb_sha256_w_mem_selfcheck.v"]
+          "argv": [
+            "samples/fail-early-finish.v",
+            "tb/tb_sha256_w_mem_selfcheck.v"
+          ]
         },
         {
           "name": "rejects a module that prints the pass line and ends the simulation in the same block, which exits zero with the line on stdout and nothing compared",
           "expected": "fail",
           "artifact": "samples/fail-print-and-finish.v",
-          "argv": ["samples/fail-print-and-finish.v", "tb/tb_sha256_w_mem_selfcheck.v"]
-        }
-      ]
-    },
-    {
-      "ref": "area",
-      "version": "1",
-      "program": "area.mjs",
-      "args": ["{artifact}"],
-      "selftest": [
-        {
-          "name": "measures the unmodified upstream module",
-          "expected": "pass",
-          "artifact": "seed/sha256_w_mem.v",
-          "argv": ["seed/sha256_w_mem.v"]
-        },
-        {
-          "name": "measures a design whose logic moved into a child module, because the hierarchy total does not depend on the partition",
-          "expected": "pass",
-          "artifact": "samples/pass-partitioned.v",
-          "argv": ["samples/pass-partitioned.v"]
-        },
-        {
-          "name": "produces no number for a file that is not the graded module",
-          "expected": "fail",
-          "artifact": "samples/fail-no-module.v",
-          "argv": ["samples/fail-no-module.v"]
+          "argv": [
+            "samples/fail-print-and-finish.v",
+            "tb/tb_sha256_w_mem_selfcheck.v"
+          ]
         }
       ]
     }
-  ],
-  "metric": {
-    "unit": "um^2",
-    "direction": "lower",
-    "measured": {
-      "criterionId": "area",
-      "statement": "the synthesized chip area of the graded module and everything it instantiates, under one pinned yosys invocation and one pinned liberty",
-      "verifier": "area"
-    }
-  }
+  ]
 }

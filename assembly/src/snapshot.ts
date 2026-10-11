@@ -1,13 +1,3 @@
-/**
- * One committed cut, read-only.
- *
- * The panel, a probe and any future reader take this shape, so the tools and the UI cannot disagree:
- * they are not two projections of the same facts, they are one. Nothing here writes, which is what lets
- * a browser poll it.
- *
- * @module @dangosys/dsh-singularity-next/snapshot
- */
-
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { projectTree } from '../../src/task/tree.ts'
 import { projectTask } from '../../src/task/view.ts'
@@ -39,13 +29,6 @@ export interface ControlSnapshot {
   }[]
 }
 
-/**
- * One committed cut, projected once.
- *
- * The cutoff is the number of committed facts, taken from the store rather than from a caller: a
- * reader-supplied cutoff would let two readers disagree about which log they are describing, and the
- * whole point of one projection is that they cannot.
- */
 export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot> {
   const committed = apparatus.store.load()
   const tasks: ControlSnapshot['tasks'][number][] = []
@@ -59,14 +42,10 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
       runs: view.runs.map(run => ({
         runId: run.runId,
         status: run.status,
-        // The criterion's own verdict detail, or the failure's own reason, or nothing: a reader is told
-        // what was recorded, and a run that recorded neither is not given an invented sentence.
-        detail: run.verdicts.find(entry => entry.criterionId === apparatus.domain.criterion.criterionId)?.detail ?? run.failureReason,
+        detail: run.failureReason ?? run.verdicts.find(entry => entry.criterionId === state.contract!.criteria[0]!.criterionId)?.detail ?? null,
       })),
     })
   }
-  // A task with no state yet is not a task a reader can be told about: `task/missing` is what the
-  // projection says about the plan's children, not a row here.
   const plans = projectTree(committed.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)).map(view => ({
     parentTaskId: view.parentTaskId,
     complete: view.complete,

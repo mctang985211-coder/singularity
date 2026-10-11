@@ -31,6 +31,7 @@ const CONTROL = 'recovery'
 const VERIFIER = 'command'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+const TEMPLATE = { id: 'recovery-probe', digest: sha256(await readFile(new URL(import.meta.url))) }
 const shellQuote = value => `'${String(value).replaceAll("'", `'\\''`)}'`
 const shellLine = argv => argv.map(shellQuote).join(' ')
 const line = value => console.log(JSON.stringify(value))
@@ -124,7 +125,8 @@ async function bootstrap({ at, store, commands, programDigest }) {
     payload: { revisionId: REVISION, manifest: { skills: ['count-words'] } },
   })
 
-  const contract = { goal: 'count the words', inputs: ['words.txt'], criteria: [criterion(programDigest)] }
+  const inputDigest = sha256(await readFile(at.input))
+  const contract = { goal: 'count the words', template: TEMPLATE, inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }], criteria: [criterion(programDigest)] }
   await commands.admit({ commandId: 'admit-parent', taskId: PARENT_TASK, contract: { ...contract, goal: 'report the count' } })
   await commands.admit({ commandId: 'admit-child', taskId: CHILD, contract })
   await commands.assign({ commandId: 'assign-parent', taskId: PARENT_TASK, agentId: AGENT })
@@ -138,7 +140,6 @@ async function bootstrap({ at, store, commands, programDigest }) {
   const digest = store.load().stateOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT).revisions[REVISION].contentDigest
   const pin = { environmentId: ENVIRONMENT, revisionId: REVISION, digest }
   await commands.startRun({ commandId: 'start-run', taskId: CHILD, runId: RUN, revision: pin })
-  const inputDigest = sha256(await readFile(at.input))
   await commands.openBubble({
     commandId: 'open-bubble',
     taskId: CHILD,
@@ -341,7 +342,7 @@ async function probe() {
 
       // And the plan agrees, from the facts alone.
       const tree = projectTree(foldSubjects(live.registry, live.store.load().entries(), TASK_PROTOCOL, TASK_VERSION))[0]
-      check('the plan reports the sub-task verified and the criterion accepted', tree?.children[0]?.status === 'verified' && tree?.criteria[0]?.satisfiedBy === CHILD)
+      check('the plan reports the child verified while the parent awaits independent acceptance', tree?.children[0]?.status === 'verified' && tree?.criteria[0]?.supportedBy.includes(CHILD) && tree?.criteria[0]?.satisfiedBy === null)
 
       await live.store.close()
       await live.live.context.fiber.dispose()

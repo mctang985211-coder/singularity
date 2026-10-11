@@ -222,7 +222,7 @@ describe('the control store over a real session', () => {
       {
         id: 'unknown-version',
         code: 'version-mismatch',
-        data: { protocol: CONTROL_PROTOCOL, version: CONTROL_VERSION, kind: TASK_KINDS.admitted, payload: plantedEnvelope(TASK_KINDS.admitted, 7) },
+        data: { protocol: CONTROL_PROTOCOL, version: CONTROL_VERSION, kind: TASK_KINDS.admitted, payload: plantedEnvelope(TASK_KINDS.admitted, TASK_VERSION + 1) },
       },
       {
         id: 'unknown-field',

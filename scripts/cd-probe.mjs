@@ -135,6 +135,7 @@ function check(label, condition, detail) {
 }
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+const TEMPLATE = { id: 'cd-probe', digest: sha256(await readFile(new URL(import.meta.url))) }
 const close = (left, right) => Math.abs(left - right) < 1e-12
 
 /** One process for real, without letting a non-zero exit throw. */
@@ -379,7 +380,8 @@ async function main() {
     const roundStateOf = roundId => store.load().stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, roundId)
     const decisionOf = roundId => roundStateOf(roundId)?.decision
     const pinOf = revisionId => ({ environmentId: ENVIRONMENT, revisionId, digest: environmentOf().revisions[revisionId].contentDigest })
-    const bubbleOf = runId => store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, TASK).runs[runId]?.bubble
+    const taskOfRun = runId => TASK + ':' + runId
+    const bubbleOf = runId => store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, taskOfRun(runId)).runs[runId]?.bubble
     const contextOf = evaluationId => contextDigestOf(bubbleOf(measureStateOf(evaluationId).run.runId))
     /** The bubble members two runs differ in: exactly what `contextDigestOf` is taken over. */
     const differingMembers = (left, right) => ['model', 'tools', 'conditions', 'inputs'].filter(key => digestOf(left[key]) !== digestOf(right[key]))
@@ -438,32 +440,23 @@ async function main() {
       manifestDigestsHold.push(environmentOf().revisions[revisionId].manifest.method.digest === sha256(await readFile(methodPathOf(revisionId))))
     check('every revision declares, and the log holds, the digest of the method bytes on disk', manifestDigestsHold.every(Boolean))
 
-    // The task every measurement run belongs to. Each *evaluation* then gets a run of its own with
-    // its own bubble, so two candidates are two executions rather than one shared one — which is
-    // exactly what a round now has to be able to compare, and what the isolation manifest declares.
-    for (const [index, fact] of [
-      {
-        kind: TASK_KINDS.admitted,
-        payload: {
-          contract: {
-            goal: 'measure candidate selections against a reference list',
-            inputs: [INPUT_NAME],
-            criteria: [{ criterionId: 'quality', statement: metric.measured.statement, verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest }],
-          },
-        },
-      },
-      { kind: TASK_KINDS.assigned, payload: { agentId: AGENT, agentIdentity: subjects[SCHEDULER_ROLE] } },
-    ].entries())
-      await store.emit({ commandId: nextId(`fixture-${index}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: TASK, ...fact })
-
     /** Open one run pinned to the revision under test, and declare the context it executes in. */
     const beginRun = async (runId, revisionId, context) => {
+      const taskId = taskOfRun(runId)
+      await store.emit({ commandId: nextId(`admit-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION,
+        kind: TASK_KINDS.admitted, subject: taskId, payload: { contract: {
+          goal: 'measure candidate selections against a reference list', template: TEMPLATE,
+          inputs: [{ name: INPUT_NAME, source: { kind: 'protected', ref: INPUT_NAME, digest: INPUTS[0].digest } }],
+          criteria: [{ criterionId: 'quality', statement: metric.measured.statement, verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest }],
+        } } })
+      await store.emit({ commandId: nextId(`assign-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION,
+        kind: TASK_KINDS.assigned, subject: taskId, payload: { agentId: AGENT, agentIdentity: subjects[SCHEDULER_ROLE] } })
       await store.emit({
         commandId: nextId(`start-${runId}`),
         protocol: TASK_PROTOCOL,
         version: TASK_VERSION,
         kind: TASK_KINDS.runStarted,
-        subject: TASK,
+        subject: taskId,
         payload: { runId, revision: pinOf(revisionId) },
       })
       await store.emit({
@@ -471,7 +464,7 @@ async function main() {
         protocol: TASK_PROTOCOL,
         version: TASK_VERSION,
         kind: TASK_KINDS.bubbleOpened,
-        subject: TASK,
+        subject: taskId,
         payload: { runId, inputs: INPUTS, workspace: { kind: 'dir', ref: workspace }, ...context },
       })
     }
@@ -571,7 +564,7 @@ async function main() {
         evaluationId,
         baseline: pinOf(options.baseline ?? revisionId),
         candidate: pinOf(revisionId),
-        run: { taskId: TASK, runId },
+        run: { taskId: taskOfRun(runId), runId },
         metric,
         weights: WEIGHTS,
         trials: 2,
@@ -981,7 +974,7 @@ async function main() {
     check('replaying round two reproduces the same selection', digestOf({ winner: replayedTwo.winner, outcomes: replayedTwo.outcomes }) === decisions['round-2'])
 
     answerer()
-    const runStates = () => Object.values(store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, TASK).runs)
+    const runStates = () => [...store.load().statesOf(TASK_PROTOCOL, TASK_VERSION).values()].flatMap(task => Object.values(task.runs))
     console.log('')
     console.log(`  facts ${facts}; checks ${checks}; refusals ${refusals}`)
     console.log(`  trials: real measurement runs ${counts.trials} (${missesRecorded} produced no number), selftest runs ${counts.samples}, artifacts hashed after the run ${artifactsHashedAfterTheRun}, constraint runs ${counts.bounds}, selector runs ${counts.selectors + counts.rebuilt.length}`)

@@ -1,20 +1,74 @@
 {
+  "rootTemplate": "count-source",
   "inputs": [
     {
-      "path": "in/source.txt",
+      "ref": "letters-original",
       "from": "samples/source.txt"
     }
   ],
-  "workspace": {
-    "submission": "program",
-    "file": "program.mjs",
-    "artifact": "report.txt"
-  },
-  "criteria": [
+  "templates": [
     {
-      "criterionId": "letters",
-      "statement": "the report is the number of ASCII letters in the input",
-      "verifier": "letters"
+      "id": "count-source",
+      "goal": "count the ASCII letters in the protected source",
+      "input": {
+        "name": "in/source.txt",
+        "source": {
+          "kind": "protected",
+          "ref": "letters-original"
+        }
+      },
+      "workspace": {
+        "submission": "program",
+        "file": "program.mjs",
+        "artifact": "report.txt"
+      },
+      "criterion": {
+        "criterionId": "letters",
+        "statement": "the report is the number of ASCII letters in the input",
+        "verifier": "letters"
+      }
+    },
+    {
+      "id": "extract-letters",
+      "goal": "extract every ASCII letter in source order, with no other bytes",
+      "input": {
+        "name": "in/source.txt",
+        "source": {
+          "kind": "protected",
+          "ref": "letters-original"
+        }
+      },
+      "workspace": {
+        "submission": "program",
+        "file": "extract.mjs",
+        "artifact": "letters.txt"
+      },
+      "criterion": {
+        "criterionId": "extracted",
+        "statement": "the artifact contains exactly the source ASCII letters in their original order, without a trailing newline",
+        "verifier": "extract-letters"
+      }
+    },
+    {
+      "id": "count-letters",
+      "goal": "count the letters in the verified extraction",
+      "input": {
+        "name": "in/letters.txt",
+        "source": {
+          "kind": "artifact",
+          "template": "extract-letters"
+        }
+      },
+      "workspace": {
+        "submission": "program",
+        "file": "count.mjs",
+        "artifact": "report.txt"
+      },
+      "criterion": {
+        "criterionId": "counted",
+        "statement": "the report is the decimal length of an input containing only ASCII letters",
+        "verifier": "count-letters"
+      }
     }
   ],
   "verifiers": [
@@ -43,6 +97,145 @@
           "argv": [
             "samples/fail-report.txt",
             "samples/source.txt"
+          ]
+        }
+      ]
+    },
+    {
+      "ref": "extract-letters",
+      "version": "1",
+      "program": "extract.mjs",
+      "args": [
+        "{artifact}",
+        "{input}"
+      ],
+      "selftest": [
+        {
+          "name": "accepts the exact extraction",
+          "expected": "pass",
+          "artifact": "samples/pass-extracted.txt",
+          "argv": [
+            "samples/pass-extracted.txt",
+            "samples/source.txt"
+          ]
+        },
+        {
+          "name": "rejects changed letter order",
+          "expected": "fail",
+          "artifact": "samples/fail-extracted.txt",
+          "argv": [
+            "samples/fail-extracted.txt",
+            "samples/source.txt"
+          ]
+        },
+        {
+          "name": "rejects a trailing newline",
+          "expected": "fail",
+          "artifact": "samples/fail-extracted-newline.txt",
+          "argv": [
+            "samples/fail-extracted-newline.txt",
+            "samples/source.txt"
+          ]
+        },
+        {
+          "name": "rejects punctuation in an extraction",
+          "expected": "fail",
+          "artifact": "samples/fail-extracted-punctuation.txt",
+          "argv": [
+            "samples/fail-extracted-punctuation.txt",
+            "samples/source.txt"
+          ]
+        },
+        {
+          "name": "accepts an empty extraction",
+          "expected": "pass",
+          "artifact": "samples/empty.txt",
+          "argv": [
+            "samples/empty.txt",
+            "samples/empty.txt"
+          ]
+        }
+      ]
+    },
+    {
+      "ref": "count-letters",
+      "version": "1",
+      "program": "count-extraction.mjs",
+      "args": [
+        "{artifact}",
+        "{input}"
+      ],
+      "selftest": [
+        {
+          "name": "accepts the true extracted letter count",
+          "expected": "pass",
+          "artifact": "samples/pass-report.txt",
+          "argv": [
+            "samples/pass-report.txt",
+            "samples/pass-extracted.txt"
+          ]
+        },
+        {
+          "name": "rejects a wrong extracted letter count",
+          "expected": "fail",
+          "artifact": "samples/fail-report.txt",
+          "argv": [
+            "samples/fail-report.txt",
+            "samples/pass-extracted.txt"
+          ]
+        },
+        {
+          "name": "rejects a non-ASCII input",
+          "expected": "fail",
+          "artifact": "samples/fail-nonascii-report.txt",
+          "argv": [
+            "samples/fail-nonascii-report.txt",
+            "samples/fail-nonascii-input.txt"
+          ]
+        },
+        {
+          "name": "rejects a nondecimal report",
+          "expected": "fail",
+          "artifact": "samples/fail-nondecimal-report.txt",
+          "argv": [
+            "samples/fail-nondecimal-report.txt",
+            "samples/pass-extracted.txt"
+          ]
+        },
+        {
+          "name": "accepts a zero letter count",
+          "expected": "pass",
+          "artifact": "samples/pass-empty-report.txt",
+          "argv": [
+            "samples/pass-empty-report.txt",
+            "samples/empty.txt"
+          ]
+        },
+        {
+          "name": "rejects a newline in its ASCII input",
+          "expected": "fail",
+          "artifact": "samples/fail-newline-input-report.txt",
+          "argv": [
+            "samples/fail-newline-input-report.txt",
+            "samples/fail-extracted-newline.txt"
+          ]
+        },
+        {
+          "name": "rejects more than one trailing report newline",
+          "expected": "fail",
+          "artifact": "samples/fail-multiline-report.txt",
+          "argv": [
+            "samples/fail-multiline-report.txt",
+            "samples/pass-extracted.txt"
+          ]
+        },
+        {
+          "name": "accepts a decimal report with no trailing newline",
+          "expected": "pass",
+          "artifact": "samples/pass-report-no-newline.txt",
+          "argv": [
+            "samples/pass-report-no-newline.txt",
+            "samples/pass-extracted.txt"
           ]
         }
       ]

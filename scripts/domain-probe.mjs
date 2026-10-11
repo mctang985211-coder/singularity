@@ -374,7 +374,7 @@ async function main() {
         version: TASK_VERSION,
         kind: 'task/admitted',
         subject: task.taskId,
-        payload: { contract: { goal: task.goal, inputs: task.inputs, criteria: admitted } },
+        payload: { contract: { goal: task.goal, template: { id: task.taskId, digest: sha256(JSON.stringify(task)) }, inputs: inputsOf[task.taskId].map(input => ({ name: input.name, source: { kind: 'protected', ref: input.name, digest: input.digest } })), criteria: admitted } },
       })
       await store.emit({
         commandId: nextId(`assign-${task.taskId}`),
@@ -411,12 +411,17 @@ async function main() {
     })
 
     const beginRun = async (taskId, runId, side) => {
+      const measuredTaskId = taskId + ':' + runId
+      await store.emit({ commandId: nextId(`admit-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION,
+        kind: 'task/admitted', subject: measuredTaskId, payload: { contract: taskOf(taskId).contract } })
+      await store.emit({ commandId: nextId(`assign-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION,
+        kind: 'task/assigned', subject: measuredTaskId, payload: { agentId: AGENT, agentIdentity: subjects[SCHEDULER_ROLE] } })
       await store.emit({
         commandId: nextId(`start-${runId}`),
         protocol: TASK_PROTOCOL,
         version: TASK_VERSION,
         kind: 'run/started',
-        subject: taskId,
+        subject: measuredTaskId,
         payload: { runId, revision: pinOf(side) },
       })
       await store.emit({
@@ -424,7 +429,7 @@ async function main() {
         protocol: TASK_PROTOCOL,
         version: TASK_VERSION,
         kind: 'bubble/opened',
-        subject: taskId,
+        subject: measuredTaskId,
         payload: { runId, workspace: { kind: 'dir', ref: workspace }, ...bubbleOfTask(taskId) },
       })
     }
@@ -481,7 +486,7 @@ async function main() {
         evaluationId: planId,
         baseline: pinOf(baselineSide),
         candidate: pinOf(side),
-        run: { taskId, runId },
+        run: { taskId: taskId + ':' + runId, runId },
         metric,
         weights: fixture.frozen.weights,
         trials: fixture.frozen.trials,
@@ -604,7 +609,7 @@ async function main() {
       }))
 
     /** One side's bubble, read back from the run the evaluation names rather than remembered here. */
-    const bubbleOf = (planId, taskId) => taskOf(taskId).runs[evaluationOf(planId).run.runId]?.bubble
+    const bubbleOf = planId => taskOf(evaluationOf(planId).run.taskId).runs[evaluationOf(planId).run.runId]?.bubble
     check('every task and side ran in a run of its own, each with the bubble it declared',
       measured.every(entry => bubbleOf(entry.planId, entry.taskId)?.runId === entry.runId) &&
         new Set(measured.map(entry => `${entry.taskId}/${entry.runId}`)).size === measured.length)

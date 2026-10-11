@@ -166,7 +166,7 @@
     },
     {
       "protocol": "task",
-      "version": 6,
+      "version": 7,
       "subject": "the task id",
       "kinds": [
         {

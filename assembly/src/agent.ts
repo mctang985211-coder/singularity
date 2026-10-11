@@ -1,13 +1,3 @@
-/**
- * The agent face: the model's whole interface, registered into the scope it is mounted in.
- *
- * Three tools — propose, submit, read — and none for admitting a contract, assigning a task, recording
- * a verdict or settling a run: a model that cannot call those cannot forge them. No schema carries a
- * caller identity, and a refusal comes back as `{ refused, detail }`.
- *
- * @module @dangosys/dsh-singularity-next/agent
- */
-
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -15,12 +5,10 @@ import { ProtocolRefusal } from '../../src/protocol/refusal.ts'
 
 export const name = 'singularity-agent'
 
-/** The host's service, the tool registry, and the prompt this face contributes to. */
 export const inject = ['singularity', 'tools', 'systemPrompt']
 
 type Answer<T> = T | { readonly refused: string; readonly detail: string }
 
-/** Run one call, turning a domain refusal into a value the model can read and act on. */
 async function attempt<T>(step: () => Promise<T>): Promise<Answer<T>> {
   try {
     return await step()
@@ -29,22 +17,21 @@ async function attempt<T>(step: () => Promise<T>): Promise<Answer<T>> {
     throw error
   }
 }
-// The canonical value is the answer's JSON text: one shape for all three tools, and a refusal and an
-// answer reach the model the same way — as the JSON of the object this package produced.
 const output = {
   schema: { type: 'string' as const },
   render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
 }
 
-const GUIDANCE = `Singularity is assembled in this session, for any task whose answer must be judged by an
-implementation rather than by you. \`singularity_propose_task\` admits a task with this deployment's
-criterion and returns its id and the workspace that holds the material it is judged on;
-\`singularity_decompose_task\` splits a task you are responsible for into sub-tasks that run in their own
-sessions, where only a verified sub-task satisfies a criterion and only an unblocked one starts;
-\`singularity_submit_program\` writes what you produced into that workspace and hands it to the
-criterion's own verifier — an independent program whose verdict is recorded as a fact.
-\`singularity_task_status\` reads the task back. The verifier's word is the only word that counts: work
-that crashes, produces nothing, or produces something plausible that is not the answer is a recorded fail.`
+const GUIDANCE = `Use singularity_propose_task to start a complete solve Run. Its response declares
+this Run's workspace, input, artifact, submission kind and the supported templates.
+For a program submission, provide a Node ES module; process.argv[2] is the input path and stdout is
+the artifact. A source submission is judged as written.
+Root agents use singularity_decompose_task to select host templates, dependencies, supports and Run budgets.
+Assigned children execute their existing Task/Run using submit/status; they cannot propose or decompose.
+Only a verified producer's sealed artifact can become a dependent Run's input. supports describes
+work toward a parent criterion; children never supply the parent's verdict. After all children verify,
+submit the parent's own result through singularity_submit_program for its independent verifier.
+Read sealed results with singularity_task_status. Execution failures cannot pass verification.`
 
 export function apply(ctx: Context): void {
   const disposers = [
@@ -64,7 +51,7 @@ export function apply(ctx: Context): void {
       defineTool({
         name: 'singularity_decompose_task',
         description:
-          'Split a task you are responsible for into sub-tasks, each worked by its own agent in its own session. Declare the whole plan in one call: every sub-task, what it depends on, which of the task\'s own criteria it supports, and how many attempts it may have. A sub-task runs the moment nothing it depends on is still pending, and only a sub-task that verifies satisfies the criterion it supports — so the plan is what decides the order of work.',
+          'Declare one complete plan using the supported templates returned by propose. Each child has its own criterion. Artifact inputs require exactly one direct dependency with the producer template. All children must verify before the parent submits its own independently judged result.',
         parameters: {
           taskId: { type: 'string', description: 'The task id the proposal returned. You must be the agent responsible for it.', required: true },
           children: {
@@ -75,13 +62,11 @@ export function apply(ctx: Context): void {
               type: 'object',
               properties: {
                 key: { type: 'string', description: 'A name for this sub-task, unique inside the plan. The sub-task id is derived from it, so the same key addresses the same sub-task on a retry.', required: true },
-                goal: { type: 'string', description: 'What this sub-task is for, in one sentence.', required: true },
+                template: { type: 'string', description: 'A supported template id from the proposal. The host fixes its goal, input source and criterion.', required: true },
                 dependsOn: { type: 'array', description: 'Keys of sub-tasks that must verify before this one may start.', required: true, items: { type: 'string' } },
-                supports: { type: 'array', description: 'Criterion ids of your own contract that this sub-task\'s verification supports.', required: true, items: { type: 'string' } },
+                supports: { type: 'array', description: 'Parent criterion ids this work supports. This does not produce a parent verdict.', required: true, items: { type: 'string' } },
                 maxRuns: { type: 'integer', description: 'How many attempts this sub-task may have. Fixed here, and nothing can raise it later.', required: true },
               },
-              // Closed on purpose: the protocol refuses a plan carrying a member it does not declare, so
-              // the schema says so here rather than letting a plausible extra key be silently dropped.
               additionalProperties: false,
             },
           },
@@ -92,9 +77,7 @@ export function apply(ctx: Context): void {
             await attempt(() =>
               ctx.singularity.forCall(exec).decompose({
                 taskId: args.taskId,
-                // Passed as planned: the key and the goal are the caller's, and the identity and the
-                // contract are assembled by the driver, which is the layer that knows this deployment.
-                children: args.children.map(child => ({ key: child.key, goal: child.goal, dependsOn: child.dependsOn, supports: child.supports, maxRuns: child.maxRuns })),
+                children: args.children.map(child => ({ key: child.key, template: child.template, dependsOn: child.dependsOn, supports: child.supports, maxRuns: child.maxRuns })),
               }),
             ),
           ),
@@ -123,7 +106,6 @@ export function apply(ctx: Context): void {
         execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).status({ taskId: args.taskId }))),
       }),
     ),
-    // The guidance goes where the host puts tool policy, through the host's own order table.
     ctx.systemPrompt.section({ name: 'singularity:policy', order: ctx.systemPrompt.getSectionOrder('TOOL_SUBAGENT'), text: GUIDANCE }),
   ]
   ctx.effect(() => () => {

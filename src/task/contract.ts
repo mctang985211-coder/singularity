@@ -1,8 +1,6 @@
 /**
  * The Task contract: what makes a task adjudicable.
  *
- * Two checks that used to be one, and the split is the point:
- *
  * - **Shape** is pure. It closes the member set, requires a goal, requires at least one criterion,
  *   and refuses a duplicate or empty criterion. A reducer may call it, because it depends on
  *   nothing outside the fact.
@@ -10,7 +8,6 @@
  *   verifier a criterion names says nothing about a fact recorded last month, so it belongs to
  *   the command that produces a new fact — never to the fold that explains an old one.
  *
- * Mixing the two is what made a legal log unreadable once a verifier was unregistered. The
  * recorded contract keeps its own content identity; the criterion's verifier ref and version are
  * part of that identity, not a lookup.
  *
@@ -35,22 +32,36 @@ export interface AcceptanceCriterion {
    * The **content digest of the implementation itself** — its code and its pinned toolchain, as
    * the deployment computed it. A ref and a version are names a deployment can re-point; a digest
    * is the only thing that makes "the implementation that judged this" checkable after the fact.
-   * The legacy system stamped a hand-written `'1'` here, so replacing an implementation while
-   * keeping its name produced an indistinguishable verdict.
    */
   readonly implementationDigest: string
 }
 
-/** What the task is for. Fixed at admission; a later contract is a different task. */
+/** The loaded task template's content identity. */
+export interface TaskTemplateRef {
+  readonly id: string
+  readonly digest: string
+}
+
+export type TaskInputSource =
+  | { readonly kind: 'protected'; readonly ref: string; readonly digest: string }
+  | { readonly kind: 'artifact'; readonly taskId: string }
+
+interface TaskInput {
+  readonly name: string
+  readonly source: TaskInputSource
+}
+
+/** Fixed at admission; a later contract is a different task. */
 export interface TaskContract {
   readonly goal: string
-  /** Inputs the work is done against, as recorded references. Explicit, never defaulted. */
-  readonly inputs: readonly string[]
+  readonly template: TaskTemplateRef
+  /** Fixed sources; an upstream artifact's bytes are bound when a Run opens its Bubble. */
+  readonly inputs: readonly TaskInput[]
   /** At least one criterion, each bound to a verifier implementation. */
   readonly criteria: readonly AcceptanceCriterion[]
 }
 
-export const CONTRACT_MEMBERS = ['goal', 'inputs', 'criteria'] as const
+export const CONTRACT_MEMBERS = ['goal', 'template', 'inputs', 'criteria'] as const
 export const CRITERION_MEMBERS = ['criterionId', 'statement', 'verifierRef', 'verifierVersion', 'implementationDigest'] as const
 
 /** A sha256 hex content digest: the only form this stack accepts as a content identity. */
@@ -94,17 +105,31 @@ function requireRecord(value: unknown, field: string): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
-/**
- * Read one criterion's closed shape. Pure: it depends on nothing but the value.
- *
- * The closed set is a **required** parameter, because the entry belongs to the kind that declares it:
- * a parse boundary that closes `judgement[]` hands `nested.judgement` over, so the declaration is what
- * closes each criterion. It used to default to `CRITERION_MEMBERS` — the declaration constant itself —
- * so a caller that dropped the argument was indistinguishable from one that named it, and the reader's
- * own set could stand in for the declaration without a check noticing. Required, every caller names
- * the set it means: a criterion inside a contract is closed by `CRITERION_MEMBERS`, and a metric's
- * `measured` member by that same set, because that member *is* a criterion's shape.
- */
+function taskInputs(raw: unknown, field: string): readonly TaskInput[] {
+  if (!Array.isArray(raw)) refuse('malformed-contract', `${field} must be an array of named input sources`)
+  const names = new Set<string>()
+  return raw.map((entry, index) => {
+    const at = `${field}[${index}]`
+    const input = requireRecord(entry, at)
+    assertClosedKeys(input, ['name', 'source'], at, 'malformed-contract')
+    const name = requireText(input['name'], `${at}.name`)
+    if (names.has(name)) refuse('malformed-contract', `${field} names input ${JSON.stringify(name)} twice`)
+    names.add(name)
+    const source = requireRecord(input['source'], `${at}.source`)
+    const kind = requireText(source['kind'], `${at}.source.kind`)
+    if (kind === 'protected') {
+      assertClosedKeys(source, ['kind', 'ref', 'digest'], `${at}.source`, 'malformed-contract')
+      return { name, source: { kind, ref: requireText(source['ref'], `${at}.source.ref`), digest: requireDigest(source['digest'], `${at}.source.digest`) } }
+    }
+    if (kind === 'artifact') {
+      assertClosedKeys(source, ['kind', 'taskId'], `${at}.source`, 'malformed-contract')
+      return { name, source: { kind, taskId: requireText(source['taskId'], `${at}.source.taskId`) } }
+    }
+    refuse('malformed-contract', `${at}.source.kind must be protected or artifact, got ${JSON.stringify(kind)}`)
+  })
+}
+
+/** Pure shape; the caller supplies the declaring kind's closed member set. */
 export function assertCriterionShape(raw: unknown, field: string, members: MemberSet): AcceptanceCriterion {
   const record = requireRecord(raw, field)
   assertClosedKeys(record, members, field, 'malformed-contract')
@@ -150,25 +175,18 @@ export function assertContractShape(raw: unknown, field: string, members: Member
 
   const goal = requireText(record['goal'], `${field}.goal`)
 
-  const rawInputs = record['inputs']
-  if (!Array.isArray(rawInputs)) refuse('malformed-contract', `${field}.inputs must be an array of recorded references`)
-  const inputs = rawInputs.map((entry, index) => requireText(entry, `${field}.inputs[${index}]`))
+  const declaredTemplate = requireRecord(record['template'], `${field}.template`)
+  assertClosedKeys(declaredTemplate, ['id', 'digest'], `${field}.template`, 'malformed-contract')
+  const template = { id: requireText(declaredTemplate['id'], `${field}.template.id`), digest: requireDigest(declaredTemplate['digest'], `${field}.template.digest`) }
+  const inputs = taskInputs(record['inputs'], `${field}.inputs`)
 
   const rawCriteria = record['criteria']
   if (!Array.isArray(rawCriteria) || rawCriteria.length === 0)
     refuse('malformed-contract', `${field}.criteria must name at least one acceptance criterion; nothing would decide the task`)
 
-  const criteria: AcceptanceCriterion[] = []
-  const seen = new Set<string>()
-  for (const [index, entry] of rawCriteria.entries()) {
-    const criterion = assertCriterionShape(entry, `${field}.criteria[${index}]`, CRITERION_MEMBERS)
-    if (seen.has(criterion.criterionId))
-      refuse('malformed-contract', `${field}.criteria declares "${criterion.criterionId}" twice; a criterion id is stable and unique`)
-    seen.add(criterion.criterionId)
-    criteria.push(criterion)
-  }
+  const criteria = criterionList(rawCriteria, `${field}.criteria`, CRITERION_MEMBERS)
 
-  return { goal, inputs, criteria }
+  return { goal, template, inputs, criteria }
 }
 
 /**

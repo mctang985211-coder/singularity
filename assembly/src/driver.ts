@@ -7,6 +7,7 @@ import { refuse } from '../../src/protocol/refusal.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import type { ReceiptView, TaskView } from '../../src/task/view.ts'
 import { callerOf, openApparatus } from './apparatus.ts'
+import type { TaskTemplate } from './template.ts'
 import type { Domain } from './domain.ts'
 import type { Admission, Execution, TurnFailureHandler } from './execution.ts'
 import { repair } from './repair.ts'
@@ -30,7 +31,7 @@ export interface AgentTaskSurface {
 }
 export interface PlannedChild {
   readonly key: string
-  readonly goal: string
+  readonly template: string
   readonly dependsOn: readonly string[]
   readonly supports: readonly string[]
   readonly maxRuns: number
@@ -42,6 +43,10 @@ export interface Proposal {
   readonly workspace: string
   readonly criterionId: string
   readonly phase: TaskView['phase']
+  readonly submission: 'program' | 'source'
+  readonly input: string
+  readonly artifact: string
+  readonly templates: readonly { readonly id: string; readonly goal: string; readonly criterionId: string; readonly input: TaskTemplate['input'] }[]
 }
 export interface Status {
   readonly phase: TaskView['phase']

@@ -69,6 +69,7 @@ function check(label, condition, detail) {
 }
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+const TEMPLATE = { id: 'measure-probe', digest: sha256(await readFile(new URL(import.meta.url))) }
 
 /** One process for real, without letting a non-zero exit throw. */
 function runProcess(file, args) {
@@ -164,7 +165,8 @@ async function main() {
         payload: {
           contract: {
             goal: 'probe the measurement path',
-            inputs: [INPUT_NAME],
+            template: TEMPLATE,
+            inputs: [{ name: INPUT_NAME, source: { kind: 'protected', ref: INPUT_NAME, digest: sha256(INPUT_BYTES) } }],
             criteria: [{ criterionId: 'counted', statement: 'the count is right', verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest }],
           },
         },

@@ -1,9 +1,9 @@
 {
-  "why": "The size of this tree, in the one place documents quote it, so the numbers people repeat are compared with the build they describe instead of drifting in prose. The drift has happened three times: docs/context.md claimed 36 files / 140 tests / 9 gates where the commit held 44 / 177 / 11, then 44 / 181 / 10 against 65 / 298 / 18, then `290 tests / 25 files; 18 gates` against the 323 / 29 / 19 the audit measured on that commit (this ledger says 21 gates because the two that check it were added after). The gate `tree-inventory` measures each count below and reports a mismatch in either direction; a count recorded here that nothing measures is a finding too, because a number nobody measures is the defect this file replaced. What each count is: `sourceFiles` is every .ts/.mts/.tsx file under src/ and tests/, which is what the two earlier prose ledgers meant by \"N .ts files\"; `specFiles` is every tests/*.spec.ts; `tests` is the number of test cases vitest *collects*, read through vitest's own `list --json` port rather than by counting `it(` in the text, which is why it counts an `it.each` expansion and a skipped case the same way vitest does; `gates` is the number of detectors this file runs, so adding one is a recorded act rather than a number in a paragraph. Deliberately not here: the two budget ratios (each ratio is computed and printed by the gate that enforces it, and a second copy here would be a number that can disagree with the one acted on), each probe's own check count (that is a self-report printed by the probe, not a fact this gate weighs), and historical measurements (a number about a past commit belongs next to that commit, not in a ledger of what is true now). The four counts are measured, never entered by hand: if this file is wrong, `node scripts/gates.mjs` says which count and by how much.",
+  "why": "Current tree measurements: sourceFiles includes .ts/.mts/.tsx under src and tests; specFiles counts root tests/*.spec.ts; tests comes from vitest list --json, including parameterized and skipped cases; gates counts active detectors. scripts/gates.mjs checks both missing and mismatched counts. Budget ratios are computed by their owners and are not duplicated here.",
   "counts": {
-    "sourceFiles": 81,
-    "specFiles": 36,
-    "tests": 498,
+    "sourceFiles": 82,
+    "specFiles": 37,
+    "tests": 600,
     "gates": 26
   }
 }
