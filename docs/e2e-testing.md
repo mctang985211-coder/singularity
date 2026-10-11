@@ -64,11 +64,20 @@ node scripts/method-browser-probe.mjs --output /tmp/singularity-method-review
 探针等待真人答复，不代点批准。无胜者或拒绝不发布。批准后新建独立原生会话，不传 Method 引用，
 验证默认加载 published head、三类资产真实消费与独立验收，再关闭自己的服务。
 `evidence.json` 记录 trials、决定、人审来源及发布后的新 Run；失败记录为 `failure.json`，均保留原始 home。
+若两轮已完成而审批尚未开始，可用 `--home` 指定原有 home，先核对完整证据，再继续原会话的发布步骤；不重跑求解。
 
 ## 证据边界
 
 W5/W9 面板完整主链已实跑通过：`/tmp/singularity-w9-panel.log`、`/tmp/singularity-w9-panel.png`。
 日志核对真实 session、依赖来源、封存附件与页面完整 receipt，成功 marker 为 `panel-probe: OK`。
+
+W6—W9 Method 工程主链已通过：`/tmp/singularity-method-review/evidence.json`，最终阶段为
+`published-head-next-run-verified`，探针 exit 0；截图为同目录的 `published-head-next-run.png`。
+两轮共十个独立原生求解会话，质量分别为 `[0,0,1,0,0]`；正确候选均被选中，相对冻结基线的 token 成本变化为 -19.39% / -6.52%。
+十次求解原始成本合计 88139 tokens；两次真人原生批准及 head 更新已核对。
+新独立会话未指定 Method，Run `run-9a75b8ead347739f` 默认消费发布的模板、Skill、Tool，并独立验收为 verified。
+本轮完整 build、64 文件 / 755 项测试、七项直接合同门禁通过；探针收口另通过 44 项相关浏览器检查。
+这些结果证明受控 letters 工程闭环；正式领域质量和成本改善尚未评测。
 
 脚本故障、模型/provider 故障和领域拒绝需按控制事实与 transcript 分辨。失败不能通过再次执行已封存程序来掩盖。
 受控恢复和领域链证明工程行为；领域质量和成本效果仍须用 W6/W7 冻结的真实任务集、口径、预算与原始 trials 验证。
