@@ -183,8 +183,8 @@ async function drafted(): Promise<{ store: ControlSessionStore; digest: string }
   await store.emit({ commandId: 'create-1', protocol: ENVIRONMENT_PROTOCOL, version: ENVIRONMENT_VERSION, kind: ENVIRONMENT_KINDS.revisionCreated, subject: ENVIRONMENT, payload: { revisionId: REVISION, manifest: MANIFEST } })
   const digest = store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT)?.revisions[REVISION]?.contentDigest
   if (digest === undefined) throw new Error('the revision was not created')
-  await createReleaseCommands({ store }).draft({ commandId: 'draft-1', revision: { environmentId: ENVIRONMENT, revisionId: REVISION, digest } })
-  return { store, digest }
+  const draft = await createReleaseCommands({ store }).draft({ commandId: 'draft-1', revision: { environmentId: ENVIRONMENT, revisionId: REVISION, digest } })
+  return { store, digest: (draft.payload as { draftDigest: string }).draftDigest }
 }
 
 const releaseOf = (store: ControlSessionStore): ReleaseState | undefined =>

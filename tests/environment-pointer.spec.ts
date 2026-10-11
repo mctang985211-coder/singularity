@@ -35,7 +35,7 @@ import {
 } from '../src/index.ts'
 import { ControlSessionStore } from '../src/control/session-store.ts'
 import { declareEnvironmentProtocol, ENVIRONMENT_KINDS, ENVIRONMENT_PROTOCOL, ENVIRONMENT_ROLE, ENVIRONMENT_VERSION, PUBLISHER_ROLE, type EnvironmentState } from '../src/environment/protocol.ts'
-import { APPROVER_ROLE, declareReleaseProtocol, RELEASE_KINDS, RELEASE_PROTOCOL, RELEASE_VERSION } from '../src/release/protocol.ts'
+import { APPROVER_ROLE, declareReleaseProtocol, RELEASE_KINDS, RELEASE_PROTOCOL, RELEASE_VERSION, releaseDraftOf } from '../src/release/protocol.ts'
 import { SCHEDULER_ROLE } from '../src/task/protocol.ts'
 import { createReleaseCommands } from '../src/release/commands.ts'
 import type { ApprovalSeams } from '../src/runtime/approval.ts'
@@ -175,8 +175,8 @@ function seam(): ApprovalSeams {
 /** Draft and approve one environment's revision, as the pipeline and a human would. */
 async function approve(store: ControlSessionStore, environmentId: string, revisionId: string, digest: string): Promise<void> {
   const commands = createReleaseCommands({ store, approvalSeams: seam() })
-  await commands.draft({ commandId: `draft-${environmentId}-${revisionId}`, revision: { environmentId, revisionId, digest } })
-  await commands.approve({ commandId: `approve-${environmentId}-${revisionId}`, environmentId, revisionId, draftDigest: digest, approvedBy: ALICE, ask: { agent: AGENT, toolName: 'release_approve' } })
+  const draft = await commands.draft({ commandId: `draft-${environmentId}-${revisionId}`, revision: { environmentId, revisionId, digest } })
+  await commands.approve({ commandId: `approve-${environmentId}-${revisionId}`, environmentId, revisionId, draftDigest: (draft.payload as { draftDigest: string }).draftDigest, approvedBy: ALICE, ask: { agent: AGENT, toolName: 'release_approve' } })
 }
 
 function publish(store: ControlSessionStore, to: string, expected = '', environmentId = ENVIRONMENT): Promise<unknown> {
@@ -316,9 +316,9 @@ describe('the command boundary decides the half the reducer cannot see', () => {
     // A release this build did not write — an adopted log, or content prepared outside the store and
     // referenced before it existed (U05). The draft names r0001 at content the environment never
     // created, and the reducer cannot see that: only the publish precondition can.
-    const forged = { revisionId: R1, draftDigest: digestOf(OTHER_MANIFEST) }
+    const forged = releaseDraftOf({ environmentId: ENVIRONMENT, revisionId: R1, digest: digestOf(OTHER_MANIFEST) }, { kind: 'bootstrap' })
     await store.emit({ commandId: 'forged-draft', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.drafted, subject: ENVIRONMENT, payload: forged })
-    await store.emit({ commandId: 'forged-approval', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.approved, subject: ENVIRONMENT, payload: { ...forged, approvedBy: ALICE, approvalId: 'audit-forged' } })
+    await store.emit({ commandId: 'forged-approval', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.approved, subject: ENVIRONMENT, payload: { revisionId: forged.revisionId, draftDigest: forged.draftDigest, approvedBy: ALICE, approvalId: 'audit-forged' } })
 
     const refusal = await asyncRefusalOf(() => publish(store, R1))
     expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining(ENVIRONMENT) })

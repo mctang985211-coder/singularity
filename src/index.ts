@@ -218,6 +218,8 @@ export {
   RELEASE_KINDS,
   RELEASE_PROTOCOL,
   RELEASE_VERSION,
+  type ReleaseBasis,
+  type ReleaseDraft,
   type ReleaseState,
 } from './release/protocol.ts'
 export {

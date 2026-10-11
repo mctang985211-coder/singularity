@@ -1,5 +1,5 @@
 /**
- * `release@1`: an approval binds the content a human saw, in one environment, and nothing else.
+ * `release@2`: an approval binds one environment's complete draft and its target content.
  *
  * `review.md` R07 is the defect this prevents: an approval recorded while binding nothing (the
  * previous system set `guards.bound` true and never wired its recompute check). Here the three
@@ -103,7 +103,7 @@ function approve(store: ControlSessionStore, double: SeamDouble, options: Approv
   const revisionId = options.revisionId ?? REVISION
   return createReleaseCommands({ store, approvalSeams: double.seams }).approve({
     commandId: options.commandId ?? 'approve-1', environmentId, revisionId,
-    draftDigest: options.draftDigest ?? contentDigest(store, revisionId, environmentId),
+    draftDigest: options.draftDigest ?? drafted(revisionId, contentDigest(store, revisionId, environmentId), environmentId).draftDigest,
     approvedBy: options.approvedBy ?? ALICE,
     ask: { agent: double.agent, toolName: 'release_approve' },
   })
@@ -180,8 +180,12 @@ function folded(entries: readonly Envelope[], subject = ENVIRONMENT): ReleaseSta
   return foldSubjects<ReleaseState>(registry, entries, RELEASE_PROTOCOL, RELEASE_VERSION).get(subject)
 }
 
-const approved = (revisionId: string, digest: string, approvedBy = ALICE, approvalId = 'audit-1') => ({ revisionId, draftDigest: digest, approvedBy, approvalId })
-const environments = (state: ReleaseState | undefined): string | undefined => state?.draftDigest
+const drafted = (revisionId: string, digest: string, environmentId = ENVIRONMENT) => {
+  const basis = { kind: 'bootstrap' as const }
+  return { revisionId, contentDigest: digest, draftDigest: digestOf({ revision: { environmentId, revisionId, digest }, basis }), basis }
+}
+const approved = (revisionId: string, digest: string, approvedBy = ALICE, approvalId = 'audit-1') => ({ revisionId, draftDigest: drafted(revisionId, digest).draftDigest, approvedBy, approvalId })
+const environments = (state: ReleaseState | undefined): string | undefined => state?.contentDigest
 
 describe('the draft binds the content the log holds, for one environment', () => {
   it('records the created revision’s own digest, under the environment it belongs to', async () => {
@@ -190,8 +194,8 @@ describe('the draft binds the content the log holds, for one environment', () =>
 
     const envelope = await draft(store, REVISION, digest)
 
-    expect([envelope.subject, envelope.payload, envelope.emitter]).toEqual([ENVIRONMENT, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }, SCHEDULER_ROLE])
-    expect(releaseState(store)).toEqual({ revisionId: REVISION, draftDigest: digest })
+    expect([envelope.subject, envelope.payload, envelope.emitter]).toEqual([ENVIRONMENT, drafted(REVISION, digestOf(MANIFEST)), SCHEDULER_ROLE])
+    expect(releaseState(store)).toEqual(drafted(REVISION, digest))
   })
 
   it('refuses a draft whose digest is not the content that revision was created with', async () => {
@@ -219,7 +223,7 @@ describe('the draft binds the content the log holds, for one environment', () =>
 
     const refusal = await asyncRefusalOf(() => draft(store, REVISION, digest, ENVIRONMENT, 'draft-again'))
     expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('changes nothing') })
-    expect(releaseState(store)?.draftDigest).toBe(digest)
+    expect(releaseState(store)?.contentDigest).toBe(digest)
   })
 
   it('supersedes the standing draft and clears its approval, so a superseded grant cannot publish', async () => {
@@ -233,7 +237,7 @@ describe('the draft binds the content the log holds, for one environment', () =>
     await draft(store, OTHER_REVISION, other, ENVIRONMENT, 'draft-2')
 
     // The approval bound r0001's content; r0002 is on the table now, so nothing is approved.
-    expect(releaseState(store)).toEqual({ revisionId: OTHER_REVISION, draftDigest: other })
+    expect(releaseState(store)).toEqual(drafted(OTHER_REVISION, other))
     const refusal = await asyncRefusalOf(() => publish(store, REVISION))
     expect(refusal.code).toBe<RefusalCode>('unapproved-revision')
   })
@@ -268,7 +272,7 @@ describe('the approval binds content, and names the draft it answers', () => {
     const envelope = await approve(store, seam('allowed-once', 'approval-42'))
 
     expect([envelope.subject, envelope.emitter, envelope.actor, envelope.payload]).toEqual([ENVIRONMENT, APPROVER_ROLE, APPROVAL_SEAM, approved(REVISION, digest, ALICE, 'approval-42')])
-    expect(releaseState(store)).toEqual(approved(REVISION, digest, ALICE, 'approval-42'))
+    expect(releaseState(store)).toEqual({ ...drafted(REVISION, digest), ...approved(REVISION, digest, ALICE, 'approval-42') })
   })
 
   it('answers a lost reply from the fact it committed, without asking the person twice', async () => {
@@ -301,7 +305,7 @@ describe('the approval binds content, and names the draft it answers', () => {
     // The human looked at content other than the draft that is on the table.
     const refusal = await asyncRefusalOf(() => approve(store, seam(), { draftDigest: digestOf(OTHER_MANIFEST) }))
     expect(refusal).toMatchObject({ code: 'stale-approval', detail: expect.stringContaining(digestOf(OTHER_MANIFEST).slice(0, 12)) })
-    expect(refusal.detail).toContain(digest.slice(0, 12))
+    expect(refusal.detail).toContain(drafted(REVISION, digest).draftDigest.slice(0, 12))
     expect(releaseState(store)?.approvedBy).toBeUndefined()
   })
 
@@ -334,18 +338,18 @@ describe('the approval binds content, and names the draft it answers', () => {
 
   it('refuses a nameless human, a missing audit id, and a payload that offers an extra member', async () => {
     const log = releaseLog()
-    await log.emit(rawFact(RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }))
-    for (const payload of [approved(REVISION, digestOf(MANIFEST), ''), approved(REVISION, digestOf(MANIFEST), ALICE, ''), { ...approved(REVISION, digestOf(MANIFEST)), role: 'admin' }, approved(REVISION, 'nope')]) expect((await asyncRefusalOf(() => log.emit(rawFact(RELEASE_KINDS.approved, payload)))).code).toBe<RefusalCode>('malformed-payload')
+    await log.emit(rawFact(RELEASE_KINDS.drafted, drafted(REVISION, digestOf(MANIFEST))))
+    for (const payload of [approved(REVISION, digestOf(MANIFEST), ''), approved(REVISION, digestOf(MANIFEST), ALICE, ''), { ...approved(REVISION, digestOf(MANIFEST)), role: 'admin' }, { ...approved(REVISION, digestOf(MANIFEST)), draftDigest: 'nope' }]) expect((await asyncRefusalOf(() => log.emit(rawFact(RELEASE_KINDS.approved, payload)))).code).toBe<RefusalCode>('malformed-payload')
   })
 
   it('makes drafting and approving different held identities, in both directions', async () => {
     const draftOnly = releaseLog({ [SCHEDULER_ROLE]: SCHEDULER })
-    await draftOnly.emit(rawFact(RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }))
+    await draftOnly.emit(rawFact(RELEASE_KINDS.drafted, drafted(REVISION, digestOf(MANIFEST))))
     const unapproved = await asyncRefusalOf(() => draftOnly.emit(rawFact(RELEASE_KINDS.approved, approved(REVISION, digestOf(MANIFEST)))))
     expect(unapproved).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining(APPROVER_ROLE) })
 
     const approveOnly = releaseLog({ [APPROVER_ROLE]: APPROVAL_SEAM })
-    const undrafted = await asyncRefusalOf(() => approveOnly.emit(rawFact(RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) })))
+    const undrafted = await asyncRefusalOf(() => approveOnly.emit(rawFact(RELEASE_KINDS.drafted, drafted(REVISION, digestOf(MANIFEST)))))
     expect(undrafted).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining(SCHEDULER_ROLE) })
   })
 })
@@ -364,7 +368,7 @@ describe('the fold, not the append path, is where the binding holds', () => {
     const approval = sealed(0, RELEASE_KINDS.approved, approved(REVISION, digestOf(MANIFEST)), ENVIRONMENT, null)
     expect(refusalOf(() => folded([approval])).code).toBe<RefusalCode>('illegal-transition')
 
-    const draft = sealed(0, RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }, ENVIRONMENT, null)
+    const draft = sealed(0, RELEASE_KINDS.drafted, drafted(REVISION, digestOf(MANIFEST)), ENVIRONMENT, null)
     const stale = sealed(1, RELEASE_KINDS.approved, approved(REVISION, digestOf(OTHER_MANIFEST)), ENVIRONMENT, draft.digest)
     expect(refusalOf(() => folded([draft, stale])).code).toBe<RefusalCode>('stale-approval')
 
@@ -373,17 +377,17 @@ describe('the fold, not the append path, is where the binding holds', () => {
   })
 
   it('refuses a hand-framed draft that changes nothing, and folds each environment on its own', () => {
-    const first = sealed(0, RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }, ENVIRONMENT, null)
-    const again = sealed(1, RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }, ENVIRONMENT, first.digest)
+    const first = sealed(0, RELEASE_KINDS.drafted, drafted(REVISION, digestOf(MANIFEST)), ENVIRONMENT, null)
+    const again = sealed(1, RELEASE_KINDS.drafted, drafted(REVISION, digestOf(MANIFEST)), ENVIRONMENT, first.digest)
     expect(refusalOf(() => folded([first, again])).code).toBe<RefusalCode>('illegal-transition')
 
-    const elsewhere = sealed(1, RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(OTHER_MANIFEST) }, OTHER_ENVIRONMENT, first.digest)
+    const elsewhere = sealed(1, RELEASE_KINDS.drafted, drafted(REVISION, digestOf(OTHER_MANIFEST), OTHER_ENVIRONMENT), OTHER_ENVIRONMENT, first.digest)
     expect([environments(folded([first, elsewhere])), environments(folded([first, elsewhere], OTHER_ENVIRONMENT))]).toEqual([digestOf(MANIFEST), digestOf(OTHER_MANIFEST)])
   })
 })
 
-describe('release@1 is exactly these two kinds', () => {
-  it('declares two appended kinds at version 1, and does not claim the conditional update', async () => {
+describe('release@2 is exactly these two kinds', () => {
+  it('declares two appended kinds at version 2, and does not claim the conditional update', async () => {
     const { registry } = await live()
 
     // The one conditional update is the environment's pointer switch, not anything here.
