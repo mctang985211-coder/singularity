@@ -89,4 +89,30 @@ describe('the deployable build', () => {
       .rejects.toThrow(/stale/)
     expect(await readFile(join(profile, 'sentinel'), 'utf8')).toBe('existing deployment')
   }, 30_000)
+
+  it('materialises a profile whose assembly row carries every key the plugin schema requires', async () => {
+    const root = await fixture()
+    await buildAssembly(root)
+    const home = join(root, 'private-home')
+    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home } })
+    const patch = await readFile(join(home, 'profiles/singularity-next-web/cordis.patch.yml'), 'utf8')
+    // The plugin's Config marks all of these required and an id-targeted patch replaces the whole
+    // config, so a template without them composes a row the host refuses to activate — and that
+    // refusal is invisible to every check that only reads this checkout.
+    for (const key of ['controlId', 'domainDir', 'workspaceRoot']) expect(patch).toContain(key + ':')
+    for (const key of ['rootSolves', 'children', 'childRuns', 'nativeTokens']) expect(patch).toContain(key + ':')
+  }, 30_000)
+
+  it('declares the gateway retry policy the measured transport failure needs', async () => {
+    const patch = await readFile(join(checkout, 'deployment/profile/cordis.patch.yml'), 'utf8')
+    // `stream_read_error` is this gateway's text for a dropped upstream stream, and the pi-ai
+    // classifier falls through to `PI_AI_ERROR` for it — a code outside the host's default
+    // retryable set, which made one dropped stream terminal for a whole Run. The route therefore has
+    // to name the policy itself; deleting this block restores the measured defect.
+    const policy = patch.slice(patch.indexOf('retryPolicy:'))
+    expect(policy).toContain('mode: normal')
+    expect(policy).toContain('maxRetries: 5')
+    expect(policy).toContain('PI_AI_ERROR')
+    for (const code of ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT']) expect(policy).toContain(code)
+  })
 })

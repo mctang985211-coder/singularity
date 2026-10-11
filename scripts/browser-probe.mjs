@@ -745,7 +745,8 @@ export async function isolatedHome(stage) {
       await writeFile(verifier, delayed)
       const overlay = join(home, 'crash.patch.yml')
       await writeFile(overlay, '- id: singularity-assembly\n  config:\n    controlId: singularity-local\n    domainDir: ' +
-        JSON.stringify(domain) + '\n    workspaceRoot: ' + JSON.stringify(join(home, 'workspaces/singularity')) + '\n')
+        JSON.stringify(domain) + '\n    workspaceRoot: ' + JSON.stringify(join(home, 'workspaces/singularity')) +
+        '\n    budget:\n      rootSolves: 4\n      children: 2\n      childRuns: 2\n      nativeTokens: 400000\n')
       extra.push('--patch', overlay)
     }
     return { home, extra }
