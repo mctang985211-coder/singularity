@@ -6,6 +6,12 @@ import { expect, it, vi } from 'vitest'
 
 import { spawnProcess } from '../src/process.ts'
 
+it('distinguishes an ordinary nonzero exit from failure to execute', async () => {
+  const exited = await spawnProcess({ shell: false, argv: [process.execPath, '-e', 'process.exit(3)'] })
+  const missing = await spawnProcess({ shell: false, argv: ['/nonexistent/singularity-verifier'] })
+  expect([exited.exitCode, exited.failure, missing.failure]).toEqual([3, undefined, expect.stringContaining('ENOENT')])
+})
+
 it('does not finish cancellation before the actual process exits', async () => {
   const root = await mkdtemp(join(tmpdir(), 'assembly-process-'))
   const ready = join(root, 'ready')

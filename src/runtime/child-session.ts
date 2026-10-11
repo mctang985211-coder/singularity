@@ -1,32 +1,5 @@
-/**
- * Driving one child session: put one instruction in its inbox, and wait until it has gone quiet.
- *
- * **Why this module exists.** DSH has no public "run one turn" API. A child created through
- * `ctx.agents.create` can be handed a message, but the three ways to hand one over are not
- * interchangeable (`docs/phase-g2-design.md` §6, all measured against the installed build):
- *
- * 1. `ctx.subagents.sendMessage` refuses a child we created ourselves. It requires a
- *    `subagent/descriptor` fact that only `dsh-subagent`'s own creation path writes, so a raw child
- *    fails `NOT_RESUMABLE`; the child→parent direction refuses too, because the child is not a
- *    resident of that layer's activation table.
- * 2. Writing `user/message` into the session directly is refused: it is surface-eligible, so an
- *    append without a `surfaceOp` marker throws — the loop supplies that marker, a hand-written
- *    event does not.
- * 3. `agent.followup(message)` appends `agent/inbox/spliced` and wakes the driver in one call, and
- *    `agent.whenIdle()` is the only completion await. That is the route this module takes.
- *
- * **What `whenIdle` means here, and why it is exact.** It awaits the whole agent going quiet, not
- * one message's settlement, which is coarser than "this turn ended". For this caller the two
- * coincide by construction: one child session is opened for one instruction, `followup` queues it as
- * the sole ordinary message of its own turn, and the driver runs turns one at a time. So there is no
- * second message for the wait to swallow — and if one is ever added, this comment is the thing that
- * has to change, because the guarantee would be gone.
- *
- * @module singularity-core/runtime/child-session
- */
-
 import type { Agent, AgentRegistry, AgentSetup } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionStore } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 
@@ -83,14 +56,10 @@ export interface ChildSessionRequest {
 
 /** One live child session: what it is, and how to put something in its inbox. */
 export interface ChildSession extends OpenedAgentSession {
-  /**
-   * Send one instruction and wait until the agent is quiet.
-   *
-   * The message is delivered here rather than in the request because delivery is what starts a turn,
-   * and a turn starts after `open` has resolved: DSH's own contract is that setup composes and never
-   * drives, so an instruction handed to `create` would be a turn beginning inside composition.
-   */
-  say(text: string): Promise<void>
+  /** Enqueue an identified message after setup resolves; completion belongs to the owner. */
+  post(message: UserMessage): void
+  /** Await resource quiescence and durability. Task/Run success is read from committed facts. */
+  wait(): Promise<void>
   /** Stop whatever it is doing. `keepInbox` leaves undelivered messages queued. */
   stop(): void
 }
@@ -133,22 +102,13 @@ export async function openChildSession(seams: ChildSessionSeams, request: ChildS
   })
   return {
     ...opened,
-    say: async text => {
-      // One user message, one turn: `followup` queues it as the sole ordinary message of its own
-      // turn and wakes the driver, which is the only public way to start a turn on a raw child.
-      opened.agent.followup(createUserMessage({ content: [textBlock(text)], source: { kind: 'user' } }))
+    post: message => opened.agent.followup(message),
+    wait: async () => {
       await opened.agent.whenIdle()
-      // The loop does not flush at turn boundaries — the durability checkpoint is another service's
-      // — so a caller that means to read the log afterwards flushes here rather than hoping.
-      // Resolved, not read as a property: the same cordis trap that `agentPresets` above avoids applies
-      // to this name, and `openAgentSession` has already proven it present by this point.
-      await (seams.get?.('sessions') as { flush(session: unknown): Promise<void> } | undefined)?.flush(opened.agent.session)
+      const sessions = (seams.get === undefined ? seams.sessions : seams.get('sessions')) as SessionStore
+      if (!await sessions.flush(opened.agent.session))
+        refuse('write-not-durable', `session "${opened.sessionId}" has no durability listener`)
     },
     stop: () => opened.agent.cancel({ kind: 'parent' }, { keepInbox: true }),
   }
-}
-
-/** One text block, in the shape the message factory takes. */
-function textBlock(text: string): ContentBlock {
-  return { type: 'text', text }
 }

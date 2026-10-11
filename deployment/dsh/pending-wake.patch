@@ -1,0 +1,20 @@
+--- a/@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts
++++ b/@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts
+@@ -165,0 +166,6 @@
++       * Wake the driver over existing inbox input without inserting a message.
++       * An empty inbox is a no-op. Maintenance and aborted activity latch the
++       * wake until quiescence; a disposed cancellation leaves input parked.
++       */
++        wake(): void;
++        /**
+--- a/@deepseek-ai/dsh-agent-loop/lib/index.js
++++ b/@deepseek-ai/dsh-agent-loop/lib/index.js
+@@ -804,0 +805,4 @@
++	}
++	wake() {
++		if (!this.inbox.hasPending) return;
++		this.wakeDriver(this.phase.kind !== "idle" && this.phase.abort.signal.aborted);
+--- a/@deepseek-ai/dsh-agent-loop/lib/types/agent.d.ts
++++ b/@deepseek-ai/dsh-agent-loop/lib/types/agent.d.ts
+@@ -40,0 +41 @@
++    wake(): void;

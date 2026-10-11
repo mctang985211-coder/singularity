@@ -66,7 +66,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { dshModule, openPersistence } from './dsh-control-runtime.mjs'
-import { realModel } from './llm-route.mjs'
+import { realModel, ROUTE } from './llm-route.mjs'
 
 const CONTROL = 'rsi-live'
 const ENVIRONMENT = 'library-live'
@@ -77,7 +77,6 @@ const AGENT = 'live-agent'
 const METER = 'meter'
 const BOUNDS = 'bounds'
 const PRODUCER = 'producer'
-const MODEL_NAME = 'rsi-live-1'
 const WEIGHTS = { quality: 100, cost: 15 }
 const FLOOR = { floor: 0.1, source: 'measured' }
 const CONDITIONS = 'deterministic'
@@ -266,7 +265,7 @@ async function main() {
   const boundsDigest = sha256(await readFile(boundsProgram))
   const INPUTS = [{ name: INPUT_NAME, digest: sha256(await readFile(inputPath)) }]
   const CONTEXT = {
-    model: MODEL_NAME,
+    model: ROUTE,
     tools: [{ name: PRODUCER, implementationDigest: verifierDigest, version: '1' }, { name: METER, implementationDigest: meterDigest, version: '1' }],
     conditions: [CONDITIONS],
   }
@@ -484,12 +483,9 @@ async function main() {
       const evidenceDigest = recordedVerdictDigest(stateOfTask(host), `${revisionId}'s verdict`, {
         runId, criterionId: 'counted', artifactDigest: judged.artifactDigest,
       })
-      // The run settles as its verdict says, the way slice-b settles a counted run: verification is the
-      // scheduler's settlement and the boundary carries no command for it, so the fact is emitted here
-      // and the reducer holds the rule — every criterion needs a pass, or the settlement is refused.
       await store.emit(judged.verdict === 'pass'
         ? { commandId: nextId(`settle-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runVerified, subject: host, payload: { runId } }
-        : { commandId: nextId(`settle-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runFailed, subject: host, payload: { runId, reason: `the verifier recorded ${judged.verdict}` } })
+        : { commandId: nextId(`settle-${runId}`), protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runFailed, subject: host, payload: { runId, cause: 'acceptance', reason: `the verifier recorded ${judged.verdict}` } })
       return { taskId: host, runId, verdict: judged.verdict, artifactDigest: judged.artifactDigest, evidenceDigest, detail: judged.detail }
     }
 

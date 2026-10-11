@@ -7,7 +7,7 @@ export async function prepareWorkspace(template: TaskTemplate, inputs: readonly 
   for (const input of inputs) {
     const target = join(workspace, input.name)
     await mkdir(dirname(target), { recursive: true })
-    await writeFile(target, input.bytes, { flag: 'wx' })
+    await writeFile(target, await input.read(), { flag: 'wx' })
   }
   if (template.initial === undefined) return
   const seed = join(workspace, template.file)

@@ -21,6 +21,7 @@ import {
   type TaskContract,
   type TaskState,
 } from '../src/index.ts'
+import { contextDigestOf } from '../src/measure/protocol.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
 import {
   ARTIFACT,
@@ -148,6 +149,33 @@ describe('only the agent currently answerable may start work', () => {
 })
 
 describe('the execution context says what actually ran', () => {
+  it('keeps provider and model names separate when either contains a slash', async () => {
+    const log = logWith()
+    for (const command of [admitted(), assigned('agent-1', SCHEDULER), started()]) await log.emit(command)
+    const model = { provider: 'provider/region', model: 'model/name' }
+    await log.emit(bubbleWith({ model }))
+    const state = foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
+    const recorded = state!.runs['run-1']!.bubble!
+    expect(recorded.model).toEqual(model)
+    expect(contextDigestOf(recorded)).not.toBe(contextDigestOf({ ...recorded, model: { provider: 'provider', model: 'region/model/name' } }))
+  })
+
+  it.each([
+    'provider/model',
+    {},
+    { provider: 'provider' },
+    { model: 'model' },
+    { provider: '', model: 'model' },
+    { provider: 'provider', model: '' },
+    { provider: 3, model: 'model' },
+    { provider: 'provider', model: 'model', route: 'extra' },
+  ])('refuses an incomplete or widened model route %j before committing', async model => {
+    const log = logWith()
+    for (const command of [admitted(), assigned('agent-1', SCHEDULER), started()]) await log.emit(command)
+    expect(await asyncRefusalOf(() => log.emit(bubbleWith({ model })))).toMatchObject({ code: 'malformed-payload' })
+    expect(log.count).toBe(3)
+  })
+
   it('refuses a bubble that cannot name its model, its tools or its conditions', () => {
     const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
     log.emit(admitted())
@@ -239,7 +267,7 @@ describe('a verdict is bound to the inputs the run declared', () => {
     await settled.emit(admitted())
     await settled.emit(assigned('agent-1', SCHEDULER))
     await settled.emit(started())
-    await settled.emit(fact(TASK_KINDS.runFailed, { runId: 'run-1', reason: 'gave up' }))
+    await settled.emit(fact(TASK_KINDS.runFailed, { runId: 'run-1', cause: 'runtime', reason: 'gave up' }))
     const late = await asyncRefusalOf(() => settled.emit(bubble()))
     expect(late).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('already settled') })
   })

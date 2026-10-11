@@ -7,6 +7,8 @@
  * implementation it does not hold.
  */
 
+import { AttachmentId, type FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
+
 import {
   declareTaskProtocol,
   ProtocolRegistry,
@@ -47,6 +49,10 @@ export const SUBJECTS: Readonly<Record<string, string>> = {
 
 /** The named inputs every run in these fixtures declares it executed against. */
 export const BUBBLE_INPUTS = [{ name: 'fixture/words.txt', digest: 'f'.repeat(64) }]
+
+export function fileAttachment(contentDigest: string, name: string, bytes = 0): FileAttachmentRef {
+  return { attachmentId: AttachmentId(`sha256:${contentDigest}`), name, bytes }
+}
 
 /** One revision the run is pinned to, named by its environment and content identity. */
 export const REVISION = { environmentId: 'library-1', revisionId: 'r0001', digest: 'a'.repeat(64) }
@@ -105,7 +111,7 @@ export const started = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runStarted
  * The isolation manifest every bubble in these specs declares. One place, because a spec that named
  * a different tool digest in each bubble would be testing a binding it never established.
  */
-export const BUBBLE_MODEL = 'test-model-1'
+export const BUBBLE_MODEL = { provider: 'test-provider', model: 'test-model-1' }
 export const BUBBLE_TOOLS = [{ name: 'count', implementationDigest: 'a'.repeat(64), version: '1' }]
 export const BUBBLE_CONDITIONS = ['no-network']
 
@@ -144,7 +150,7 @@ export const judged = (
   })
 export const verified = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runVerified, { runId })
 export const failed = (reason?: string, runId = RUN_ID): EmitInput =>
-  emit(TASK_KINDS.runFailed, reason === undefined ? { runId } : { runId, reason })
+  emit(TASK_KINDS.runFailed, { runId, cause: 'runtime', ...(reason === undefined ? {} : { reason }) })
 
 /** The whole slice: admit, start, judge both criteria with their own verifiers, settle. */
 export const sliceCommands = (): readonly EmitInput[] => [

@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentRegistry, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import { afterEach, describe, expect, it } from 'vitest'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
@@ -17,7 +18,7 @@ import { loadDomain } from '../src/domain.ts'
 import { openDriver, type TaskDriver } from '../src/driver.ts'
 import { taskIdOf } from '../src/ids.ts'
 import { spawnProcess } from '../src/process.ts'
-import { agentFor, execFor, factsOf, fakeExecution, FakePersistence, kindsOf, mount, serviceOf } from './seam.ts'
+import { attachmentsAt, agentFor, execFor, factsOf, fakeExecution, FakePersistence, kindsOf, mount, serviceOf } from './seam.ts'
 
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const sha256 = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
@@ -39,27 +40,43 @@ async function childrenRuntime() {
   root = await mkdtemp(join(tmpdir(), 'assembly-children-'))
   const medium = new FakePersistence()
   const parent = agentFor('agent-7', 'session-9')
-  const agents = new Map<string, Agent>([[parent.id, parent]])
+  const agents = new Map<string, Agent>([[parent.session.id, parent]])
   const delivered: { sessionId: string; message: unknown }[] = []
+  const logs = new Map<string, SessionEvent[]>()
+  const attach = (agent: Agent): Agent => {
+    const sessionId = String(agent.session.id)
+    const events: SessionEvent[] = []
+    logs.set(sessionId, events)
+    return Object.assign(agent, {
+      session: { ...agent.session, get seq() { return events.length } },
+      followup: (message: unknown) => {
+        delivered.push({ sessionId, message })
+        events.push({ seq: events.length, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted: [message] } } as unknown as SessionEvent)
+      },
+      whenIdle: async () => undefined,
+      wake: () => undefined,
+      cancel: () => undefined,
+    })
+  }
+  attach(parent)
   const registry = {
     get: (id: string) => agents.get(id),
     create: async (options: CreateAgentOptions) => {
       const sessionId = String(options.sessionId)
-      const agent = { ...agentFor(sessionId, sessionId),
-        followup: (message: unknown) => { delivered.push({ sessionId, message }) },
-        whenIdle: async () => undefined,
-        cancel: () => undefined,
-      } as unknown as Agent
+      const agent = attach(agentFor(sessionId, sessionId))
       agents.set(sessionId, agent)
       return { agent, dispose: async () => { agents.delete(sessionId) } }
     },
   } as unknown as AgentRegistry
   const services: Readonly<Record<string, unknown>> = {
-    agents: registry, sessionPersistence: medium, sessions: { flush: async () => true }, agentLoop: {}, agentPresets: { composeFrom: () => undefined },
+    agents: registry, sessionPersistence: {
+      stat: (id: string) => medium.stat(id as never),
+      open: async (id: string) => ({ id, read: async () => ({ events: logs.get(id)!, eventState: 'detached' }), close: async () => undefined }),
+    }, sessions: { flush: async () => true }, agentLoop: {}, agentPresets: { composeFrom: () => undefined },
   }
   const seams: ChildSessionSeams = { get: name => services[name] }
   ownedDriver = await openDriver({ controlId: 'lib-1', workspaceRoot: root, domain: await loadDomain(REAL, spawnProcess),
-    persistence: medium as unknown as SessionPersistence, seams, execution: fakeExecution })
+    persistence: medium as unknown as SessionPersistence, attachments: attachmentsAt(root), seams, execution: fakeExecution })
   const driver = ownedDriver
   const call = (agent: Agent, id: string) => driver.forCall(execFor(agent, id))
   return { driver, parent, agents, medium, delivered, call }
@@ -76,6 +93,19 @@ async function mounted() {
 }
 
 describe('the driver with explicit execution and persistence ports', () => {
+  it('activates only the recorded parent session to recover an already published plan', async () => {
+    const { parent, driver, agents, delivered, call } = await childrenRuntime()
+    const proposal = await call(parent, 'propose').propose({ goal: 'count letters' })
+    agents.delete(String(parent.session.id))
+    await expect(call(parent, 'plan').decompose({ taskId: proposal.taskId, children: [
+      { key: 'extract', template: 'extract-letters', dependsOn: [], supports: ['letters'], maxRuns: 1 },
+    ] })).rejects.toThrow('no live recorded parent')
+    await driver.activate('unrelated-session')
+    expect(delivered).toEqual([])
+    agents.set(String(parent.session.id), parent)
+    await driver.activate(String(parent.session.id))
+    expect(delivered).toHaveLength(1)
+  })
   it('starts a complete solve Run and stages its declared protected input in that Run workspace', async () => {
     const { call, medium, workspace } = await mounted()
     const proposal = await call('propose').propose({ goal: 'count the letters' })
@@ -99,14 +129,14 @@ describe('the driver with explicit execution and persistence ports', () => {
     expect(medium.events.length).toBe(committed)
   })
 
-  it('surfaces child creation failure instead of returning an empty successful dispatch', async () => {
+  it('refuses a plan with no live recorded parent session instead of using the caller as a substitute', async () => {
     const { call, medium } = await mounted()
     const proposal = await call('propose').propose({ goal: 'count the letters' })
     const refusal = await asyncRefusalOf(() => call('plan').decompose({
       taskId: proposal.taskId,
       children: [{ key: 'first', template: 'extract-letters', dependsOn: [], supports: ['letters'], maxRuns: 1 }],
     }))
-    expect(refusal.code).toBe('malformed-declaration')
+    expect(refusal.code).toBe('unknown-emitter-role')
     expect(factsOf(medium).some(fact => fact.kind === TASK_KINDS.decomposed)).toBe(true)
   })
 
@@ -177,7 +207,7 @@ describe('the driver with explicit execution and persistence ports', () => {
     const agent = agentFor('worker', 'worker-session', 'm-under-test')
     await surface.forCall(execFor(agent, 'propose')).propose({ goal: 'g' })
     expect(factsOf(medium).find(fact => fact.kind === 'bubble/opened')?.payload).toMatchObject({
-      model: 'test/m-under-test',
+      model: { provider: 'test', model: 'm-under-test' },
       tools: [{ name: 'node', version: process.version, implementationDigest: sha256(await readFile(process.execPath)) }],
     })
   })
@@ -186,6 +216,25 @@ describe('the driver with explicit execution and persistence ports', () => {
     const { call } = await mounted()
     const proposal = await call('propose').propose({ goal: 'g' })
     expect(await call('submit').submit({ taskId: proposal.taskId, program: "process.stdout.write('0')" })).toMatchObject({ verdict: 'fail', phase: 'failed' })
+  })
+
+  it('executes submitted programs in their exact Run workspace', async () => {
+    const { call } = await mounted()
+    const proposal = await call('cwd-propose').propose({ goal: 'count letters' })
+    const program = "process.stdout.write(process.cwd())"
+    await call('cwd-submit').submit({ taskId: proposal.taskId, program })
+    expect(await readFile(join(proposal.workspace, 'report.txt'), 'utf8')).toBe(proposal.workspace)
+  })
+
+  it('cancels the submitted process through the native tool signal', async () => {
+    const { surface, call, agent } = await mounted()
+    const proposal = await call('cancel-propose').propose({ goal: 'count letters' })
+    const controller = new AbortController()
+    const pending = surface.forCall({ ...execFor(agent, 'cancel-submit'), signal: controller.signal }).submit({ taskId: proposal.taskId,
+      program: "import { writeFileSync } from 'node:fs'; writeFileSync('ready.txt', 'ready'); process.stdout.write('35'); setTimeout(() => {}, 750)" })
+    await vi.waitFor(() => access(join(proposal.workspace, 'ready.txt')))
+    controller.abort(new Error('user cancelled'))
+    expect(await pending).toMatchObject({ phase: 'failed', detail: expect.stringContaining('cancelled') })
   })
 
   it('pins separate task revisions against the template rather than mutable workspace bytes', async () => {

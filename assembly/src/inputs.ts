@@ -1,18 +1,16 @@
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { contractDigest, type TaskContract, type TaskInputSource } from '../../src/task/contract.ts'
 import type { Apparatus } from './apparatus.ts'
 import { taskStateOf } from './apparatus.ts'
 import { templateOf, type Domain } from './domain.ts'
-import { sha256 } from './ids.ts'
+import { sealedBytes } from './sealed.ts'
 import type { TaskTemplate } from './template.ts'
 
 export interface PreparedInput {
   readonly name: string
   readonly digest: string
   readonly source: Extract<TaskInputSource, { kind: 'protected' }> | { readonly kind: 'artifact'; readonly taskId: string; readonly runId: string }
-  readonly bytes: Uint8Array
+  read(): Promise<Uint8Array>
 }
 
 export function contractFor(domain: Domain, template: TaskTemplate, goal: string, producerTaskId?: string): TaskContract {
@@ -40,30 +38,23 @@ export function assertTemplateContract(domain: Domain, contract: TaskContract): 
   return template
 }
 
-export async function resolveInputs(apparatus: Apparatus, contract: TaskContract): Promise<readonly PreparedInput[]> {
+export function resolveInputs(apparatus: Apparatus, contract: TaskContract): readonly PreparedInput[] {
   const consumer = assertTemplateContract(apparatus.domain, contract)
-  return await Promise.all(contract.inputs.map(async input => {
+  return contract.inputs.map(input => {
     const source = input.source
     if (source.kind === 'protected') {
       const protectedInput = apparatus.domain.inputs.find(input => input.ref === source.ref)
       if (protectedInput?.digest !== source.digest)
         refuse('evidence-input-mismatch', 'the deployment no longer declares the frozen input ' + input.name)
-      return { name: input.name, digest: protectedInput.digest, bytes: protectedInput.bytes, source }
+      return { name: input.name, digest: protectedInput.digest, read: async () => protectedInput.bytes, source }
     }
     const producer = taskStateOf(apparatus, source.taskId)
     if (consumer.input.source.kind !== 'artifact' || producer.contract!.template.id !== consumer.input.source.template)
       refuse('evidence-input-mismatch', 'the producer Task does not match the input template: ' + source.taskId)
     const run = Object.values(producer.runs).findLast(run => run.status === 'verified')
     if (run?.submission === undefined) refuse('illegal-transition', 'the producer Task has no verified sealed artifact: ' + source.taskId)
-    const template = templateOf(apparatus.domain, producer.contract!.template)
-    const path = join(apparatus.workspaceRoot, 'tasks', source.taskId, 'runs', run.runId, template.artifact)
-    let bytes: Uint8Array
-    try { bytes = await readFile(path) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      refuse('evidence-input-mismatch', 'the producer artifact is missing: ' + source.taskId)
-    }
-    const digest = sha256(bytes)
-    if (digest !== run.submission.artifactDigest) refuse('evidence-input-mismatch', 'the producer artifact changed: ' + source.taskId)
-    return { name: input.name, digest, bytes, source: { kind: 'artifact' as const, taskId: source.taskId, runId: run.runId } }
-  }))
+    const digest = run.submission.artifactDigest
+    const ref = run.submission.files.artifact
+    return { name: input.name, digest, read: () => sealedBytes(apparatus, ref), source: { kind: 'artifact' as const, taskId: source.taskId, runId: run.runId } }
+  })
 }

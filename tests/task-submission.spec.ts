@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 
 import { AGENT_ROLE, foldSubject, MemoryLog, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type EmitInput, type TaskState } from '../src/index.ts'
 import { AGENT, CHILD, commandsFor, createRevision, deployment, openAgent, PARENT, pin, planned } from './command-fixtures.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
-import { admitted, ARTIFACT, assigned, BUBBLE_CONDITIONS, BUBBLE_INPUTS, BUBBLE_MODEL, BUBBLE_TOOLS, bubbleOpened, contract, failed, judged, REVISION, RUN_ID, SCHEDULER, started, SUBJECTS, TASK_ID, taskRegistry, UNIT_IMPLEMENTATION, UNIT_VERIFIER, verified } from './task-fixtures.ts'
+import { admitted, ARTIFACT, assigned, BUBBLE_CONDITIONS, BUBBLE_INPUTS, BUBBLE_MODEL, BUBBLE_TOOLS, bubbleOpened, contract, failed, fileAttachment, judged, REVISION, RUN_ID, SCHEDULER, started, SUBJECTS, TASK_ID, taskRegistry, UNIT_IMPLEMENTATION, UNIT_VERIFIER, verified } from './task-fixtures.ts'
 
 const SUBMISSION = {
   requestId: 'control-1/session-1/call-1',
@@ -11,6 +12,11 @@ const SUBMISSION = {
   programDigest: '2'.repeat(64),
   artifactDigest: ARTIFACT,
   inputDigests: BUBBLE_INPUTS,
+  files: {
+    program: fileAttachment('2'.repeat(64), 'program.ts', 127),
+    artifact: fileAttachment(ARTIFACT, 'artifact.json', 0),
+    inputs: BUBBLE_INPUTS.map(input => ({ name: input.name, attachment: fileAttachment(input.digest, 'words.txt', 19) })),
+  },
   source: { sessionId: 'session-1', eventCount: 7, digest: '3'.repeat(64) },
 } as const
 
@@ -82,7 +88,9 @@ describe('submission freezes the attempt', () => {
     const submitted = await log.emit(submissionFact())
     expect(state(log).runs[RUN_ID]).toMatchObject({ status: 'running', stage: 'submitted', submission: SUBMISSION, submittedAt: submitted.at })
     expect(await log.emit(submissionFact())).toEqual(submitted)
-    expect(await asyncRefusalOf(() => log.emit(submissionFact({ ...SUBMISSION, programDigest: '4'.repeat(64) })))).toMatchObject({ code: 'command-conflict' })
+    expect(await asyncRefusalOf(() => log.emit(submissionFact({ ...SUBMISSION, programDigest: '4'.repeat(64),
+      files: { ...SUBMISSION.files, program: fileAttachment('4'.repeat(64), 'program.ts', 128) },
+    })))).toMatchObject({ code: 'command-conflict' })
     expect(await asyncRefusalOf(() => log.emit(submissionFact(SUBMISSION, 'second-submit')))).toMatchObject({ code: 'illegal-transition' })
   })
 
@@ -96,7 +104,7 @@ describe('submission freezes the attempt', () => {
     await log.emit(beginningFact())
     const reserved = log.count
     expect(await asyncRefusalOf(() => log.emit({ ...submissionFact(), as: 'stranger' }))).toMatchObject({ code: 'not-responsible' })
-    expect(await asyncRefusalOf(() => log.emit(submissionFact({ ...SUBMISSION, inputDigests: [] })))).toMatchObject({ code: 'evidence-input-mismatch' })
+    expect(await asyncRefusalOf(() => log.emit(submissionFact({ ...SUBMISSION, inputDigests: [], files: { ...SUBMISSION.files, inputs: [] } })))).toMatchObject({ code: 'evidence-input-mismatch' })
     expect(log.count).toBe(reserved)
   })
 
@@ -142,6 +150,8 @@ describe('submission freezes the attempt', () => {
     const before = log.count
     expect(await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))).toMatchObject({ code: 'illegal-transition' })
     expect(await asyncRefusalOf(() => log.emit(verified()))).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('failed program execution') })
+    expect(await asyncRefusalOf(() => log.emit({ ...failed(), payload: { runId: RUN_ID, cause: 'acceptance' } })))
+      .toMatchObject({ code: 'illegal-transition' })
     expect(log.count).toBe(before)
     expect(state(log).runs[RUN_ID]).toMatchObject({ status: 'running', submission, evidence: [] })
     await log.emit(failed(submission.executionFailure))
@@ -184,6 +194,52 @@ describe('submission freezes the attempt', () => {
     ]
     for (const payload of malformed)
       expect(await asyncRefusalOf(() => log.emit(submissionFact(payload)))).toMatchObject({ code: 'malformed-payload' })
+  })
+
+  it('requires native file receipts whose content IDs bind every submitted digest', async () => {
+    const log = await working()
+    await log.emit(beginningFact())
+    const before = log.count
+    const { files, ...withoutFiles } = SUBMISSION
+    const input = files.inputs[0]!
+    const malformed = [
+      withoutFiles,
+      { ...SUBMISSION, files: {} },
+      { ...SUBMISSION, files: { ...files, extra: true } },
+      { ...SUBMISSION, files: { ...files, program: { ...files.program, extra: true } } },
+      { ...SUBMISSION, files: { ...files, artifact: { ...files.artifact, extra: true } } },
+      { ...SUBMISSION, files: { ...files, program: { ...files.program, attachmentId: 'wrong' } } },
+      { ...SUBMISSION, files: { ...files, program: { ...files.program, attachmentId: SUBMISSION.programDigest } } },
+      { ...SUBMISSION, files: { ...files, program: { ...files.program, attachmentId: AttachmentId('sha256:' + '4'.repeat(64)) } } },
+      { ...SUBMISSION, files: { ...files, artifact: { ...files.artifact, attachmentId: AttachmentId('sha256:' + '4'.repeat(64)) } } },
+      { ...SUBMISSION, files: { ...files, program: { ...files.program, name: '' } } },
+      { ...SUBMISSION, files: { ...files, inputs: null } },
+      { ...SUBMISSION, files: { ...files, inputs: [] } },
+      { ...SUBMISSION, files: { ...files, inputs: [{ ...input, extra: true }] } },
+      { ...SUBMISSION, files: { ...files, inputs: [{ ...input, name: 'foreign-input' }] } },
+      { ...SUBMISSION, files: { ...files, inputs: [{ ...input, attachment: { ...input.attachment, extra: true } }] } },
+      { ...SUBMISSION, files: { ...files, inputs: [{ ...input, attachment: { ...input.attachment, attachmentId: AttachmentId('sha256:' + '4'.repeat(64)) } }] } },
+      { ...SUBMISSION, files: { ...files, inputs: [input, input] } },
+      ...[-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1'].map(bytes =>
+        ({ ...SUBMISSION, files: { ...files, artifact: { ...files.artifact, bytes } } })),
+    ]
+    for (const payload of malformed) {
+      expect(await asyncRefusalOf(() => log.emit(submissionFact(payload)))).toMatchObject({ code: 'malformed-payload' })
+      expect(log.count).toBe(before)
+    }
+  })
+
+  it('refuses reordered or duplicate input receipts even when all content IDs are valid', async () => {
+    const log = await working()
+    await log.emit(beginningFact())
+    const first = SUBMISSION.files.inputs[0]!
+    const second = { name: 'other-input', attachment: fileAttachment('5'.repeat(64), 'other.txt', 1) }
+    const inputDigests = [...BUBBLE_INPUTS, { name: second.name, digest: '5'.repeat(64) }]
+    for (const inputs of [[second, first], [first, first]])
+      expect(await asyncRefusalOf(() => log.emit(submissionFact({ ...SUBMISSION, inputDigests,
+        files: { ...SUBMISSION.files, inputs },
+      })))).toMatchObject({ code: 'malformed-payload' })
+    expect(state(log).runs[RUN_ID]?.stage).toBe('submitting')
   })
 
   it('exposes submission through the bound agent command and replays after settlement', async () => {
@@ -244,8 +300,8 @@ describe('submission freezes the attempt', () => {
     expect((await commands.beginSubmission(parentSubmit)).envelope.kind).toBe('run/submitting')
   })
 
-  it('rejects task v6 rather than guessing a template or input source', () => {
-    expect(TASK_VERSION).toBe(7)
-    expect(refusalOf(() => taskRegistry().ruleFor(TASK_PROTOCOL, 6, TASK_KINDS.runStarted))).toMatchObject({ code: 'version-mismatch' })
+  it('rejects task v7 rather than guessing a failed Run cause', () => {
+    expect(TASK_VERSION).toBe(8)
+    expect(refusalOf(() => taskRegistry().ruleFor(TASK_PROTOCOL, 7, TASK_KINDS.runStarted))).toMatchObject({ code: 'version-mismatch' })
   })
 })

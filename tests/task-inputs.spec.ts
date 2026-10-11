@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { assertContractShape, CONTRACT_MEMBERS, foldSubject, MemoryLog, TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../src/index.ts'
 import { AGENT, commandsFor, createRevision, deployment, openAgent, pin } from './command-fixtures.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
-import { admitted, ARTIFACT, assigned, BUBBLE_INPUTS, bubbleOpened, contract, started, SUBJECTS, TASK_ID, taskRegistry } from './task-fixtures.ts'
+import { admitted, ARTIFACT, assigned, BUBBLE_INPUTS, bubbleOpened, contract, fileAttachment, started, SUBJECTS, TASK_ID, taskRegistry } from './task-fixtures.ts'
 
 const TEMPLATE = { id: 'word-counter', digest: '1'.repeat(64) }
 const PROTECTED = { name: 'fixture/words.txt', source: { kind: 'protected', ref: 'words', digest: 'f'.repeat(64) } } as const
@@ -76,11 +76,15 @@ async function inputDeployment(stage: ProducerStage, sourceTaskId = PRODUCER) {
     await commands.assign({ commandId: 'assign-producer', taskId: PRODUCER, agentId: AGENT })
     await commands.startRun({ commandId: 'start-producer', taskId: PRODUCER, runId: 'p1', revision: pin(live) })
     await commands.openBubble({ commandId: 'bubble-producer', taskId: PRODUCER, runId: 'p1', inputs: BUBBLE_INPUTS,
-      workspace: { kind: 'dir', ref: '/producer' }, model: 'model', tools: [], conditions: [] })
+      workspace: { kind: 'dir', ref: '/producer' }, model: { provider: 'test', model: 'model' }, tools: [], conditions: [] })
     if (stage !== 'working' && stage !== 'direct-verified') {
       await commands.beginSubmission({ commandId: 'begin-producer', taskId: PRODUCER, runId: 'p1', requestId: 'submit-producer', requestDigest: '2'.repeat(64) })
       await commands.submitRun({ commandId: 'seal-producer', taskId: PRODUCER, runId: 'p1', submission: {
         requestId: 'submit-producer', requestDigest: '2'.repeat(64), programDigest: '3'.repeat(64), artifactDigest: ARTIFACT, inputDigests: BUBBLE_INPUTS,
+        files: {
+          program: fileAttachment('3'.repeat(64), 'program.ts'), artifact: fileAttachment(ARTIFACT, 'artifact.txt'),
+          inputs: BUBBLE_INPUTS.map(input => ({ name: input.name, attachment: fileAttachment(input.digest, 'words.txt') })),
+        },
         source: { sessionId: 'producer-session', eventCount: 0, digest: '4'.repeat(64) },
       } })
     }
@@ -96,7 +100,7 @@ async function inputDeployment(stage: ProducerStage, sourceTaskId = PRODUCER) {
   await commands.assign({ commandId: 'assign-consumer', taskId: CONSUMER, agentId: AGENT })
   await commands.startRun({ commandId: 'start-consumer', taskId: CONSUMER, runId: 'c1', revision: pin(live) })
   const bubble = (digest = ARTIFACT) => commands.openBubble({ commandId: 'bubble-consumer', taskId: CONSUMER, runId: 'c1',
-    inputs: [{ name: INPUT, digest }], workspace: { kind: 'dir', ref: '/consumer' }, model: 'model', tools: [], conditions: [] })
+    inputs: [{ name: INPUT, digest }], workspace: { kind: 'dir', ref: '/consumer' }, model: { provider: 'test', model: 'model' }, tools: [], conditions: [] })
   return { live, commands, bubble }
 }
 

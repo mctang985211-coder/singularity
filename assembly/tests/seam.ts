@@ -1,6 +1,8 @@
 /** Driver specs use a persistence and execution port double with real domain commands and projection. */
 
 import { Context } from '@deepseek-ai/cordis'
+import { LocalAttachmentStore } from '@deepseek-ai/dsh-attachment-local'
+import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, SessionLogOffset, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import {
@@ -154,6 +156,9 @@ export const fakeExecution = (_admission: Admission): Execution => ({
   close: async () => undefined,
 })
 
+export const attachmentsAt = (root: string): LocalAttachmentStore =>
+  new LocalAttachmentStore(new Context(), { dshHome: join(root, 'dsh-home') })
+
 /** Compose the real driver with explicit test ports; host apply is covered separately. */
 export async function mount(config: Config, medium = new FakePersistence()): Promise<{ ctx: Context; medium: FakePersistence }> {
   const ctx = new Context()
@@ -161,6 +166,7 @@ export async function mount(config: Config, medium = new FakePersistence()): Pro
     ...config,
     domain: await loadDomain(config.domainDir, spawnProcess),
     persistence: medium as unknown as SessionPersistence,
+    attachments: attachmentsAt(config.workspaceRoot),
     seams: ctx,
     execution: fakeExecution,
   })

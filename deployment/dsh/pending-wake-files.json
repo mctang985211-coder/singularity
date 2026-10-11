@@ -1,0 +1,17 @@
+[
+  {
+    "path": "@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts",
+    "before": "07e00646b0c07eda239c102ea736a3bf29c431f34aee97fd7619ea0150d3c71a",
+    "after": "9ba5cba2cf7a52756a62f5dd44c063644373019e46eec01cc123ed011aea5560"
+  },
+  {
+    "path": "@deepseek-ai/dsh-agent-loop/lib/index.js",
+    "before": "00c4814d63f3d1e2754eb09144832d19b30499d6ea444730473f740b587948c2",
+    "after": "c4e32ffcedd2ef190432a76bc8dffa8935f9f38e0d5e04c81940f78ca4d6f91b"
+  },
+  {
+    "path": "@deepseek-ai/dsh-agent-loop/lib/types/agent.d.ts",
+    "before": "66131a86c5f024fabb77e99103f3f07cdca5818cbce7d6aaecb058197c66589e",
+    "after": "fab97d57beb986aa396a3a1c46498e6951e33ce185c8cca8c6e51d87ac1635e8"
+  }
+]

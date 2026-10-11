@@ -107,7 +107,7 @@ describe('settlement', () => {
 
   it('refuses any further fact once a run has settled', async () => {
     const log = await running()
-    await log.emit({ commandId: 'f1', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/failed', subject: TASK_ID, payload: { runId: RUN_ID, reason: 'no golden file' } })
+    await log.emit({ commandId: 'f1', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/failed', subject: TASK_ID, payload: { runId: RUN_ID, cause: 'runtime', reason: 'no golden file' } })
 
     expect([(await asyncRefusalOf(() => log.emit(verified()))).code, (await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))).code]).toEqual(['illegal-transition', 'illegal-transition'])
   })

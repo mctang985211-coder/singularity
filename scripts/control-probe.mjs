@@ -279,7 +279,7 @@ async function probe() {
     section('5. the successor can append new facts, so the takeover is functional')
     await successor.emit({
       commandId: 'finish-probe-run-1', protocol: TASK_PROTOCOL, version: TASK_VERSION,
-      kind: TASK_KINDS.runFailed, subject: TASK, payload: { runId: RUN, reason: 'the first attempt was interrupted' },
+      kind: TASK_KINDS.runFailed, subject: TASK, payload: { runId: RUN, cause: 'runtime', reason: 'the first attempt was interrupted' },
     })
     const next = await successor.emit({
       commandId: 'probe-command-2',

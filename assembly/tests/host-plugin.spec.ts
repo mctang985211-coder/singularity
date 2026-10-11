@@ -54,6 +54,6 @@ describe('the host plugin', () => {
   })
 
   it('declares identity, tool admission and session persistence ports', () => {
-    expect([name, inject]).toEqual(['singularity-assembly', ['agents', 'tools', 'sessions', 'sessionPersistence']])
+    expect([name, inject]).toEqual(['singularity-assembly', ['agents', 'tools', 'sessions', 'sessionPersistence', 'attachments']])
   })
 })

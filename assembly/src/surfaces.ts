@@ -1,5 +1,3 @@
-import type { Agent } from '@deepseek-ai/dsh-agent'
-
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import { assertClosedKeys, digestOf } from '../../src/protocol/envelope.ts'
 import { contractDigest } from '../../src/task/contract.ts'
@@ -24,7 +22,6 @@ export async function decompose(
   apparatus: Apparatus,
   scheduler: Scheduler,
   caller: Caller,
-  parent: Agent | undefined,
   input: { readonly taskId: string; readonly children: readonly PlannedChild[] },
 ): Promise<PlanRecord> {
   const state = taskStateOf(apparatus, input.taskId)
@@ -81,7 +78,7 @@ export async function decompose(
     await commands.assign({ commandId: `assign:${entry.taskId}`, taskId: entry.taskId, agentId })
   }
   await commands.decompose({ commandId: `decompose:${input.taskId}`, parentTaskId: input.taskId, children })
-  return { taskId: input.taskId, opened: await scheduler.advance(parent) }
+  return { taskId: input.taskId, opened: await scheduler.advance(input.taskId) }
 }
 
 export async function propose(apparatus: Apparatus, caller: Caller, callId: string, input: { readonly goal: string }): Promise<Proposal> {

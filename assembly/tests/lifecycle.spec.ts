@@ -8,7 +8,7 @@ import { openDriver, type TaskDriver } from '../src/driver.ts'
 import { loadDomain } from '../src/domain.ts'
 import type { TurnFailure, TurnFailureHandler } from '../src/execution.ts'
 import { spawnProcess } from '../src/process.ts'
-import { agentFor, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
+import { attachmentsAt, agentFor, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
 
 const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const roots: string[] = []
@@ -26,7 +26,7 @@ async function setup() {
   const medium = new FakePersistence()
   let report!: TurnFailureHandler
   const driver = await openDriver({ controlId: 'lifecycle', workspaceRoot: root,
-    domain: await loadDomain(domainDir, spawnProcess), persistence: medium as never, seams: {},
+    domain: await loadDomain(domainDir, spawnProcess), persistence: medium as never, attachments: attachmentsAt(root), seams: {},
     execution: (admission, onFailure) => { report = onFailure; return fakeExecution(admission) },
   })
   drivers.push(driver)

@@ -1,5 +1,5 @@
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,7 +13,7 @@ import { loadDomain } from '../src/domain.ts'
 import { contractFor } from '../src/inputs.ts'
 import { spawnProcess } from '../src/process.ts'
 import { submit } from '../src/submission.ts'
-import { agentFor, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
+import { attachmentsAt, agentFor, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
 
 const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const roots: string[] = []
@@ -26,7 +26,7 @@ async function setup(producerTemplate = 'extract-letters', verified = true) {
   roots.push(root)
   const medium = new FakePersistence()
   const domain = await loadDomain(domainDir, spawnProcess)
-  const apparatus = await openApparatus('inputs', root, domain, medium as unknown as SessionPersistence)
+  const apparatus = await openApparatus('inputs', root, domain, medium as unknown as SessionPersistence, attachmentsAt(root))
   const agent = agentFor('executor', 'executor-session')
   const caller = callerOf(agent)
   await bindCaller(apparatus, caller)
@@ -60,7 +60,7 @@ async function rejectsWithoutRun(h: Awaited<ReturnType<typeof setup>>, code: str
   expect(Object.keys(taskStateOf(h.apparatus, 'consumer').runs)).toEqual([])
 }
 
-describe('template input binding before a Run or input revision exists', () => {
+describe('template input binding and sealed preparation', () => {
   it('uses loader-sealed protected bytes after the domain source file changes', async () => {
     const h = await setup()
     const input = h.domain.inputs[0]!
@@ -99,18 +99,39 @@ describe('template input binding before a Run or input revision exists', () => {
     await rejectsWithoutRun(h, 'illegal-transition')
   })
 
-  it('rejects a changed verified artifact without creating a revision or Run', async () => {
+  it('uses the sealed producer bytes after its editable artifact changes', async () => {
     const h = await setup()
     await h.admit(h.contract)
+    const sealed = await readFile(h.artifact)
     await writeFile(h.artifact, 'changed')
-    await rejectsWithoutRun(h, 'evidence-input-mismatch')
+    const run = await startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run')
+    expect(await readFile(join(workspaceOf(h.apparatus, 'consumer', run.runId), 'in/letters.txt'))).toEqual(sealed)
   })
 
-  it('rejects a missing verified artifact without creating a revision or Run', async () => {
+  it('uses the sealed producer bytes after its editable artifact is removed', async () => {
     const h = await setup()
     await h.admit(h.contract)
+    const sealed = await readFile(h.artifact)
     await rm(h.artifact)
-    await rejectsWithoutRun(h, 'evidence-input-mismatch')
+    const run = await startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run')
+    expect(await readFile(join(workspaceOf(h.apparatus, 'consumer', run.runId), 'in/letters.txt'))).toEqual(sealed)
+  })
+
+  it.each(['missing', 'corrupt'] as const)('records a runtime preparation failure when the sealed producer object is %s', async damage => {
+    const h = await setup()
+    await h.admit(h.contract)
+    const producer = taskStateOf(h.apparatus, 'producer').runs[h.producerRunId]!
+    const ref = producer.submission!.files.artifact
+    const path = attachmentsAt(h.apparatus.workspaceRoot).fileHostPath(ref)
+    if (damage === 'missing') await rm(path)
+    else {
+      await chmod(path, 0o600)
+      await writeFile(path, Buffer.alloc(ref.bytes, 120))
+    }
+    await expect(startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run')).rejects.toMatchObject({
+      code: damage === 'missing' ? 'ATTACHMENT_NOT_FOUND' : 'ATTACHMENT_CORRUPT',
+    })
+    expect(Object.values(taskStateOf(h.apparatus, 'consumer').runs)).toMatchObject([{ status: 'failed', failureCause: 'runtime' }])
   })
 
   it('rejects a verified producer of another template before creating a revision or Run', async () => {

@@ -123,8 +123,8 @@ export async function openRun(log: MemoryLog, subject: string, runId: string): P
   await log.emit(openBubble(subject, runId))
 }
 export const verified = (subject: string, runId: string): EmitInput => emit(subject, TASK_KINDS.runVerified, { runId })
-export const failed = (subject: string, runId: string, reason?: string): EmitInput =>
-  emit(subject, TASK_KINDS.runFailed, reason === undefined ? { runId } : { runId, reason })
+export const failed = (subject: string, runId: string, reason?: string, cause: 'acceptance' | 'runtime' = 'runtime'): EmitInput =>
+  emit(subject, TASK_KINDS.runFailed, { runId, cause, ...(reason === undefined ? {} : { reason }) })
 
 export function judge(
   subject: string,

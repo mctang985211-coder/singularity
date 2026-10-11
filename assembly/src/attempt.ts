@@ -20,7 +20,7 @@ export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId:
   if (recorded?.bubble !== undefined) return recorded
   const contract = state.contract!
   const template = templateOf(apparatus.domain, contract.template)
-  const inputs = await resolveInputs(apparatus, contract)
+  const inputs = resolveInputs(apparatus, contract)
   const manifest = { task: taskId, taskTemplate: contract.template,
     inputSources: inputs.map(({ name, digest, source }) => ({ name, digest, source })) }
   const basis = sha256(JSON.stringify(manifest))

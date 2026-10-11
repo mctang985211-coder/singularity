@@ -60,7 +60,7 @@ describe('preparing a workspace', () => {
   it('stages the declared inputs, and the seed at the path a submission is judged on', async () => {
     const domain = await loadDomain(await sourceDomain(), spawnProcess)
     const workspace = await workspaceOf()
-    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, bytes: domain.inputs[0]!.bytes }], workspace)
+    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes }], workspace)
     expect([await readFile(join(workspace, 'in', 'protected.txt'), 'utf8'), await readFile(join(workspace, 'rtl', 'edited.v'), 'utf8')]).toEqual([
       'the protected material\n',
       'the original source\n',
@@ -70,11 +70,9 @@ describe('preparing a workspace', () => {
   it('stages the bytes it digested even when the declared source has changed since', async () => {
     const dir = await sourceDomain()
     const domain = await loadDomain(dir, spawnProcess)
-    // The deployment's material changes under it, which is the only situation where "read the source
-    // again" and "write what was digested" disagree.
     await writeFile(join(dir, 'input.txt'), 'something else entirely\n', 'utf8')
     const workspace = await workspaceOf()
-    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, bytes: domain.inputs[0]!.bytes }], workspace)
+    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes }], workspace)
     const staged = await readFile(join(workspace, 'in', 'protected.txt'))
     expect([sha256(staged), staged.toString('utf8')]).toEqual([domain.inputs[0]?.digest, 'the protected material\n'])
   })
@@ -82,9 +80,9 @@ describe('preparing a workspace', () => {
   it('refuses to prepare an existing Run workspace and preserves its frozen files', async () => {
     const domain = await loadDomain(await sourceDomain(), spawnProcess)
     const workspace = await workspaceOf()
-    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, bytes: domain.inputs[0]!.bytes }], workspace)
+    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes }], workspace)
     await writeFile(join(workspace, 'rtl', 'edited.v'), 'what the model produced\n', 'utf8')
-    await expect(prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, bytes: domain.inputs[0]!.bytes }], workspace)).rejects.toMatchObject({ code: 'EEXIST' })
+    await expect(prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes }], workspace)).rejects.toMatchObject({ code: 'EEXIST' })
     expect(await readFile(join(workspace, 'rtl', 'edited.v'), 'utf8')).toBe('what the model produced\n')
   })
 })

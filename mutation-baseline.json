@@ -47,7 +47,7 @@
       "edits": [
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "const FROZEN_FIXTURE_DIGEST = '2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b'",
+          "find": "const FROZEN_FIXTURE_DIGEST = 'f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934'",
           "replace": "const FROZEN_FIXTURE_DIGEST = '0000000000000000000000000000000000000000000000000000000000000000'"
         }
       ],
@@ -86,7 +86,7 @@
         {
           "file": "scripts/domain-probe.mjs",
           "find": "          model: fixture.frozen.model,\n",
-          "replace": "          model: 'probe-authored/another-model',\n"
+          "replace": "          model: { provider: 'probe-authored', model: 'another-model' },\n"
         }
       ],
       "run": {
@@ -109,13 +109,13 @@
         },
         {
           "file": "tests/fixtures/f-domain.json",
-          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
-          "replace": "4039ccbf3d81d1080bb14ccc5ebde311b6b1bc4246209b78548cbbab66b4ee25"
+          "find": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934",
+          "replace": "112462b94c2f4d532d640eebcfc3ca08141404ea92dfb0c00db745e578ef17aa"
         },
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
-          "replace": "4039ccbf3d81d1080bb14ccc5ebde311b6b1bc4246209b78548cbbab66b4ee25"
+          "find": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934",
+          "replace": "112462b94c2f4d532d640eebcfc3ca08141404ea92dfb0c00db745e578ef17aa"
         }
       ],
       "run": {
@@ -215,13 +215,13 @@
         },
         {
           "file": "tests/fixtures/f-domain.json",
-          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
-          "replace": "4faeb36704353f892600a44d7e4a62362a6651649482acf9f4fe24d1b103d7c1"
+          "find": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934",
+          "replace": "67e605355cfe74e82e120870310a7070ba8fe2e6b3ff68d4167bbe76ff84169a"
         },
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
-          "replace": "4faeb36704353f892600a44d7e4a62362a6651649482acf9f4fe24d1b103d7c1"
+          "find": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934",
+          "replace": "67e605355cfe74e82e120870310a7070ba8fe2e6b3ff68d4167bbe76ff84169a"
         }
       ],
       "run": {
@@ -320,13 +320,13 @@
         },
         {
           "file": "tests/fixtures/f-domain.json",
-          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
-          "replace": "58a5789a61506326fd025fc484543c5e031794e99eef67931618fa17aaa75f9a"
+          "find": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934",
+          "replace": "bf650007a64c8cf24ed5c525563cd7f26ee69a108bbe34130cb2059a96947c02"
         },
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
-          "replace": "58a5789a61506326fd025fc484543c5e031794e99eef67931618fa17aaa75f9a"
+          "find": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934",
+          "replace": "bf650007a64c8cf24ed5c525563cd7f26ee69a108bbe34130cb2059a96947c02"
         }
       ],
       "run": {
@@ -368,13 +368,13 @@
         },
         {
           "file": "tests/fixtures/f-domain.json",
-          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
-          "replace": "58a5789a61506326fd025fc484543c5e031794e99eef67931618fa17aaa75f9a"
+          "find": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934",
+          "replace": "bf650007a64c8cf24ed5c525563cd7f26ee69a108bbe34130cb2059a96947c02"
         },
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b",
-          "replace": "58a5789a61506326fd025fc484543c5e031794e99eef67931618fa17aaa75f9a"
+          "find": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934",
+          "replace": "bf650007a64c8cf24ed5c525563cd7f26ee69a108bbe34130cb2059a96947c02"
         },
         {
           "file": "scripts/domain-probe.mjs",
@@ -1051,8 +1051,8 @@
       "edits": [
         {
           "file": "src/task/commands.ts",
-          "find": "    kind: TASK_KINDS.runFailed,\n    payload: reason === undefined ? { runId: input.runId } : { runId: input.runId, reason },\n    ...(as === undefined ? {} : { as }),",
-          "replace": "    kind: TASK_KINDS.runFailed,\n    payload: reason === undefined ? { runId: input.runId } : { runId: input.runId, reason },"
+          "find": "    kind: TASK_KINDS.runFailed,\n    payload: { runId: input.runId, cause: 'acceptance', ...(reason === undefined ? {} : { reason }) },\n    ...(as === undefined ? {} : { as }),",
+          "replace": "    kind: TASK_KINDS.runFailed,\n    payload: { runId: input.runId, cause: 'acceptance', ...(reason === undefined ? {} : { reason }) },"
         }
       ],
       "run": {
@@ -1109,7 +1109,7 @@
         {
           "file": "src/task/commands.ts",
           "find": "  if (unmet.length === 0) return { ...common, kind: TASK_KINDS.runVerified, payload: { runId: input.runId } }",
-          "replace": "  if (unmet.length === 0) return { ...common, kind: TASK_KINDS.runFailed, payload: { runId: input.runId } }"
+          "replace": "  if (unmet.length === 0) return { ...common, kind: TASK_KINDS.runFailed, payload: { runId: input.runId, cause: 'runtime' } }"
         }
       ],
       "run": {
@@ -1198,13 +1198,13 @@
     },
     {
       "id": "core-runner-no-exit-is-pass",
-      "rule": "a process that never started fails closed",
+      "rule": "verifier execution failure cannot produce an acceptance verdict",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
           "file": "src/verifier/command.ts",
-          "find": "    verdict: outcome.exitCode === 0 ? 'pass' : 'fail',",
-          "replace": "    verdict: outcome.exitCode === 0 || outcome.exitCode === null ? 'pass' : 'fail',"
+          "find": "  if (outcome.failure !== undefined || outcome.exitCode === null)\n    throw new Error(outcome.failure ?? 'verifier execution ended without an exit code')\n",
+          "replace": ""
         }
       ],
       "run": {
@@ -1213,7 +1213,7 @@
           "tests/verifier-runner.spec.ts"
         ]
       },
-      "witness": "reads a process that never started as a failure"
+      "witness": "rejects verifier execution failure without producing an acceptance verdict"
     },
     {
       "id": "core-runner-artifact-before-run",
@@ -1222,8 +1222,8 @@
       "edits": [
         {
           "file": "src/verifier/command.ts",
-          "find": "  const outcome = await runProcess(invocation)\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)",
-          "replace": "  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)\n  const outcome = await runProcess(invocation)"
+          "find": "  const outcome = await runProcess(invocation)\n  if (outcome.failure !== undefined || outcome.exitCode === null)\n    throw new Error(outcome.failure ?? 'verifier execution ended without an exit code')\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)",
+          "replace": "  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)\n  const outcome = await runProcess(invocation)\n  if (outcome.failure !== undefined || outcome.exitCode === null)\n    throw new Error(outcome.failure ?? 'verifier execution ended without an exit code')"
         }
       ],
       "run": {
@@ -1241,8 +1241,8 @@
       "edits": [
         {
           "file": "src/verifier/command.ts",
-          "find": "  const outcome = await runProcess(invocation)\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)",
-          "replace": "  const inputDigests = await hashInputs(inputs)\n  const outcome = await runProcess(invocation)\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)"
+          "find": "  const outcome = await runProcess(invocation)\n  if (outcome.failure !== undefined || outcome.exitCode === null)\n    throw new Error(outcome.failure ?? 'verifier execution ended without an exit code')\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)\n  const inputDigests = await hashInputs(inputs)",
+          "replace": "  const inputDigests = await hashInputs(inputs)\n  const outcome = await runProcess(invocation)\n  if (outcome.failure !== undefined || outcome.exitCode === null)\n    throw new Error(outcome.failure ?? 'verifier execution ended without an exit code')\n  const artifactDigest = await digestOfFile(artifactPath, `the artifact ${artifactPath}`)"
         }
       ],
       "run": {
@@ -1374,8 +1374,8 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, template.input.name)] }, signal)",
-          "replace": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, filePath] }, signal)"
+          "find": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, template.input.name)] }, signal, workspace)",
+          "replace": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, filePath] }, signal, workspace)"
         }
       ],
       "run": {
@@ -1431,8 +1431,8 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "if (run.evidence.length === 0) await judgeAndRecord(apparatus, taskId, run)",
-          "replace": "if (run.evidence.length === 0) await judgeAndRecord(apparatus, taskId, run)\n      else continue"
+          "find": "      await apparatus.tasks.settle({ commandId: 'settle:' + taskId + '/' + run.runId, taskId, runId: run.runId }, key)",
+          "replace": "      if (run.evidence.length === 0) await apparatus.tasks.settle({ commandId: 'settle:' + taskId + '/' + run.runId, taskId, runId: run.runId }, key)"
         }
       ],
       "run": {
@@ -1802,8 +1802,8 @@
         },
         {
           "file": "assembly/src/workspace.ts",
-          "find": "await writeFile(target, input.bytes, { flag: 'wx' })",
-          "replace": "await writeFile(target, input.bytes)"
+          "find": "await writeFile(target, await input.read(), { flag: 'wx' })",
+          "replace": "await writeFile(target, await input.read())"
         }
       ],
       "run": {
@@ -1840,8 +1840,13 @@
       "edits": [
         {
           "file": "assembly/src/inputs.ts",
-          "find": "bytes: protectedInput.bytes",
-          "replace": "bytes: await readFile(join(apparatus.domain.dir, protectedInput.sourcePath))"
+          "find": "read: async () => protectedInput.bytes",
+          "replace": "read: async () => readFile(join(apparatus.domain.dir, protectedInput.sourcePath))"
+        },
+        {
+          "file": "assembly/src/inputs.ts",
+          "find": "import { refuse } from '../../src/protocol/refusal.ts'",
+          "replace": "import { readFile } from 'node:fs/promises'\nimport { join } from 'node:path'\nimport { refuse } from '../../src/protocol/refusal.ts'"
         }
       ],
       "run": {
@@ -1892,13 +1897,13 @@
     },
     {
       "id": "assembly-m32-advance-after-settle",
-      "rule": "a plan is re-scanned after a run settles, because only a verified sub-task makes its dependents ready",
+      "rule": "only a newly settled child advances its exact parent plan so verified dependencies can start",
       "doc": "docs/phase-g2-design.md",
       "edits": [
         {
           "file": "assembly/src/driver.ts",
-          "find": "await scheduler.settled()",
-          "replace": "void scheduler"
+          "find": "if (terminal && parentTaskId !== undefined) try { await scheduler.advance(parentTaskId) }",
+          "replace": "if (false && parentTaskId !== undefined) try { await scheduler.advance(parentTaskId) }"
         }
       ],
       "run": {

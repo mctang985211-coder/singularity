@@ -16,7 +16,7 @@ import { MemoryLog } from '../src/protocol/memory-log.ts'
 import { ProtocolRegistry } from '../src/protocol/registry.ts'
 import { SCHEDULER_ROLE, declareTaskProtocol, verifierRoleOf } from '../src/task/protocol.ts'
 import { projectReceipt } from '../src/task/view.ts'
-import { loadDomain, templateOf } from '../assembly/src/domain.ts'
+import { loadDomain } from '../assembly/src/domain.ts'
 import { runIdOf, sha256 } from '../assembly/src/ids.ts'
 import { snapshotOf } from '../assembly/src/snapshot.ts'
 import { DSH_BIN, DSH_HOME, dshModule, openPersistence } from './dsh-control-runtime.mjs'
@@ -50,7 +50,10 @@ const DECOMPOSE_PROMPT = [
   'Then call singularity_decompose_task for that taskId with exactly this plan:',
   '{"children":[{"key":"extract","template":"extract-letters","dependsOn":[],"supports":["letters"],"maxRuns":1},',
   '{"key":"count","template":"count-letters","dependsOn":["extract"],"supports":["letters"],"maxRuns":1}]}',
-  'Do not submit the parent program in this turn. Report the plan result.',
+  'After decomposition, finish this turn and wait for the host plan-outcome message.',
+  'When that message says both children verified, continue the same parent Task and Run automatically.',
+  'Independently submit its Node ES module program with singularity_submit_program; it runs as node program.mjs <input path>, imports node:fs and prints only the ASCII letter count of its protected source.',
+  'Then call singularity_task_status for the existing parent Task and report its receipt. Do not propose or decompose again.',
 ].join('\n')
 
 async function boot(port, extra = [], home = DSH_HOME) {
@@ -234,6 +237,42 @@ export function assertPlannedTasks(facts, parentTaskId) {
   const admitted = facts.filter(fact => fact.kind === 'task/admitted').map(fact => fact.subject).sort()
   assert.deepEqual(admitted, allowed, 'the delegated model admitted a Task outside the declared campaign plan')
 }
+export async function sealedDigestsOf(attachments, submission) {
+  const read = async ref => {
+    const chunks = []
+    for await (const chunk of attachments.readFileStream(ref)) chunks.push(chunk)
+    const bytes = Buffer.concat(chunks)
+    assert.equal(bytes.length, ref.bytes, 'the native attachment length differs from its sealed reference')
+    const digest = sha256(bytes)
+    assert.equal('sha256:' + digest, ref.attachmentId, 'the native attachment bytes differ from their sealed identity')
+    return digest
+  }
+  const sealed = {
+    programDigest: await read(submission.files.program),
+    artifactDigest: await read(submission.files.artifact),
+    inputDigests: await Promise.all(submission.files.inputs.map(async input => ({ name: input.name, digest: await read(input.attachment) }))),
+  }
+  assert.equal(sealed.programDigest, submission.programDigest)
+  assert.equal(sealed.artifactDigest, submission.artifactDigest)
+  assert.deepEqual(sealed.inputDigests, submission.inputDigests)
+  return sealed
+}
+export function schedulerEvidenceOf(events, source) {
+  const matches = message => message.source?.kind === 'singularity' && message.source.purpose === source.purpose
+  const inserted = events.filter(event => event.type === 'agent/inbox/spliced')
+    .flatMap(event => event.data.inserted.filter(matches).map(message => ({ event, message })))
+  const entered = events.filter(event => event.type === 'user/message' && matches(event.data))
+  assert.equal(inserted.length, 1, 'the Run scheduler instruction was not inserted exactly once')
+  assert.equal(entered.length, 1, 'the Run scheduler instruction did not enter exactly one native model turn')
+  assert.equal(inserted[0].event.data.target, 'next-turn')
+  assert.deepEqual(inserted[0].message.source, source, 'the inbox scheduler source names a different committed fact')
+  assert.deepEqual(entered[0].data, inserted[0].message, 'the model-visible scheduler message changed after native insertion')
+  assert(inserted[0].event.seq < entered[0].seq, 'the scheduler message entered before its insertion')
+  const turn = events.findLast(event => event.type === 'turn/start' && event.seq < entered[0].seq)
+  assert(turn !== undefined, 'the scheduler message entered outside a native turn')
+  return { source, messageId: entered[0].data.id, insertedSeq: inserted[0].event.seq,
+    enteredSeq: entered[0].seq, turn: turn.data.turn }
+}
 export async function coreRead(facts, domainDir, cutoff = facts.length) {
   assert(Number.isInteger(cutoff) && cutoff >= 0 && cutoff <= facts.length, 'the route serves an uncommitted cutoff')
   const domain = await loadDomain(domainDir, () => { throw new Error('a read invoked a verifier') })
@@ -287,7 +326,7 @@ async function waitForRun(persistence, page, stage, exclude = []) {
   }
   throw new Error('no live Run reached crash stage ' + stage)
 }
-async function provenance(persistence, taskId, runId, sessionId, domainDir) {
+async function provenance(persistence, attachments, taskId, runId, sessionId, domainDir) {
   const facts = await controlFacts(persistence)
   const transcript = await readLog(persistence, sessionId)
   const tool = toolFacts(transcript)
@@ -332,18 +371,9 @@ async function provenance(persistence, taskId, runId, sessionId, domainDir) {
   assert.equal(source.digest, digestOf({ sessionId, eventCount: source.eventCount, events: prefix }))
   assert(transcript.length > source.eventCount, 'receipt source was not sealed before later transcript events')
   const contract = facts.find(fact => fact.kind === 'task/admitted' && fact.subject === taskId).payload.contract
-  const template = templateOf(core.domain, contract.template)
   const inputSources = inputSourcesOf(facts, taskId, receipt)
-  const workspace = receipt.consumption.workspace.ref
-  const disk = {
-    programDigest: sha256(await readFile(join(workspace, template.file))),
-    artifactDigest: sha256(await readFile(join(workspace, template.artifact))),
-    inputDigests: await Promise.all(contract.inputs.map(async input => ({ name: input.name, digest: sha256(await readFile(join(workspace, input.name))) }))),
-  }
-  assert.equal(disk.programDigest, receipt.submission.programDigest)
-  assert.equal(disk.artifactDigest, receipt.submission.artifactDigest)
-  assert.deepEqual(disk.inputDigests, receipt.submission.inputDigests)
-  assert.deepEqual(disk.inputDigests, receipt.consumption.inputs)
+  const sealed = await sealedDigestsOf(attachments, receipt.submission)
+  assert.deepEqual(sealed.inputDigests, receipt.consumption.inputs)
   for (const bound of inputSources) {
     if (bound.source.kind === 'protected')
       assert.equal(bound.digest, core.domain.inputs.find(input => input.ref === bound.source.ref).digest)
@@ -351,38 +381,51 @@ async function provenance(persistence, taskId, runId, sessionId, domainDir) {
   for (const criterion of receipt.criteria) {
     const verifier = core.domain.verifiers.find(verifier => verifier.ref === criterion.verifierRef)
     assert.equal(criterion.implementationDigest, sha256(await readFile(verifier.program)))
-    assert.equal(criterion.artifactDigest, disk.artifactDigest)
+    assert.equal(criterion.artifactDigest, sealed.artifactDigest)
     assert.equal(criterion.verdict, 'pass')
   }
   const headers = transcript.filter(event => event.type === 'request/header').map(event => event.data.header)
   for (const header of headers)
     assert.deepEqual(header.tools.map(tool => tool.name).sort(), [...TOOLS, 'singularity_decompose_task'].sort(), 'the Singularity preset exposes an unowned execution capability')
   const header = headers.at(-1)
+  const bubble = facts.find(fact => fact.kind === 'bubble/opened' && fact.subject === taskId && fact.payload.runId === runId)
+  assert.deepEqual(bubble.payload.model, { provider: header.config.provider, model: header.config.model },
+    'the Run model differs from the native child route')
   const declaredTools = header.tools.map(tool => tool.name).sort()
   return { receipt, template: contract.template, inputSources, tools: tool.calls.map(call => call.data.name),
     nativeErrors: tool.results.filter(result => result.value.isError === true),
     calls: tool.calls.map(call => ({ callId: call.data.callId, name: call.data.name, turn: call.data.turn, seq: call.seq })),
     provenance: { proposalCallId: proposed?.callId ?? null, submissionCallId: submissionCall.data.callId, statusCallId: status?.callId ?? null,
-      startedSeq: runs[0].seq, submittedSeq: submitted.seq, terminalSeq: terminal.seq, disk },
+      startedSeq: runs[0].seq, submittedSeq: submitted.seq, terminalSeq: terminal.seq, sealed },
     declaredTools, model: header.config, controlFactCount: facts.length, currentTranscriptEvents: transcript.length }
 }
 
-async function decompositionEvidence(persistence, page, domainDir) {
+async function decompositionEvidence(persistence, attachments, page, domainDir) {
   await send(page, DECOMPOSE_PROMPT)
+  const deadline = Date.now() + G2_TIMEOUT_MS
   await waitForTools(page, ['singularity_propose_task', 'singularity_decompose_task'], G2_TIMEOUT_MS)
-  const turnDeadline = Date.now() + G2_TIMEOUT_MS
-  while (await page.locator('button[aria-label="Stop generating"]').count() > 0) {
-    const progress = await controlFacts(persistence)
-    const plan = progress.find(fact => fact.kind === 'task/decomposed')
-    if (plan !== undefined) assertPlannedTasks(progress, plan.subject)
-    assert(!progress.some(fact => fact.kind === 'run/failed'), 'a delegated Run failed during the decomposition turn')
-    assert(Date.now() < turnDeadline, 'the decomposition turn did not settle before its deadline')
+  let facts
+  let started
+  while (true) {
+    facts = await controlFacts(persistence)
+    started = facts.find(fact => fact.kind === 'run/started')
+    const plan = facts.find(fact => fact.kind === 'task/decomposed')
+    if (plan !== undefined) assertPlannedTasks(facts, plan.subject)
+    assert(!facts.some(fact => fact.kind === 'run/failed'), 'a Run failed during the automatic campaign')
+    if (started !== undefined && facts.some(fact => fact.kind === 'run/verified' && fact.subject === started.subject)) {
+      const holder = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === started.subject).payload.agentId
+      const sessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === holder).payload.sessionId
+      const transcript = await readLog(persistence, sessionId)
+      const status = toolFacts(transcript).results.findLast(result => result.name === 'singularity_task_status' &&
+        result.value.receipt?.taskId === started.subject)
+      if (status !== undefined && transcript.some(event => event.type === 'turn/end' && event.seq > status.seq &&
+        event.data.reason.kind === 'completed')) break
+    }
+    assert(Date.now() < deadline, 'the parent did not automatically continue and verify before the deadline')
     await sleep(100)
   }
   await settle(page, G2_TIMEOUT_MS)
-  let facts = await controlFacts(persistence)
-  const started = facts.find(fact => fact.kind === 'run/started')
-  assert(started !== undefined, 'the decomposition recorded no parent Run')
+  facts = await controlFacts(persistence)
   const plan = facts.find(fact => fact.kind === 'task/decomposed' && fact.subject === started.subject)
   assert(plan !== undefined, 'the parent recorded no complete decomposition')
   assertPlannedTasks(facts, started.subject)
@@ -396,19 +439,12 @@ async function decompositionEvidence(persistence, page, domainDir) {
   assert.deepEqual(count.dependsOn, [extract.taskId])
   assert.deepEqual(count.contract.inputs[0].source, { kind: 'artifact', taskId: extract.taskId })
   for (const child of children) { assert.equal(child.maxRuns, 1); assert.deepEqual(child.supports, ['letters']) }
-  const deadline = Date.now() + G2_TIMEOUT_MS
-  while (!children.every(child => facts.some(fact => fact.kind === 'run/verified' && fact.subject === child.taskId))) {
-    assert(!facts.some(fact => fact.kind === 'run/failed'), 'a delegated Run failed before its producer chain completed')
-    assert(Date.now() < deadline, 'both delegated tasks did not verify before the deadline')
-    await sleep(100)
-    facts = await controlFacts(persistence)
-    assertPlannedTasks(facts, started.subject)
-  }
-  assert(!facts.some(fact => fact.kind === 'run/submitted' && fact.subject === started.subject),
-    'the parent submitted before its independent final acceptance turn')
+  assert(children.every(child => facts.some(fact => fact.kind === 'run/verified' && fact.subject === child.taskId)),
+    'the parent completed before both delegated tasks verified')
   const holder = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === started.subject).payload.agentId
   const sessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === holder).payload.sessionId
-  const parentTools = toolFacts(await readLog(persistence, sessionId))
+  const parentTranscript = await readLog(persistence, sessionId)
+  const parentTools = toolFacts(parentTranscript)
   const decomposition = parentTools.results.find(result => result.name === 'singularity_decompose_task' && result.value.taskId === started.subject)
   assert(decomposition !== undefined, 'the native root transcript contains no successful decomposition result')
   const delegated = []
@@ -417,23 +453,32 @@ async function decompositionEvidence(persistence, page, domainDir) {
     const childSessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === owner).payload.sessionId
     const run = facts.find(fact => fact.kind === 'run/started' && fact.subject === child.taskId)
     assert(run !== undefined, 'a planned task has no actual Run')
-    delegated.push({ taskId: child.taskId, runId: run.payload.runId, sessionId: childSessionId,
-      ...await provenance(persistence, child.taskId, run.payload.runId, childSessionId, domainDir) })
+    const transcript = await readLog(persistence, childSessionId)
+    const dispatch = schedulerEvidenceOf(transcript, { kind: 'singularity', purpose: 'dispatch', controlId: 'singularity-local',
+      parentTaskId: started.subject, taskId: child.taskId, runId: run.payload.runId, factSeq: run.seq })
+    delegated.push({ taskId: child.taskId, runId: run.payload.runId, sessionId: childSessionId, dispatch,
+      ...await provenance(persistence, attachments, child.taskId, run.payload.runId, childSessionId, domainDir) })
   }
   assert.equal(new Set([sessionId, ...delegated.map(child => child.sessionId)]).size, 3,
     'the parent and both child tasks did not run in distinct native sessions')
-  await send(page, 'Both delegated Tasks verified. Independently submit a Node ES module for the existing parent Task ' +
-    started.subject + ' using singularity_submit_program. It runs as node program.mjs <input path>; import node:fs and ' +
-    'print only the ASCII letter count of its protected source. Then call singularity_task_status for its receipt. Do not propose or decompose again.')
-  await waitForTools(page, TOOLS, G2_TIMEOUT_MS)
-  await settle(page, G2_TIMEOUT_MS)
-  const parent = await provenance(persistence, started.subject, started.payload.runId, sessionId, domainDir)
+  const childIds = new Set(children.map(child => child.taskId))
+  const terminal = facts.findLast(fact => fact.kind === 'run/verified' && childIds.has(fact.subject))
+  const outcome = schedulerEvidenceOf(parentTranscript, { kind: 'singularity', purpose: 'plan-outcome', controlId: 'singularity-local',
+    parentTaskId: started.subject, taskId: terminal.subject, runId: terminal.payload.runId, factSeq: terminal.seq })
+  const users = parentTranscript.filter(event => event.type === 'user/message')
+  assert.equal(users.filter(event => event.data.source.kind === 'user').length, 1, 'the probe supplied a second human parent turn')
+  const parent = await provenance(persistence, attachments, started.subject, started.payload.runId, sessionId, domainDir)
+  const continuation = parent.calls.find(call => call.callId === parent.provenance.submissionCallId)
+  const decompositionCall = parent.calls.find(call => call.callId === decomposition.callId)
+  assert.equal(continuation.turn, outcome.turn, 'the parent submission did not belong to the host outcome turn')
+  assert(continuation.seq > outcome.enteredSeq && outcome.turn > decompositionCall.turn,
+    'the parent did not wait for the host outcome before its own submission')
   const lastChildCutoff = Math.max(...delegated.map(child => child.receipt.cutoff))
   assert(parent.provenance.submittedSeq >= lastChildCutoff, 'the parent receipt preceded delegated acceptance')
   assert(parent.receipt.criteria.every(criterion => criterion.verifierRef === 'letters'), 'child criteria replaced the parent independent verifier')
   assert.notEqual(parent.receipt.source.digest, delegated[1].receipt.source.digest)
   return { taskId: started.subject, runId: started.payload.runId, sessionId,
-    plan: { callId: decomposition.callId, seq: plan.seq, children: plan.payload.children }, delegated, ...parent }
+    plan: { callId: decomposition.callId, seq: plan.seq, children: plan.payload.children }, outcome, delegated, ...parent }
 }
 
 const panelState = page => page.evaluate(() => {
@@ -505,11 +550,14 @@ async function runProbe(home, context, screenshot, stage, extra) {
   let before
   let page
   try {
+    const { LocalAttachmentStore } = await dshModule('@deepseek-ai/dsh-attachment-local')
+    await medium.context.plugin(LocalAttachmentStore, { dshHome: home })
+    const attachments = medium.context.get('attachments')
     page = await openApp(context, server.url)
     const dismissedFirstRun = await prepare(page, home)
     if (stage === 'decompose' || stage === 'panel') {
       const domainDir = join(ROOT, 'deployment/domain/letters')
-      const result = await decompositionEvidence(medium.persistence, page, domainDir)
+      const result = await decompositionEvidence(medium.persistence, attachments, page, domainDir)
       const panel = stage === 'panel' ? await panelEvidence(medium.persistence, page, new URL(server.url).origin, domainDir) : null
       await mkdir(dirname(screenshot), { recursive: true })
       await page.screenshot({ path: screenshot, fullPage: true })
@@ -611,7 +659,7 @@ async function runProbe(home, context, screenshot, stage, extra) {
     const holder = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === taskId).payload.agentId
     const sessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === holder).payload.sessionId
     const domainDir = stage === 'submitted' ? join(home, 'domain') : join(ROOT, 'deployment/domain/letters')
-    const result = await provenance(medium.persistence, taskId, runId, sessionId, domainDir)
+    const result = await provenance(medium.persistence, attachments, taskId, runId, sessionId, domainDir)
     if (before !== undefined) {
       assert.equal(sessionId, before.sessionId, 'native resume changed the responsible session')
       assert.equal(result.receipt.consumption.workspace.ref, before.workspace, 'recovery changed the Run workspace')
@@ -643,6 +691,8 @@ async function runProbe(home, context, screenshot, stage, extra) {
       failures.push({ sessionId: stored.header.id,
         model: events.findLast(event => event.type === 'request/header')?.data.header.config ?? null,
         turnEnd: events.findLast(event => event.type === 'turn/end')?.data ?? null,
+        schedulerMessages: events.filter(event => event.type === 'agent/inbox/spliced' || event.type === 'user/message')
+          .map(event => ({ seq: event.seq, type: event.type, data: event.data })),
         calls: tool.calls.map(event => ({ seq: event.seq, turn: event.data.turn, name: event.data.name, callId: event.data.callId })),
         results: tool.results })
     }

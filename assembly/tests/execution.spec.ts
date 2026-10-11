@@ -33,6 +33,20 @@ function harness(admission: Admission = () => undefined, onTurnFailure: (failure
 }
 
 describe('the DSH execution port', () => {
+  it('forwards agent runtime errors through the failure port once per exact live turn', async () => {
+    const failures: TurnFailure[] = []
+    const h = harness(undefined, failure => { failures.push(failure) })
+    h.session.append('turn/start', { turn: 1 })
+    h.ctx.emit('agent/error', { agent: h.agent, turn: 1, step: 0, error: new Error('checkpoint flush failed') })
+    expect(failures).toHaveLength(1)
+    h.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'UNKNOWN', message: 'checkpoint flush failed' } } })
+    h.ctx.emit('agent/error', { agent: { ...h.agent }, turn: 2, step: 0, error: new Error('stale agent') })
+    expect(failures).toMatchObject([{ sessionId: 'root', turn: 1, reason: { kind: 'error', error: { message: 'checkpoint flush failed' } } }])
+    await h.execution.close()
+    h.ctx.emit('agent/error', { agent: h.agent, turn: 2, step: 0, error: new Error('after close') })
+    expect(failures).toHaveLength(1)
+  })
+
   it('forwards error and abort endings from the exact live agent session through one failure port', async () => {
     const failures: TurnFailure[] = []
     const h = harness(undefined, failure => { failures.push(failure) })

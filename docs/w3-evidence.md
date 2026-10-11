@@ -1,6 +1,6 @@
-# W3：领域分解与封存产物合同
+# W3/W4：领域分解与封存产物合同
 
-W3 使用 Task v7。letters 的父模板 `count-source` 保留原保护输入；`extract-letters` 独立验收保序 ASCII 字母，
+当前使用 Task v8。letters 的父模板 `count-source` 保留原保护输入；`extract-letters` 独立验收保序 ASCII 字母，
 `count-letters` 独立验收封存字母的 decimal 计数。child 的 `supports` 只说明工作关系，父判据由父自己的 verified Run 接受。
 
 用户明确：父可在完整计划内创建任务并选择已声明模板；已分配 child 执行自己的 Task/Run，不可另开根任务或发布计划。
@@ -12,11 +12,12 @@ W3 使用 Task v7。letters 的父模板 `count-source` 保留原保护输入；
 合法计划最后以原 decomposition 事实发布；变更重送拒绝，非法计划不留下准备事实。
 
 Task 固定模板内容身份与输入来源，artifact 准入只引用准确 producer Task。
-下游开始时读取 verified producer 的封存产物，核摘要后将准确 producer Task/Run 写入现有 revision manifest，Bubble 绑定实际字节。
-输入名、来源、判据与模板错配，以及未 verified、丢失或变更产物，都在新 revision/Run 前拒绝。
+提交把真实程序、输入和产物存入 DSH 原生附件存储，并持久绑定 `sha256:` 内容引用。
+下游从准确 verified producer 的附件读取字节；既有 revision manifest 记录 producer Task/Run，Bubble 绑定摘要。
+输入名、来源、判据与模板错配及未 verified 在 Run 前拒绝；权威存储读失败在 Run 准备阶段记 runtime failed。
 
-恢复核对准确模板、revision、producer Run 的封存摘要和自身输入副本，不重新复制上游工作区。
-冻结后上游文件删除或变化不影响副本恢复；自身冻结输入或模板变更则明确失败。
+submitted 恢复和验证只读取权威附件；工作区文件改删不改变封存结果。
+working 恢复仍核对已准备输入、模板与 revision。
 
 接口/spec、执行和独立 verifier 有 red→green 证据。相关变异通过仓库 [账本](../mutation-baseline.json) 可运行；
 保留固定 receipt、请求重送、退出码和来源规则。已删除单模板 Domain 字段、闲置 metric、重复制输入的准备路径与两个独立 G2 浏览器脚本。
@@ -31,9 +32,11 @@ Task 固定模板内容身份与输入来源，artifact 准入只引用准确 pr
 按用户裁定修复后，双 child 已 verified，探针的只读 cut 适配错误记录在 `/tmp/singularity-w3-panel-probe-failed.json` 和同名 png。
 失败记录不作为产品通过证据。
 
-本轮父通过第二个用户 turn 继续提交；这不是 W4 自动父唤醒或有界重试的证据。
-完整 G2 检查点仍需 W4/W5 的准确会话、有界调度、来源读面和恢复出口。
+W4 自动链已通过，证据为 `/tmp/singularity-w4-panel.json` 与同名 png：只发送一个用户 turn，
+两个 child 与父 Run 分别 verified；dispatch/outcome 的 Task/Run/factSeq、原生附件字节与真实模型路由一致。
+同会话重试、预算耗尽、准确父和 pending 唤醒有端口 spec；本轮没有追加对应模型 campaign。
+来源读面归 W5。
 
 core build、assembly 类型检查及完整 spec 通过；插件产物已重建。
-全量 gates（含真实浏览器调用）和检测器自测通过，日志保留在 `/tmp/singularity-w3-gates-final.log`。
+W3 全量 gates 日志保留在 `/tmp/singularity-w3-gates-final.log`；W4 按主链节奏运行构建、相关 spec 和一次成功浏览器验收。
 源码差异检查通过；计数反例样本末尾的两个 LF 是独立 verifier 的刻意失败输入。

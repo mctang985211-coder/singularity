@@ -23,7 +23,7 @@ import { refuse } from '../protocol/refusal.ts'
 import type { DecompositionChild } from './decomposition.ts'
 import type { RunState, TaskState } from './protocol.ts'
 
-/** What a scheduler should do about one sub-task. `stopped` means its declared budget is spent. */
+/** `stopped` means runtime failure or exhausted attempt budget. */
 export type ChildStatus = 'missing' | 'blocked' | 'waiting' | 'ready' | 'running' | 'verified' | 'stopped'
 
 /** What a sub-task's own runs have done, whether or not it was allowed to proceed. */
@@ -149,6 +149,9 @@ function projectOne(parent: TaskState, tasks: ReadonlyMap<string, TaskState>): T
 
     if (runs.some(run => run.status === 'verified')) return { ...shape, status: 'verified', reason: null }
     if (runs.some(run => run.status === 'running')) return { ...shape, status: 'running', reason: null }
+    const interrupted = runs.find(run => run.failureCause === 'runtime')
+    if (interrupted !== undefined)
+      return { ...shape, status: 'stopped', reason: `runtime failure in Run "${interrupted.runId}"${interrupted.failureReason === undefined ? '' : ': ' + interrupted.failureReason}` }
     if (runsUsed >= entry.maxRuns)
       return {
         ...shape,

@@ -166,7 +166,7 @@
     },
     {
       "protocol": "task",
-      "version": 7,
+      "version": 8,
       "subject": "the task id",
       "kinds": [
         {
@@ -206,6 +206,7 @@
         {
           "name": "run/failed",
           "members": [
+            "cause",
             "reason",
             "runId"
           ]

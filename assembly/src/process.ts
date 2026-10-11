@@ -1,12 +1,12 @@
 import { spawn, type SpawnOptions } from 'node:child_process'
 import type { VerifierInvocation } from '../../src/verifier/command.ts'
 
-export function spawnProcess(invocation: VerifierInvocation, signal?: AbortSignal): Promise<{
+export function spawnProcess(invocation: VerifierInvocation, signal?: AbortSignal, cwd?: string): Promise<{
   exitCode: number | null; stdout: string; stderr: string; failure?: string
 }> {
   signal?.throwIfAborted()
   return new Promise(resolve => {
-    const options: SpawnOptions = { stdio: ['ignore', 'pipe', 'pipe'], detached: true }
+    const options: SpawnOptions = { stdio: ['ignore', 'pipe', 'pipe'], detached: true, ...(cwd === undefined ? {} : { cwd }) }
     const child = invocation.shell
       ? spawn(invocation.command, { ...options, shell: true })
       : spawn(invocation.argv[0], invocation.argv.slice(1), options)
@@ -37,8 +37,8 @@ export function spawnProcess(invocation: VerifierInvocation, signal?: AbortSigna
     child.on('close', (code, termination) => {
       clearTimeout(timer)
       signal?.removeEventListener('abort', abort)
-      if (code !== 0) failure ??= `process-execution-failed: exited ${code}, signal ${termination}`
-      resolve({ exitCode: failure === undefined || code !== 0 ? code : null, stdout, stderr, ...(failure === undefined ? {} : { failure }) })
+      if (termination !== null) failure ??= `process-execution-failed: signal ${termination}`
+      resolve({ exitCode: code, stdout, stderr, ...(failure === undefined ? {} : { failure }) })
     })
   })
 }

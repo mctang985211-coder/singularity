@@ -4,14 +4,15 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
-import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
+import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import type { ReceiptView, TaskView } from '../../src/task/view.ts'
 import { callerOf, openApparatus } from './apparatus.ts'
+import type { Apparatus } from './apparatus.ts'
 import type { TaskTemplate } from './template.ts'
 import type { Domain } from './domain.ts'
 import type { Admission, Execution, TurnFailureHandler } from './execution.ts'
 import { repair } from './repair.ts'
-import { createScheduler } from './scheduler.ts'
+import { createScheduler, DispatchError } from './scheduler.ts'
 import { snapshotOf, type ControlSnapshot } from './snapshot.ts'
 import { decompose, propose, status } from './surfaces.ts'
 import { submit, type Submission } from './submission.ts'
@@ -54,6 +55,7 @@ export interface Status {
   readonly receipt: ReceiptView | null
 }
 export interface DriverOptions {
+  readonly attachments: Apparatus['attachments']
   readonly controlId: string
   readonly workspaceRoot: string
   readonly domain: Domain
@@ -61,10 +63,13 @@ export interface DriverOptions {
   readonly seams: ChildSessionSeams
   readonly execution: (admission: Admission, onTurnFailure: TurnFailureHandler) => Execution
 }
-export interface TaskDriver extends TaskService { close(): Promise<void> }
+export interface TaskDriver extends TaskService {
+  activate(sessionId: string): Promise<void>
+  close(): Promise<void>
+}
 
 export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
-  const apparatus = await openApparatus(options.controlId, options.workspaceRoot, options.domain, options.persistence)
+  const apparatus = await openApparatus(options.controlId, options.workspaceRoot, options.domain, options.persistence, options.attachments)
   const admission: Admission = exec => {
     if (exec.agent === undefined || ['singularity_task_status', 'singularity_propose_task', 'singularity_submit_program'].includes(exec.name)) return undefined
     const tasks = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
@@ -88,6 +93,10 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     void pending.then(() => active.delete(pending), () => active.delete(pending))
     return pending
   }
+  const scheduler = createScheduler(apparatus, options.seams)
+  const parentPlanOf = (taskId: string): string | undefined =>
+    [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
+      .find(task => task.decomposition?.children.some(child => child.taskId === taskId))?.taskId
   const execution = options.execution(admission, failure => {
     void work(async () => {
       const cut = apparatus.store.load()
@@ -102,6 +111,8 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
             commandId: `turn-failed:${failure.sessionId}/${failure.seq}/${run.runId}`, taskId: task.taskId, runId: run.runId,
             reason: 'session-turn-failed: ' + JSON.stringify(failure),
           })
+          const parentTaskId = parentPlanOf(task.taskId)
+          if (parentTaskId !== undefined) await scheduler.advance(parentTaskId)
         }
       }
     }).catch(error => lifecycleErrors.add(error))
@@ -110,18 +121,38 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     const cleanup = await Promise.allSettled([execution.close(), apparatus.store.close()])
     throw new AggregateError([error, ...cleanup.flatMap(result => result.status === 'rejected' ? [result.reason] : [])], 'driver recovery failed')
   }
-  const scheduler = createScheduler(apparatus, options.seams)
   return {
+    activate: sessionId => work(async () => {
+      const cut = apparatus.store.load()
+      for (const task of cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()) {
+        if (task.decomposition === undefined || task.responsibility === undefined) continue
+        const holder = cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility.agentId)
+        if (holder?.sessionId === sessionId) await scheduler.advance(task.taskId)
+      }
+    }),
     forCall: exec => {
       const agent = execution.assertCaller(exec)
       const caller = callerOf(agent)
       return {
         propose: input => work(() => propose(apparatus, caller, String(exec.callId), input)),
-        decompose: input => work(() => decompose(apparatus, scheduler, caller, agent, input)),
+        decompose: input => work(() => decompose(apparatus, scheduler, caller, input)),
         submit: input => work(async () => {
-          const answer = await submit(apparatus, execution, caller, exec, input, controller.signal)
-          try { await scheduler.settled() } catch (error) {
-            return { ...answer, dispatchError: error instanceof Error ? error.message : String(error) }
+          const cutoff = apparatus.store.load().entries().length
+          let answer: Submission
+          try { answer = await submit(apparatus, execution, caller, exec, input, AbortSignal.any([controller.signal, exec.signal])) }
+          catch (error) {
+            const failed = apparatus.store.load().entries().slice(cutoff).some(fact => fact.subject === input.taskId && fact.kind === TASK_KINDS.runFailed)
+            const parentTaskId = parentPlanOf(input.taskId)
+            if (failed && parentTaskId !== undefined) try { await scheduler.advance(parentTaskId) }
+            catch (dispatch) { throw new AggregateError([error, dispatch], 'submission and parent notification failed') }
+            throw error
+          }
+          const terminal = apparatus.store.load().entries().slice(cutoff).some(fact => fact.subject === answer.taskId &&
+            (fact.kind === TASK_KINDS.runVerified || fact.kind === TASK_KINDS.runFailed) && (fact.payload as { runId: string }).runId === answer.runId)
+          const parentTaskId = parentPlanOf(answer.taskId)
+          if (terminal && parentTaskId !== undefined) try { await scheduler.advance(parentTaskId) } catch (error) {
+            return { ...answer, dispatchError: { parentTaskId, taskId: error instanceof DispatchError ? error.taskId : answer.taskId,
+              runId: error instanceof DispatchError ? error.runId : answer.runId, detail: error instanceof Error ? error.message : String(error) } }
           }
           return answer
         }),

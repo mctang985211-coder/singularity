@@ -30,7 +30,7 @@ const FIXTURE_PATH = join(ROOT, 'tests', 'fixtures', 'f-domain.json')
 /**
  * The fixture's canonical content digest, written down here by hand.
  */
-const FROZEN_FIXTURE_DIGEST = '2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b'
+const FROZEN_FIXTURE_DIGEST = 'f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934'
 
 const CONTROL = 'f-domain-probe'
 const ENVIRONMENT = 'f-domain-library'
@@ -38,7 +38,7 @@ const AGENT = 'f-domain-agent'
 const SELECTOR = 'selector'
 const METER = 'meter'
 const BOUNDS = 'bounds'
-const MODEL = 'probe-authored/not-a-real-model'
+const MODEL = { provider: 'probe-authored', model: 'not-a-real-model' }
 const CONDITIONS = ['no-network']
 const NOWHERE = 'the fixture carries no such member'
 

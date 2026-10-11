@@ -36,6 +36,7 @@ interface ActiveExecution {
 export function createExecution(ctx: Context, admission: Admission, onTurnFailure: TurnFailureHandler): Execution {
   const active = new Map<ToolExecutionToken, ActiveExecution>()
   const borrowed = new WeakSet<Agent>()
+  const failedTurns = new WeakMap<Agent, number>()
   let closed = false
   let closing: Promise<void> | undefined
   const assertCaller = (exec: ToolRunContext): Agent => {
@@ -78,28 +79,34 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
       resolve()
     }
   })
+  const report = (agent: Agent, failure: TurnFailure): void => {
+    if (ctx.agents.get(agent.id) !== agent || (failedTurns.get(agent) ?? -1) >= failure.turn) return
+    failedTurns.set(agent, failure.turn)
+    onTurnFailure(failure)
+  }
+  const crashed = ctx.on('agent/error', ({ agent, turn, error }) => {
+    report(agent, { sessionId: String(agent.session.id), turn, seq: Number(agent.session.seq),
+      reason: { kind: 'error', error: { code: 'DSH_AGENT_ERROR', message: error instanceof Error ? error.message : String(error) } } })
+  })
   const ended = ctx.on('session/event', (session, event) => {
     if (event.type !== 'turn/end' || (event.data.reason.kind !== 'error' && event.data.reason.kind !== 'aborted')) return
     const agent = ctx.agents.get(session.id)
     if (agent?.session !== session) return
-    onTurnFailure({ sessionId: String(session.id), turn: event.data.turn, seq: Number(event.seq), reason: event.data.reason })
+    report(agent, { sessionId: String(session.id), turn: event.data.turn, seq: Number(event.seq), reason: event.data.reason })
   })
   const close = (): Promise<void> => closing ??= (async () => {
     closed = true
     ended()
+    crashed()
     const granted = [...active.values()].filter(entry => entry.exec.agent !== undefined && borrowed.has(entry.exec.agent))
     for (const entry of granted) entry.controller.abort(new Error('the execution port has closed'))
-    try {
-      await wait(granted)
-    } finally {
-      listen()
-      guard()
-    }
+    await wait(granted)
   })()
   ctx.effect(function* () {
     yield guard
     yield listen
     yield ended
+    yield crashed
     yield close
   })
   return {

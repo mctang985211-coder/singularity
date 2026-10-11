@@ -55,7 +55,7 @@ const BUBBLE_INPUTS = [{ name: 'words.txt', digest: '1'.repeat(64) }]
 /** A different protected dataset has a separate immutable Task contract. */
 const OTHER_INPUTS = [{ name: 'words.txt', digest: '2'.repeat(64) }]
 /** The manifest a run declares: the model, each tool's content digest, and the conditions. */
-const BUBBLE = { model: 'model-1', tools: [{ name: 'count', implementationDigest: METER_DIGEST, version: '1' }], conditions: ['no-network'] }
+const BUBBLE = { model: { provider: 'test', model: 'model-1' }, tools: [{ name: 'count', implementationDigest: METER_DIGEST, version: '1' }], conditions: ['no-network'] }
 /** A run's declared manifest: the context members, plus a dataset a test may vary on its own. */
 type Manifest = Partial<typeof BUBBLE> & { readonly inputs?: typeof BUBBLE_INPUTS }
 const bubbleOf = (runId: string, overrides: Manifest) => ({
@@ -63,7 +63,7 @@ const bubbleOf = (runId: string, overrides: Manifest) => ({
 })
 /** The runs this log holds: two under one manifest, then another model, a rebuilt tool, no context. */
 const RUNS: readonly (readonly [string, Manifest | null])[] = [
-  [RUN, {}], [RUN_SAME, {}], [RUN_MODEL, { model: 'model-2' }],
+  [RUN, {}], [RUN_SAME, {}], [RUN_MODEL, { model: { provider: 'test', model: 'model-2' } }],
   [RUN_TOOLS, { tools: [{ name: 'count', implementationDigest: UNHELD_DIGEST, version: '1' }] }], [RUN_BARE, null],
 ]
 const CONTRACT = {
@@ -114,7 +114,7 @@ async function openLive(meterIdentity = METER_ACTOR, boundsIdentity = BOUNDS_ACT
     ...RUNS.flatMap(([runId, manifest]) => [
       { kind: TASK_KINDS.runStarted, payload: { runId, revision: REVISION } },
       ...(manifest === null ? [] : [{ kind: TASK_KINDS.bubbleOpened, payload: bubbleOf(runId, manifest) }]),
-      { kind: TASK_KINDS.runFailed, payload: { runId, reason: 'fixture attempt complete' } },
+      { kind: TASK_KINDS.runFailed, payload: { runId, cause: 'runtime', reason: 'fixture attempt complete' } },
     ]),
   ]
   for (const [index, fact] of facts.entries())
@@ -124,7 +124,7 @@ async function openLive(meterIdentity = METER_ACTOR, boundsIdentity = BOUNDS_ACT
     { kind: TASK_KINDS.assigned, payload: { agentId: AGENT, agentIdentity: SCHEDULER } },
     { kind: TASK_KINDS.runStarted, payload: { runId: RUN_INPUTS, revision: REVISION } },
     { kind: TASK_KINDS.bubbleOpened, payload: bubbleOf(RUN_INPUTS, { inputs: OTHER_INPUTS }) },
-    { kind: TASK_KINDS.runFailed, payload: { runId: RUN_INPUTS, reason: 'fixture attempt complete' } },
+    { kind: TASK_KINDS.runFailed, payload: { runId: RUN_INPUTS, cause: 'runtime', reason: 'fixture attempt complete' } },
   ]
   for (const [index, fact] of otherInputs.entries())
     await store.emit({ commandId: `other-input-${index}`, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: INPUT_TASK, ...fact })

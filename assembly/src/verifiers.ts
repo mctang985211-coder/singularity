@@ -1,13 +1,3 @@
-/**
- * Declaring a verifier: the program whose bytes are its identity, the template its judgement is invoked
- * with, and the samples that prove it can produce both verdicts.
- *
- * The samples are read here rather than at the call site because a selftest's digests have to be the
- * digests of the bytes actually declared — computed from the files, never taken from the declaration.
- *
- * @module @dangosys/dsh-singularity-next/verifiers
- */
-
 import { refuse } from '../../src/protocol/refusal.ts'
 import { assertClosedKeys } from '../../src/protocol/envelope.ts'
 import { runVerifierCommand, type VerifierProcess } from '../../src/verifier/command.ts'
@@ -59,7 +49,6 @@ export async function verifierOf(dir: string, entry: unknown, where: string, run
     args,
     implementationDigest: sha256(await readBytes(program, `${where}.program`)),
     selftest: { samples },
-    // This port is the selftest's: a real judgement reaches the verifier through `runJudge`.
     judge: async (sample: VerifierInput): Promise<VerifierVerdict> => {
       const command = argv.get(sample.subject)
       if (command === undefined) refuse('malformed-declaration', `the selftest asked for ${JSON.stringify(sample.subject)}, which is not the artifact of any declared sample`)
@@ -68,7 +57,6 @@ export async function verifierOf(dir: string, entry: unknown, where: string, run
     },
   }
 }
-/** The verifier a declaration names, or a refusal naming the one it asked for. */
 export function requireVerifier(verifiers: readonly DomainVerifier[], named: string, where: string): DomainVerifier {
   const resolved = verifiers.find(entry => entry.ref === named)
   if (resolved === undefined)

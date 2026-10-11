@@ -19,6 +19,8 @@ const DSH_INSTALLED =
 export default defineConfig({
   resolve: {
     alias: {
+      '@deepseek-ai/dsh-attachment': `${DSH_INSTALLED}/dsh-attachment/lib/index.js`,
+      '@deepseek-ai/dsh-attachment-local': `${DSH_INSTALLED}/dsh-attachment-local/lib/index.js`,
       '@deepseek-ai/cordis': `${DSH_INSTALLED}/cordis/lib/index.js`,
       '@deepseek-ai/dsh-session': `${DSH_INSTALLED}/dsh-session/lib/index.js`,
       '@deepseek-ai/dsh-session-persistence': `${DSH_INSTALLED}/dsh-session-persistence/lib/index.js`,

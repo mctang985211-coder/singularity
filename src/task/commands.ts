@@ -9,7 +9,7 @@ import { assertPinnedRevision } from '../environment/binding.ts'
 import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunSubmission, type TaskState } from './protocol.ts'
 import { unadjudicatedCriteria, unmetCriteria, verdictFor } from './run.ts'
 import { projectTree } from './tree.ts'
-import type { BubbleInput, BubbleTool } from './bubble.ts'
+import type { Bubble, BubbleInput, BubbleTool } from './bubble.ts'
 import type { DecompositionChild } from './decomposition.ts'
 
 /** What the deployment holds for one agent: the subjects-table key its acts are bound to. */
@@ -54,7 +54,7 @@ export interface AgentCommands {
     readonly runId: string
     readonly inputs: readonly BubbleInput[]
     readonly workspace: { readonly kind: string; readonly ref: string }
-    readonly model: string
+    readonly model: Bubble['model']
     readonly tools: readonly BubbleTool[]
     readonly conditions: readonly string[]
   }, as?: string): Promise<Envelope>
@@ -218,7 +218,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         input.commandId,
         TASK_KINDS.runFailed,
         input.taskId,
-        input.reason === undefined ? { runId: input.runId } : { runId: input.runId, reason: input.reason },
+        { runId: input.runId, cause: 'runtime', ...(input.reason === undefined ? {} : { reason: input.reason }) },
         as,
       ),
 
@@ -405,7 +405,7 @@ function settleRequest(
   return {
     ...common,
     kind: TASK_KINDS.runFailed,
-    payload: reason === undefined ? { runId: input.runId } : { runId: input.runId, reason },
+    payload: { runId: input.runId, cause: 'acceptance', ...(reason === undefined ? {} : { reason }) },
     ...(as === undefined ? {} : { as }),
   }
 }

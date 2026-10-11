@@ -17,7 +17,7 @@ export interface Bubble {
   readonly inputs: readonly BubbleInput[]
   readonly workspace: { readonly kind: string; readonly ref: string }
   /** The model that actually ran. Never a default: an unnamed model is an unrecorded condition. */
-  readonly model: string
+  readonly model: { readonly provider: string; readonly model: string }
   /** Every tool the execution could reach, by name, version and the digest of its implementation. */
   readonly tools: readonly BubbleTool[]
   /** The observable external conditions, each named. Empty means "none observed", not "unrecorded". */
@@ -35,6 +35,7 @@ export interface BubbleTool {
 export const BUBBLE_MEMBERS = ['runId', 'inputs', 'workspace', 'model', 'tools', 'conditions'] as const
 export const WORKSPACE_MEMBERS = ['kind', 'ref'] as const
 export const BUBBLE_INPUT_MEMBERS = ['name', 'digest'] as const
+const MODEL_MEMBERS = ['provider', 'model'] as const
 /** The closed shape of one tool. Not exported: what is exported is the surface the stack uses. */
 const BUBBLE_TOOL_MEMBERS = ['name', 'implementationDigest', 'version'] as const
 
@@ -113,25 +114,24 @@ function conditionList(raw: unknown, where: string): readonly string[] {
 export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskState> {
   return defineKind<
     TaskState,
-    { runId: string; inputs: readonly BubbleInput[]; workspace: { kind: string; ref: string }; model: string; tools: readonly BubbleTool[]; conditions: readonly string[] },
-    { workspace: MemberSet; inputs: MemberSet; tools: MemberSet }
+    { runId: string; inputs: readonly BubbleInput[]; workspace: { kind: string; ref: string }; model: Bubble['model']; tools: readonly BubbleTool[]; conditions: readonly string[] },
+    { workspace: MemberSet; inputs: MemberSet; tools: MemberSet; model: MemberSet }
   >({
     guarantees: { appended: true },
     members: BUBBLE_MEMBERS,
-    // `inputs[]`, `tools[]` and `workspace` are closed by their own readers with the sets named here:
-    // this declaration is handed to each of them, so it is what the log enforces rather than a second
-    // copy printed beside the one the reader uses.
-    nested: { workspace: WORKSPACE_MEMBERS, inputs: BUBBLE_INPUT_MEMBERS, tools: BUBBLE_TOOL_MEMBERS },
+    nested: { workspace: WORKSPACE_MEMBERS, inputs: BUBBLE_INPUT_MEMBERS, tools: BUBBLE_TOOL_MEMBERS, model: MODEL_MEMBERS },
     emitter,
     parse: (raw, where, nested) => {
       const source = record(raw, where)
       const workspace = record(source['workspace'], `${where}.workspace`)
       assertClosedKeys(workspace, nested.workspace, `${where}.workspace`)
+      const model = record(source['model'], `${where}.model`)
+      assertClosedKeys(model, nested.model, `${where}.model`)
       return {
         runId: text(source, 'runId', where),
         inputs: inputList(source['inputs'], `${where}.inputs`, nested.inputs),
         workspace: { kind: text(workspace, 'kind', `${where}.workspace`), ref: text(workspace, 'ref', `${where}.workspace`) },
-        model: text(source, 'model', where),
+        model: { provider: text(model, 'provider', `${where}.model`), model: text(model, 'model', `${where}.model`) },
         tools: toolList(source['tools'], `${where}.tools`, nested.tools),
         conditions: conditionList(source['conditions'], `${where}.conditions`),
       }

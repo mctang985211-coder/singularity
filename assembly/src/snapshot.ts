@@ -1,5 +1,5 @@
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
-import { projectTree } from '../../src/task/tree.ts'
+import { projectTree, type TreeChildView, type TreeCriterionView } from '../../src/task/tree.ts'
 import { projectTask } from '../../src/task/view.ts'
 import type { Apparatus } from './apparatus.ts'
 
@@ -16,16 +16,8 @@ export interface ControlSnapshot {
   readonly plans: readonly {
     readonly parentTaskId: string
     readonly complete: boolean
-    readonly children: readonly {
-      readonly taskId: string
-      readonly status: string
-      readonly dependsOn: readonly string[]
-      readonly supports: readonly string[]
-      readonly maxRuns: number
-      readonly runsUsed: number
-      readonly reason: string | null
-    }[]
-    readonly criteria: readonly { readonly criterionId: string; readonly satisfiedBy: string | null }[]
+    readonly children: readonly Omit<TreeChildView, 'lastOutcome'>[]
+    readonly criteria: readonly Omit<TreeCriterionView, 'supportedBy'>[]
   }[]
 }
 
@@ -35,10 +27,7 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
   for (const [taskId, state] of committed.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)) {
     if (state.contract === undefined) continue
     const view = projectTask(state)
-    tasks.push({
-      taskId,
-      goal: state.contract.goal,
-      phase: view.phase,
+    tasks.push({ taskId, goal: state.contract.goal, phase: view.phase,
       runs: view.runs.map(run => ({
         runId: run.runId,
         status: run.status,
@@ -49,16 +38,8 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
   const plans = projectTree(committed.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)).map(view => ({
     parentTaskId: view.parentTaskId,
     complete: view.complete,
-    children: view.children.map(child => ({
-      taskId: child.taskId,
-      status: child.status,
-      dependsOn: child.dependsOn,
-      supports: child.supports,
-      maxRuns: child.maxRuns,
-      runsUsed: child.runsUsed,
-      reason: child.reason,
-    })),
-    criteria: view.criteria.map(criterion => ({ criterionId: criterion.criterionId, satisfiedBy: criterion.satisfiedBy ?? null })),
+    children: view.children.map(({ lastOutcome: _, ...child }) => child),
+    criteria: view.criteria.map(({ supportedBy: _, ...criterion }) => criterion),
   }))
   const ordered = tasks.sort((left, right) => left.taskId.localeCompare(right.taskId))
   return { formatVersion: 1, controlId: apparatus.controlId, cutoff: committed.entries().length, tasks: ordered, plans }

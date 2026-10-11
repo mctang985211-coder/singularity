@@ -1,3 +1,5 @@
+import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
+
 import { refuse } from '../protocol/refusal.ts'
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
@@ -9,6 +11,7 @@ import type { RevisionRef, TaskState } from './protocol.ts'
 
 export type RunStatus = 'running' | 'verified' | 'failed'
 type RunStage = 'working' | 'submitting' | 'submitted'
+type RunFailureCause = 'acceptance' | 'runtime'
 
 export interface RunSubmission {
   readonly executionFailure?: string
@@ -17,6 +20,11 @@ export interface RunSubmission {
   readonly programDigest: string
   readonly artifactDigest: string
   readonly inputDigests: readonly BubbleInput[]
+  readonly files: {
+    readonly program: FileAttachmentRef
+    readonly artifact: FileAttachmentRef
+    readonly inputs: readonly { readonly name: string; readonly attachment: FileAttachmentRef }[]
+  }
   readonly source: { readonly sessionId: string; readonly eventCount: number; readonly digest: string }
 }
 
@@ -62,6 +70,7 @@ export interface RunState {
   readonly consumed: readonly MethodConsumption[]
   readonly finishedAt?: string
   readonly failureReason?: string
+  readonly failureCause?: RunFailureCause
 }
 
 const APPENDED = { appended: true } as const
@@ -69,11 +78,51 @@ const METHOD_CONSUMED_MEMBERS = ['runId', 'revision', 'method', 'source'] as con
 const RUN_STARTED_MEMBERS = ['runId', 'revision'] as const
 const RUN_SUBMITTING_MEMBERS = ['runId', 'requestId', 'requestDigest'] as const
 const RUN_SUBMITTED_MEMBERS = ['runId', 'submission'] as const
-const SUBMISSION_MEMBERS = ['requestId', 'requestDigest', 'programDigest', 'artifactDigest', 'inputDigests', 'source', 'executionFailure'] as const
+const SUBMISSION_MEMBERS = ['requestId', 'requestDigest', 'programDigest', 'artifactDigest', 'inputDigests', 'files', 'source', 'executionFailure'] as const
+const SUBMISSION_FILES_MEMBERS = ['program', 'artifact', 'inputs'] as const
+const FILE_ATTACHMENT_MEMBERS = ['attachmentId', 'name', 'bytes'] as const
+const INPUT_ATTACHMENT_MEMBERS = ['name', 'attachment'] as const
 const SOURCE_MEMBERS = ['sessionId', 'eventCount', 'digest'] as const
 const RUN_VERIFIED_MEMBERS = ['runId'] as const
-const RUN_FAILED_MEMBERS = ['runId', 'reason'] as const
+const RUN_FAILED_MEMBERS = ['runId', 'cause', 'reason'] as const
 const EVIDENCE_PRODUCED_MEMBERS = ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'inputDigests', 'detail'] as const
+
+function fileAttachmentRef(raw: unknown, expectedDigest: string, where: string): FileAttachmentRef {
+  const source = record(raw, where)
+  assertClosedKeys(source, FILE_ATTACHMENT_MEMBERS, where)
+  const attachmentId = text(source, 'attachmentId', where)
+  const contentDigest = /^sha256:([0-9a-f]{64})$/.exec(attachmentId)?.[1]
+  if (contentDigest === undefined)
+    refuse('malformed-payload', `${where}.attachmentId must be a sha256:<hex> attachment ID`)
+  const bytes = source['bytes']
+  if (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 0)
+    refuse('malformed-payload', `${where}.bytes must be a non-negative safe integer`)
+  if (contentDigest !== expectedDigest)
+    refuse('malformed-payload', `${where}.attachmentId must equal the submitted content digest`)
+  return { attachmentId: attachmentId as FileAttachmentRef['attachmentId'], name: text(source, 'name', where), bytes }
+}
+
+function submissionFiles(raw: unknown, programDigest: string, artifactDigest: string, inputs: readonly BubbleInput[], where: string): RunSubmission['files'] {
+  const source = record(raw, where)
+  assertClosedKeys(source, SUBMISSION_FILES_MEMBERS, where)
+  const files = source['inputs']
+  if (!Array.isArray(files) || files.length !== inputs.length)
+    refuse('malformed-payload', `${where}.inputs must name exactly the submitted inputs in order`)
+  return {
+    program: fileAttachmentRef(source['program'], programDigest, `${where}.program`),
+    artifact: fileAttachmentRef(source['artifact'], artifactDigest, `${where}.artifact`),
+    inputs: files.map((raw, index) => {
+      const at = `${where}.inputs[${index}]`
+      const entry = record(raw, at)
+      assertClosedKeys(entry, INPUT_ATTACHMENT_MEMBERS, at)
+      const name = text(entry, 'name', at)
+      const input = inputs[index]!
+      if (name !== input.name)
+        refuse('malformed-payload', `${at}.name must equal submitted input ${JSON.stringify(input.name)}`)
+      return { name, attachment: fileAttachmentRef(entry['attachment'], input.digest, `${at}.attachment`) }
+    }),
+  }
+}
 
 export function verdictFor(run: RunState, criterion: AcceptanceCriterion): EvidenceRecord | undefined {
   return run.evidence.find(
@@ -183,14 +232,18 @@ export function runSubmittedKind(kind: string, emitter: string): KindRule<TaskSt
       if (typeof eventCount !== 'number' || !Number.isSafeInteger(eventCount) || eventCount < 0)
         refuse('malformed-payload', `${sourceAt}.eventCount must be a non-negative safe integer`)
       const executionFailure = maybeText(submission, 'executionFailure', at)
+      const programDigest = digest(submission, 'programDigest', at)
+      const artifactDigest = digest(submission, 'artifactDigest', at)
+      const inputDigests = inputList(submission['inputDigests'], `${at}.inputDigests`, BUBBLE_INPUT_MEMBERS)
       return {
         runId: text(payload, 'runId', where),
         submission: {
           requestId: text(submission, 'requestId', at),
           requestDigest: digest(submission, 'requestDigest', at),
-          programDigest: digest(submission, 'programDigest', at),
-          artifactDigest: digest(submission, 'artifactDigest', at),
-          inputDigests: inputList(submission['inputDigests'], `${at}.inputDigests`, BUBBLE_INPUT_MEMBERS),
+          programDigest,
+          artifactDigest,
+          inputDigests,
+          files: submissionFiles(submission['files'], programDigest, artifactDigest, inputDigests, `${at}.files`),
           source: { sessionId: text(source, 'sessionId', sourceAt), eventCount, digest: digest(source, 'digest', sourceAt) },
           ...(executionFailure === undefined ? {} : { executionFailure }),
         },
@@ -372,9 +425,9 @@ export function runVerifiedKind(kind: string, emitter: string): KindRule<TaskSta
   })
 }
 
-/** `run/failed`: the run settles the other way. A missing reason stays missing. */
+/** Failed acceptance may be retried within budget; runtime failure stops delegated work. */
 export function runFailedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { runId: string; reason?: string }, {}>({
+  return defineKind<TaskState, { runId: string; cause: RunFailureCause; reason?: string }, {}>({
     guarantees: APPENDED,
     members: RUN_FAILED_MEMBERS,
     nested: {},
@@ -382,19 +435,28 @@ export function runFailedKind(kind: string, emitter: string): KindRule<TaskState
     parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
+      const cause = source['cause']
+      if (cause !== 'acceptance' && cause !== 'runtime')
+        refuse('malformed-payload', `${where}.cause must be acceptance or runtime`)
       const reason = maybeText(source, 'reason', where)
-      return { runId: text(source, 'runId', where), ...(reason === undefined ? {} : { reason }) }
+      return { runId: text(source, 'runId', where), cause, ...(reason === undefined ? {} : { reason }) }
     },
     reduce: (state, envelope, payload) => {
       const where = `${kind} #${envelope.seq}`
       const run = requireRun(state, payload.runId, where)
-      // Settling is work on the attempt, and work is the responsible agent's: a stranger cannot
-      // fail a run somebody else is answerable for.
       requireResponsible(state, envelope.actor, where)
       if (run.status !== 'running')
         refuse('illegal-transition', `${where} settles run "${payload.runId}" again; it is already ${run.status}`)
-      // A missing reason stays missing: the view reports "none recorded", it does not invent one.
-      return { ...state, runs: { ...state.runs, [payload.runId]: settled(run, 'failed', envelope.at, payload.reason) } }
+      if (payload.cause === 'acceptance') {
+        if (run.submission?.executionFailure !== undefined)
+          refuse('illegal-transition', `${where} cannot record acceptance after a failed program execution`)
+        const contract = requireContractOf(state, where, envelope.subject)
+        if (unadjudicatedCriteria(contract, run).length > 0 || unmetCriteria(contract, run).length === 0)
+          refuse('unadjudicated-criterion', `${where} requires complete verdicts with at least one failing criterion`)
+      }
+      return { ...state, runs: { ...state.runs, [payload.runId]: {
+        ...settled(run, 'failed', envelope.at, payload.reason), failureCause: payload.cause,
+      } } }
     },
   })
 }

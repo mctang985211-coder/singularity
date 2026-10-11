@@ -6,7 +6,7 @@
 
 ## 一轮代码验证
 
-先按目标合同写失败 spec，再实现最小改动。收口时分别检查 core 和 assembly，不能用根类型检查代替 assembly：
+先按目标合同写失败 spec，再实现最小改动。每包运行相关 spec 并分别检查 core 和 assembly；完整产品验收在 W9 收口：
 
 ```bash
 cd /home/ROXY/code/singularity-core
@@ -14,12 +14,11 @@ pnpm build
 pnpm exec tsc --noEmit -p assembly/tsconfig.json
 pnpm test
 node assembly/build.mjs
-node scripts/gates.mjs --probe
 git diff --check
 ```
 
-`--probe` 只验证检测器能失败；全量门禁是 `node scripts/gates.mjs`，其中含真实模型和浏览器调用。
-必要检查通过后再启动对应产品探针；没有新改动或未解决问题时，不重复扩跑。
+`node scripts/gates.mjs` 含真实模型和浏览器调用，`--probe` 验证检测器。
+产品探针只运行当前主链需要的 mode；不因增加边界覆盖重复启动模型。
 
 ## 浏览器验收入口
 
@@ -45,8 +44,9 @@ node scripts/browser-probe.mjs --panel --screenshot /tmp/singularity-panel.png
 本轮父可在完整计划内创建任务并选择已声明模板；持久 role 为 child 的调用方只执行分配任务，不能另开根 Task 或发布计划。
 自创 TaskTemplate 的准入和评估归 W6。定向反例：`mutate:assembly-w3-child-cannot-fork-root`。
 
-W3 的分解验收由第二个用户 turn 让父继续提交，不作为 W4 自动唤醒或同会话有界重试的证据。
-原 `panel-probe.mjs` 与 `subtask-probe.mjs` 已删除；门禁目标名称保留，调用统一浏览器入口的对应 mode。
+分解与面板 mode 只发送一个用户 turn，后序 child 与父通过宿主原生消息自动推进。
+按每条 `singularity` source 核对准确控制事实；DSH 原生 `runtime-context` 不算重复派发。
+程序、输入、产物从原生附件存储核对，不以可写工作区作为封存来源。
 
 ## 证据边界
 

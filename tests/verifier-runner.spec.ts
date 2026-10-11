@@ -115,12 +115,17 @@ describe('the verifier command runner', () => {
     expect([refusal.code, refusal.detail.includes('words.txt')]).toEqual(['evidence-input-mismatch', true])
   })
 
-  it('reads a process that never started as a failure, not as a pass', async () => {
+  it('rejects verifier execution failure without producing an acceptance verdict', async () => {
     await writeFile(artifact, 'artifact', 'utf8')
     const port: VerifierProcess = async () => ({ exitCode: null, stderr: '', failure: 'spawn nope ENOENT' })
 
-    const result = await runVerifierCommand({ command: 'nope', artifactPath: artifact, inputs: [] }, port)
+    await expect(runVerifierCommand({ command: 'nope', artifactPath: artifact, inputs: [] }, port)).rejects.toThrow('spawn nope ENOENT')
+  })
 
-    expect([result.verdict, result.detail]).toEqual(['fail', expect.stringContaining('did not run (spawn nope ENOENT)')])
+  it('rejects runtime failure even when an invocation reports exit zero', async () => {
+    await writeFile(artifact, 'artifact', 'utf8')
+    await expect(runVerifierCommand({ command: 'true', artifactPath: artifact }, async () => ({
+      exitCode: 0, stderr: '', failure: 'process output limit',
+    }))).rejects.toThrow('process output limit')
   })
 })

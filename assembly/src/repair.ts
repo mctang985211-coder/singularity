@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isAttachmentError } from '@deepseek-ai/dsh-attachment'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../../src/environment/protocol.ts'
 import { assertClosedKeys, digestOf } from '../../src/protocol/envelope.ts'
 import { ProtocolRefusal } from '../../src/protocol/refusal.ts'
@@ -11,6 +12,7 @@ import { assertTemplateContract } from './inputs.ts'
 import { list, record, text } from './shape.ts'
 import { judgeAndRecord } from './submission.ts'
 import type { TaskTemplate } from './template.ts'
+import { sealedBytes } from './sealed.ts'
 
 export async function repair(apparatus: Apparatus): Promise<void> {
   for (const [taskId, state] of apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)) {
@@ -35,7 +37,11 @@ export async function repair(apparatus: Apparatus): Promise<void> {
         continue
       }
       if (run.stage === 'working') continue
-      if (run.evidence.length === 0) await judgeAndRecord(apparatus, taskId, run)
+      if (run.evidence.length === 0) try { await judgeAndRecord(apparatus, taskId, run) } catch (error) {
+        if (error instanceof ProtocolRefusal && error.refusal.code === 'write-not-durable') throw error
+        await commands.failRun({ commandId: 'repair-failed:' + taskId + '/' + run.runId, taskId, runId: run.runId, reason: 'verification-failed: ' + String(error) })
+        continue
+      }
       await apparatus.tasks.settle({ commandId: 'settle:' + taskId + '/' + run.runId, taskId, runId: run.runId }, key)
     }
   }
@@ -99,10 +105,18 @@ async function frozenFailure(apparatus: Apparatus, state: TaskState, run: RunSta
   const workspace = workspaceOf(apparatus, state.taskId, run.runId)
   if (run.bubble!.workspace.kind !== 'dir' || run.bubble!.workspace.ref !== workspace)
     return 'unrecoverable-revision: the bubble names a different Run workspace'
-  const expected = [...run.bubble!.inputs, ...(run.submission === undefined ? [] : [
-    { name: template.file, digest: run.submission.programDigest },
-    { name: template.artifact, digest: run.submission.artifactDigest },
-  ])]
+  if (run.submission !== undefined) {
+    const files = run.submission.files
+    try {
+      for (const ref of [files.program, files.artifact, ...files.inputs.map(input => input.attachment)])
+        await sealedBytes(apparatus, ref)
+    } catch (error) {
+      if (!isAttachmentError(error)) throw error
+      return 'unrecoverable-submission: ' + error.message
+    }
+    return undefined
+  }
+  const expected = run.bubble!.inputs
   for (const file of expected) {
     let found: string
     try { found = sha256(await readFile(join(workspace, file.name))) } catch (error) {

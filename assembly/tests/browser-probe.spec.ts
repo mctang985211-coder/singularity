@@ -1,15 +1,28 @@
 import assert from 'node:assert/strict'
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { LocalAttachmentStore } from '@deepseek-ai/dsh-attachment-local'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { describe, it } from 'vitest'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { MemoryLog } from '../../src/protocol/memory-log.ts'
+import type { RunSubmission } from '../../src/task/run.ts'
+import type { SchedulerMessageSource } from '../src/scheduler-message.ts'
+import { sha256 } from '../src/ids.ts'
 import { admitted, contract, SUBJECTS, TASK_ID, taskRegistry } from '../../tests/task-fixtures.ts'
 const scriptPath = fileURLToPath(new URL('../../scripts/browser-probe.mjs', import.meta.url))
-const { inputSourcesOf, toolFacts, assertPlannedTasks, coreRead }: {
+const { inputSourcesOf, toolFacts, assertPlannedTasks, coreRead, sealedDigestsOf, schedulerEvidenceOf }: {
   inputSourcesOf(facts: readonly unknown[], taskId: string, receipt: unknown): unknown
   toolFacts(events: readonly unknown[]): { results: readonly { value: unknown }[] }
   assertPlannedTasks(facts: readonly unknown[], parentTaskId: string): void
   coreRead(facts: readonly unknown[], domainDir: string, cutoff?: number): Promise<{ snapshot: unknown }>
+  sealedDigestsOf(attachments: Pick<AttachmentStore, 'readFileStream'>, submission: Pick<RunSubmission,
+    'files' | 'programDigest' | 'artifactDigest' | 'inputDigests'>): Promise<unknown>
+  schedulerEvidenceOf(events: readonly unknown[], source: SchedulerMessageSource): unknown
 } = await import(scriptPath)
 
 function witness(kind: 'artifact' | 'protected' = 'artifact') {
@@ -105,4 +118,100 @@ it('serves core snapshot reads from a fixed durable cut of a real MemoryLog', as
   const read = await coreRead(log.entries(), domainDir, 1)
   assert.deepEqual(read.snapshot, { formatVersion: 1, controlId: 'singularity-local', cutoff: 1,
     tasks: [{ taskId: TASK_ID, goal: contract().goal, phase: 'awaiting-run', runs: [] }], plans: [] })
+})
+
+describe('browser evidence reads authoritative native file attachments', () => {
+  async function sealed(check: (store: LocalAttachmentStore, submission: Pick<RunSubmission,
+    'files' | 'programDigest' | 'artifactDigest' | 'inputDigests'>, home: string) => Promise<void>) {
+    const home = await mkdtemp(join(tmpdir(), 'singularity-probe-sealed-'))
+    const context = new Context()
+    try {
+      const store = new LocalAttachmentStore(context, { dshHome: home })
+      const program = Buffer.from('process.stdout.write("35")')
+      const artifact = Buffer.from('35')
+      const input = Buffer.from('A\u0000z\xff', 'latin1')
+      const files = {
+        program: await store.saveFile({ name: 'program.mjs', data: program }),
+        artifact: await store.saveFile({ name: 'artifact.txt', data: artifact }),
+        inputs: [{ name: 'in/source.txt', attachment: await store.saveFile({ name: 'source.txt', data: input }) }],
+      }
+      await check(store, { files, programDigest: sha256(program), artifactDigest: sha256(artifact),
+        inputDigests: [{ name: 'in/source.txt', digest: sha256(input) }] }, home)
+    } finally {
+      await context.fiber.dispose()
+      await rm(home, { recursive: true, force: true })
+    }
+  }
+
+  it('checks byte digests from real attachments after editable workspace bytes change', async () => {
+    await sealed(async (store, submission, home) => {
+      await writeFile(join(home, 'program.mjs'), 'edited program')
+      assert.deepEqual(await sealedDigestsOf(store, submission), {
+        programDigest: submission.programDigest, artifactDigest: submission.artifactDigest,
+        inputDigests: submission.inputDigests,
+      })
+    })
+  })
+
+  for (const damaged of ['missing', 'corrupt', 'length', 'digest', 'input-name'] as const) {
+    it(`rejects a ${damaged} sealed object or reference`, async () => {
+      await sealed(async (store, submission) => {
+        if (damaged === 'missing') await rm(store.fileHostPath(submission.files.artifact))
+        if (damaged === 'corrupt') {
+          const path = store.fileHostPath(submission.files.artifact)
+          await chmod(path, 0o600)
+          await writeFile(path, '00')
+        }
+        if (damaged === 'length') submission.files.artifact.bytes += 1
+        if (damaged === 'digest') Object.assign(submission, { artifactDigest: 'a'.repeat(64) })
+        if (damaged === 'input-name') Object.assign(submission.files.inputs[0]!, { name: 'in/another.txt' })
+        await assert.rejects(() => sealedDigestsOf(store, submission))
+      })
+    })
+  }
+})
+
+describe('browser evidence proves one native scheduler delivery', () => {
+  function delivery(purpose: SchedulerMessageSource['purpose'] = 'dispatch') {
+    const source: SchedulerMessageSource = { kind: 'singularity', purpose, controlId: 'singularity-local',
+      parentTaskId: 'parent', taskId: 'child', runId: 'child-run', factSeq: 12 }
+    const message = createUserMessage({ source, content: [{ type: 'text', text: 'assigned work' }] })
+    const events = [
+      { seq: 4, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted: [message] } },
+      { seq: 5, type: 'turn/start', data: { turn: 2 } },
+      { seq: 6, type: 'user/message', data: message },
+    ]
+    return { source, message, events }
+  }
+
+  it.each(['dispatch', 'plan-outcome'] as const)('binds %s insertion and model entry to the same original message', purpose => {
+    const h = delivery(purpose)
+    assert.deepEqual(schedulerEvidenceOf(h.events, h.source), { source: h.source, messageId: h.message.id,
+      insertedSeq: 4, enteredSeq: 6, turn: 2 })
+  })
+
+  it('rejects duplicate insertion of the same Run dispatch', () => {
+    const h = delivery()
+    assert.throws(() => schedulerEvidenceOf([...h.events, h.events[0]], h.source))
+  })
+  it('rejects duplicate model entry of the same outcome', () => {
+    const h = delivery('plan-outcome')
+    assert.throws(() => schedulerEvidenceOf([...h.events, h.events[2]], h.source))
+  })
+  it('rejects an inserted message that never entered the model turn', () => {
+    const h = delivery()
+    assert.throws(() => schedulerEvidenceOf(h.events.slice(0, 2), h.source))
+  })
+  it('rejects changed identity or content between inbox and user source', () => {
+    const h = delivery()
+    const replacement = createUserMessage({ source: h.source, content: [{ type: 'text', text: 'different work' }] })
+    assert.throws(() => schedulerEvidenceOf([...h.events.slice(0, 2), { seq: 6, type: 'user/message', data: replacement }], h.source))
+  })
+  for (const key of ['controlId', 'parentTaskId', 'taskId', 'runId', 'factSeq'] as const) {
+    it(`rejects a source that names another ${key}`, () => {
+      const h = delivery()
+      const expected = { ...h.source, [key]: key === 'factSeq' ? 13 : 'other' }
+      assert.throws(() => schedulerEvidenceOf(h.events, expected))
+    })
+  }
 })

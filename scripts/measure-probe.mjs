@@ -179,7 +179,7 @@ async function main() {
           runId: RUN,
           inputs: [{ name: INPUT_NAME, digest: sha256(INPUT_BYTES) }],
           workspace: { kind: 'dir', ref: workspace },
-          model: 'probe-model-1',
+          model: { provider: 'probe', model: 'probe-model-1' },
           tools: [{ name: 'count', implementationDigest: meterDigest, version: '1' }],
           conditions: ['no-network'],
         },

@@ -1,11 +1,3 @@
-/**
- * The stable ids: the names one call produces, on every delivery of that call. `taskId` derives from the
- * control, the caller and the goal; `runId` from the control, the session and DSH's own call id. Nothing
- * here reads a counter or the clock: an id that moved would be a second attempt.
- *
- * @module @dangosys/dsh-singularity-next/ids
- */
-
 import { createHash } from 'node:crypto'
 
 export function sha256(bytes: string | Uint8Array): string {

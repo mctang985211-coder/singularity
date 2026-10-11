@@ -1,13 +1,3 @@
-/**
- * Reading a declaration: the readers that turn untyped JSON into names, lists and records, refuse by
- * name, and prove that a declared path stays inside the tree it belongs to.
- *
- * Separate from the domain it reads because two declarations are read with these — the domain's own and
- * each verifier's — and a second copy of `inside` is a second containment rule to keep in step.
- *
- * @module @dangosys/dsh-singularity-next/shape
- */
-
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 

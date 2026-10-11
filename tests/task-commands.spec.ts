@@ -220,11 +220,13 @@ describe('a run starts only when every cross-entity condition holds', () => {
     const state = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CHILD)
     expect(Object.keys(state?.runs ?? {})).toHaveLength(1)
 
-    // While that run is unsettled the sub-task is `running`, and a second start is refused for that
-    // reason. Settling it as failed is what turns the same sub-task into `stopped`: the budget is
-    // spent and no run verified, so the plan says so in its own words.
     const settled = fulfilled[0] as PromiseFulfilledResult<{ payload: { runId: string } }>
-    await commands.failRun({ commandId: 'f1', taskId: CHILD, runId: settled.value.payload.runId, reason: 'the counting attempt failed' })
+    const runId = settled.value.payload.runId
+    await commands.openBubble({ commandId: 'b1', taskId: CHILD, runId, inputs: BUBBLE_INPUTS,
+      workspace: { kind: 'dir', ref: '/counter' }, model: BUBBLE_MODEL, tools: [], conditions: [] })
+    await commands.recordVerdict({ commandId: 'v1', taskId: CHILD, verdict: { runId, criterionId: 'part',
+      verdict: 'fail', implementationDigest: UNIT_IMPLEMENTATION, artifactDigest: 'b'.repeat(64), inputDigests: BUBBLE_INPUTS } })
+    await commands.settle({ commandId: 'f1', taskId: CHILD, runId })
 
     const spent = await asyncRefusalOf(() => commands.startRun({ commandId: 'r-third', taskId: CHILD, runId: 'run-c', revision: pin(live) }))
     expect(spent).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/budget exhausted.*1 of 1/) })

@@ -170,6 +170,18 @@ describe('the settle command decides the run from its evidence', () => {
     expect([again.digest, again.seq, live.store.load().entries().length]).toEqual([first.digest, first.seq, recorded])
   })
 
+  it('replays acceptance failure with its cause and appends nothing', async () => {
+    const { live, commands } = await ready()
+    await judge(commands, 'correctness', 'fail')
+    await judge(commands, 'limits', 'pass')
+    const request = { commandId: 'settle-1', taskId: PARENT, runId: RUN }
+    const first = await commands.settle(request)
+    const before = live.store.load().entries().length
+    const again = await commands.settle(request)
+    expect([again.digest, again.payload, live.store.load().entries().length])
+      .toEqual([first.digest, { runId: RUN, cause: 'acceptance' }, before])
+  })
+
   it('refuses a failed settle emitted under a binding that is not the responsible agent', async () => {
     const { live, commands } = await ready()
     await judge(commands, 'correctness', 'fail', 'the count is wrong')

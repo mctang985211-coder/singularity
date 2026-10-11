@@ -10,6 +10,7 @@ import {
   bubbleOpened,
   contract,
   failed,
+  fileAttachment,
   RUN_ID,
   sliceCommands,
   started,
@@ -49,6 +50,10 @@ describe('a run receipt seals its control source', () => {
       programDigest: '2'.repeat(64),
       artifactDigest: ARTIFACT,
       inputDigests: BUBBLE_INPUTS,
+      files: {
+        program: fileAttachment('2'.repeat(64), 'program.ts'), artifact: fileAttachment(ARTIFACT, 'artifact.json'),
+        inputs: BUBBLE_INPUTS.map(input => ({ name: input.name, attachment: fileAttachment(input.digest, 'words.txt') })),
+      },
       source: { sessionId: 'session-1', eventCount: 12, digest: '3'.repeat(64) },
     }
     await log.emit({

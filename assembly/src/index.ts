@@ -11,7 +11,7 @@ import { spawnProcess } from './process.ts'
 
 export const name = 'singularity-assembly'
 
-export const inject = ['agents', 'tools', 'sessions', 'sessionPersistence']
+export const inject = ['agents', 'tools', 'sessions', 'sessionPersistence', 'attachments']
 
 const CONFIG_MEMBERS = ['controlId', 'domainDir', 'workspaceRoot'] as const
 
@@ -37,6 +37,7 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     workspaceRoot: config.workspaceRoot,
     domain,
     persistence: ctx.sessionPersistence,
+    attachments: ctx.attachments,
     seams: ctx as ChildSessionSeams,
     execution: (admission, onTurnFailure) => createExecution(ctx, admission, onTurnFailure),
   })
@@ -44,5 +45,6 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     forCall: (exec: ToolRunContext) => driver.forCall(exec),
     read: () => driver.read(),
   })
+  ctx.on('agent/created', async ({ agent }) => { await driver.activate(String(agent.session.id)); return undefined })
   ctx.effect(() => () => driver.close())
 }

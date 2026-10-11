@@ -237,7 +237,7 @@ async function main() {
       workspace: { kind: 'dir', ref: workspace },
       // The isolation manifest R08 requires: the model identity and the content digest of every
       // tool the execution could reach. A tool's name can be re-pointed; its digest cannot.
-      model: 'probe-model-1',
+      model: { provider: 'probe', model: 'probe-model-1' },
       tools: [{ name: 'count', implementationDigest: programDigest, version: '1' }],
       conditions: ['no-network'],
     })
@@ -332,7 +332,7 @@ async function main() {
     check('the parent is not complete while a criterion is unaccepted', afterCount.complete === false)
     check('the verified child contributes support while the parent awaits its own verdict', afterCount.criteria.find(entry => entry.criterionId === 'counted')?.supportedBy.includes(CHILD_COUNT) && afterCount.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy === null)
 
-    // ---------------------------------------------------------------- 6. the budget really stops
+    // ---------------------------------------------------------------- 6. runtime failure stops
     await commands.startRun({ commandId: 'start-limits', taskId: CHILD_LIMITS, runId: 'run-limits', revision: pin })
     await commands.openBubble({
       commandId: 'bubble-limits',
@@ -340,18 +340,18 @@ async function main() {
       runId: 'run-limits',
       inputs: INPUTS,
       workspace: { kind: 'dir', ref: workspace },
-      model: 'probe-model-1',
+      model: { provider: 'probe', model: 'probe-model-1' },
       tools: [{ name: 'count', implementationDigest: programDigest, version: '1' }],
       conditions: ['no-network'],
     })
     await commands.failRun({ commandId: 'fail-limits', taskId: CHILD_LIMITS, runId: 'run-limits', reason: 'the limit check could not be run in this environment' })
 
     const spent = await asyncRefusalOf(() => commands.startRun({ commandId: 'start-limits-again', taskId: CHILD_LIMITS, runId: 'run-limits-2', revision: pin }))
-    check('a spent budget stops the sub-task being started again', spent.code === 'illegal-transition' && spent.detail.includes('budget exhausted'), spent.detail)
+    check('a runtime failure stops the sub-task being started again', spent.code === 'illegal-transition' && spent.detail.includes('runtime failure'), spent.detail)
 
     const tree = treeOf()[0]
     const stopped = tree.children.find(child => child.taskId === CHILD_LIMITS)
-    check('the plan reports the sub-task as stopped, in its own words', stopped?.status === 'stopped' && (stopped.reason ?? '').includes('budget exhausted'), stopped?.reason)
+    check('the plan reports the sub-task as stopped, in its own words', stopped?.status === 'stopped' && (stopped.reason ?? '').includes('runtime failure'), stopped?.reason)
     check('the parent is still incomplete, and the unaccepted criterion is named', tree.complete === false && tree.criteria.find(entry => entry.criterionId === 'bounded')?.satisfiedBy === null)
     check('the stopped sub-task is listed as blocked with a reason', tree.blocked.some(entry => entry.taskId === CHILD_LIMITS))
 

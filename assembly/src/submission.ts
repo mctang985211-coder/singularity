@@ -14,6 +14,7 @@ import { commandOf, templateOf } from './domain.ts'
 import type { Execution } from './execution.ts'
 import { sha256 } from './ids.ts'
 import { spawnProcess } from './process.ts'
+import { sealFiles, withSealedWorkspace } from './sealed.ts'
 
 export interface Submission {
   readonly taskId: string
@@ -22,7 +23,7 @@ export interface Submission {
   readonly detail: string
   readonly artifactDigest: string | null
   readonly phase: TaskView['phase']
-  readonly dispatchError?: string
+  readonly dispatchError?: { readonly parentTaskId: string; readonly taskId: string; readonly runId: string | null; readonly detail: string }
 }
 export async function submit(apparatus: Apparatus, execution: Execution, caller: Caller, exec: ToolRunContext,
   request: { readonly taskId: string; readonly program: string }, signal: AbortSignal): Promise<Submission> {
@@ -52,15 +53,16 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
     await mkdir(dirname(filePath), { recursive: true })
     await writeFile(filePath, request.program, 'utf8')
     if (template.submission === 'program') {
-      const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, template.input.name)] }, signal)
+      const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, template.input.name)] }, signal, workspace)
       await writeFile(join(workspace, template.artifact), output.stdout, 'utf8')
-      executionFailure = output.failure
+      executionFailure = output.failure ?? (output.exitCode === 0 ? undefined : `process-execution-failed: exited ${output.exitCode}`)
     }
     const inputDigests = await Promise.all(run.bubble!.inputs.map(async input => ({ name: input.name, digest: sha256(await readFile(join(workspace, input.name))) })))
     const programDigest = sha256(await readFile(filePath))
     if (programDigest !== sha256(request.program)) refuse('evidence-input-mismatch', 'the executed program changed its submitted source')
     await commands.submitRun({ commandId: 'seal:' + requestId, taskId: request.taskId, runId: run.runId,
       submission: { requestId, requestDigest, programDigest, artifactDigest: sha256(await readFile(join(workspace, template.artifact))), inputDigests,
+        files: await sealFiles(apparatus, run, template, workspace),
         source: await execution.sealTranscript(exec), ...(executionFailure === undefined ? {} : { executionFailure }) } })
   } catch (error) {
     if (taskStateOf(apparatus, request.taskId).runs[run.runId]!.stage === 'submitting')
@@ -72,7 +74,7 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
     return answerOf(taskStateOf(apparatus, request.taskId), run.runId)
   }
   try {
-    await judgeAndRecord(apparatus, request.taskId, run, signal)
+    await judgeAndRecord(apparatus, request.taskId, taskStateOf(apparatus, request.taskId).runs[run.runId]!, signal)
     await apparatus.tasks.settle({ commandId: 'settle:' + request.taskId + '/' + run.runId, taskId: request.taskId, runId: run.runId }, 'agent:' + caller.agentId)
   } catch (error) {
     if (error instanceof ProtocolRefusal && error.refusal.code === 'write-not-durable') throw error
@@ -87,16 +89,15 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
 
 export async function judgeAndRecord(apparatus: Apparatus, taskId: string, run: RunState, signal?: AbortSignal): Promise<void> {
   const template = templateOf(apparatus.domain, taskStateOf(apparatus, taskId).contract!.template)
-  const workspace = workspaceOf(apparatus, taskId, run.runId)
   const declared: BubbleInput = run.bubble!.inputs[0]!
-  const judged = await runProductionVerdict({ runId: run.runId, criterion: template.criterion, implementations: apparatus.domain.verifiers,
+  const judged = await withSealedWorkspace(apparatus, run, template, workspace => runProductionVerdict({ runId: run.runId, criterion: template.criterion, implementations: apparatus.domain.verifiers,
     inputs: [declared], workspace, artifactPath: template.artifact,
     command: commandOf(template.verifier, join(workspace, template.artifact), join(workspace, declared.name)),
     runJudge: async execution => {
       const implementationDigest = sha256(await readFile(template.verifier.program))
-      const ran = await runVerifierCommand({ command: execution.command, artifactPath: execution.artifactPath, inputs: execution.inputs }, invocation => spawnProcess(invocation, signal))
+      const ran = await runVerifierCommand({ command: execution.command, artifactPath: execution.artifactPath, inputs: execution.inputs }, invocation => spawnProcess(invocation, signal, workspace))
       return { verdict: ran.verdict, implementationDigest, detail: ran.detail }
-    } })
+    } }))
   await apparatus.tasks.recordVerdict({ commandId: 'verdict:' + taskId + '/' + run.runId, taskId,
     verdict: { runId: run.runId, criterionId: judged.criterionId, verdict: judged.verdict, implementationDigest: judged.implementationDigest,
       artifactDigest: judged.artifactDigest, inputDigests: judged.inputDigests, ...(judged.detail === undefined ? {} : { detail: judged.detail }) } })

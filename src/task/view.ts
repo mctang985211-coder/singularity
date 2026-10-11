@@ -37,6 +37,7 @@ export interface RunView {
   readonly finishedAt: string | null
   /** `null` when the failure recorded no reason — never an invented one. */
   readonly failureReason: string | null
+  readonly failureCause: NonNullable<RunState['failureCause']> | null
   readonly verdicts: readonly CriterionVerdictView[]
 }
 
@@ -123,6 +124,7 @@ export function projectTask(state: TaskState): TaskView {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt ?? null,
     failureReason: run.failureReason ?? null,
+    failureCause: run.failureCause ?? null,
     verdicts: contract.criteria.map(criterion => {
       const judged = verdictOf(run, criterion.criterionId)
       return {

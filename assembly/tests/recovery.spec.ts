@@ -1,4 +1,4 @@
-import { access, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,11 +20,11 @@ import { openDriver } from '../src/driver.ts'
 import { repair } from '../src/repair.ts'
 import { spawnProcess } from '../src/process.ts'
 import { submit } from '../src/submission.ts'
-import { agentFor, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
+import { attachmentsAt, agentFor, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
 
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const TASK = 'recovery-task'
-const CALLER = { agentId: 'agent-7', sessionId: 'session-9', model: 'test/model' }
+const CALLER = { agentId: 'agent-7', sessionId: 'session-9', model: { provider: 'test', model: 'model' } }
 const PROGRAM = "import { appendFileSync } from 'node:fs'; appendFileSync(process.argv[2]+'.runs','execution\\n'); process.stdout.write('35')"
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -38,7 +38,7 @@ async function working() {
   await cp(REAL, domainDir, { recursive: true })
   const domain = await loadDomain(domainDir, spawnProcess)
   const medium = new FakePersistence()
-  const apparatus = await openApparatus('lib-1', root, domain, medium as unknown as SessionPersistence)
+  const apparatus = await openApparatus('lib-1', root, domain, medium as unknown as SessionPersistence, attachmentsAt(root))
   await bindCaller(apparatus, CALLER)
   const commands = apparatus.tasks.forAgent(CALLER.agentId)
   const template = domain.templates.get(domain.rootTemplate)!
@@ -59,7 +59,7 @@ async function submitted(failureKind: string = TASK_KINDS.evidenceProduced): Pro
 
 async function reopen(fixture: Fixture, domain: Domain = fixture.domain): Promise<Apparatus> {
   await fixture.apparatus.store.close()
-  return await openApparatus('lib-1', fixture.root, domain, fixture.medium as unknown as SessionPersistence)
+  return await openApparatus('lib-1', fixture.root, domain, fixture.medium as unknown as SessionPersistence, attachmentsAt(fixture.root))
 }
 
 const current = (apparatus: Apparatus, fixture: Fixture) => taskStateOf(apparatus, fixture.taskId).runs[fixture.runId]!
@@ -274,7 +274,7 @@ describe('recovery of the committed Run stage', () => {
     expect(await readFile(join(fixture.workspace, fixture.template.input.name) + '.runs', 'utf8')).toBe('execution\n')
   })
 
-  it.each(['program', 'artifact', 'input', 'missing-artifact'] as const)('fails when the sealed %s bytes cannot be recovered', async changed => {
+  it.each(['program', 'artifact', 'input', 'missing-artifact'] as const)('recovers sealed bytes after the editable %s file changes', async changed => {
     const fixture = await submitted()
     const path = join(fixture.workspace, changed === 'program' ? fixture.template.file : changed === 'input' ? fixture.template.input.name : fixture.template.artifact)
     if (changed === 'missing-artifact') await rm(path)
@@ -282,7 +282,7 @@ describe('recovery of the committed Run stage', () => {
     const apparatus = await reopen(fixture)
     await repair(apparatus)
 
-    expect(current(apparatus, fixture)).toMatchObject({ status: 'failed', failureReason: expect.stringContaining('unrecoverable-submission'), evidence: [] })
+    expect(current(apparatus, fixture)).toMatchObject({ status: 'verified', evidence: [{ verdict: 'pass' }] })
   })
 
   it.each(['renamed', 'replaced'] as const)('settles a run frozen against an input this deployment no longer declares, and still opens (%s)', async changed => {
@@ -307,20 +307,31 @@ describe('recovery of the committed Run stage', () => {
     expect(factsOf(fixture.medium).some(fact => fact.kind === TASK_KINDS.evidenceProduced)).toBe(false)
   })
 
-  it('returns the recovered failure on redelivery even when pass evidence was already committed', async () => {
+  it('returns the recovered sealed success after editable bytes change and pass evidence was committed', async () => {
     const fixture = await submitted(TASK_KINDS.runVerified)
     await writeFile(join(fixture.workspace, fixture.template.artifact), '0')
     const apparatus = await reopen(fixture)
     await repair(apparatus)
 
-    expect(current(apparatus, fixture)).toMatchObject({ status: 'failed', failureReason: expect.stringContaining('unrecoverable-submission'), evidence: [{ verdict: 'pass' }] })
-    const failureReason = current(apparatus, fixture).failureReason
+    expect(current(apparatus, fixture)).toMatchObject({ status: 'verified', evidence: [{ verdict: 'pass' }] })
     const committed = fixture.medium.events.length
     expect(await submit(apparatus, { ...execution, drain: async () => { throw new Error('redelivery must not execute') } }, CALLER,
       execFor(agentFor(CALLER.agentId, CALLER.sessionId), 'submit'), { taskId: TASK, program: PROGRAM }, new AbortController().signal))
-      .toMatchObject({ runId: fixture.runId, verdict: 'fail', phase: 'failed', detail: failureReason })
+      .toMatchObject({ runId: fixture.runId, verdict: 'pass', phase: 'verified' })
     expect(fixture.medium.events.length).toBe(committed)
     expect(await readFile(join(fixture.workspace, fixture.template.input.name) + '.runs', 'utf8')).toBe('execution\n')
+  })
+
+  it.each(['missing', 'corrupt'] as const)('fails explicitly when the authoritative sealed object is %s', async damage => {
+    const fixture = await submitted()
+    const ref = current(fixture.apparatus, fixture).submission!.files.artifact
+    const path = attachmentsAt(fixture.root).fileHostPath(ref)
+    if (damage === 'missing') await rm(path)
+    else { await chmod(path, 0o600); await writeFile(path, 'corrupt sealed storage') }
+    const apparatus = await reopen(fixture)
+    await repair(apparatus)
+    expect(current(apparatus, fixture)).toMatchObject({ status: 'failed', failureCause: 'runtime',
+      failureReason: expect.stringContaining('unrecoverable-submission'), evidence: [] })
   })
 
   it('fails when a reloaded verifier changes the admitted template identity', async () => {
@@ -334,14 +345,12 @@ describe('recovery of the committed Run stage', () => {
     expect(current(apparatus, fixture)).toMatchObject({ status: 'failed', failureReason: expect.stringContaining('unrecoverable-template'), evidence: [] })
   })
 
-  it('propagates verifier runtime failure while retaining the submitted attempt', async () => {
+  it('stops a submitted attempt when recovery verification cannot execute', async () => {
     const fixture = await submitted()
     const failure = new Error('verifier process unavailable')
     const apparatus = await reopen(fixture, { ...fixture.domain, verifiers: fixture.domain.verifiers.map(verifier => ({ ...verifier, judge: async () => { throw failure } })) })
-    await expect(repair(apparatus)).rejects.toThrow('verifier process unavailable')
-
-    expect(current(apparatus, fixture)).toMatchObject({ status: 'running', stage: 'submitted', evidence: [] })
-    expect(factsOf(fixture.medium).some(fact => fact.kind === TASK_KINDS.runFailed)).toBe(false)
+    await repair(apparatus)
+    expect(current(apparatus, fixture)).toMatchObject({ status: 'failed', failureCause: 'runtime', failureReason: expect.stringContaining('verifier process unavailable'), evidence: [] })
   })
 
   it.each([TASK_KINDS.evidenceProduced, TASK_KINDS.runVerified])('propagates recovery persistence failure at %s', async kind => {
@@ -362,7 +371,7 @@ describe('recovery of the committed Run stage', () => {
     const receipt = projectReceipt(repaired.registry, repaired.store.load().entries(), TASK, fixture.runId)
     await rm(fixture.workspace, { recursive: true })
     await repaired.store.close()
-    const apparatus = await openApparatus('lib-1', fixture.root, fixture.domain, fixture.medium as unknown as SessionPersistence)
+    const apparatus = await openApparatus('lib-1', fixture.root, fixture.domain, fixture.medium as unknown as SessionPersistence, attachmentsAt(fixture.root))
     await repair(apparatus)
 
     expect(factsOf(fixture.medium)).toEqual(before)
@@ -373,7 +382,7 @@ describe('recovery of the committed Run stage', () => {
     const fixture = await working()
     await fixture.apparatus.store.close()
     const options = { controlId: 'lib-1', workspaceRoot: fixture.root, domain: fixture.domain,
-      persistence: fixture.medium as unknown as SessionPersistence, seams: {}, execution: fakeExecution }
+      persistence: fixture.medium as unknown as SessionPersistence, seams: {}, execution: fakeExecution, attachments: attachmentsAt(fixture.root) }
     const agent = agentFor(CALLER.agentId, CALLER.sessionId)
     const driver = await openDriver(options)
     await driver.forCall(execFor(agent, 'driver-submit')).submit({ taskId: TASK, program: PROGRAM })

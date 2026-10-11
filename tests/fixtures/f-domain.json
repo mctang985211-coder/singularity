@@ -66,7 +66,7 @@
         }
       }
     },
-    "model": "probe-authored/not-a-real-model",
+    "model": { "provider": "probe-authored", "model": "not-a-real-model" },
     "tools": [
       { "name": "selector", "version": "1" },
       { "name": "meter", "version": "1" },
@@ -99,5 +99,5 @@
     "solve": ["f-task-one", "f-task-two"],
     "holdout": ["f-task-three"]
   },
-  "contentDigest": "2284f3b8d3a470246c8099c7c45e923a63ec0cc854a34897bbc19fdafdb5336b"
+  "contentDigest": "f7c0d5ced43f8eed0c74e2522766d134e91fb1a2251e9d748ab0b4b2c0af7934"
 }

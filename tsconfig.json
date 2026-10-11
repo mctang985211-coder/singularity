@@ -19,6 +19,7 @@
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
+      "@deepseek-ai/dsh-attachment": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-attachment/lib/types/index.d.ts"],
       "@deepseek-ai/cordis": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/cordis/lib/types/index.d.ts"],
       "@deepseek-ai/dsh-session": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-session/lib/types/index.d.ts"],
       "@deepseek-ai/dsh-session/types": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-session/lib/types/types.d.ts"],

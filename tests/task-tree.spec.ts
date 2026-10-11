@@ -87,11 +87,11 @@ describe('a plan is presented with its gates, not its hopes', () => {
 
   it('blocks a dependent on a dependency that ended without verifying, naming it', async () => {
     const registry = taskRegistry()
-    // A has two runs of budget; both fail, so it is stopped rather than retryable.
     const log = await planned(registry, { aDependsOn: [] })
     for (const runId of ['a1', 'a2']) {
       await openRun(log, CHILD_A, runId)
-      await log.emit(failed(CHILD_A, runId, 'the counter crashed'))
+      await log.emit(judge(CHILD_A, runId, 'part-a', UNIT_VERIFIER, 'fail'))
+      await log.emit(failed(CHILD_A, runId, 'the count is wrong', 'acceptance'))
     }
 
     const view = tree(registry, log)
@@ -125,7 +125,8 @@ describe('a plan is presented with its gates, not its hopes', () => {
     const registry = taskRegistry()
     const log = await planned(registry)
     await openRun(log, CHILD_A, 'a1')
-    await log.emit(failed(CHILD_A, 'a1', 'first attempt failed'))
+    await log.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER, 'fail'))
+    await log.emit(failed(CHILD_A, 'a1', 'first attempt failed', 'acceptance'))
 
     const view = tree(registry, log)
     expect(statusOf(view, CHILD_A)).toMatchObject({ status: 'ready', lastOutcome: 'failed', runsUsed: 1, reason: expect.stringContaining('1 of 2 runs remain'), })

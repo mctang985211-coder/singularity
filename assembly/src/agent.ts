@@ -35,23 +35,18 @@ Read sealed results with singularity_task_status. Execution failures cannot pass
 
 export function apply(ctx: Context): void {
   const disposers = [
-    ctx.tools.register(
-      defineTool({
+    ctx.tools.register(defineTool({
         name: 'singularity_propose_task',
-        description:
-          'Propose one task to the Singularity pipeline. It is admitted with the criterion this deployment holds and you become responsible for it. Returns the task id, the workspace prepared with the material the task is judged on, and the criterion the answer is judged against.',
+        description: 'Propose one task to the Singularity pipeline. It is admitted with the criterion this deployment holds and you become responsible for it. Returns the task id, the workspace prepared with the material the task is judged on, and the criterion the answer is judged against.',
         parameters: {
           goal: { type: 'string', description: 'What the task is for, in one sentence.', required: true },
         },
         output,
         execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).propose({ goal: args.goal }))),
-      }),
-    ),
-    ctx.tools.register(
-      defineTool({
+    })),
+    ctx.tools.register(defineTool({
         name: 'singularity_decompose_task',
-        description:
-          'Declare one complete plan using the supported templates returned by propose. Each child has its own criterion. Artifact inputs require exactly one direct dependency with the producer template. All children must verify before the parent submits its own independently judged result.',
+        description: 'Declare one complete plan using the supported templates returned by propose. Each child has its own criterion. Artifact inputs require exactly one direct dependency with the producer template. All children must verify before the parent submits its own independently judged result.',
         parameters: {
           taskId: { type: 'string', description: 'The task id the proposal returned. You must be the agent responsible for it.', required: true },
           children: {
@@ -72,40 +67,25 @@ export function apply(ctx: Context): void {
           },
         },
         output,
-        execute: async (args, exec) =>
-          JSON.stringify(
-            await attempt(() =>
-              ctx.singularity.forCall(exec).decompose({
-                taskId: args.taskId,
-                children: args.children.map(child => ({ key: child.key, template: child.template, dependsOn: child.dependsOn, supports: child.supports, maxRuns: child.maxRuns })),
-              }),
-            ),
-          ),
-      }),
-    ),
-    ctx.tools.register(
-      defineTool({
+        execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).decompose(args))),
+    })),
+    ctx.tools.register(defineTool({
         name: 'singularity_submit_program',
-        description:
-          "Submit what answers a proposed task: the domain's own submission, written into the task workspace and handed to the criterion's own verifier — an independent program whose verdict is recorded as a fact. Anything on standard error is not part of the submission, and work that crashes or produces nothing is a recorded fail, not a missing result.",
+        description: "Submit what answers a proposed task: the domain's own submission, written into the task workspace and handed to the criterion's own verifier — an independent program whose verdict is recorded as a fact. Anything on standard error is not part of the submission, and work that crashes or produces nothing is a recorded fail, not a missing result.",
         parameters: {
           taskId: { type: 'string', description: 'The task id the proposal returned.', required: true },
           program: { type: 'string', description: 'The submission as text: for a program domain, the whole program source, which must print the answer to standard output.', required: true },
         },
         output,
         execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).submit({ taskId: args.taskId, program: args.program }))),
-      }),
-    ),
-    ctx.tools.register(
-      defineTool({
+    })),
+    ctx.tools.register(defineTool({
         name: 'singularity_task_status',
-        description:
-          'Read one task as the pipeline projects it: its phase, how many attempts it has, and the receipt of its latest settled run, derived from the committed facts.',
+        description: 'Read one task as the pipeline projects it: its phase, how many attempts it has, and the receipt of its latest settled run, derived from the committed facts.',
         parameters: { taskId: { type: 'string', description: 'The task id the proposal returned.', required: true } },
         output,
         execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).status({ taskId: args.taskId }))),
-      }),
-    ),
+    })),
     ctx.systemPrompt.section({ name: 'singularity:policy', order: ctx.systemPrompt.getSectionOrder('TOOL_SUBAGENT'), text: GUIDANCE }),
   ]
   ctx.effect(() => () => {

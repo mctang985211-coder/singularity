@@ -1,9 +1,9 @@
 {
   "why": "Current tree measurements: sourceFiles includes .ts/.mts/.tsx under src and tests; specFiles counts root tests/*.spec.ts; tests comes from vitest list --json, including parameterized and skipped cases; gates counts active detectors. scripts/gates.mjs checks both missing and mismatched counts. Budget ratios are computed by their owners and are not duplicated here.",
   "counts": {
-    "sourceFiles": 82,
-    "specFiles": 37,
-    "tests": 600,
+    "sourceFiles": 86,
+    "specFiles": 40,
+    "tests": 689,
     "gates": 26
   }
 }

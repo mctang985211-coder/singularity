@@ -11,7 +11,7 @@ import { loadDomain } from '../src/domain.ts'
 import type { PlannedChild } from '../src/driver.ts'
 import { spawnProcess } from '../src/process.ts'
 import { decompose, propose } from '../src/surfaces.ts'
-import { agentFor, factsOf, FakePersistence } from './seam.ts'
+import { attachmentsAt, agentFor, factsOf, FakePersistence } from './seam.ts'
 
 const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const roots: string[] = []
@@ -25,12 +25,12 @@ async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'assembly-plan-'))
   roots.push(root)
   const medium = new FakePersistence()
-  const apparatus = await openApparatus('plans', root, await loadDomain(domainDir, spawnProcess), medium as never)
+  const apparatus = await openApparatus('plans', root, await loadDomain(domainDir, spawnProcess), medium as never, attachmentsAt(root))
   const agent = agentFor('parent', 'parent-session')
   const caller = callerOf(agent)
   const parent = await propose(apparatus, caller, 'propose', { goal: 'count letters' })
   const dispatched: string[] = []
-  const scheduler = { advance: async () => { dispatched.push('dispatch'); return [] }, settled: async () => [], close: async () => undefined }
+  const scheduler = { advance: async () => { dispatched.push('dispatch'); return [] }, close: async () => undefined }
   return { apparatus, medium, agent, caller, parent, scheduler, dispatched }
 }
 
@@ -48,7 +48,7 @@ describe('a fully checked domain decomposition', () => {
   ] as const)('refuses %s before creating or admitting children', async (_case, proposal) => {
     const h = await setup()
     const before = factsOf(h.medium)
-    await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, h.caller, h.agent,
+    await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, h.caller,
       { taskId: h.parent.taskId, children: proposal }))
     expect(factsOf(h.medium)).toEqual(before)
     expect(h.dispatched).toEqual([])
@@ -58,14 +58,14 @@ describe('a fully checked domain decomposition', () => {
     const h = await setup()
     const before = factsOf(h.medium)
     const stranger = agentFor('stranger', 'stranger-session')
-    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, callerOf(stranger), stranger,
+    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, callerOf(stranger),
       { taskId: h.parent.taskId, children }))).toMatchObject({ code: 'not-responsible' })
     expect(factsOf(h.medium)).toEqual(before)
   })
 
   it('refuses an assigned child proposing another root Task before binding or admitting it', async () => {
     const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller, h.agent, { taskId: h.parent.taskId, children })
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })
     const child = [...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
       .find(state => state.contract?.template.id === 'extract-letters')!
     const id = child.responsibility!.agentId
@@ -77,20 +77,20 @@ describe('a fully checked domain decomposition', () => {
 
   it('refuses an assigned child publishing another plan before creating any descendants', async () => {
     const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller, h.agent, { taskId: h.parent.taskId, children })
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })
     const child = [...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
       .find(state => state.contract?.template.id === 'extract-letters')!
     const id = child.responsibility!.agentId
     const agent = agentFor(id, id)
     const before = factsOf(h.medium)
-    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, callerOf(agent), agent,
+    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, callerOf(agent),
       { taskId: child.taskId, children }))).toMatchObject({ code: 'illegal-transition' })
     expect(factsOf(h.medium)).toEqual(before)
   })
 
   it('publishes child-specific contracts with the precise producer Task source', async () => {
     const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller, h.agent, { taskId: h.parent.taskId, children })
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })
     const states = [...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
     const extract = states.find(state => state.contract?.template.id === 'extract-letters')!
     const count = states.find(state => state.contract?.template.id === 'count-letters')!
@@ -103,9 +103,9 @@ describe('a fully checked domain decomposition', () => {
 
   it('rejects a changed plan replay without adding preparation facts', async () => {
     const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller, h.agent, { taskId: h.parent.taskId, children })
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })
     const before = factsOf(h.medium)
-    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, h.caller, h.agent,
+    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, h.caller,
       { taskId: h.parent.taskId, children: [{ ...children[0]!, key: 'changed' }] }))).toMatchObject({ code: 'command-conflict' })
     expect(factsOf(h.medium)).toEqual(before)
   })

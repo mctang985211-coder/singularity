@@ -294,7 +294,7 @@ describe('the task slice', () => {
     await log.emit(started())
     await log.emit(bubbleOpened())
     await log.emit(judged('correctness', UNIT_VERIFIER, 'fail'))
-    await log.emit({ commandId: 'fail-1', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/failed', subject: TASK_ID, payload: { runId: RUN_ID } })
+    await log.emit({ commandId: 'fail-1', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/failed', subject: TASK_ID, payload: { runId: RUN_ID, cause: 'runtime' } })
 
     const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     if (state === undefined) throw new Error('expected a folded task')

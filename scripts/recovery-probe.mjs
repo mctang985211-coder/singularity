@@ -148,7 +148,7 @@ async function bootstrap({ at, store, commands, programDigest }) {
     workspace: { kind: 'dir', ref: at.workspace },
     // The isolation manifest: the model identity and the tool digests this execution could reach.
     // A bubble that cannot say what its tools were is not a reproducible context, so it is required.
-    model: 'probe-model-1',
+    model: { provider: 'probe', model: 'probe-model-1' },
     tools: [{ name: 'count', implementationDigest: programDigest, version: '1' }],
     conditions: ['no-network'],
   })
