@@ -8,6 +8,7 @@ import { sha256 } from './ids.ts'
 import { inside, list, readBytes, record, text } from './shape.ts'
 import { readTemplate, type TaskTemplate } from './template.ts'
 import { verifierOf } from './verifiers.ts'
+import { loadMeasurement, type DomainMeasurement } from './domain-measurement.ts'
 
 export interface DomainVerifier extends VerifierImplementation {
   readonly program: string
@@ -25,6 +26,7 @@ export interface Domain {
   readonly inputs: readonly DomainInput[]
   readonly templates: ReadonlyMap<string, TaskTemplate>
   readonly verifiers: readonly DomainVerifier[]
+  readonly measurement?: DomainMeasurement
 }
 export async function loadDomain(dir: string, runProcess: VerifierProcess): Promise<Domain> {
   const declaration = join(dir, 'task.json')
@@ -34,7 +36,7 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
     refuse('malformed-declaration', `${declaration} is not JSON (${String(error)})`)
   }
   const declared = record(parsed, 'task.json')
-  assertClosedKeys(declared, ['rootTemplate', 'inputs', 'templates', 'verifiers'], 'task.json', 'malformed-declaration')
+  assertClosedKeys(declared, ['rootTemplate', 'inputs', 'templates', 'verifiers', 'measurement'], 'task.json', 'malformed-declaration')
   const inputs: DomainInput[] = []
   for (const [index, entry] of list(declared['inputs'], 'task.json.inputs').entries()) {
     const at = `task.json.inputs[${index}]`
@@ -62,7 +64,9 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
   const root = templates.get(rootTemplate)
   if (root === undefined) refuse('malformed-declaration', `task.json.rootTemplate names absent template ${JSON.stringify(rootTemplate)}`)
   if (root.input.source.kind !== 'protected') refuse('malformed-declaration', 'the root template must read a protected source')
-  const domain = { dir, rootTemplate, inputs, templates, verifiers }
+  const measurement = declared['measurement'] === undefined ? undefined
+    : await loadMeasurement(inside(dir, text(declared, 'measurement', 'task.json'), 'task.json.measurement'))
+  const domain = { dir, rootTemplate, inputs, templates, verifiers, ...(measurement === undefined ? {} : { measurement }) }
   assertTemplateSources(domain)
   return domain
 }

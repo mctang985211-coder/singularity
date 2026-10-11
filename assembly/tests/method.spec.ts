@@ -72,3 +72,14 @@ it('refuses changes to protected task input or acceptance while allowing changed
   await expect(createMethod(apparatus, { ...assets, templates: changed })).rejects.toThrow()
   await apparatus.store.close()
 })
+
+it('passes a model-created candidate to the pinned auxiliary tool without making it the submission', async () => {
+  const { apparatus, assets, caller } = await setup()
+  const method = await createMethod(apparatus, { ...assets,
+    tool: "import {readFileSync} from 'node:fs'; process.stdout.write(readFileSync(process.argv[3],'utf8').toUpperCase())" })
+  const proposal = await propose(apparatus, caller, 'candidate-test', { goal: 'inspect candidate', method })
+  const result = await runMethodTool(apparatus, caller, proposal.taskId, 'inspect', new AbortController().signal, 'model-created source')
+  expect(result.artifact).toBe('MODEL-CREATED SOURCE')
+  expect(taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!.submission).toBeUndefined()
+  await apparatus.store.close()
+})

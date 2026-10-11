@@ -152,8 +152,8 @@ it('sums exact native assistant totals and refuses absent usage or unknown total
   expect(tokensOf([event({ inputTokens: 2, outputTokens: 3, totalTokens: 17, cacheReadTokens: 12 }),
     event({ inputTokens: 5, outputTokens: 7, totalTokens: 23, cacheReadTokens: 11 })])).toBe(40)
   expect(() => tokensOf([])).toThrow('no native model messages')
-  expect(() => tokensOf([event()])).toThrow('usage is missing')
-  expect(() => tokensOf([event({ inputTokens: 2, outputTokens: 3 })])).toThrow('totalTokens')
+  expect(() => tokensOf([event()])).toThrow('usage is unknown')
+  expect(() => tokensOf([event({ inputTokens: 2, outputTokens: 3 })])).toThrow('usage is unknown')
 })
 
 it('binds independently verified sealed submissions to native transcript token costs and verdict citations', async () => {
@@ -200,17 +200,18 @@ it('binds independently verified sealed submissions to native transcript token c
 
 it('refuses unmeasurable native usage after sealing acceptance and releases its child session', async () => {
   const h = await fixture(false)
-  await expect(h.surface.evolve({ roundId: 'round-1', round: 1, incumbent: h.incumbent, candidates: [h.good, h.bad], explorationSlots: 1 })).rejects.toThrow('usage is missing')
+  await expect(h.surface.evolve({ roundId: 'round-1', round: 1, incumbent: h.incumbent, candidates: [h.good, h.bad], explorationSlots: 1 })).rejects.toThrow('usage is unknown')
   const facts = await h.facts()
   expect(facts.filter(fact => fact.kind === TASK_KINDS.runSubmitted)).toHaveLength(1)
   expect(facts.filter(fact => fact.kind === TASK_KINDS.evidenceProduced)).toHaveLength(1)
-  expect(h.surface.history()).toEqual([])
+  expect((await h.surface.history()).decisions).toEqual([])
   expect(h.disposed).toHaveLength(1)
 })
 
-it('refuses an agent submission that changes the pinned method program', async () => {
+it('allows the solver to produce a different final program while consuming the frozen Method tool', async () => {
   const h = await fixture(true, true)
-  await expect(h.surface.evolve({ roundId: 'round-1', round: 1, incumbent: h.incumbent, candidates: [h.good, h.bad], explorationSlots: 1 })).rejects.toThrow('pinned Method tool')
-  expect(h.surface.history()).toEqual([])
-  expect(h.disposed).toHaveLength(1)
+  const round = await h.surface.evolve({ roundId: 'round-1', round: 1, incumbent: h.incumbent, candidates: [h.good, h.bad], explorationSlots: 1 })
+  expect(round.winner).toBe(0)
+  expect((await h.surface.history()).decisions).toEqual([round])
+  expect(h.disposed).toHaveLength(5)
 })

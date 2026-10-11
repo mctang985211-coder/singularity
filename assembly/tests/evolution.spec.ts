@@ -39,19 +39,21 @@ async function fixture() {
   })
   stores.push(store)
   const methods = new Map<string, typeof initial>()
-  const quality = new Map<string, 0 | 1>()
+  const quality = new Map<string, number>()
+  const accepted = new Map<string, boolean>()
   const contexts = new Map<string, readonly string[]>()
   const calls: { revision: RevisionRef; operationId: string; roundWasOpen: boolean }[] = []
   const environments = createEnvironmentCommands({ store, registry })
-  async function revision(id: string, assets: typeof initial, passed: 0 | 1): Promise<RevisionRef> {
+  async function revision(id: string, assets: typeof initial, passed: number, met = passed === 1): Promise<RevisionRef> {
     await environments.createRevision({ commandId: `revision:${id}`, environmentId: 'methods', revisionId: id, manifest: assets })
     methods.set(id, assets)
     quality.set(id, passed)
+    accepted.set(id, met)
     return { environmentId: 'methods', revisionId: id, digest: digestOf(assets) }
   }
   // This solve double establishes real core Task/Run/Bubble facts; native execution and token
   // accounting are the host port's separate integration contract.
-  async function solve({ revision, operationId }: { revision: RevisionRef; operationId: string }): Promise<SolveResult> {
+  async function solve({ revision, operationId, started }: { revision: RevisionRef; operationId: string; started: (run: { taskId: string; runId: string }) => Promise<void> }): Promise<SolveResult> {
     const roundId = operationId.split(':')[0]!
     calls.push({ revision, operationId, roundWasOpen: store.load().stateOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, roundId)?.plan !== undefined })
     const taskId = `${operationId}:task`
@@ -71,10 +73,13 @@ async function fixture() {
     ]
     for (const [index, fact] of facts.entries())
       await store.emit({ commandId: `${operationId}:${index}`, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: taskId, ...fact })
-    return { taskId, runId, quality: quality.get(revision.revisionId)!, cost: 100,
-      artifactDigest: digestOf({ taskId }), inputDigests: inputs, implementationDigest: criterion.implementationDigest }
+    await started({ taskId, runId })
+    return { taskId, runId, quality: quality.get(revision.revisionId)!, met: accepted.get(revision.revisionId)!, cost: 100,
+      artifactDigest: digestOf({ taskId }), inputDigests: inputs, implementationDigest: criterion.implementationDigest,
+      acceptanceDigest: criterion.implementationDigest }
   }
-  const options = { store, registry, criterion, rounds: 2, firstBudget: 3, minimumBudget: 1,
+  const metric = { measured: { ...criterion, criterionId: 'correct:quality' }, unit: 'pass', direction: 'higher' as const }
+  const options = { store, registry, criterion, metric, trials: 1, weights: { quality: 1, cost: 0 }, rounds: 2, firstBudget: 3, minimumBudget: 1,
     calibration, loadMethod: async (ref: RevisionRef) => methods.get(ref.revisionId)!, solve }
   const evolution = createEvolution(options)
   return { store, registry, revision, evolution, calls, solve, contexts, options }
@@ -121,19 +126,38 @@ describe('method evolution', () => {
     expect(second.winner).toBeNull()
     expect(live.calls).toHaveLength(10)
 
-    const late = await live.solve({ revision: good, operationId: 'late' })
+    const late = await live.solve({ revision: good, operationId: 'late', started: async () => undefined })
     const measure = createMeasureCommands({ store: live.store, registry: live.registry,
       implementations: [{ ref: criterion.verifierRef, version: criterion.verifierVersion, implementationDigest: criterion.implementationDigest }] })
     await measure.openEvaluation({ commandId: 'late:open', evaluationId: 'late', baseline: good, candidate: good,
       run: { taskId: late.taskId, runId: late.runId }, metric: { measured: { ...criterion, criterionId: 'correct:quality' }, unit: 'pass', direction: 'higher' }, weights: { quality: 1, cost: 0 }, trials: 1, judgement: [criterion] })
     await measure.recordTrial({ commandId: 'late:trial', evaluationId: 'late', trial: { ...late, slot: 0, quality: 0 } })
     expect(live.evolution.history()).toEqual([first, second])
-    const reopened = createEvolution({ store: live.store, registry: live.registry, criterion, rounds: 2, firstBudget: 3,
+    const reopened = createEvolution({ ...live.options, rounds: 2, firstBudget: 3,
       minimumBudget: 1, calibration: { floor: 999, source: 'declared' }, loadMethod: async () => initial, solve: live.solve })
     expect(reopened.history()).toEqual([first, second])
     const decisions = live.store.load().entriesOf(STRATEGY_PROTOCOL, STRATEGY_VERSION).filter(entry => entry.kind === STRATEGY_KINDS.roundDecided)
     expect(decisions).toHaveLength(2)
     expect(live.store.load().statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION).size).toBe(11)
+  })
+
+  it('freezes two independent area trials before execution and rejects a faster invalid implementation', async () => {
+    const live = await fixture()
+    const incumbent = await live.revision('baseline', initial, 1, true)
+    const smaller = await live.revision('smaller', { ...initial, skill: 'optimize the schedule' }, 0.95, true)
+    const invalid = await live.revision('invalid', { ...initial, tool: 'drops schedule words' }, 0.5, false)
+    const evolution = createEvolution({ ...live.options, trials: 2,
+      metric: { ...live.options.metric, unit: 'baseline area ratio', direction: 'lower' },
+      calibration: { floor: 0.01, source: 'declared' }, weights: { quality: 100, cost: 15 } })
+    const round = await evolution.runRound({ roundId: 'area', round: 1, incumbent, candidates: [smaller, invalid], explorationSlots: 1 })
+    expect(round.winner).toBe(0)
+    expect(round.slots.map(slot => [slot.quality, slot.denominator, slot.constraintsMet])).toEqual([[0.95, 2, true], [0.5, 2, false]])
+    expect(live.calls).toHaveLength(10)
+    const candidate = live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'area:0:candidate:evaluation')!
+    expect(candidate.observed.map(trial => JSON.parse(trial.detail!))).toEqual([
+      expect.objectContaining({ taskId: 'area:0:candidate:trial:0:task' }),
+      expect.objectContaining({ taskId: 'area:0:candidate:trial:1:task' }),
+    ])
   })
 
   it('refuses fewer than two candidates and actual over-budget content before running', async () => {
@@ -151,7 +175,7 @@ describe('method evolution', () => {
     const incumbent = await live.revision('initial', initial, 0)
     const good = await live.revision('good', { ...initial, skill: 'correct method' }, 1)
     const bad = await live.revision('bad', { ...initial, tool: 'broken method' }, 0)
-    live.contexts.set('r1:0:baseline', ['changed dataset conditions'])
+    live.contexts.set('r1:0:baseline:trial:0', ['changed dataset conditions'])
     await expect(live.evolution.runRound({ roundId: 'r1', round: 1, incumbent, candidates: [good, bad], explorationSlots: 0 })).rejects.toThrow(/caliber/)
     expect(live.evolution.history()).toEqual([])
     expect(live.calls).toHaveLength(2)

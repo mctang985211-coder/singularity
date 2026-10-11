@@ -1559,13 +1559,13 @@
     },
     {
       "id": "assembly-m14-read-holder-only",
-      "rule": "a read of a task the caller is not responsible for is refused by name",
+      "rule": "a task read is limited to its responsible agent or exact direct parent",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
           "file": "assembly/src/surfaces.ts",
-          "find": "const state = taskStateOf(apparatus, input.taskId)\n  if (state.responsibility?.agentId !== caller.agentId)\n    refuse('not-responsible', `task",
-          "replace": "const state = taskStateOf(apparatus, input.taskId)\n  if (false)\n    refuse('not-responsible', `task"
+          "find": "if (state.responsibility?.agentId !== caller.agentId && !directParent)",
+          "replace": "if (false)"
         }
       ],
       "run": {

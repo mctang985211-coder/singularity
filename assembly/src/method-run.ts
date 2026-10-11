@@ -44,7 +44,7 @@ export async function observeMethodSkill(apparatus: Apparatus, sessionId: string
 }
 
 export async function runMethodTool(apparatus: Apparatus, caller: Caller, taskId: string, callId: string,
-  signal: AbortSignal): Promise<{ program: string; artifact: string }> {
+  signal: AbortSignal, candidate?: string): Promise<{ program: string; artifact: string }> {
   const task = taskStateOf(apparatus, taskId)
   if (task.responsibility?.agentId !== caller.agentId) refuse('not-responsible', 'the caller does not own this Task')
   const run = Object.values(task.runs).find(run => run.status === 'running' && run.stage === 'working')
@@ -56,8 +56,11 @@ export async function runMethodTool(apparatus: Apparatus, caller: Caller, taskId
   const workspace = workspaceOf(apparatus, taskId, run.runId)
   const path = join(workspace, 'method-tool.mjs')
   await writeFile(path, method.assets.tool, 'utf8')
+  const candidatePath = join(workspace, 'method-candidate.txt')
+  if (candidate !== undefined) await writeFile(candidatePath, candidate, 'utf8')
   await consumeMethod(apparatus, taskId, run, 'tool', `tool:${caller.sessionId}/${callId}:${ref.digest}`)
-  const result = await spawnProcess({ shell: false, argv: [process.execPath, path, join(workspace, template.input.name)] }, signal, workspace)
+  const result = await spawnProcess({ shell: false, argv: [process.execPath, path, join(workspace, template.input.name),
+    ...(candidate === undefined ? [] : [candidatePath])] }, signal, workspace)
   if (result.failure !== undefined || result.exitCode !== 0) throw new Error(result.failure ?? `Method tool exited ${result.exitCode}: ${result.stderr}`)
   return { program: method.assets.tool, artifact: result.stdout }
 }

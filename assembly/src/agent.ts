@@ -28,12 +28,16 @@ For a program submission, provide a Node ES module; process.argv[2] is the input
 the artifact. A source submission is judged as written.
 Root agents use singularity_decompose_task to select host templates, dependencies, supports and Run budgets.
 Use singularity_create_method to admit one complete Method JSON with rootTemplate, templates, skill
-and tool (Node ES module). A proposal may pin its returned method reference; otherwise it uses the
-published head. singularity_run_method executes the exact pinned tool and returns its program/result.
+and tool (an auxiliary Node ES module). The tool receives the actual input path in process.argv[2]
+and an optional model-created candidate path in process.argv[3]. It may analyze, test or generate
+source; its Node program is not a Verilog submission. A proposal may pin its returned method reference;
+otherwise it uses the published head. singularity_run_method executes the pinned helper, and you
+produce the final answer using the Method Skill and its output.
 Use singularity_evolve_method with a complete round JSON to compare at least two admitted candidates
-against one incumbent through real independent solves. This letters engineering path uses two rounds,
-three edits per candidate, independent pass/fail quality, native token cost and a declared zero noise floor.
-Read singularity_method_history before proposing a later round so it uses the frozen earlier decisions.
+against one incumbent through real independent solves. Domain quality, independent functional
+constraints, token cost, repetitions and noise band are fixed by the deployment. Freeze Method assets,
+not the solver's answer. Read singularity_method_history before creating candidates: it contains actual
+Task/Run results, sealed source, Method contents and frozen decisions. Propose changes from that history.
 singularity_release_method accepts a bootstrap reference for an empty library or a committed roundId;
 it presents the actual contents, changes and measurement to the human through native approval.
 Assigned children execute their existing Task/Run using submit/status; they cannot propose or decompose.
@@ -108,21 +112,22 @@ export function apply(ctx: Context): void {
     })),
     ctx.tools.register(defineTool({
       name: 'singularity_run_method',
-      description: 'Execute this working Run’s pinned Method tool against its actual input. Returns program and stdout; submit the program for independent acceptance.',
-      parameters: { taskId: { type: 'string', description: 'Your working Task.', required: true } }, output,
+      description: 'Execute the pinned auxiliary Method tool on the actual input and an optional model-created candidate. Returns helper program and its stdout. Produce your own final domain answer for independent acceptance.',
+      parameters: { taskId: { type: 'string', description: 'Your working Task.', required: true },
+        candidate: { type: 'string', description: 'Optional source to test or analyze, available to the helper in process.argv[3].' } }, output,
       execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).runMethod(args))),
     })),
     ctx.tools.register(defineTool({
       name: 'singularity_evolve_method',
-      description: 'Run a bounded letters engineering comparison. Each candidate and incumbent execute in independent real DSH sessions with independent acceptance and native token cost. Returns the committed decision.',
+      description: 'Compare frozen Method assets under the deployment metric and functional constraints. Baseline and candidates solve independently in real DSH sessions, including optional decomposition, and record actual quality and token cost. Returns the committed RRSI decision, possibly no winner.',
       parameters: { round: { type: 'string', description: 'JSON {roundId,round,incumbent,candidates,explorationSlots}; at least two candidates, round 1 or 2.', required: true } }, output,
       execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).evolve(JSON.parse(args.round)))),
     })),
     ctx.tools.register(defineTool({
       name: 'singularity_method_history',
-      description: 'Read frozen committed round decisions, including outcomes and calibration. Use this history when proposing the next round.',
+      description: 'Read actual Task/Run execution history, sealed submissions, exact Method contents and frozen round decisions. Use these facts to propose new tasks and method candidates.',
       parameters: {}, output,
-      execute: async (_args, exec) => JSON.stringify(ctx.singularity.forCall(exec).history()),
+      execute: async (_args, exec) => JSON.stringify(await ctx.singularity.forCall(exec).history()),
     })),
     ctx.tools.register(defineTool({
       name: 'singularity_release_method',

@@ -36,15 +36,18 @@ export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId:
   const revision = apparatus.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, apparatus.controlId)?.revisions[revisionId]
   if (revision === undefined) refuse('unknown-revision', `revision "${revisionId}" is not committed`)
   const commands = apparatus.tasks.forAgent(caller.agentId)
-  await commands.startRun({ commandId: `start:${runId}`, taskId, runId,
+  const start = () => commands.startRun({ commandId: `start:${runId}`, taskId, runId,
     revision: { environmentId: apparatus.controlId, revisionId, digest: revision.contentDigest } })
+  if (apparatus.budget === undefined) await start()
+  else await apparatus.budget.startRun(taskId, runId, start)
   const workspace = workspaceOf(apparatus, taskId, runId)
   try {
     await prepareWorkspace(template, inputs, workspace)
     await commands.openBubble({ commandId: `bubble:${taskId}/${runId}`, taskId, runId,
       inputs: inputs.map(({ name, digest }) => ({ name, digest })),
       workspace: { kind: 'dir', ref: workspace }, model: caller.model,
-      tools: [{ name: 'node', version: process.version, implementationDigest: await toolchainDigest() }], conditions: [] })
+      tools: [{ name: 'node', version: process.version, implementationDigest: await toolchainDigest() }, ...(domain.measurement?.tools ?? [])],
+      conditions: domain.measurement?.conditions ?? [] })
     if (method !== undefined) await consumeMethod(apparatus, taskId, taskStateOf(apparatus, taskId).runs[runId]!, 'template', `template:${method.digest}/${template.id}`)
   } catch (error) {
     await commands.failRun({ commandId: `prepare-failed:${taskId}/${runId}`, taskId, runId, reason: String(error) })

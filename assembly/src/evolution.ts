@@ -1,6 +1,6 @@
 import type { ControlSessionStore } from '../../src/control/session-store.ts'
 import { createMeasureCommands } from '../../src/measure/commands.ts'
-import { MEASURE_KINDS, MEASURE_PROTOCOL, MEASURE_VERSION, type EvaluationState } from '../../src/measure/protocol.ts'
+import { contextDigestOf, MEASURE_KINDS, MEASURE_PROTOCOL, MEASURE_VERSION, type EvaluationMetric, type EvaluationState, type EvaluationWeights } from '../../src/measure/protocol.ts'
 import { caliberDigestOf, projectEvaluation } from '../../src/measure/view.ts'
 import { digestOf, type Envelope } from '../../src/protocol/envelope.ts'
 import { foldSubject, foldSubjects } from '../../src/protocol/fold.ts'
@@ -12,18 +12,20 @@ import { STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_VERSION, type RoundState, t
 import { projectRound, type MeasureSlice, type RoundDecision } from '../../src/strategy/view.ts'
 import type { BubbleInput } from '../../src/task/bubble.ts'
 import type { AcceptanceCriterion } from '../../src/task/contract.ts'
-import type { RevisionRef } from '../../src/task/protocol.ts'
+import { TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from '../../src/task/protocol.ts'
 import { sameRevision } from '../../src/task/shape.ts'
 import type { MethodAssets } from './method.ts'
 
 export interface SolveResult {
   readonly taskId: string
   readonly runId: string
-  readonly quality: 0 | 1
+  readonly quality: number
+  readonly met: boolean
   readonly cost: number
   readonly artifactDigest: string
   readonly inputDigests: readonly BubbleInput[]
   readonly implementationDigest: string
+  readonly acceptanceDigest: string
   readonly verdict?: { readonly criterionId: string; readonly evidenceDigest: string; readonly artifactDigest: string }
 }
 
@@ -35,8 +37,12 @@ export interface EvolutionOptions {
   readonly firstBudget: number
   readonly minimumBudget: number
   readonly calibration: Calibration
+  readonly metric: EvaluationMetric
+  readonly weights: EvaluationWeights
+  readonly trials: number
   readonly loadMethod: (revision: RevisionRef) => Promise<MethodAssets>
-  readonly solve: (input: { readonly revision: RevisionRef; readonly operationId: string }) => Promise<SolveResult>
+  readonly solve: (input: { readonly revision: RevisionRef; readonly operationId: string;
+    readonly started: (run: { readonly taskId: string; readonly runId: string }) => Promise<void> }) => Promise<SolveResult>
 }
 
 export interface EvolutionRound {
@@ -93,11 +99,9 @@ function measuresAt(entries: readonly Envelope[], registry: ProtocolRegistry): M
 }
 
 export function createEvolution(options: EvolutionOptions): Evolution {
-  const { store, registry, criterion } = options
-  const metric = { measured: { ...criterion, criterionId: `${criterion.criterionId}:quality` }, unit: 'pass', direction: 'higher' as const }
-  const weights = { quality: 1, cost: 0 }
+  const { store, registry, criterion, metric, weights, trials } = options
   const measure = createMeasureCommands({ store, registry,
-    implementations: [{ ref: criterion.verifierRef, version: criterion.verifierVersion, implementationDigest: criterion.implementationDigest }] })
+    implementations: [criterion, metric.measured].map(held => ({ ref: held.verifierRef, version: held.verifierVersion, implementationDigest: held.implementationDigest })) })
   const strategy = createStrategyCommands({ store, rounds: options.rounds, firstBudget: options.firstBudget,
     minimumBudget: options.minimumBudget, calibration: options.calibration, measuresAt: cut => measuresAt(cut.entries(), registry) })
 
@@ -112,20 +116,34 @@ export function createEvolution(options: EvolutionOptions): Evolution {
   }
 
   async function evaluate(incumbent: RevisionRef, revision: RevisionRef, operationId: string, expectedCaliber?: string): Promise<string> {
-    const result = await options.solve({ revision, operationId })
     const evaluationId = `${operationId}:evaluation`
-    await measure.openEvaluation({ commandId: `${operationId}:open-evaluation`, evaluationId, baseline: incumbent, candidate: revision,
-      run: { taskId: result.taskId, runId: result.runId }, metric, weights, trials: 1, judgement: [criterion] })
-    const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
-    if (expectedCaliber !== undefined && caliberDigestOf(plan) !== expectedCaliber)
-      refuse('caliber-mismatch', `${operationId} changed the round's frozen caliber`)
-    await measure.recordTrial({ commandId: `${operationId}:trial`, evaluationId, trial: {
-      slot: 0, quality: result.quality, cost: result.cost, artifactDigest: result.artifactDigest,
-      inputDigests: result.inputDigests, implementationDigest: result.implementationDigest,
-    } })
+    const results: SolveResult[] = []
+    for (let slot = 0; slot < trials; slot++) {
+      const result = await options.solve({ revision, operationId: `${operationId}:trial:${slot}`, started: async run => {
+        if (slot === 0) {
+          await measure.openEvaluation({ commandId: `${operationId}:open-evaluation`, evaluationId, baseline: incumbent, candidate: revision,
+            run, metric, weights, trials, judgement: [criterion] })
+          const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
+          if (expectedCaliber !== undefined && caliberDigestOf(plan) !== expectedCaliber)
+            refuse('caliber-mismatch', `${operationId} changed the round's frozen caliber`)
+        } else {
+          const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
+          const actual = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, run.taskId)!.runs[run.runId]!
+          if (contextDigestOf(actual.bubble!) !== plan.context) refuse('caliber-mismatch', `${operationId} trial ${slot} changed its frozen context`)
+        }
+      } })
+      results.push(result)
+      await measure.recordTrial({ commandId: `${operationId}:trial:${slot}`, evaluationId, trial: {
+        slot, quality: result.quality, cost: result.cost, artifactDigest: result.artifactDigest,
+        inputDigests: result.inputDigests, implementationDigest: result.implementationDigest,
+        detail: JSON.stringify({ taskId: result.taskId, runId: result.runId, met: result.met, verdict: result.verdict }),
+      } })
+    }
+    const witness = results.find(result => !result.met) ?? results.at(-1)!
     await measure.checkConstraint({ commandId: `${operationId}:constraint`, evaluationId, criterionId: criterion.criterionId,
-      met: result.quality === 1, artifactDigest: result.artifactDigest, implementationDigest: result.implementationDigest,
-      ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+      met: results.every(result => result.met), artifactDigest: witness.artifactDigest, implementationDigest: witness.acceptanceDigest,
+      ...(witness.verdict === undefined ? {} : { verdict: witness.verdict }),
+      detail: JSON.stringify(results.map(result => ({ taskId: result.taskId, runId: result.runId, met: result.met, verdict: result.verdict }))),
     })
     return evaluationId
   }

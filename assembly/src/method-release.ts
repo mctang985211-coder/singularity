@@ -44,7 +44,9 @@ export async function releaseMethod(apparatus: Apparatus, seams: ApprovalSeams, 
     review = { purpose: 'Publish selected Method', revision: candidate, basis: content.basis,
       edits: structuralEditsOf(before, after), before, after,
       report: projectEvaluation(report), calibration: round.decision!.calibration,
-      costUnit: 'native model tokens', experiment: 'controlled letters engineering acceptance' }
+      costUnit: 'native model tokens', metric: round.plan!.caliber,
+      experiment: apparatus.domain.measurement === undefined ? 'functional engineering comparison' : 'domain method comparison',
+      ...(apparatus.domain.measurement === undefined ? {} : { qualityUnit: 'baseline area ratio', baselineArea: apparatus.domain.measurement.baseline }) }
   }
   const draft = apparatus.store.load().stateOf<ReleaseDraft>(RELEASE_PROTOCOL, RELEASE_VERSION, environmentId)!
   const approval = await release.approve({ commandId: `${callId}:approve`, environmentId, revisionId: draft.revisionId,
