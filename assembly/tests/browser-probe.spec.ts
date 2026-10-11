@@ -116,8 +116,8 @@ it('serves core snapshot reads from a fixed durable cut of a real MemoryLog', as
   log.emit({ ...admitted(), subject: 'later-task', commandId: 'admit-later-task' })
   const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
   const read = await coreRead(log.entries(), domainDir, 1)
-  assert.deepEqual(read.snapshot, { formatVersion: 1, controlId: 'singularity-local', cutoff: 1,
-    tasks: [{ taskId: TASK_ID, goal: contract().goal, phase: 'awaiting-run', runs: [] }], plans: [] })
+  assert.deepEqual(read.snapshot, { formatVersion: 2, controlId: 'singularity-local', cutoff: 1,
+    tasks: [{ taskId: TASK_ID, goal: contract().goal, phase: 'awaiting-run', sessionId: null, template: contract().template, runs: [] }], plans: [] })
 })
 
 describe('browser evidence reads authoritative native file attachments', () => {

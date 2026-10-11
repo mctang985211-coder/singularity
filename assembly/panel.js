@@ -1,35 +1,8 @@
-/**
- * The panel page: the task log as a person reads it.
- *
- * A page of its own, served at `/singularity/panel` and mounted in the shell as an iframe — the
- * structure the previous singularity's web surface used. It reads one route, `/singularity/tasks`, with
- * the browser's own session, so it needs nothing from the shell: no React, no module loader, no slot
- * registry. A shell restyle cannot break it, and a probe opens it directly instead of driving a chat
- * surface to reach a task list.
- *
- * It renders one read and nothing else. It does not poll (a poll is a request per interval for a log
- * that only changes when somebody acts), does not write, and does not hold a cut across a click: the
- * Refresh button exists because re-reading is a *user* action here, and the page prints the `cutoff` it
- * actually read rather than the one it expected. A failed read renders the failure's own text — a blank
- * panel and a panel whose route is not mounted look identical, and only one of those is a bug.
- *
- * @module @dangosys/dsh-singularity-next/panel
- */
-
-/// <reference lib="dom" />
-
-/** The one route this page reads. Absolute, because that is how the Host registered it. */
 const TASKS_ROUTE = '/singularity/tasks'
 
 const root = document.getElementById('root')
 if (root === null) throw new Error('panel: #root is missing from the page this script was served with')
 
-/**
- * Read one cut.
- *
- * @param signal - aborts the request when the page goes away.
- * @returns the snapshot, or an object naming what went wrong.
- */
 async function readCut(signal) {
   let response
   try {
@@ -39,9 +12,6 @@ async function readCut(signal) {
     return { error: `${TASKS_ROUTE} could not be reached: ${error.message}` }
   }
   if (!response.ok) return { error: `${TASKS_ROUTE} answered ${response.status} ${response.statusText}` }
-  // A 200 carrying `text/html` is the shell's SPA answering for a route that was never mounted, so the
-  // content type is checked before the body is trusted. Without this, "the route is missing" renders as
-  // a JSON parse error and reads like a bug in the reader.
   const type = (response.headers.get('content-type') ?? '').split(';', 1)[0].trim().toLowerCase()
   if (type !== 'application/json')
     return { error: `${TASKS_ROUTE} answered ${type === '' ? 'no content type' : type}, not JSON — is the route mounted?` }
@@ -52,7 +22,6 @@ async function readCut(signal) {
   }
 }
 
-/** One element, with its attributes, children and text. */
 function element(tag, attributes = {}, children = []) {
   const node = document.createElement(tag)
   for (const [name, value] of Object.entries(attributes)) {
@@ -67,19 +36,24 @@ function element(tag, attributes = {}, children = []) {
   return node
 }
 
-/** A span carrying one field of a record, marked so a reader can find it without parsing prose. */
 function field(tag, marker, text, className) {
   const node = element(tag, { text, ...(marker === undefined ? {} : { [marker]: '' }) })
   if (className !== undefined) node.className = className
   return node
 }
 
-/** A run's own words, or nothing: a run that recorded no detail is not given an invented sentence. */
 function runRow(run) {
   return element('div', { 'data-run': run.runId, 'data-status': run.status, class: 'row' }, [
     field('span', undefined, run.runId, 'id'),
     field('span', undefined, run.status),
+    run.model === null ? null : field('span', 'data-model', `${run.model.provider}/${run.model.model}`, 'faded'),
     run.detail === null ? null : field('span', undefined, run.detail, 'faded'),
+    ...run.inputSources.map(input => field('div', 'data-input', `${input.name} · ${input.source.kind === 'artifact'
+      ? `${input.source.taskId}/${input.source.runId}` : input.source.ref} · ${input.digest}`, 'id')),
+    run.receipt === null ? null : element('details', { 'data-receipt': run.runId, 'data-receipt-cutoff': run.receipt.cutoff }, [
+      element('summary', { text: `Sealed receipt · cut ${run.receipt.cutoff}` }),
+      element('pre', { text: JSON.stringify(run.receipt, null, 2) }),
+    ]),
   ].filter(Boolean))
 }
 
@@ -90,6 +64,8 @@ function taskRow(task) {
   return element('div', { 'data-task': task.taskId, 'data-phase': task.phase, class: 'ruled' }, [
     element('div', { class: 'row' }, [field('span', undefined, task.taskId, 'id'), field('span', undefined, task.phase)]),
     field('div', undefined, task.goal, 'faded'),
+    field('div', 'data-session', task.sessionId ?? 'unassigned', 'id'),
+    field('div', 'data-template', task.template.id, 'faded'),
     element('div', {}, runs),
   ])
 }
@@ -123,12 +99,6 @@ function planBlock(plan) {
   ])
 }
 
-/**
- * Draw one read.
- *
- * The whole page is redrawn rather than patched: it holds one read's worth of state, so a diff would be
- * a way for the drawn page and the read to disagree — the one thing this page is here to make visible.
- */
 function render(state, reads) {
   const snapshot = state.snapshot
   const page = element('div', { 'data-panel': 'singularity-tasks', 'data-reads': String(reads), class: 'panel' }, [
@@ -160,14 +130,10 @@ function render(state, reads) {
   )
   return page
 }
-
-// One read on load, one on every click. `reads` counts landed reads so a reader can tell "the click
-// finished" from "the click started" without racing the button's own disabled state.
 let reads = 0
 let reading = false
 const controller = new AbortController()
 
-/** Read once and draw the result. The last landed read always wins, in order. */
 async function show() {
   reading = true
   draw()
@@ -181,7 +147,6 @@ async function show() {
   draw(state)
 }
 
-/** What the page currently holds: the last landed read. A read in flight leaves it alone. */
 let current = {}
 
 function draw(next) {

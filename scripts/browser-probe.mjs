@@ -292,7 +292,7 @@ export async function coreRead(facts, domainDir, cutoff = facts.length) {
     stateOf: (protocol, version, subject) => log.stateAt(protocol, version, subject, cutoff),
     statesOf: (protocol, version) => log.statesAt(protocol, version, cutoff),
   }
-  return { domain, registry, log, snapshot: await snapshotOf({ controlId: 'singularity-local', domain, store: { load: () => view } }) }
+  return { domain, registry, log, snapshot: await snapshotOf({ controlId: 'singularity-local', domain, registry, store: { load: () => view } }) }
 }
 async function waitForRun(persistence, page, stage, exclude = []) {
   const deadline = Date.now() + TURN_TIMEOUT_MS
@@ -487,7 +487,9 @@ const panelState = page => page.evaluate(() => {
   return { reads: Number(panel.getAttribute('data-reads')), controlId: text('[data-control]'), cutoff: text('[data-cutoff]'),
     error: text('[data-error]'), refresh: panel.querySelector('[data-refresh]') !== null,
     tasks: [...panel.querySelectorAll('[data-task]')].map(task => ({ taskId: task.getAttribute('data-task'), phase: task.getAttribute('data-phase'),
-      runs: [...task.querySelectorAll('[data-run]')].map(run => ({ runId: run.getAttribute('data-run'), status: run.getAttribute('data-status') })) })),
+      sessionId: task.querySelector('[data-session]').textContent, template: task.querySelector('[data-template]').textContent,
+      runs: [...task.querySelectorAll('[data-run]')].map(run => ({ runId: run.getAttribute('data-run'), status: run.getAttribute('data-status'),
+        receipt: run.querySelector('[data-receipt] pre') === null ? null : JSON.parse(run.querySelector('[data-receipt] pre').textContent) })) })),
     plans: [...panel.querySelectorAll('[data-plan]')].map(plan => ({ parentTaskId: plan.getAttribute('data-plan'), complete: plan.getAttribute('data-complete'),
       children: [...plan.querySelectorAll('[data-child]')].map(child => ({ taskId: child.getAttribute('data-child'), status: child.getAttribute('data-status') })),
       criteria: [...plan.querySelectorAll('[data-criterion]')].map(criterion => ({ criterionId: criterion.getAttribute('data-criterion'),
@@ -504,7 +506,8 @@ function assertPanel(state, snapshot) {
   assert.equal(state.controlId, snapshot.controlId)
   assert.equal(state.cutoff, String(snapshot.cutoff))
   assert.deepEqual(state.tasks, snapshot.tasks.map(task => ({ taskId: task.taskId, phase: task.phase,
-    runs: task.runs.map(run => ({ runId: run.runId, status: run.status })) })))
+    sessionId: task.sessionId ?? 'unassigned', template: task.template.id,
+    runs: task.runs.map(run => ({ runId: run.runId, status: run.status, receipt: run.receipt })) })))
   assert.deepEqual(state.plans, snapshot.plans.map(plan => ({ parentTaskId: plan.parentTaskId, complete: String(plan.complete),
     children: plan.children.map(child => ({ taskId: child.taskId, status: child.status })),
     criteria: plan.criteria.map(criterion => ({ criterionId: criterion.criterionId, satisfiedBy: criterion.satisfiedBy ?? '' })) })))

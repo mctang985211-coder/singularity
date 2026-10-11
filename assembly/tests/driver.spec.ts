@@ -192,6 +192,12 @@ describe('the driver with explicit execution and persistence ports', () => {
       .toMatchObject({ verdict: 'pass', phase: 'verified' })
     expect((await ownedDriver!.read()).plans[0]).toMatchObject({ complete: true,
       criteria: [{ criterionId: 'letters', satisfiedBy: proposal.runId }] })
+    const snapshot = await ownedDriver!.read()
+    const counted = snapshot.tasks.find(task => task.taskId === second)!
+    expect(counted).toMatchObject({ sessionId: String(agentSessionIdOf(second)), template: { id: 'count-letters' }, runs: [{
+      inputSources: [{ source: { kind: 'artifact', taskId: first, runId: firstAnswer.runId } }],
+      receipt: { source: { sessionId: String(agentSessionIdOf(second)) }, status: 'verified' },
+    }] })
   })
 
   it('settles the proposal Run from the independent verifier output', async () => {
