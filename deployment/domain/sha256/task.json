@@ -1,20 +1,42 @@
 {
-  "rootTemplate": "sha256-schedule",
+  "rootTemplate": "sha256-area",
   "inputs": [
     {
-      "ref": "testbench",
-      "from": "tb/tb_sha256_w_mem_selfcheck.v"
+      "ref": "requirements",
+      "from": "protected.json"
     }
   ],
   "templates": [
     {
-      "id": "sha256-schedule",
-      "goal": "implement the SHA256 message schedule under the protected NIST selfcheck",
+      "id": "sha256-area",
+      "goal": "Reduce the complete mapped sha256_core top cell area by editing only sha256_w_mem.v. Preserve the upstream public ports, active-low asynchronous reset, init/next behavior, and every observable cycle in SHA224 and SHA256. First verify the W schedule, then integrate that exact sealed source with the fixed upstream core and K implementation, then independently verify the parent artifact and measure the complete top area.",
       "input": {
-        "name": "tb/tb_sha256_w_mem_selfcheck.v",
+        "name": "protected.json",
         "source": {
           "kind": "protected",
-          "ref": "testbench"
+          "ref": "requirements"
+        }
+      },
+      "workspace": {
+        "submission": "source",
+        "file": "rtl/sha256_w_mem.v",
+        "artifact": "rtl/sha256_w_mem.v",
+        "initial": "seed/sha256_w_mem.v"
+      },
+      "criterion": {
+        "criterionId": "core-preserved",
+        "statement": "Reduce the complete mapped sha256_core top cell area by editing only sha256_w_mem.v. Preserve the upstream public ports, active-low asynchronous reset, init/next behavior, and every observable cycle in SHA224 and SHA256. First verify the W schedule, then integrate that exact sealed source with the fixed upstream core and K implementation, then independently verify the parent artifact and measure the complete top area.",
+        "verifier": "core-functional"
+      }
+    },
+    {
+      "id": "sha256-schedule",
+      "goal": "Optimize only sha256_w_mem.v while preserving its 192-word NIST schedule, public ports, reset, hold and next behavior cycle by cycle.",
+      "input": {
+        "name": "protected.json",
+        "source": {
+          "kind": "protected",
+          "ref": "requirements"
         }
       },
       "workspace": {
@@ -25,15 +47,37 @@
       },
       "criterion": {
         "criterionId": "w-schedule",
-        "statement": "the edited module produces the message schedule every published NIST vector requires, as the protected self-checking testbench compares it round by round",
-        "verifier": "functional"
+        "statement": "Optimize only sha256_w_mem.v while preserving its 192-word NIST schedule, public ports, reset, hold and next behavior cycle by cycle.",
+        "verifier": "w-schedule"
+      }
+    },
+    {
+      "id": "sha256-integration",
+      "goal": "Copy the exact verified predecessor sha256_w_mem.v into the artifact and verify it with the sealed upstream core/K, NIST multi-block test and SHA224/SHA256 public-cycle comparison.",
+      "input": {
+        "name": "in/sha256_w_mem.v",
+        "source": {
+          "kind": "artifact",
+          "template": "sha256-schedule"
+        }
+      },
+      "workspace": {
+        "submission": "source",
+        "file": "rtl/sha256_w_mem.v",
+        "artifact": "rtl/sha256_w_mem.v",
+        "initial": "seed/sha256_w_mem.v"
+      },
+      "criterion": {
+        "criterionId": "core-integrated",
+        "statement": "Copy the exact verified predecessor sha256_w_mem.v into the artifact and verify it with the sealed upstream core/K, NIST multi-block test and SHA224/SHA256 public-cycle comparison.",
+        "verifier": "core-integration"
       }
     }
   ],
   "verifiers": [
     {
-      "ref": "functional",
-      "version": "1",
+      "ref": "core-functional",
+      "version": "2",
       "program": "functional.mjs",
       "args": [
         "{artifact}",
@@ -41,51 +85,146 @@
       ],
       "selftest": [
         {
-          "name": "accepts the unmodified upstream module",
+          "name": "accepts the preserved upstream core",
           "expected": "pass",
           "artifact": "seed/sha256_w_mem.v",
           "argv": [
             "seed/sha256_w_mem.v",
-            "tb/tb_sha256_w_mem_selfcheck.v"
+            "protected.json"
           ]
         },
         {
-          "name": "rejects a module whose schedule is wrong in one round",
+          "name": "rejects a wrong W schedule in the integrated core",
           "expected": "fail",
           "artifact": "samples/fail-w_mem.v",
           "argv": [
             "samples/fail-w_mem.v",
-            "tb/tb_sha256_w_mem_selfcheck.v"
+            "protected.json"
           ]
         },
         {
-          "name": "rejects a wrong module that also prints the pass line itself",
+          "name": "rejects changed reset behavior",
+          "expected": "fail",
+          "artifact": "samples/fail-reset.v",
+          "argv": [
+            "samples/fail-reset.v",
+            "protected.json"
+          ]
+        }
+      ]
+    },
+    {
+      "ref": "w-schedule",
+      "version": "2",
+      "program": "schedule.mjs",
+      "args": [
+        "{artifact}",
+        "{input}"
+      ],
+      "selftest": [
+        {
+          "name": "accepts the upstream W sequence",
+          "expected": "pass",
+          "artifact": "seed/sha256_w_mem.v",
+          "argv": [
+            "seed/sha256_w_mem.v",
+            "protected.json"
+          ]
+        },
+        {
+          "name": "rejects one wrong W word",
+          "expected": "fail",
+          "artifact": "samples/fail-w_mem.v",
+          "argv": [
+            "samples/fail-w_mem.v",
+            "protected.json"
+          ]
+        },
+        {
+          "name": "rejects changed reset behavior",
+          "expected": "fail",
+          "artifact": "samples/fail-reset.v",
+          "argv": [
+            "samples/fail-reset.v",
+            "protected.json"
+          ]
+        },
+        {
+          "name": "rejects advancement while next is low",
+          "expected": "fail",
+          "artifact": "samples/fail-stall.v",
+          "argv": [
+            "samples/fail-stall.v",
+            "protected.json"
+          ]
+        },
+        {
+          "name": "rejects a source that prints a pass line",
           "expected": "fail",
           "artifact": "samples/fail-printing-cheat.v",
           "argv": [
             "samples/fail-printing-cheat.v",
-            "tb/tb_sha256_w_mem_selfcheck.v"
+            "protected.json"
           ]
         },
         {
-          "name": "rejects a module that ends the simulation early, which exits zero and never compares a word",
+          "name": "rejects a source that ends simulation early",
           "expected": "fail",
           "artifact": "samples/fail-early-finish.v",
           "argv": [
             "samples/fail-early-finish.v",
-            "tb/tb_sha256_w_mem_selfcheck.v"
+            "protected.json"
           ]
         },
         {
-          "name": "rejects a module that prints the pass line and ends the simulation in the same block, which exits zero with the line on stdout and nothing compared",
+          "name": "rejects a printed pass followed by early finish",
           "expected": "fail",
           "artifact": "samples/fail-print-and-finish.v",
           "argv": [
             "samples/fail-print-and-finish.v",
-            "tb/tb_sha256_w_mem_selfcheck.v"
+            "protected.json"
+          ]
+        }
+      ]
+    },
+    {
+      "ref": "core-integration",
+      "version": "1",
+      "program": "integration.mjs",
+      "args": [
+        "{artifact}",
+        "{input}"
+      ],
+      "selftest": [
+        {
+          "name": "accepts the exact sealed upstream predecessor",
+          "expected": "pass",
+          "artifact": "seed/sha256_w_mem.v",
+          "argv": [
+            "seed/sha256_w_mem.v",
+            "seed/sha256_w_mem.v"
+          ]
+        },
+        {
+          "name": "rejects replacing a verified predecessor",
+          "expected": "fail",
+          "artifact": "samples/fail-w_mem.v",
+          "argv": [
+            "samples/fail-w_mem.v",
+            "seed/sha256_w_mem.v"
+          ]
+        },
+        {
+          "name": "rejects an unchanged predecessor with wrong core results",
+          "expected": "fail",
+          "artifact": "samples/fail-printing-cheat.v",
+          "argv": [
+            "samples/fail-printing-cheat.v",
+            "samples/fail-printing-cheat.v"
           ]
         }
       ]
     }
-  ]
+  ],
+  "measurement": "measurement.mjs"
 }

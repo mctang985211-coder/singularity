@@ -1,0 +1,102 @@
+{
+  "goal": "Reduce the complete mapped sha256_core top cell area by editing only sha256_w_mem.v. Preserve the upstream public ports, active-low asynchronous reset, init/next behavior, and every observable cycle in SHA224 and SHA256. First verify the W schedule, then integrate that exact sealed source with the fixed upstream core and K implementation, then independently verify the parent artifact and measure the complete top area.",
+  "editable": [
+    "sha256_w_mem.v"
+  ],
+  "preserve": [
+    "ports",
+    "reset",
+    "SHA224",
+    "SHA256",
+    "cycle timing"
+  ],
+  "upstream": {
+    "repository": "https://github.com/secworks/sha256",
+    "commit": "837c5cc396f001d18f2c765721c585716eb439ae"
+  },
+  "seed": {
+    "path": "seed/sha256_w_mem.v",
+    "digest": "0b4de636364625e34e771bb26363d24f4a4bcae6579d0f8cd3e86d7e5c14354a",
+    "source": "//======================================================================\n//\n// sha256_w_mem_regs.v\n// -------------------\n// The W memory. This version uses 16 32-bit registers as a sliding\n// window to generate the 64 words.\n//\n//\n// Author: Joachim Strombergson\n// Copyright (c) 2013, Secworks Sweden AB\n// All rights reserved.\n//\n// Redistribution and use in source and binary forms, with or\n// without modification, are permitted provided that the following\n// conditions are met:\n//\n// 1. Redistributions of source code must retain the above copyright\n//    notice, this list of conditions and the following disclaimer.\n//\n// 2. Redistributions in binary form must reproduce the above copyright\n//    notice, this list of conditions and the following disclaimer in\n//    the documentation and/or other materials provided with the\n//    distribution.\n//\n// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n// \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS\n// FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE\n// COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,\n// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,\n// BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,\n// STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)\n// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF\n// ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n//\n//======================================================================\n\n`default_nettype none\n\nmodule sha256_w_mem(\n                    input wire           clk,\n                    input wire           reset_n,\n\n                    input wire [511 : 0] block,\n                    input wire [5 : 0]   round,\n\n                    input wire           init,\n                    input wire           next,\n                    output wire [31 : 0] w\n                   );\n\n\n  //----------------------------------------------------------------\n  // Registers including update variables and write enable.\n  //----------------------------------------------------------------\n  reg [31 : 0] w_mem [0 : 15];\n  reg [31 : 0] w_mem00_new;\n  reg [31 : 0] w_mem01_new;\n  reg [31 : 0] w_mem02_new;\n  reg [31 : 0] w_mem03_new;\n  reg [31 : 0] w_mem04_new;\n  reg [31 : 0] w_mem05_new;\n  reg [31 : 0] w_mem06_new;\n  reg [31 : 0] w_mem07_new;\n  reg [31 : 0] w_mem08_new;\n  reg [31 : 0] w_mem09_new;\n  reg [31 : 0] w_mem10_new;\n  reg [31 : 0] w_mem11_new;\n  reg [31 : 0] w_mem12_new;\n  reg [31 : 0] w_mem13_new;\n  reg [31 : 0] w_mem14_new;\n  reg [31 : 0] w_mem15_new;\n  reg          w_mem_we;\n\n\n  //----------------------------------------------------------------\n  // Wires.\n  //----------------------------------------------------------------\n  reg [31 : 0] w_tmp;\n  reg [31 : 0] w_new;\n\n\n  //----------------------------------------------------------------\n  // Concurrent connectivity for ports etc.\n  //----------------------------------------------------------------\n  assign w = w_tmp;\n\n\n  //----------------------------------------------------------------\n  // reg_update\n  // Update functionality for all registers in the core.\n  // All registers are positive edge triggered with synchronous\n  // active low reset. All registers have write enable.\n  //----------------------------------------------------------------\n  always @ (posedge clk or negedge reset_n)\n    begin : reg_update\n      integer i;\n\n      if (!reset_n)\n        begin\n          for (i = 0 ; i < 16 ; i = i + 1) begin\n            w_mem[i] <= 32'h0;\n\t  end\n        end\n      else\n        begin\n          if (w_mem_we)\n            begin\n              w_mem[00] <= w_mem00_new;\n              w_mem[01] <= w_mem01_new;\n              w_mem[02] <= w_mem02_new;\n              w_mem[03] <= w_mem03_new;\n              w_mem[04] <= w_mem04_new;\n              w_mem[05] <= w_mem05_new;\n              w_mem[06] <= w_mem06_new;\n              w_mem[07] <= w_mem07_new;\n              w_mem[08] <= w_mem08_new;\n              w_mem[09] <= w_mem09_new;\n              w_mem[10] <= w_mem10_new;\n              w_mem[11] <= w_mem11_new;\n              w_mem[12] <= w_mem12_new;\n              w_mem[13] <= w_mem13_new;\n              w_mem[14] <= w_mem14_new;\n              w_mem[15] <= w_mem15_new;\n            end\n        end\n    end // reg_update\n\n\n  //----------------------------------------------------------------\n  // select_w\n  //\n  // Mux for the external read operation. This is where we exract\n  // the W variable.\n  //----------------------------------------------------------------\n  always @*\n    begin : select_w\n      if (round < 16)\n        w_tmp = w_mem[round[3 : 0]];\n      else\n        w_tmp = w_new;\n    end // select_w\n\n\n  //----------------------------------------------------------------\n  // w_new_logic\n  //\n  // Logic that calculates the next value to be inserted into\n  // the sliding window of the memory.\n  //----------------------------------------------------------------\n  always @*\n    begin : w_mem_update_logic\n      reg [31 : 0] w_0;\n      reg [31 : 0] w_1;\n      reg [31 : 0] w_9;\n      reg [31 : 0] w_14;\n      reg [31 : 0] d0;\n      reg [31 : 0] d1;\n\n      w_mem00_new = 32'h0;\n      w_mem01_new = 32'h0;\n      w_mem02_new = 32'h0;\n      w_mem03_new = 32'h0;\n      w_mem04_new = 32'h0;\n      w_mem05_new = 32'h0;\n      w_mem06_new = 32'h0;\n      w_mem07_new = 32'h0;\n      w_mem08_new = 32'h0;\n      w_mem09_new = 32'h0;\n      w_mem10_new = 32'h0;\n      w_mem11_new = 32'h0;\n      w_mem12_new = 32'h0;\n      w_mem13_new = 32'h0;\n      w_mem14_new = 32'h0;\n      w_mem15_new = 32'h0;\n      w_mem_we    = 0;\n\n      w_0  = w_mem[0];\n      w_1  = w_mem[1];\n      w_9  = w_mem[9];\n      w_14 = w_mem[14];\n\n      d0 = {w_1[6  : 0], w_1[31 :  7]} ^\n           {w_1[17 : 0], w_1[31 : 18]} ^\n           {3'b000, w_1[31 : 3]};\n\n      d1 = {w_14[16 : 0], w_14[31 : 17]} ^\n           {w_14[18 : 0], w_14[31 : 19]} ^\n           {10'b0000000000, w_14[31 : 10]};\n\n      w_new = d1 + w_9 + d0 + w_0;\n\n      if (init)\n        begin\n          w_mem00_new = block[511 : 480];\n          w_mem01_new = block[479 : 448];\n          w_mem02_new = block[447 : 416];\n          w_mem03_new = block[415 : 384];\n          w_mem04_new = block[383 : 352];\n          w_mem05_new = block[351 : 320];\n          w_mem06_new = block[319 : 288];\n          w_mem07_new = block[287 : 256];\n          w_mem08_new = block[255 : 224];\n          w_mem09_new = block[223 : 192];\n          w_mem10_new = block[191 : 160];\n          w_mem11_new = block[159 : 128];\n          w_mem12_new = block[127 :  96];\n          w_mem13_new = block[95  :  64];\n          w_mem14_new = block[63  :  32];\n          w_mem15_new = block[31  :   0];\n          w_mem_we    = 1;\n        end\n\n      if (next && (round > 15))\n        begin\n          w_mem00_new = w_mem[01];\n          w_mem01_new = w_mem[02];\n          w_mem02_new = w_mem[03];\n          w_mem03_new = w_mem[04];\n          w_mem04_new = w_mem[05];\n          w_mem05_new = w_mem[06];\n          w_mem06_new = w_mem[07];\n          w_mem07_new = w_mem[08];\n          w_mem08_new = w_mem[09];\n          w_mem09_new = w_mem[10];\n          w_mem10_new = w_mem[11];\n          w_mem11_new = w_mem[12];\n          w_mem12_new = w_mem[13];\n          w_mem13_new = w_mem[14];\n          w_mem14_new = w_mem[15];\n          w_mem15_new = w_new;\n          w_mem_we    = 1;\n        end\n    end // w_mem_update_logic\nendmodule // sha256_w_mem\n\n//======================================================================\n// sha256_w_mem.v\n//======================================================================\n"
+  },
+  "materials": [
+    {
+      "path": "seed/sha256_w_mem.v",
+      "file": "seed.v",
+      "digest": "0b4de636364625e34e771bb26363d24f4a4bcae6579d0f8cd3e86d7e5c14354a"
+    },
+    {
+      "path": "fixed/sha256_core.v",
+      "file": "sha256_core.v",
+      "digest": "81ea4b865b09ab42034ada6acfeaa2ea2880d39918878aaaa816852677840192"
+    },
+    {
+      "path": "fixed/sha256_k_constants.v",
+      "file": "sha256_k_constants.v",
+      "digest": "78a9600a6968eb0dc04a3a9fdc6329d3b503044b5a2561263b1cdab18f657007"
+    },
+    {
+      "path": "tb/tb_sha256_w_mem_selfcheck.v",
+      "file": "tb_sha256_w_mem_selfcheck.v",
+      "digest": "cc5d716493a5a976f23760863dd2622d27c065e995e378a63acb95c1d64d63eb"
+    },
+    {
+      "path": "tb/tb_sha256_w_mem_cycles.v",
+      "file": "tb_sha256_w_mem_cycles.v",
+      "digest": "fcdf80a7ee9edc80a25929d017639b1ebc2ebb13c2c29c4ed51cf4591212c2d7"
+    },
+    {
+      "path": "tb/tb_sha256_core.v",
+      "file": "tb_sha256_core.v",
+      "digest": "42157958278fa0bcf0a2d4b88e8993460da7f6e05f346ca1924777896cd58637"
+    },
+    {
+      "path": "tb/tb_sha256_core_cycles.v",
+      "file": "tb_sha256_core_cycles.v",
+      "digest": "e91f6fa2d773f37b324b7551e0a99a3a9afea488d22329e88938eb67009ffbe3"
+    }
+  ],
+  "tools": [
+    {
+      "name": "iverilog",
+      "version": "13.0",
+      "path": "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+      "implementationDigest": "5553e9ceab3b9e1af68480f7c5bf7fe71641d51f1218aa492137a9acba224c7b"
+    },
+    {
+      "name": "vvp",
+      "version": "13.0",
+      "path": "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/vvp",
+      "implementationDigest": "40376b9f0b3624a0acfe4eb7bc4a3e4e31700159402b48cb252cf004ca24c460"
+    },
+    {
+      "name": "yosys",
+      "version": "0.69+post",
+      "path": "/nix/store/qh2djvg55jzqsb2xlrsh8hjfaj114jbq-yosys-0.69/bin/yosys",
+      "implementationDigest": "74ebd7c65c62265b6c0de997fd170dd52459bb2aad6dc0083b2f9ac10f18ae56"
+    },
+    {
+      "name": "abc",
+      "version": "1.01",
+      "path": "/nix/store/qh2djvg55jzqsb2xlrsh8hjfaj114jbq-yosys-0.69/bin/yosys-abc",
+      "implementationDigest": "28dc4a8ac10ea54dd720d2eeabe7ddc85d812a7a5db6557910efbc777dc7031e"
+    },
+    {
+      "name": "sky130hd",
+      "version": "tt_025C_1v80",
+      "path": "/home/ROXY/singularity-next/labs/sky130hd-lib/sky130hd_tt_025C_1v80.lib",
+      "implementationDigest": "ec0e1067a35c8bf20b11e58d1e8ac53326067e4dac84a125cc1b917a3518d0d9"
+    }
+  ],
+  "measurement": {
+    "baselineArea": 64858.4544,
+    "conditions": [
+      "editable=sha256_w_mem.v",
+      "top=sha256_core;scope=complete hierarchy mapped cell area",
+      "rtl-order=sha256_k_constants.v,sha256_w_mem.v,sha256_core.v",
+      "passes=read_liberty,read_verilog,synth,dfflibmap,abc,stat;flatten=false",
+      "library=sky130hd TT/25C/1.80V",
+      "public-cycle-contract=secworks/sha256@837c5cc396f001d18f2c765721c585716eb439ae"
+    ]
+  }
+}
