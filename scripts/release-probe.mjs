@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `release@1` + `environment@2` + the native approval seam, in one real process.
+ * `release@2` + `environment@2` + the native approval seam, in one real process.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -19,7 +19,7 @@ import {
   ENVIRONMENT_VERSION,
   PUBLISHER_ROLE,
 } from '../src/environment/protocol.ts'
-import { APPROVER_ROLE, declareReleaseProtocol, RELEASE_PROTOCOL, RELEASE_VERSION } from '../src/release/protocol.ts'
+import { APPROVER_ROLE, declareReleaseProtocol, RELEASE_PROTOCOL, RELEASE_VERSION, releaseDraftOf } from '../src/release/protocol.ts'
 import { createReleaseCommands } from '../src/release/commands.ts'
 import { askForApproval } from '../src/runtime/approval.ts'
 import { SCHEDULER_ROLE } from '../src/task/protocol.ts'
@@ -218,8 +218,8 @@ async function main() {
       return environmentOf(subject).revisions[revisionId].contentDigest
     }
     const draft = async (subject, revisionId, digest) => {
-      await commands.draft({ commandId: `draft-${subject}-${revisionId}`, revision: { environmentId: subject, revisionId, digest } })
-      return digest
+      const envelope = await commands.draft({ commandId: `draft-${subject}-${revisionId}`, revision: { environmentId: subject, revisionId, digest } })
+      return envelope.payload.draftDigest
     }
     const releaseOf = subject => store.load().stateOf(RELEASE_PROTOCOL, RELEASE_VERSION, subject)
     const pointerFacts = () =>
@@ -229,9 +229,9 @@ async function main() {
 
     // ---------------------------------------------------------------- 1. no answerer: fail closed
     const digestA = await createRevision(LIBRARY, R1, MANIFEST_A)
-    await draft(LIBRARY, R1, digestA)
-    const unavailable = await askOnce({ commandId: 'approve-unavailable', environmentId: LIBRARY, revisionId: R1, draftDigest: digestA }, 'ask with no answerer')
-    check('a draft records the content digest the log holds', releaseOf(LIBRARY)?.draftDigest === digestA, releaseOf(LIBRARY)?.draftDigest)
+    const draftA = await draft(LIBRARY, R1, digestA)
+    const unavailable = await askOnce({ commandId: 'approve-unavailable', environmentId: LIBRARY, revisionId: R1, draftDigest: draftA }, 'ask with no answerer')
+    check('a draft records the content digest the log holds', releaseOf(LIBRARY)?.contentDigest === digestA, releaseOf(LIBRARY)?.contentDigest)
     check('with no answerer composed, the ask resolves unavailable', unavailable.decided?.outcome === 'unavailable', JSON.stringify(unavailable.decided))
     check('an unavailable answerer is not consent: the command refuses', contentOf(unavailable.result).refused === 'unapproved-revision', JSON.stringify(contentOf(unavailable.result)))
     check('and no approval fact was written', releaseOf(LIBRARY)?.approvedBy === undefined)
@@ -239,7 +239,7 @@ async function main() {
     // ---------------------------------------------------------------- 2. an answerer that says no
     answerer = ctx.on('approval/request', async () => decision)
     decision = 'rejected'
-    const rejected = await askOnce({ commandId: 'approve-rejected', environmentId: LIBRARY, revisionId: R1, draftDigest: digestA }, 'ask a rejecting answerer')
+    const rejected = await askOnce({ commandId: 'approve-rejected', environmentId: LIBRARY, revisionId: R1, draftDigest: draftA }, 'ask a rejecting answerer')
     check('a rejecting answerer is not consent either', contentOf(rejected.result).refused === 'unapproved-revision', JSON.stringify(contentOf(rejected.result)))
     check('the refusal names the native outcome', contentOf(rejected.result).detail?.includes('rejected') === true, contentOf(rejected.result).detail)
     check('and still no approval fact exists', releaseOf(LIBRARY)?.approvedBy === undefined)
@@ -247,19 +247,19 @@ async function main() {
     // ---------------------------------------------------------------- 2b. a withdrawn question
     const controller = new AbortController()
     controller.abort()
-    const cancelled = await askOnce({ commandId: 'approve-cancelled', environmentId: LIBRARY, revisionId: R1, draftDigest: digestA, signal: controller.signal }, 'ask with a withdrawn question')
+    const cancelled = await askOnce({ commandId: 'approve-cancelled', environmentId: LIBRARY, revisionId: R1, draftDigest: draftA, signal: controller.signal }, 'ask with a withdrawn question')
     check('a withdrawn question settles cancelled', cancelled.decided?.outcome === 'cancelled', JSON.stringify(cancelled.decided))
     check('and a cancelled ask is not consent either', contentOf(cancelled.result).refused === 'unapproved-revision', JSON.stringify(contentOf(cancelled.result)))
     check('so the release is still unapproved', releaseOf(LIBRARY)?.approvedBy === undefined)
 
     // ---------------------------------------------------------------- 3. an answerer that grants
     decision = 'allowed-once'
-    const granted = await askOnce({ commandId: 'approve-granted', environmentId: LIBRARY, revisionId: R1, draftDigest: digestA }, 'ask a granting answerer')
+    const granted = await askOnce({ commandId: 'approve-granted', environmentId: LIBRARY, revisionId: R1, draftDigest: draftA }, 'ask a granting answerer')
     const recorded = releaseOf(LIBRARY)
     check('the grant is recorded as an approval', contentOf(granted.result).approved === true, JSON.stringify(contentOf(granted.result)))
     check('the approval carries the audit id of the question the service logged', recorded?.approvalId === granted.asked?.id, `${recorded?.approvalId} vs ${granted.asked?.id}`)
     check('the audit pair pairs one id with the granted outcome', granted.asked?.id === granted.decided?.id && granted.decided?.outcome === 'allowed-once')
-    check('the approval names the human and the content on the table', recorded?.approvedBy === ALICE && recorded?.draftDigest === digestA)
+    check('the approval names the human and the complete draft on the table', recorded?.approvedBy === ALICE && recorded?.draftDigest === draftA)
 
     // ---------------------------------------------------------------- 4. the head moves by CAS
     const unapproved = await asyncRefusalOf(() => commands.publish({ commandId: 'publish-r2-unapproved', environmentId: LIBRARY, expected: '', to: R2 }))
@@ -277,8 +277,8 @@ async function main() {
     // ---------------------------------------------------------------- 5. one id, two environments
     const digestAElsewhere = await createRevision(OTHER_LIBRARY, R1, MANIFEST_B)
     check('two environments hold one revision id at different content', digestA !== digestAElsewhere)
-    await draft(OTHER_LIBRARY, R1, digestAElsewhere)
-    const grantedElsewhere = await askOnce({ commandId: 'approve-elsewhere', environmentId: OTHER_LIBRARY, revisionId: R1, draftDigest: digestAElsewhere }, 'ask for the other environment')
+    const draftAElsewhere = await draft(OTHER_LIBRARY, R1, digestAElsewhere)
+    const grantedElsewhere = await askOnce({ commandId: 'approve-elsewhere', environmentId: OTHER_LIBRARY, revisionId: R1, draftDigest: draftAElsewhere }, 'ask for the other environment')
     check('the other environment approves its own content', contentOf(grantedElsewhere.result).approved === true, JSON.stringify(contentOf(grantedElsewhere.result)))
     await commands.publish({ commandId: 'publish-elsewhere', environmentId: OTHER_LIBRARY, expected: '', to: R1 })
     check('each environment publishes its own r0001', environmentOf(OTHER_LIBRARY)?.pointer === R1 && environmentOf(LIBRARY)?.pointer === R1)
@@ -289,8 +289,8 @@ async function main() {
 
     // ---------------------------------------------------------------- 6. a second release, and the race
     const digestB = await createRevision(LIBRARY, R2, MANIFEST_B)
-    await draft(LIBRARY, R2, digestB)
-    const grantedAgain = await askOnce({ commandId: 'approve-r2', environmentId: LIBRARY, revisionId: R2, draftDigest: digestB }, 'ask for the next revision')
+    const draftB = await draft(LIBRARY, R2, digestB)
+    const grantedAgain = await askOnce({ commandId: 'approve-r2', environmentId: LIBRARY, revisionId: R2, draftDigest: draftB }, 'ask for the next revision')
     check('a new draft supersedes the consumed approval, and its own grant is recorded', contentOf(grantedAgain.result).approved === true && releaseOf(LIBRARY)?.revisionId === R2)
 
     const race = await Promise.allSettled([
@@ -305,13 +305,14 @@ async function main() {
     check('and exactly one more pointer fact was appended', pointerFacts().length === 3, String(pointerFacts().length))
 
     // ---------------------------------------------------------------- 7. content the log does not hold
+    const forgedDraft = releaseDraftOf({ environmentId: OTHER_LIBRARY, revisionId: R2, digest: digestA }, { kind: 'bootstrap' })
     await store.emit({
       commandId: 'forged-draft',
       protocol: RELEASE_PROTOCOL,
       version: RELEASE_VERSION,
       kind: 'release/drafted',
       subject: OTHER_LIBRARY,
-      payload: { revisionId: R2, draftDigest: digestA },
+      payload: forgedDraft,
     })
     await store.emit({
       commandId: 'forged-approval',
@@ -319,7 +320,7 @@ async function main() {
       version: RELEASE_VERSION,
       kind: 'release/approved',
       subject: OTHER_LIBRARY,
-      payload: { revisionId: R2, draftDigest: digestA, approvedBy: 'human:mallory', approvalId: 'audit-forged' },
+      payload: { revisionId: R2, draftDigest: forgedDraft.draftDigest, approvedBy: 'human:mallory', approvalId: 'audit-forged' },
     })
     await store.emit({
       commandId: 'forged-revision',

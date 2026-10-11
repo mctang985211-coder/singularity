@@ -246,8 +246,8 @@ async function main() {
     // revision: draft and approve the content the environment holds, then move the head onto it.
     const release = createReleaseCommands({ store, approvalSeams: seam() })
     const pin = { environmentId: ENVIRONMENT, revisionId: PUBLISHED, digest: CANDIDATE_1.digest }
-    await release.draft({ commandId: 'draft-r0003', revision: pin })
-    await release.approve({ commandId: 'approve-r0003', environmentId: ENVIRONMENT, revisionId: PUBLISHED, draftDigest: pin.digest, approvedBy: 'human:alice', ask: { agent: ASKING_AGENT, toolName: 'release_approve' } })
+    const draft = await release.draft({ commandId: 'draft-r0003', revision: pin })
+    await release.approve({ commandId: 'approve-r0003', environmentId: ENVIRONMENT, revisionId: PUBLISHED, draftDigest: draft.payload.draftDigest, approvedBy: 'human:alice', ask: { agent: ASKING_AGENT, toolName: 'release_approve' } })
     await release.publish({ commandId: 'publish-r0003', environmentId: ENVIRONMENT, expected: '', to: PUBLISHED })
     check('the head moved onto the revision round 1 elected', environmentState().pointer === PUBLISHED)
 

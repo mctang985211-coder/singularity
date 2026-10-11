@@ -674,8 +674,8 @@
       "edits": [
         {
           "file": "scripts/round-probe.mjs",
-          "find": "    const pin = { environmentId: ENVIRONMENT, revisionId: PUBLISHED, digest: CANDIDATE_1.digest }\n    await release.draft({ commandId: 'draft-r0003', revision: pin })\n    await release.approve({ commandId: 'approve-r0003', environmentId: ENVIRONMENT, revisionId: PUBLISHED, draftDigest: pin.digest, approvedBy: 'human:alice', ask: { agent: ASKING_AGENT, toolName: 'release_approve' } })\n    await release.publish({ commandId: 'publish-r0003', environmentId: ENVIRONMENT, expected: '', to: PUBLISHED })\n",
-          "replace": "    const pin = { environmentId: ENVIRONMENT, revisionId: PUBLISHED, digest: CANDIDATE_1.digest }\n"
+          "find": "    await release.publish({ commandId: 'publish-r0003', environmentId: ENVIRONMENT, expected: '', to: PUBLISHED })\n",
+          "replace": ""
         }
       ],
       "run": {

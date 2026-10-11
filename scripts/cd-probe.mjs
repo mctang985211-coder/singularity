@@ -739,17 +739,17 @@ async function main() {
 
     const noDraft = await asyncRefusalOf(() => release.publish({ commandId: nextId('publish-r0002'), environmentId: ENVIRONMENT, expected: '', to: 'r0002' }))
     check('a head does not move onto a revision nobody drafted', noDraft.code === 'unapproved-revision', noDraft.code)
-    await release.draft({ commandId: nextId('draft-r0002'), revision: pinOf('r0002') })
-    check('the draft binds the content digest this environment actually holds', releaseOf().draftDigest === pinOf('r0002').digest && releaseOf().revisionId === 'r0002')
+    const draftOne = await release.draft({ commandId: nextId('draft-r0002'), revision: pinOf('r0002') })
+    check('the draft binds the content digest this environment actually holds', releaseOf().contentDigest === pinOf('r0002').digest && releaseOf().revisionId === 'r0002')
     const unapproved = await asyncRefusalOf(() => release.publish({ commandId: nextId('publish-r0002-unapproved'), environmentId: ENVIRONMENT, expected: '', to: 'r0002' }))
     check('publishing a drafted but unapproved revision is refused', unapproved.code === 'unapproved-revision' && unapproved.detail.includes('carries no approval'), unapproved.code)
     const loser = await asyncRefusalOf(() => release.publish({ commandId: nextId('publish-r0003'), environmentId: ENVIRONMENT, expected: '', to: 'r0003' }))
     check('the release path cannot publish the candidate the round refused', loser.code === 'unapproved-revision', loser.code)
 
-    const granted = await approveThroughTheSeam({ commandId: nextId('approve-r0002'), revisionId: 'r0002', draftDigest: pinOf('r0002').digest }, 'approve the drafted winner')
+    const granted = await approveThroughTheSeam({ commandId: nextId('approve-r0002'), revisionId: 'r0002', draftDigest: draftOne.payload.draftDigest }, 'approve the drafted winner')
     check('the native ask granted once and the log recorded it', granted.answer.approved === true && granted.decided?.outcome === 'allowed-once', JSON.stringify(granted.answer))
     check('the approval fact carries the audit id of the ask that produced it', releaseOf().approvalId === granted.asked?.id && granted.asked?.id === granted.decided?.id, `${releaseOf().approvalId} vs ${granted.asked?.id}`)
-    check('the approval names the human and the content on the table', releaseOf().approvedBy === ALICE && releaseOf().draftDigest === pinOf('r0002').digest)
+    check('the approval names the human and the complete draft on the table', releaseOf().approvedBy === ALICE && releaseOf().draftDigest === draftOne.payload.draftDigest)
 
     await release.publish({ commandId: nextId('publish-r0002-approved'), environmentId: ENVIRONMENT, expected: '', to: 'r0002' })
     check('the head moves onto the approved revision by compare-and-swap', environmentOf().pointer === 'r0002')
@@ -829,12 +829,12 @@ async function main() {
     check('the decision records slot 0 as the winner and closes both slots', decisionOf('round-2').winner === 0 && decisionOf('round-2').outcomes.length === 2)
 
     // ---------------------------------------------------------------- 6. releasing round two's winner
-    await release.draft({ commandId: nextId('draft-r0005'), revision: pinOf('r0005') })
+    const draftTwo = await release.draft({ commandId: nextId('draft-r0005'), revision: pinOf('r0005') })
     check('a new draft supersedes the standing one and clears its approval', releaseOf().revisionId === 'r0005' && releaseOf().approvedBy === undefined)
-    const stale = await approveThroughTheSeam({ commandId: nextId('approve-stale'), revisionId: 'r0005', draftDigest: pinOf('r0002').digest }, 'approve the wrong content')
+    const stale = await approveThroughTheSeam({ commandId: nextId('approve-stale'), revisionId: 'r0005', draftDigest: draftOne.payload.draftDigest }, 'approve the wrong content')
     check('an approval naming content other than the draft\'s is refused as stale', stale.answer.refused === 'stale-approval', JSON.stringify(stale.answer))
     check('the refused approval left no approval on the table', releaseOf().approvedBy === undefined && releaseOf().revisionId === 'r0005')
-    const grantedTwo = await approveThroughTheSeam({ commandId: nextId('approve-r0005'), revisionId: 'r0005', draftDigest: pinOf('r0005').digest }, 'approve the drafted winner')
+    const grantedTwo = await approveThroughTheSeam({ commandId: nextId('approve-r0005'), revisionId: 'r0005', draftDigest: draftTwo.payload.draftDigest }, 'approve the drafted winner')
     check('the second grant is recorded with its own audit id', grantedTwo.answer.approved === true && releaseOf().approvalId === grantedTwo.asked?.id)
 
     const racedAway = await asyncRefusalOf(() => release.publish({ commandId: nextId('publish-r0005-stale-head'), environmentId: ENVIRONMENT, expected: '', to: 'r0005' }))

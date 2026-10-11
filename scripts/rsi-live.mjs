@@ -638,10 +638,10 @@ async function main() {
       await handle.agent.whenIdle()
       return handle.agent.session.snapshotEvents().filter(event => event.type === 'tool/result').at(-1)?.data?.message?.content?.[0]?.text
     }
-    await release.draft({ commandId: nextId('draft-r0001'), revision: pinOf('r0001') })
+    const draftOne = await release.draftFromDecision({ commandId: nextId('draft-r0001'), roundId: 'round-1' })
     const unapproved = await refusalOf(() => release.publish({ commandId: nextId('publish-unapproved'), environmentId: ENVIRONMENT, expected: headBefore, to: 'r0001' }))
     check('a drafted but unapproved revision cannot be published', unapproved.code === 'unapproved-revision', unapproved.code)
-    const granted = JSON.parse(await approveThroughTheSeam({ commandId: nextId('approve-r0001'), revisionId: 'r0001', draftDigest: pinOf('r0001').digest }))
+    const granted = JSON.parse(await approveThroughTheSeam({ commandId: nextId('approve-r0001'), revisionId: 'r0001', draftDigest: draftOne.payload.draftDigest }))
     check('the native ask granted once and the fact carries the audit id of the question that produced it', granted.approved === true && granted.approvalId !== undefined)
     await release.publish({ commandId: nextId('publish-r0001'), environmentId: ENVIRONMENT, expected: headBefore, to: 'r0001' })
     const headAfter = environmentOf().pointer
@@ -727,8 +727,8 @@ async function main() {
       decisionTwo.winner === projectedTwo.winner && (secondVerdict.verdict === 'pass' || decisionTwo.winner === null),
       `verdict ${secondVerdict.verdict}, winner ${decisionTwo.winner}, projected ${projectedTwo.winner}`)
     if (decisionTwo.winner === 0) {
-      await release.draft({ commandId: nextId('draft-r0002'), revision: pinOf('r0002') })
-      const grantedTwo = JSON.parse(await approveThroughTheSeam({ commandId: nextId('approve-r0002'), revisionId: 'r0002', draftDigest: pinOf('r0002').digest }))
+      const draftTwo = await release.draftFromDecision({ commandId: nextId('draft-r0002'), roundId: 'round-2' })
+      const grantedTwo = JSON.parse(await approveThroughTheSeam({ commandId: nextId('approve-r0002'), revisionId: 'r0002', draftDigest: draftTwo.payload.draftDigest }))
       check('round two\'s winner was approved through the same seam before its head could move', grantedTwo.approved === true && grantedTwo.approvalId !== undefined)
       await release.publish({ commandId: nextId('publish-r0002'), environmentId: ENVIRONMENT, expected: headAfter, to: 'r0002' })
       check('the second improvement moved the head too, onto a revision the verifier passed',

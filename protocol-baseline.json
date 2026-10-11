@@ -101,7 +101,7 @@
     },
     {
       "protocol": "release",
-      "version": 1,
+      "version": 2,
       "subject": "the environment whose head is moving",
       "kinds": [
         {
@@ -116,13 +116,15 @@
         {
           "name": "release/drafted",
           "members": [
+            "basis",
+            "contentDigest",
             "draftDigest",
             "revisionId"
           ]
         }
       ],
-      "producedBy": "src/release/commands.ts createReleaseCommands (draft, and approve behind the native approval seam)",
-      "readBy": "src/release/commands.ts publish (a head may only move to an approved revision)"
+      "producedBy": "src/release/commands.ts createReleaseCommands (bootstrap draft or committed-winner draftFromDecision, and approve behind the native approval seam)",
+      "readBy": "src/release/commands.ts publish (rechecks the complete approved draft, committed decision/report, content and expected head before the one pointer switch)"
     },
     {
       "protocol": "strategy",
