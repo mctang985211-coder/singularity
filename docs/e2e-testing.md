@@ -11,13 +11,13 @@
 ```bash
 cd /home/ROXY/code/singularity-core
 pnpm build
-pnpm exec tsc --noEmit -p assembly/tsconfig.json
 pnpm test
-node assembly/build.mjs
+pnpm gates
 git diff --check
 ```
 
-`node scripts/gates.mjs` 含真实模型和浏览器调用，`--probe` 验证检测器。
+`pnpm build` 同时检查 core/assembly 类型，构建并装载四个导出面，核对源与产物的内容摘要。
+`pnpm gates` 检查直接合同；`--probe` 复用检测器 spec。门禁不隐式启动模型或浏览器。
 产品探针只运行当前主链需要的 mode；不因增加边界覆盖重复启动模型。
 
 ## 浏览器验收入口
@@ -42,13 +42,17 @@ node scripts/browser-probe.mjs --panel --screenshot /tmp/singularity-panel.png
 - `--panel`：执行同一完整领域链，再比对 API/core 同 cut、页面所有 Task/Run/依赖/判据行，以及刷新和重载无事实写入。
 
 本轮父可在完整计划内创建任务并选择已声明模板；持久 role 为 child 的调用方只执行分配任务，不能另开根 Task 或发布计划。
-自创 TaskTemplate 的准入和评估归 W6。定向反例：`mutate:assembly-w3-child-cannot-fork-root`。
+自创 TaskTemplate 通过 Method 的完整内容准入；输入来源与独立验收仍由部署固定。
+模板、Skill 与 Tool 共用一个 Revision、评估与发布入口。定向反例：`mutate:assembly-w3-child-cannot-fork-root`。
 
 分解与面板 mode 只发送一个用户 turn，后序 child 与父通过宿主原生消息自动推进。
 按每条 `singularity` source 核对准确控制事实；DSH 原生 `runtime-context` 不算重复派发。
 程序、输入、产物从原生附件存储核对，不以可写工作区作为封存来源。
 
 ## 证据边界
+
+W5/W9 面板完整主链已实跑通过：`/tmp/singularity-w9-panel.log`、`/tmp/singularity-w9-panel.png`。
+日志核对真实 session、依赖来源、封存附件与页面完整 receipt，成功 marker 为 `panel-probe: OK`。
 
 脚本故障、模型/provider 故障和领域拒绝需按控制事实与 transcript 分辨。失败不能通过再次执行已封存程序来掩盖。
 受控恢复和领域链证明工程行为；领域质量和成本效果仍须用 W6/W7 冻结的真实任务集、口径、预算与原始 trials 验证。
