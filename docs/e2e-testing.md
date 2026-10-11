@@ -2,7 +2,7 @@
 
 开发、构建 peers 和产品运行都使用 `/home/ROXY/singularity-next/`。旧 harness 只供只读参考。
 浏览器探针从私有配置创建临时 home，加载安装的 `singularity-next-web` profile 与本仓库已构建插件；
-结束时关闭自己的 server、browser 和临时 home。
+结束时关闭自己的 server 和 browser；Method 发布探针保留临时 home 与原始证据。
 
 ## 一轮代码验证
 
@@ -48,6 +48,22 @@ node scripts/browser-probe.mjs --panel --screenshot /tmp/singularity-panel.png
 分解与面板 mode 只发送一个用户 turn，后序 child 与父通过宿主原生消息自动推进。
 按每条 `singularity` source 核对准确控制事实；DSH 原生 `runtime-context` 不算重复派发。
 程序、输入、产物从原生附件存储核对，不以可写工作区作为封存来源。
+
+## Method 进化与原生发布验收
+
+```bash
+node scripts/method-browser-probe.mjs --output /tmp/singularity-method-review
+```
+
+两轮各两个候选，共十次独立真实 DSH 求解；第二轮模型先读取第一轮冻结历史。
+每次核对准确 Revision 的模板、原生系统消息中的 Skill、实际执行 Tool、封存程序和独立判决。
+原始成本取原生 `usage.totalTokens`，策略比较相对变化 `(candidate - incumbent) / incumbent`，上限为 25%。
+基线故意多计一个字母，正确候选与错误候选只用于受控工程验收，不能作为正式领域效果证明。
+
+两轮结束后，用户通过输出目录的 `approval-url.txt` 打开原生 Web，依次批准临时 Method 库的 baseline bootstrap 和真实选中候选；
+探针等待真人答复，不代点批准。无胜者或拒绝不发布。批准后新建独立原生会话，不传 Method 引用，
+验证默认加载 published head、三类资产真实消费与独立验收，再关闭自己的服务。
+`evidence.json` 记录 trials、决定、人审来源及发布后的新 Run；失败记录为 `failure.json`，均保留原始 home。
 
 ## 证据边界
 
