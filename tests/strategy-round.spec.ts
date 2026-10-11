@@ -280,6 +280,37 @@ describe('the round command service', async () => {
   })
 })
 
+describe('the projection compares relative cost against the frozen incumbent', () => {
+  it.each([
+    { baseline: 9558, candidate: 9595, winner: 0 },
+    { baseline: 10, candidate: 12, winner: 0 },
+    { baseline: 1000, candidate: 1200, winner: 0 },
+    { baseline: 1000, candidate: 1300, winner: null },
+  ])('decides $baseline → $candidate tokens using the 25% ceiling', async ({ baseline, candidate, winner }) => {
+    const live = await deployment({ calibration: { floor: 0, source: 'declared' } })
+    const roundId = await openThrough(live, { candidates: 1, historyCutoff: 5 })
+    measuredAt(live.table, INCUMBENT, 0, 0, baseline)
+    live.table.evaluations.set('e-0', evaluation('e-0', { quality: 1, cost: candidate }))
+    await submitThrough(live, roundId, 0)
+    const decision = project(live, roundId)
+    expect(decision.slots[0]?.cost).toBe(candidate)
+    expect(decision.slots[0]?.costGain).toBeCloseTo((candidate - baseline) / baseline, 12)
+    expect(winnerOf(await decideThrough(live, roundId))).toBe(winner)
+  })
+
+  it('leaves a relative cost unknown when the frozen baseline cost is zero', async () => {
+    const live = await deployment()
+    const roundId = await openThrough(live, { candidates: 1, historyCutoff: 5 })
+    measuredAt(live.table, INCUMBENT, 0, 0, 0)
+    live.table.evaluations.set('e-0', evaluation('e-0', { quality: 1, cost: 0 }))
+    await submitThrough(live, roundId, 0)
+    expect(project(live, roundId).slots[0]?.costGain).toBe(null)
+    const decision = await decideThrough(live, roundId)
+    expect(winnerOf(decision)).toBe(null)
+    expect(stateOf(live, roundId)?.decision?.outcomes[0]?.reason).toContain('cost change unknown')
+  })
+})
+
 describe('the projection decides admissibility before any argmax', async () => {
   it('never lets a higher aggregate buy a violated hard constraint', async () => {
     const live = await deployment()
@@ -342,8 +373,6 @@ describe('the projection decides admissibility before any argmax', async () => {
     const live = await deployment({ calibration: { floor: 0.1, source: 'measured' } })
     const roundId = await openThrough(live, { candidates: 1, historyCutoff: 5 })
     measuredAt(live.table, INCUMBENT, 0, 0.7)
-    // 0.55 costs almost nothing, so the in-band cost rule alone would admit it (100*-0.15 - 15*-9 > 0):
-    // only the incumbent's floor refuses it, and the band is the calibration's value, not a constant.
     live.table.evaluations.set('e-0', evaluation('e-0', { quality: 0.55, cost: 1 }))
     await submitThrough(live, roundId, 0, { evaluationId: 'e-0' })
     expect(project(live, roundId).slots[0]?.reason ?? '').toMatch(/below the admissible floor.*the measured noise band/)
@@ -352,7 +381,7 @@ describe('the projection decides admissibility before any argmax', async () => {
     const lenient = await deployment({ calibration: { floor: 0.2, source: 'declared' } })
     const second = await openThrough(lenient, { candidates: 1, historyCutoff: 5 })
     measuredAt(lenient.table, INCUMBENT, 0, 0.7)
-    lenient.table.evaluations.set('e-0', evaluation('e-0', { quality: 0.55, cost: 1 }))
+    lenient.table.evaluations.set('e-0', evaluation('e-0', { quality: 0.57, cost: 1 }))
     await submitThrough(lenient, second, 0, { evaluationId: 'e-0' })
     expect([project(lenient, second).slots[0]?.admissible, winnerOf(await decideThrough(lenient, second))]).toEqual([true, 0])
     expect(stateOf(lenient, second)?.decision?.calibration).toEqual({ floor: 0.2, source: 'declared' })

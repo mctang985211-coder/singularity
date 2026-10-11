@@ -115,6 +115,7 @@ export interface SlotView {
    * rule *reads* it. `quality` above is the metric's own raw number; this one is not.
    */
   readonly gain: number | null
+  /** Relative cost change against the frozen incumbent; `null` when it cannot be calculated. */
   readonly costGain: number | null
   /** Structural asset classes of this candidate that were never accepted before (R05). */
   readonly novelty: number
@@ -264,9 +265,9 @@ function plannedOf(
   if (evaluation === undefined)
     return { submission, evaluation, reason: null, gain: null, costGain: null, constraintsMet: false, measurement: null }
   const frozenCostGain =
-    incumbentAggregate === null || evaluation.cost === null || incumbentAggregate.cost === null
+    incumbentAggregate === null || evaluation.cost === null || incumbentAggregate.cost === null || incumbentAggregate.cost === 0
       ? null
-      : evaluation.cost - incumbentAggregate.cost
+      : (evaluation.cost - incumbentAggregate.cost) / incumbentAggregate.cost
   const direction = directionOf(evaluation)
   return {
     submission,
