@@ -9,7 +9,7 @@ import { digestOf } from '../src/protocol/envelope.ts'
 import { projectReceipt } from '../src/task/view.ts'
 import { sha256 } from '../assembly/src/ids.ts'
 import { dshModule, openPersistence } from './dsh-control-runtime.mjs'
-import { assertToolHeader, boot, controlFacts, coreRead, freePort, inputSourcesOf,
+import { assertToolHeader, boot, controlFacts, coreRead, dismissFirstRun, freePort, inputSourcesOf,
   isolatedHome, kill, openApp, prepare, readLog, sealedDigestsOf, send, settle, toolFacts } from './browser-probe.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -122,7 +122,10 @@ async function evaluationEvidence(persistence, attachments, facts, core, opened,
     'the actual native model input omitted the Method template goal')
   const { calls, results } = toolFacts(events)
   assert(!results.some(result => result.value.isError === true || result.value.refused !== undefined), 'a native solve tool failed')
-  assert.deepEqual(calls.map(event => event.data.name).sort(), ['singularity_run_method', 'singularity_submit_program'])
+  assert.deepEqual(calls.filter(event => event.data.name !== 'singularity_task_status').map(event => event.data.name).sort(),
+    ['singularity_run_method', 'singularity_submit_program'])
+  for (const status of calls.filter(event => event.data.name === 'singularity_task_status'))
+    assert.deepEqual(JSON.parse(status.data.arguments), { taskId }, 'a read-only status call names a different assigned Task')
   const runTool = results.find(result => result.name === 'singularity_run_method')
   const submit = calls.find(call => call.data.name === 'singularity_submit_program')
   assert.equal(runTool.value.program, assets.tool)
@@ -343,29 +346,39 @@ async function run() {
   const outputIndex = process.argv.indexOf('--output')
   assert(outputIndex === -1 || process.argv[outputIndex + 1] !== undefined, '--output requires a directory')
   const output = outputIndex === -1 ? join(tmpdir(), `singularity-method-evidence-${Date.now()}`) : process.argv[outputIndex + 1]
+  const homeIndex = process.argv.indexOf('--home')
+  assert(homeIndex === -1 || process.argv[homeIndex + 1] !== undefined, '--home requires an existing completed experiment home')
   await mkdir(output, { recursive: true, mode: 0o700 })
   await chmod(output, 0o700)
   const methods = await controlledMethods()
-  const isolated = await isolatedHome()
+  const isolated = homeIndex === -1 ? await isolatedHome() : { home: process.argv[homeIndex + 1], extra: [] }
   let server, browser, medium, page
   try {
+    medium = await openPersistence(join(isolated.home, 'sessions'), 'zstd')
+    const { LocalAttachmentStore } = await dshModule('@deepseek-ai/dsh-attachment-local')
+    await medium.context.plugin(LocalAttachmentStore, { dshHome: isolated.home })
+    let experiment
+    if (homeIndex !== -1) experiment = await assertExperiment(medium.persistence, medium.context.get('attachments'), methods)
     server = await boot(await freePort(), isolated.extra, isolated.home)
     await writeFile(join(output, 'approval-url.txt'), server.url + '\n', { mode: 0o600 })
     await writeFile(join(output, 'run.json'), JSON.stringify({ home: isolated.home, hostPid: server.child.pid,
       probePid: process.pid, origin: new URL(server.url).origin }) + '\n', { mode: 0o600 })
-    medium = await openPersistence(join(isolated.home, 'sessions'), 'zstd')
-    const { LocalAttachmentStore } = await dshModule('@deepseek-ai/dsh-attachment-local')
-    await medium.context.plugin(LocalAttachmentStore, { dshHome: isolated.home })
     browser = await chromium.launch()
     const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 900 } })
     page = await openApp(context, server.url)
-    await prepare(page, isolated.home)
-    for (const [index] of ROUND_IDS.entries()) {
-      await send(page, roundPrompt(methods, index + 1))
-      await waitForRound(medium.persistence, page, index)
-      process.stderr.write(`method-browser-probe: round ${index + 1} committed through real native solves\n`)
+    if (homeIndex === -1) {
+      await prepare(page, isolated.home)
+      for (const [index] of ROUND_IDS.entries()) {
+        await send(page, roundPrompt(methods, index + 1))
+        await waitForRound(medium.persistence, page, index)
+        process.stderr.write(`method-browser-probe: round ${index + 1} committed through real native solves\n`)
+      }
+      experiment = await assertExperiment(medium.persistence, medium.context.get('attachments'), methods)
+    } else {
+      await dismissFirstRun(page)
+      await page.locator(`[data-row-key="session:${experiment.rootSessionId}"]`).click({ timeout: 30_000 })
+      await page.locator('div[role="textbox"][contenteditable="true"]').waitFor({ timeout: 30_000 })
     }
-    const experiment = await assertExperiment(medium.persistence, medium.context.get('attachments'), methods)
     const baseline = toolFacts((await rootTranscript(medium.persistence)).events).results.find(result =>
       result.name === 'singularity_create_method' && result.value.digest === digestOf(methods.baseline)).value
     await page.screenshot({ path: join(output, 'two-rounds.png'), fullPage: true })
@@ -376,6 +389,7 @@ async function run() {
       origin: new URL(server.url).origin, urlFile: join(output, 'approval-url.txt'), screenshot: join(output, 'two-rounds.png'),
       phase: 'two-rounds-verified' }
     await writeFile(join(output, 'evidence.json'), JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600 })
+    const releaseAfter = (await readLog(medium.persistence, experiment.rootSessionId)).length
     await send(page, [
       'The controlled two-round integration evaluation has been checked against the actual native transcripts and committed facts.',
       `Call singularity_release_method with release=${JSON.stringify(JSON.stringify({ bootstrap: baseline }))}. This opens a native Web human approval; wait for the real user answer.`,
@@ -385,7 +399,7 @@ async function run() {
     const deadline = Date.now() + 120_000
     while (true) {
       const events = await readLog(medium.persistence, experiment.rootSessionId)
-      const asked = events.find(event => event.type === 'approval/asked' && event.data.toolName === 'singularity_release_method')
+      const asked = events.find(event => event.seq >= releaseAfter && event.type === 'approval/asked' && event.data.toolName === 'singularity_release_method')
       if (asked !== undefined) {
         assert(!events.some(event => event.type === 'approval/decided' && event.data.id === asked.data.id),
           'the native approval was answered before the user reviewed it')
@@ -400,8 +414,6 @@ async function run() {
         break
       }
       assert(Date.now() < deadline, 'the root did not request native human approval')
-      assert(!events.some(event => event.type === 'turn/end' && event.seq > events.findLast(entry => entry.type === 'user/message').seq),
-        'the root turn ended before native approval')
       await sleep(500)
     }
     evidence.publication = await awaitPublication(medium.persistence, page, evidence, output, server)

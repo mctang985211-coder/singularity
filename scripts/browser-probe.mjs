@@ -94,7 +94,7 @@ export async function openApp(context, url) {
   await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
   return page
 }
-async function dismissFirstRun(page) {
+export async function dismissFirstRun(page) {
   const dismissed = []
   let quiet = 0
   for (let attempt = 0; attempt < 60 && quiet < 3; attempt++) {
