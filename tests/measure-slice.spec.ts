@@ -113,6 +113,7 @@ async function openLive(meterIdentity = METER_ACTOR, boundsIdentity = BOUNDS_ACT
     ...RUNS.flatMap(([runId, manifest]) => [
       { kind: TASK_KINDS.runStarted, payload: { runId, revision: REVISION } },
       ...(manifest === null ? [] : [{ kind: TASK_KINDS.bubbleOpened, payload: bubbleOf(runId, manifest) }]),
+      { kind: TASK_KINDS.runFailed, payload: { runId, reason: 'fixture attempt complete' } },
     ]),
   ]
   for (const [index, fact] of facts.entries())

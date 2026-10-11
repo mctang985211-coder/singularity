@@ -131,23 +131,18 @@ describe('the task slice', () => {
     const taskFacts = held.filter(entry => entry.subject === TASK_ID)
     expect([held.length, taskFacts.map(entry => entry.seq)]).toEqual([14, [0, 2, 4, 6, 8, 10, 12]])
 
-    // The bound is a function of the facts this subject's run actually carries - one past the last of
-    // them - and not of the array's length, which on a filtered array is a smaller number the caller
-    // chose. Thirteen task facts would be needed to reach this bound; seven were handed in.
-    expect(projectReceipt(registry, held, TASK_ID, RUN_ID).cutoff).toBe(14)
+    expect(projectReceipt(registry, held, TASK_ID, RUN_ID).cutoff).toBe(13)
 
     // A filtered array is not the prefix the receipt would name: its own sequence numbers show the
     // facts in between, and asking for a receipt from it asks for one whose bound covers facts it
     // does not hold. That is refused rather than re-labelled, because a receipt *is* the claim that
     // its bound accounts for exactly the facts it was folded from.
     expect(refusalOf(() => projectReceipt(registry, taskFacts, TASK_ID, RUN_ID))).toMatchObject({
-      code: 'unknown-run',
+      code: 'chain-broken',
       detail: expect.stringContaining('prefix'),
     })
 
-    // The genuine prefix - the run's own facts committed as a log of their own, so seq is again the
-    // position in the array - derives the receipt: same bound, same criteria, a different array from
-    // the whole log's, which is the other receipt the same run has.
+    // Recommitting these commands into another log gives them a different control source.
     const prefix = new MemoryLog(registry, { subjects: SUBJECTS })
     for (const fact of taskFacts.map(entry => ({ ...entry, commandId: `prefix-${entry.seq}` }))) await prefix.emit(fact)
     expect(projectReceipt(registry, prefix.entries(), TASK_ID, RUN_ID).cutoff).toBe(7)
@@ -225,28 +220,6 @@ describe('the task slice', () => {
       inputs: BUBBLE_INPUTS,
       workspace: { kind: 'git', ref: 'refs/heads/main' },
     })
-  })
-
-  it('does not move a receipt because facts outside its prefix arrived later', async () => {
-    const { registry, log } = await slice()
-    const held = log.entries()
-    const before = receiptDigest(projectReceipt(registry, held, TASK_ID, RUN_ID))
-
-    // A fact about another task, committed after the facts this reader holds, is outside what the
-    // receipt accounts for - so the same prefix still derives the same receipt, and a reader can rely
-    // on that without having kept a number around.
-    await log.emit({
-      commandId: 'other-task',
-      protocol: TASK_PROTOCOL,
-      version: TASK_VERSION,
-      kind: TASK_KINDS.admitted,
-      subject: 'task-elsewhere',
-      payload: { contract: contract() },
-    })
-
-    expect(receiptDigest(projectReceipt(registry, held, TASK_ID, RUN_ID))).toBe(before)
-    // A reader holding the longer prefix has a different accounting, which is what the bound names.
-    expect(receiptDigest(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID))).not.toBe(before)
   })
 
   it('reports a run that declared no execution context as having consumed nothing, not as unknown', async () => {

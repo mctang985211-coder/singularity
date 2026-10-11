@@ -1,177 +1,75 @@
 #!/usr/bin/env node
-/**
- * G1 evidence: real Web sessions, in Chromium, driving the assembly through its own tools.
- *
- * The probe boots the deployment's profile as a child process — the same command a person would run —
- * and owns that process: it is killed on every exit path, so the probe never leaves a server behind and
- * never measures a long-lived development server.
- *
- * Two legs, one harness:
- *
- *  - the default leg proves the assembly works at all: the composed profile loads with no skipped
- *    bundle and no inactive row, the `singularity-next` preset can be selected in the browser, one
- *    turn calls all three tools, and the receipt the turn reads says `verified`;
- *  - `--recovery` proves the committed facts survive a crash: one turn admits a task, the server is
- *    **SIGKILL**ed, the same profile restarts on the same port, the browser reloads and resumes the
- *    *same* session, and the second turn submits against the task id captured before the kill. The
- *    receipt it reads must name that same task. If the app cannot resume the session, the leg fails:
- *    a fresh session would prove nothing.
- *
- * Both legs are assertions, not observations: a missing preset, a turn with no tool call, a changed
- * session or task id, or a non-passing verdict ends the probe non-zero and names what it saw. What the
- * probe does not do is decide correctness: the domain's verifier decides, and the receipt carries its
- * word.
- *
- * The UI is driven through the app's own accessible surface: the preset seat's title, the composer's
- * `role=textbox`, the send button's label, and the tool rows' `data-tool`. Nothing here reads a
- * private React class name, so a restyle does not turn into a false failure.
- *
- * Usage: node scripts/browser-probe.mjs [--recovery] [--screenshot <path>]
- *   Requires: `. /home/ROXY/singularity-next/env.sh` (dsh on PATH, DSH_HOME set) and a deployed profile.
- *
- * @module singularity-core/scripts/browser-probe
- */
-
+/** Real private-profile G1 smoke, working/submitted crash recovery, or native --aborted lifecycle. */
+import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { mkdir, readdir, stat } from 'node:fs/promises'
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
-
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 
-import { DSH_BIN, DSH_HOME } from './dsh-control-runtime.mjs'
+import { digestOf } from '../src/protocol/envelope.ts'
+import { runIdOf, sha256 } from '../assembly/src/ids.ts'
+import { DSH_BIN, DSH_HOME, dshModule, openPersistence } from './dsh-control-runtime.mjs'
 
-/** The profile both legs boot. Deployed by `scripts/deploy.mjs`. */
 export const PROFILE = 'singularity-next-web'
-/** The preset the assembly's preset row declares. */
 export const PRESET_NAME = 'Singularity Next'
-/**
- * The tools the agent face registers, in the order a model reads them.
- *
- * Four, and the fourth is why G2 exists: a task can be planned into sub-tasks that run in their own
- * sessions. The letter-count domain's tasks are one turn's work, so this probe still proves the
- * single-task path — the sub-task path has its own probe.
- */
-const TOOLS = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program', 'singularity_task_status']
-
-/**
- * The default leg's one user message. It names the tool sequence, not the answer.
- *
- * It no longer passes the text to count: a task's input is protected material the deployment declares,
- * not something a model supplies, so `singularity_propose_task` takes a goal only and the workspace it
- * returns already holds the bytes the criterion reads.
- */
-const FULL_PROMPT = [
-  'Use the singularity tools to count the ASCII letters (A-Z and a-z only) in the input this',
-  'deployment has prepared for the task.',
-  '',
-  'Call singularity_propose_task with a one-sentence goal, then call singularity_submit_program with a',
-  'small Node program that prints only the count. The program is written to `program.mjs` and run as',
-  '`node program.mjs <input path>`: it is an ES module, so use `import`, not `require`. Then call',
-  'singularity_task_status for the same taskId and report the receipt status and the criterion verdict',
-  'exactly as recorded.',
-].join('\n')
-
-/** The recovery leg's first message: admit a task and stop. */
-const PROPOSE_PROMPT = [
-  'Call the singularity tool `singularity_propose_task` once to admit a task whose goal is to count',
-  'the ASCII letters in the input this deployment has prepared for it.',
-  '',
-  'Do not submit a program in this turn. Report the `taskId` the tool returned verbatim.',
-].join('\n')
-
-/** The recovery leg's second message, sent after the kill into the same task. */
-const submitPrompt = taskId =>
-  [
-    `The singularity task ${taskId} is already admitted and its input is in this session's workspace.`,
-    `Call \`singularity_submit_program\` with that exact taskId and a small Node program that prints`,
-    'only the ASCII letter count of the file handed to it as its first argument. The program is written',
-    'to `program.mjs` and run as `node program.mjs <input path>`: it is an ES module, so use `import`,',
-    'not `require`.',
-    `Then call \`singularity_task_status\` for ${taskId} and report the receipt status and the criterion`,
-    'verdict exactly as recorded.',
-  ].join('\n')
-
 export const BOOT_TIMEOUT_MS = 120_000
-const TURN_TIMEOUT_MS = 900_000
-const SETTLE_MS = 5_000
 export const URL_PATTERN = /http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+/
+const TURN_TIMEOUT_MS = 300_000
+const TOOLS = ['singularity_propose_task', 'singularity_submit_program', 'singularity_task_status']
+const CONTROL_SESSION = 'singularity:control:singularity-local'
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const diagnosticOf = value => String(value).replaceAll(/([?&]token=)[A-Za-z0-9_-]+/g, '$1[redacted]')
+const composerOf = page => page.locator('div[role="textbox"][contenteditable="true"]')
+const FULL_PROMPT = [
+  'Use singularity_propose_task to count the ASCII letters (A-Z and a-z) in the protected input.',
+  'Then use singularity_submit_program for that exact taskId with a small Node ES module program.',
+  'The program runs as node program.mjs <input path>; import node:fs and print only the count.',
+  'Finally call singularity_task_status for the same taskId and report its receipt.',
+  'Do not decompose this single task.',
+].join('\n')
+const PROPOSE_PROMPT = [
+  'Call singularity_propose_task once to count the ASCII letters in the protected input.',
+  'The domain will later run a submitted Node ES module as node program.mjs <input path>.',
+  'Do not submit a program in this turn. Report its taskId and runId.',
+].join('\n')
 
-/** A failure that already names its cause. Printed as one line; the stack would only add noise. */
-class ProbeError extends Error {}
-
-/**
- * Boot one profile child and wait for the URL it prints.
- * @returns the child, its exit promise, and a reader for everything it has said so far.
- */
-export async function boot(port, extra = []) {
-  // An overlay goes before the host flags, which is where the CLI accepts it: `--patch` after `--port`
-  // is refused as an unknown option, and a probe that guessed the order would fail as a boot error
-  // rather than as the thing it was probing.
+export async function boot(port, extra = [], home = DSH_HOME) {
   const argv = ['--profile', PROFILE, ...extra, '--host', '127.0.0.1', '--port', String(port), '--no-open']
-  const command = `${DSH_BIN} ${argv.join(' ')}`
-  // The private install's own binary, not `dsh` from PATH: a bare shell's `dsh` is the global harness, and
-  // it fails with `profile "singularity-next-web" does not exist` — a missing-deployment message for what
-  // is really the wrong binary.
-  // `DSH_HOME` is *set* on the child rather than inherited: this module resolves the home when the
-  // environment has none, and the server reads the variable itself — so passing `process.env` through
-  // unchanged would launch a server with no home at all, which is the same failure as the wrong binary
-  // wearing a different message. Everything else is inherited as it was.
-  const child = spawn(DSH_BIN, argv, { env: { ...process.env, DSH_HOME }, stdio: ['ignore', 'pipe', 'pipe'] })
-  const server = { command, child, output: '' }
-  child.stdout.on('data', chunk => (server.output += chunk))
-  child.stderr.on('data', chunk => (server.output += chunk))
-  child.once('error', error => (server.output += `\nspawn failed: ${error.message}`))
-  server.exited = new Promise(resolve => child.once('exit', code => resolve(code)))
-  server.url = await waitForUrl(server)
-  // A skipped bundle or an inactive row leaves the profile mounted but incomplete: the assembly's
-  // service is absent, its preset drops out of the picker, and the legs would fail later with a worse
-  // message than this one.
-  if (server.output.includes('skipping profile bundle'))
-    throw new ProbeError(`the composed profile skipped a bundle:\n${server.output.trim()}`)
-  if (server.output.includes('did not activate'))
-    throw new ProbeError(`the composed profile has a row that did not activate:\n${server.output.trim()}`)
-  return server
-}
-
-/** Poll a child's combined output for the URL it prints when the server is listening. */
-async function waitForUrl(server) {
-  const deadline = Date.now() + BOOT_TIMEOUT_MS
-  while (Date.now() < deadline) {
-    const found = URL_PATTERN.exec(server.output)
-    if (found !== null) return found[0]
-    const code = await Promise.race([server.exited, sleep(250).then(() => undefined)])
-    if (code !== undefined)
-      throw new ProbeError(`the profile exited with code ${code} before printing a URL:\n${server.output.trim()}`)
+  const child = spawn(DSH_BIN, argv, { env: { ...process.env, DSH_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const server = { child, command: DSH_BIN + ' ' + argv.join(' '), output: '' }
+  child.stdout.on('data', chunk => { server.output += chunk })
+  child.stderr.on('data', chunk => { server.output += chunk })
+  server.exited = new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject) })
+  try {
+    const deadline = Date.now() + BOOT_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      const found = URL_PATTERN.exec(server.output)
+      if (found !== null) {
+        assert(!server.output.includes('skipping profile bundle'), server.output)
+        assert(!server.output.includes('did not activate'), server.output)
+        server.url = found[0]
+        return server
+      }
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(server.output)
+      await sleep(250)
+    }
+    throw new Error('profile printed no listening URL:\n' + server.output)
+  } catch (error) {
+    await kill(server)
+    throw error
   }
-  throw new ProbeError(`the profile printed no URL within ${BOOT_TIMEOUT_MS}ms:\n${server.output.trim()}`)
 }
 
-/** Open the app and wait until its session surface has painted. */
 export async function openApp(context, url) {
   const page = await context.newPage()
   await page.goto(url, { waitUntil: 'domcontentloaded' })
-  // The shell's own label is "New session" with a lower-case s, and it is a real `button`'s
-  // `aria-label`. The capitalised spelling this used to look for did not match it: `getByRole` is
-  // case-insensitive but *substring*-matching by default, so it matched the sidebar's session list
-  // instead and the wait timed out on a page that had painted correctly. An exact name removes the
-  // ambiguity, and `data-tool` rows afterwards prove the turn really ran.
   await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
   return page
 }
-
-/**
- * Dismiss the two first-run surfaces, when they are shown: the preview notice, and the credential
- * dialog that appears only while no provider is usable. The deployment's profile names a provider, so
- * the credential dialog is a symptom rather than a step — it is dismissed so the run reaches the model
- * call, and the evidence carries whether it appeared at all.
- *
- * Both surfaces mount after the shell paints, so this waits for the surface to stay quiet instead of
- * clicking once into a page that has not decided yet what to show.
- * @returns the labels it dismissed, in order.
- */
 export async function dismissFirstRun(page) {
   const dismissed = []
   let quiet = 0
@@ -179,7 +77,7 @@ export async function dismissFirstRun(page) {
     let clicked = false
     for (const name of ['Continue', 'Configure later']) {
       const button = page.getByRole('button', { name, exact: true })
-      if ((await button.count()) > 0 && (await button.first().isVisible())) {
+      if (await button.count() && await button.first().isVisible()) {
         await button.first().click()
         dismissed.push(name)
         clicked = true
@@ -187,89 +85,36 @@ export async function dismissFirstRun(page) {
         await page.waitForTimeout(700)
       }
     }
-    if (!clicked) {
-      quiet += 1
-      await page.waitForTimeout(1000)
-    }
+    if (!clicked) { quiet += 1; await page.waitForTimeout(1000) }
   }
-  if (quiet < 3) throw new ProbeError('a first-run dialog never went away')
+  assert(quiet >= 3, 'first-run dialog did not close')
   return dismissed
 }
-
-/** Select the assembly's preset from the session header, and require the seat to show it. */
 export async function selectPreset(page) {
-  const seat = page.locator('button[title="Choose the agent preset for your new task"]')
-  try {
-    await seat.first().waitFor({ timeout: 30_000 })
-  } catch {
-    throw new ProbeError('the agent-preset seat never appeared in the session header')
-  }
-  await seat.first().click()
-  const item = page.locator('[role="menuitem"]', { hasText: PRESET_NAME })
-  try {
-    await item.first().waitFor({ timeout: 20_000 })
-  } catch {
-    const offered = await page.locator('[role="menuitem"]').allInnerTexts()
-    throw new ProbeError(
-      `the preset menu offers no ${JSON.stringify(PRESET_NAME)}; it offers ${JSON.stringify(offered.map(text => text.split('\n')[0]))}`,
-    )
-  }
-  await item.first().click()
+  const seat = page.locator('button[title="Choose the agent preset for your new task"]').first()
+  await seat.waitFor({ timeout: 30_000 })
+  await seat.click()
+  await page.locator('[role="menuitem"]', { hasText: PRESET_NAME }).first().click({ timeout: 20_000 })
   await expectSeat(page)
 }
-
-/** The header's seat is the app's own statement of which preset the session carries. */
 export async function expectSeat(page) {
-  try {
-    await page.waitForFunction(
-      name =>
-        [...document.querySelectorAll('button[title="Choose the agent preset for your new task"]')].some(button =>
-          (button.innerText ?? '').includes(name),
-        ),
-      PRESET_NAME,
-      { timeout: 20_000 },
-    )
-  } catch {
-    throw new ProbeError(
-      `the seat does not read ${JSON.stringify(PRESET_NAME)}; the session is not using the assembly's preset`,
-    )
-  }
+  await page.waitForFunction(name => [...document.querySelectorAll('button[title="Choose the agent preset for your new task"]')]
+    .some(button => button.innerText.includes(name)), PRESET_NAME, { timeout: 20_000 })
 }
-
-/**
- * Pick the deployment's workspace root, unless the app already holds one (it remembers the last
- * choice, so the picker is absent on a second run). The picker's own path field navigates on Enter and
- * then enables Open.
- */
 export async function chooseWorkspace(page, home) {
-  const composer = composerOf(page)
-  if ((await composer.count()) > 0) return
-
-  const chooser = page.getByRole('button', { name: 'Choose workspace' }).last()
-  if ((await chooser.count()) === 0)
-    throw new ProbeError('no composer and no workspace chooser: the app did not render a session')
-  await chooser.click()
-
+  if (await composerOf(page).count()) return
+  await page.getByRole('button', { name: 'Choose workspace' }).last().click()
   const edit = page.getByRole('button', { name: 'Edit path' })
-  if ((await edit.count()) > 0) {
+  if (await edit.count()) {
     await edit.click()
     const field = page.locator('input[aria-label="Edit path"]')
     await field.fill(join(home, 'workspaces', 'singularity'))
     await field.press('Enter')
     await page.waitForTimeout(2000)
   }
-  const open = page.getByRole('button', { name: 'Open', exact: true })
-  if ((await open.count()) === 0 || (await open.isDisabled()))
-    throw new ProbeError('the workspace picker did not accept the deployment workspace root')
-  await open.click()
-  try {
-    await composer.waitFor({ timeout: 30_000 })
-  } catch {
-    throw new ProbeError('the workspace was accepted but the composer never appeared')
-  }
+  await page.getByRole('button', { name: 'Open', exact: true }).click()
+  await composerOf(page).waitFor({ timeout: 30_000 })
 }
-
-/** Preset first, then workspace: the choice is the *new* session's preset, and the workspace names it. */
 export async function prepare(page, home) {
   const dismissed = await dismissFirstRun(page)
   await selectPreset(page)
@@ -277,398 +122,351 @@ export async function prepare(page, home) {
   await expectSeat(page)
   return dismissed
 }
-
-/**
- * Send one message and wait until the turn has started.
- *
- * `fill` inserts the whole prompt as one edit: typing it key by key would press Enter on every
- * newline, and in a chat composer Enter sends, so the probe would post its first line as a message.
- * The send button's label flips to `Stop generating` the instant the turn starts, which is exactly
- * while Playwright re-checks an ordinary click's actionability — a landed send must not read as a
- * timeout, so the click is dispatched at the button and the wait below is what proves it happened.
- */
 export async function send(page, prompt) {
   const composer = composerOf(page)
   await composer.waitFor({ timeout: 30_000 })
   await composer.fill(prompt)
-  const typed = await composer.innerText()
-  if (!typed.includes(prompt.split('\n')[0].slice(0, 20)))
-    throw new ProbeError('the composer did not take the prompt; the app would send an empty turn')
+  assert((await composer.innerText()).includes(prompt.split('\n')[0].slice(0, 20)), 'composer did not accept the prompt')
+  const before = await page.locator('[data-tool]').count()
   await page.locator('button[aria-label="Send message"]').first().click({ force: true })
-  try {
-    await page.waitForFunction(
-      () =>
-        document.querySelector('button[aria-label="Stop generating"]') !== null ||
-        document.querySelector('[data-tool]') !== null,
-      null,
-      { timeout: 60_000 },
-    )
-  } catch {
-    throw new ProbeError('the message was sent but no turn started')
-  }
+  await page.waitForFunction(count => document.querySelector('button[aria-label="Stop generating"]') !== null ||
+    document.querySelectorAll('[data-tool]').length > count, before, { timeout: 60_000 })
 }
-
-/** Wait for the named tool rows to be present. */
 export async function waitForTools(page, names) {
   for (const name of names) {
-    try {
-      await page.waitForFunction(
-        tool => document.querySelector(`[data-tool="${tool}"]`) !== null,
-        name,
-        { timeout: TURN_TIMEOUT_MS },
-      )
-    } catch {
-      throw new ProbeError(`the turn never called ${name}; it called ${JSON.stringify(await toolNames(page))}`)
-    }
+    await page.waitForFunction(tool => document.querySelector('[data-tool="' + tool + '"]') !== null ||
+      document.querySelector('button[aria-label="Stop generating"]') === null, name, { timeout: TURN_TIMEOUT_MS })
+    assert(await page.locator('[data-tool="' + name + '"]').count() > 0, 'the turn ended before calling ' + name)
   }
 }
-
-/**
- * Wait for the turn to settle. The composer's own button is the clock: it reads `Stop generating`
- * while a turn runs and `Send message` once the turn is over, which beats guessing at a stream flag.
- */
 async function settle(page) {
-  try {
-    await page.waitForFunction(() => document.querySelector('button[aria-label="Stop generating"]') === null, null, {
-      timeout: TURN_TIMEOUT_MS,
-    })
-  } catch {
-    throw new ProbeError('the turn never settled')
-  }
-  await page.waitForTimeout(SETTLE_MS)
+  await page.waitForFunction(() => document.querySelector('button[aria-label="Stop generating"]') === null, null,
+    { timeout: TURN_TIMEOUT_MS })
+  await page.waitForTimeout(1000)
 }
-
-/** Expand every assembly tool card, so the screenshot and the text show what the tools answered. */
-async function expandTools(page) {
-  const rows = page.locator('[data-tool^="singularity_"]')
-  for (let index = 0; index < (await rows.count()); index++) {
-    const row = rows.nth(index)
-    const expanded = await row.evaluate(element => element.querySelector('[aria-expanded="true"]') !== null)
-    if (!expanded) await row.click({ force: true }).catch(() => undefined)
-  }
-  await page.waitForTimeout(500)
-}
-
-/** Every tool name the conversation has rendered, in order. */
-const toolNames = page =>
-  page.evaluate(() => [...document.querySelectorAll('[data-tool]')].map(row => row.getAttribute('data-tool')))
-
-/** The conversation's visible text: the tool cards' bodies and the model's own words. */
-
-const composerOf = page => page.locator('div[role="textbox"][contenteditable="true"]')
-const compact = text => text.replace(/\s+/g, '')
-/** The last capture of `pattern`, or undefined: a later tool answer supersedes an earlier one. */
-const last = (text, pattern) => [...text.matchAll(new RegExp(pattern.source, 'g'))].at(-1)?.[1]
-
-/** Read the evidence fields one turn's text carries. */
-function fields(turn) {
-  const text = compact(turn)
-  return {
-    verdict: last(text, /"verdict":"(pass|fail)"/),
-    phase: last(text, /"phase":"(verified|failed|awaiting-run|running)"/),
-    receiptStatus: last(text, /"status":"(verified|failed)"/),
-    artifactDigest: last(text, /"artifactDigest":"([0-9a-f]{64})"/),
-    taskId: last(text, /"taskId":"(task-[0-9a-f]+)"/),
-    receiptTaskId: last(text, /"receipt":\{"taskId":"(task-[0-9a-f]+)"/),
-    runId: last(text, /"runId":"(run-[0-9a-f]+)"/),
-  }
-}
-
-/**
- * One session log, decoded whole.
- *
- * The log is a stream of zstd frames, one per flush, and Node's own zstd decoder stops at the first
- * frame — it returns the header and nothing else. The host's `zstd` decodes the stream, so the probe
- * reads the record it is about to assert on instead of an empty prefix of it.
- */
-function readSession(file) {
-  const decoded = spawnSync('zstd', ['-dc', file], { maxBuffer: 256 * 1024 * 1024 })
-  if (decoded.error !== undefined)
-    throw new ProbeError(`zstd could not be run to read ${file}: ${decoded.error.message}`)
-  if (decoded.status !== 0)
-    throw new ProbeError(`zstd exited ${decoded.status} reading ${file}: ${(decoded.stderr ?? '').toString().trim()}`)
-  return decoded.stdout.toString('utf8')
-}
-
-/**
- * The web session the server is appending to for this workspace.
- *
- * Read from the server's own log rather than from the UI: the id in the session header is the fact the
- * recovery leg has to compare across the kill, and the browser is not where it is written.
- * @returns the newest non-control session for `workspaceRoot`, with its header fields.
- */
-async function sessionOf(home, workspaceRoot) {
-  const root = join(home, 'sessions')
-  if (!existsSync(root)) return undefined
-  let newest
-  for (const scope of await readdir(root)) {
-    for (const directory of await readdir(join(root, scope))) {
-      const file = join(root, scope, directory, 'session.v4.jsonl.zstd')
-      if (!existsSync(file)) continue
-      const header = JSON.parse(readSession(file).split('\n')[0])
-      if (header.type !== 'session' || header.cwd !== workspaceRoot || !String(header.id).startsWith('session-')) continue
-      const { mtimeMs } = await stat(file)
-      if (newest === undefined || mtimeMs > newest.mtimeMs) newest = { id: header.id, preset: header.agentPreset, mtimeMs, file }
-    }
-  }
-  return newest
-}
-
-/**
- * The tool calls and tool results one session recorded, optionally for a single turn.
- *
- * The receipt facts are read here rather than scraped from the page: a tool card renders a
- * presentation of the call, not the JSON the tool answered, and the session log is the record the
- * server itself wrote for the very session this probe drove. The browser still has to prove the turn
- * happened — that is what the `data-tool` rows are for.
- */
-function sessionFacts(file, turn) {
-  const calls = []
-  const results = []
-  for (const line of readSession(file).split('\n')) {
-    if (line === '') continue
-    const event = JSON.parse(line)
-    if (turn !== undefined && event.data?.turn !== turn) continue
-    if (event.type === 'tool/call') calls.push(event.data.name)
-    if (event.type === 'tool/result')
-      results.push((event.data.message?.content ?? []).map(part => part.text ?? '').join(''))
-  }
-  return { calls, text: results.join('\n') }
-}
-
-/** Print the evidence block before any assertion about it can fail. */
-function report(evidence) {
-  process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`)
-}
-
-/** The default leg: one full turn against the deployed profile. */
-async function liveLeg(home, context, screenshot) {
-  const port = await freePort()
-  const workspace = join(home, 'workspaces', 'singularity')
-  const server = await boot(port)
-  try {
-    const page = await openApp(context, server.url)
-    const dismissed = await prepare(page, home)
-    await send(page, FULL_PROMPT)
-    await waitForTools(page, TOOLS)
-    await settle(page)
-    await expandTools(page)
-
-    const called = await toolNames(page)
-    const session = await sessionOf(home, workspace)
-    if (session === undefined) throw new ProbeError('the server recorded no session for this workspace')
-    const facts = sessionFacts(session.file, 1)
-    const { verdict, phase, receiptStatus, artifactDigest, runId } = fields(facts.text)
-
-    await mkdir(dirname(screenshot), { recursive: true })
-    await page.screenshot({ path: screenshot, fullPage: true })
-
-    const evidence = {
-      leg: 'live',
-      command: server.command,
-      url: server.url,
-      chromium: context.browser().version(),
-      preset: PRESET_NAME,
-      screenshot,
-      session: session.id,
-      dismissedFirstRun: dismissed,
-      toolsCalledInBrowser: called,
-      toolsCalledInSession: facts.calls,
-      runId,
-      verdict,
-      phase,
-      receiptStatus,
-      artifactDigest,
-    }
-    report(evidence)
-
-    const missing = TOOLS.filter(tool => !called.includes(tool) || !facts.calls.includes(tool))
-    if (missing.length > 0)
-      throw new ProbeError(
-        `the turn did not call ${missing.join(', ')}; the browser showed ${JSON.stringify(called)}, the session recorded ${JSON.stringify(facts.calls)}`,
-      )
-    if (verdict !== 'pass' || receiptStatus !== 'verified')
-      throw new ProbeError(
-        `the run did not record a passing verdict: verdict=${verdict}, phase=${phase}, receiptStatus=${receiptStatus}\n--- the tool results ---\n${facts.text.slice(-2000)}`,
-      )
-    return evidence
-  } finally {
-    await kill(server)
-  }
-}
-
-/** The recovery leg: admit a task, SIGKILL the server, resume the session, finish the task. */
-async function recoveryLeg(home, context, screenshot) {
-  const port = await freePort()
-  const workspace = join(home, 'workspaces', 'singularity')
-  let server = await boot(port)
-  try {
-    const page = await openApp(context, server.url)
-    const dismissed = await prepare(page, home)
-    await send(page, PROPOSE_PROMPT)
-    await waitForTools(page, ['singularity_propose_task'])
-    await settle(page)
-
-    const before = await sessionOf(home, workspace)
-    if (before === undefined) throw new ProbeError('the server recorded no session for this workspace')
-    const firstFacts = sessionFacts(before.file, 1)
-    const taskId = fields(firstFacts.text).taskId
-    if (taskId === undefined)
-      throw new ProbeError(`turn one admitted no task; the tool results were:\n${firstFacts.text.slice(-2000)}`)
-
-    // A SIGKILL, not a shutdown: no plugin gets to flush, close a handle, or finish a write.
-    const killed = server
-    killed.child.kill('SIGKILL')
-    await killed.exited
-
-    server = await boot(port)
-    await page.goto(server.url, { waitUntil: 'domcontentloaded' })
-    await page.getByRole('button', { name: 'New session', exact: true }).first().waitFor({ timeout: 60_000 })
-    await dismissFirstRun(page)
-
-    // The resumed session renders turn one's own tool row before anything is sent. A fresh session
-    // would not, and a leg that started over would prove nothing about the recorded facts. A short
-    // wait: the card is either restored with the session or it is not, and a resume failure should
-    // say so instead of surfacing later as a missing tool call.
-    try {
-      await page.waitForFunction(
-        () => document.querySelector('[data-tool="singularity_propose_task"]') !== null,
-        null,
-        { timeout: 60_000 },
-      )
-    } catch {
-      throw new ProbeError("the app did not resume the session after the restart: turn one's tool card never reappeared")
-    }
-    const after = await sessionOf(home, workspace)
-    if (after === undefined) throw new ProbeError('the restarted server recorded no session for this workspace')
-    if (after.id !== before.id)
-      throw new ProbeError(
-        `the app did not resume the session: before the kill the server was appending to ${before.id}, after the restart to ${after.id}`,
-      )
-
-    await send(page, submitPrompt(taskId))
-    await waitForTools(page, ['singularity_submit_program', 'singularity_task_status'])
-    await settle(page)
-    await expandTools(page)
-
-    const called = await toolNames(page)
-    const resumed = await sessionOf(home, workspace)
-    const secondFacts = sessionFacts(resumed.file, 2)
-    const { verdict, phase, receiptStatus, artifactDigest, receiptTaskId, runId } = fields(secondFacts.text)
-
-    await mkdir(dirname(screenshot), { recursive: true })
-    await page.screenshot({ path: screenshot, fullPage: true })
-
-    const evidence = {
-      leg: 'recovery',
-      command: server.command,
-      port,
-      url: server.url,
-      chromium: context.browser().version(),
-      preset: PRESET_NAME,
-      screenshot,
-      dismissedFirstRun: dismissed,
-      sessionBeforeKill: before.id,
-      sessionAfterRestart: after.id,
-      taskIdBeforeKill: taskId,
-      receiptTaskId,
-      runId,
-      toolsCalledInBrowser: called,
-      toolsCalledInSession: secondFacts.calls,
-      verdict,
-      phase,
-      receiptStatus,
-      artifactDigest,
-    }
-    report(evidence)
-
-    const missing = ['singularity_submit_program', 'singularity_task_status'].filter(
-      tool => !called.includes(tool) || !secondFacts.calls.includes(tool),
-    )
-    if (missing.length > 0)
-      throw new ProbeError(
-        `the resumed turn did not call ${missing.join(', ')}; the browser showed ${JSON.stringify(called)}, the session recorded ${JSON.stringify(secondFacts.calls)}`,
-      )
-    if (receiptTaskId === undefined)
-      throw new ProbeError(
-        `the resumed turn read no receipt for ${taskId}; verdict=${verdict}, phase=${phase}, receiptStatus=${receiptStatus}\n--- the tool results ---\n${secondFacts.text.slice(-2000)}`,
-      )
-    if (receiptTaskId !== taskId)
-      throw new ProbeError(`the receipt names ${receiptTaskId}, not the task admitted before the kill (${taskId})`)
-    if (verdict !== 'pass' || receiptStatus !== 'verified')
-      throw new ProbeError(
-        `the resumed run did not record a passing verdict: verdict=${verdict}, phase=${phase}, receiptStatus=${receiptStatus}\n--- the tool results ---\n${secondFacts.text.slice(-2000)}`,
-      )
-    return evidence
-  } finally {
-    await kill(server)
-  }
-}
-
-/** SIGTERM, then SIGKILL: a probe that leaves the server listening is a probe that lied about owning it. */
 async function kill(server) {
-  const { child, exited } = server
-  if (child.exitCode !== null || child.signalCode !== null) return
-  child.kill('SIGTERM')
-  const stopped = await Promise.race([exited.then(() => true), sleep(5000).then(() => false)])
-  if (!stopped) child.kill('SIGKILL')
+  if (server.child.exitCode !== null || server.child.signalCode !== null) return
+  server.child.kill('SIGTERM')
+  const stopped = await Promise.race([server.exited.then(() => true), sleep(5000).then(() => false)])
+  if (!stopped) { server.child.kill('SIGKILL'); await server.exited }
 }
-
-/** One free loopback port, asked of the kernel rather than guessed. */
 async function freePort() {
   const server = createServer()
-  await new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolve)
-  })
-  const address = server.address()
-  const port = typeof address === 'object' && address !== null ? address.port : undefined
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+  const port = server.address().port
   await new Promise(resolve => server.close(resolve))
-  if (port === undefined) throw new ProbeError('the kernel returned no port for the probe')
   return port
 }
+async function readLog(persistence, sessionId) {
+  const { SessionId } = await dshModule('@deepseek-ai/dsh-session')
+  const handle = await persistence.open(SessionId(sessionId), 'read')
+  try { return (await handle.read()).events } finally { await handle.close() }
+}
+async function controlFacts(persistence) {
+  const stored = await persistence.list()
+  if (!stored.some(entry => entry.header.id === CONTROL_SESSION)) return []
+  return (await readLog(persistence, CONTROL_SESSION)).map(event => {
+    assert.equal(event.type, 'plugin:singularity:control')
+    return event.data.payload
+  })
+}
+export function toolFacts(events) {
+  const calls = events.filter(event => event.type === 'tool/call')
+  const names = new Map(calls.map(event => [event.data.callId, event.data.name]))
+  const results = events.filter(event => event.type === 'tool/result' && names.get(event.data.message.toolCallId)?.startsWith('singularity_'))
+    .map(event => ({ callId: event.data.message.toolCallId, name: names.get(event.data.message.toolCallId), seq: event.seq,
+      value: event.data.message.isError
+        ? event.data.message
+        : JSON.parse(event.data.message.content.map(part => part.text ?? '').join('')) }))
+  return { calls, results }
+}
+async function waitForRun(persistence, page, stage, exclude = []) {
+  const deadline = Date.now() + TURN_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const facts = await controlFacts(persistence)
+    assert(await page.locator('button[aria-label="Stop generating"]').count() > 0, 'the turn ended before reaching crash stage ' + stage)
+    const started = facts.find(fact => fact.kind === 'run/started' && !exclude.includes(fact.subject))
+    if (started !== undefined) {
+      const taskId = started.subject
+      const runId = started.payload.runId
+      const bubble = facts.find(fact => fact.kind === 'bubble/opened' && fact.subject === taskId)
+      const submitted = facts.find(fact => fact.kind === 'run/submitted' && fact.subject === taskId)
+      const terminal = facts.find(fact => ['run/verified', 'run/failed'].includes(fact.kind) && fact.subject === taskId)
+      assert(terminal === undefined, 'the Run settled before the crash boundary was observed')
+      if (bubble !== undefined && (stage === 'working' || submitted !== undefined)) {
+        assert(await page.locator('button[aria-label="Stop generating"]').count() > 0, 'the crash boundary was idle')
+        const holder = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === taskId).payload.agentId
+        const sessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === holder).payload.sessionId
+        const transcript = await readLog(persistence, sessionId)
+        const turn = transcript.findLast(event => event.type === 'turn/start').data.turn
+        assert(!transcript.some(event => event.type === 'turn/end' && event.data.turn === turn), 'the turn was already complete')
+        const proposal = toolFacts(transcript).results.find(result => result.name === 'singularity_propose_task' &&
+          result.value.taskId === taskId && result.value.runId === runId)
+        if (proposal === undefined) { await sleep(20); continue }
+        return { taskId, runId, sessionId, workspace: bubble.payload.workspace.ref,
+          proposalCallId: proposal.callId, openTurn: turn,
+          inputDigests: bubble.payload.inputs, submission: submitted?.payload.submission ?? null, stage }
+      }
+    }
+    await sleep(20)
+  }
+  throw new Error('no live Run reached crash stage ' + stage)
+}
+async function provenance(persistence, taskId, runId, sessionId, domainDir) {
+  const facts = await controlFacts(persistence)
+  const transcript = await readLog(persistence, sessionId)
+  const tool = toolFacts(transcript)
+  const status = tool.results.findLast(result => result.name === 'singularity_task_status' && result.value.receipt?.taskId === taskId)
+  const receipt = status?.value.receipt
+  assert(receipt !== undefined, 'the actual tool transcript contains no receipt for the Task')
+  assert.equal(receipt.runId, runId)
+  assert.equal(receipt.status, 'verified')
+  const runs = facts.filter(fact => fact.kind === 'run/started' && fact.subject === taskId)
+  assert.equal(runs.length, 1, 'recovery or submit created another solve Run')
+  assert.equal(runs[0].payload.runId, runId)
+  const submitted = facts.find(fact => fact.kind === 'run/submitted' && fact.subject === taskId)
+  const terminal = facts.find(fact => fact.kind === 'run/verified' && fact.subject === taskId)
+  const proposed = tool.results.find(result => result.name === 'singularity_propose_task' && result.value.taskId === taskId && result.value.runId === runId)
+  assert(proposed !== undefined, 'the actual proposal result is not linked to this Run')
+  assert.equal(runId, runIdOf('singularity-local', sessionId, proposed.callId))
+  assert.equal(runs[0].commandId, 'start:' + runId)
+  const submissionCall = tool.calls.find(call => call.data.name === 'singularity_submit_program' &&
+    'submit-' + sha256(JSON.stringify(['singularity-local', sessionId, call.data.callId])) === submitted.payload.submission.requestId)
+  assert(submissionCall !== undefined, 'the frozen submission is not linked to an actual DSH call')
+  const request = JSON.parse(submissionCall.data.arguments)
+  assert.equal(request.taskId, taskId)
+  assert.equal(submitted.payload.submission.requestDigest, sha256(JSON.stringify({ taskId: request.taskId, program: request.program })))
+  assert.equal(submitted.payload.submission.programDigest, sha256(request.program))
+  assert.deepEqual(receipt.submission, submitted.payload.submission)
+  assert.deepEqual(receipt.source, submitted.payload.submission.source)
+  assert.equal(receipt.cutoff, terminal.seq + 1)
+  assert.equal(receipt.source.sessionId, sessionId)
+  const source = receipt.source
+  assert(submissionCall.seq < source.eventCount, 'the sealed source excludes its own submission call')
+  assert(status.seq >= source.eventCount, 'the status result precedes the frozen source')
+  const prefix = transcript.slice(0, source.eventCount)
+  assert.equal(prefix.length, source.eventCount)
+  assert.equal(source.digest, digestOf({ sessionId, eventCount: source.eventCount, events: prefix }))
+  assert(transcript.length > source.eventCount, 'receipt source was not sealed before later transcript events')
+  const descriptor = JSON.parse(await readFile(join(domainDir, 'task.json'), 'utf8'))
+  const workspace = receipt.consumption.workspace.ref
+  const disk = {
+    programDigest: sha256(await readFile(join(workspace, descriptor.workspace.file))),
+    artifactDigest: sha256(await readFile(join(workspace, descriptor.workspace.artifact))),
+    inputDigests: await Promise.all(descriptor.inputs.map(async input => ({ name: input.path, digest: sha256(await readFile(join(workspace, input.path))) }))),
+  }
+  assert.equal(disk.programDigest, receipt.submission.programDigest)
+  assert.equal(disk.artifactDigest, receipt.submission.artifactDigest)
+  assert.deepEqual(disk.inputDigests, receipt.submission.inputDigests)
+  assert.deepEqual(disk.inputDigests, receipt.consumption.inputs)
+  for (const criterion of receipt.criteria) {
+    const verifier = descriptor.verifiers.find(verifier => verifier.ref === criterion.verifierRef)
+    assert.equal(criterion.implementationDigest, sha256(await readFile(join(domainDir, verifier.program))))
+    assert.equal(criterion.artifactDigest, disk.artifactDigest)
+  }
+  const headers = transcript.filter(event => event.type === 'request/header').map(event => event.data.header)
+  for (const header of headers)
+    assert.deepEqual(header.tools.map(tool => tool.name).sort(), [...TOOLS, 'singularity_decompose_task'].sort(), 'the Singularity preset exposes an unowned execution capability')
+  const header = headers.at(-1)
+  const declaredTools = header.tools.map(tool => tool.name).sort()
+  return { receipt, tools: tool.calls.map(call => call.data.name),
+    nativeErrors: tool.results.filter(result => result.value.isError === true),
+    calls: tool.calls.map(call => ({ callId: call.data.callId, name: call.data.name, turn: call.data.turn, seq: call.seq })),
+    provenance: { proposalCallId: proposed.callId, submissionCallId: submissionCall.data.callId, statusCallId: status.callId,
+      startedSeq: runs[0].seq, submittedSeq: submitted.seq, terminalSeq: terminal.seq, disk },
+    declaredTools, model: header.config, controlFactCount: facts.length, currentTranscriptEvents: transcript.length }
+}
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
-
-/**
- * Run only as a program, never on import.
- *
- * The panel probe imports this file's browser-driving steps — booting, preparing a session, sending a
- * turn — rather than copying them, because a second copy of an app's accessors drifts the moment the app
- * changes and only one of the copies is watched. That import has to be free of side effects, and running
- * the legs is the largest side effect there is.
- */
-const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
-
-// Resolved, never required: the same resolver the other probes use, and for the same reason — a gate
-// runner invokes a script with the environment it was started with, so requiring `DSH_HOME` here made
-// this probe refuse in exactly the place it is supposed to produce evidence.
-const home = DSH_HOME
-const recovery = process.argv.includes('--recovery')
-const screenshotFlag = process.argv.indexOf('--screenshot')
-if (!invokedDirectly) {
-  // Imported: the steps above are the whole offering, and nothing below runs.
-} else if (screenshotFlag !== -1 && process.argv[screenshotFlag + 1] === undefined)
-  process.stderr.write('browser-probe: --screenshot needs a path\n')
-else {
-  const screenshot =
-    screenshotFlag === -1
-      ? join(home, 'artifacts', recovery ? 'browser-probe-recovery.png' : 'browser-probe.png')
-      : process.argv[screenshotFlag + 1]
-  const browser = await chromium.launch()
+async function runProbe(home, context, screenshot, stage, extra) {
+  const port = await freePort()
+  let server = await boot(port, extra, home)
+  const medium = await openPersistence(join(home, 'sessions'), 'zstd')
+  let before
   try {
-    // The app's locale delegates to the browser when no preference is set, and a browser context
-    // inherits the machine's own — so without this, the probes' English accessors match on an en
-    // desktop and time out on a zh one. Pin the locale; the UI language is part of the probe's frame,
-    // not something it observes.
-    const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 900 } })
-    await (recovery ? recoveryLeg(home, context, screenshot) : liveLeg(home, context, screenshot))
+    const page = await openApp(context, server.url)
+    const dismissedFirstRun = await prepare(page, home)
+    if (stage === 'aborted') {
+      await send(page, PROPOSE_PROMPT)
+      await waitForTools(page, ['singularity_propose_task'])
+      await settle(page)
+      const first = (await controlFacts(medium.persistence)).find(fact => fact.kind === 'run/started')
+      assert(first !== undefined, 'the control session has no unaffected Run')
+      const read = async () => await page.evaluate(async () => {
+        const response = await fetch('/singularity/tasks', { cache: 'no-store' })
+        if (!response.ok) throw new Error('task read refused: ' + response.status)
+        return await response.json()
+      })
+      const unaffected = (await read()).tasks.find(task => task.taskId === first.subject)
+      assert.equal(unaffected.phase, 'running')
+      await page.getByRole('button', { name: 'New session', exact: true }).first().click()
+      await selectPreset(page)
+      await chooseWorkspace(page, home)
+      await send(page, PROPOSE_PROMPT)
+      before = await waitForRun(medium.persistence, page, 'working', [first.subject])
+      process.stderr.write('browser-probe: working Run observed; clicking native Stop generating\n')
+      await page.getByRole('button', { name: 'Stop generating', exact: true }).click()
+      await settle(page)
+      let snapshot = await read()
+      const deadline = Date.now() + 10_000
+      while (snapshot.tasks.find(task => task.taskId === before.taskId)?.phase !== 'failed' && Date.now() < deadline) {
+        await sleep(20)
+        snapshot = await read()
+      }
+      const failed = snapshot.tasks.find(task => task.taskId === before.taskId)
+      assert.equal(failed.phase, 'failed', 'native cancellation left the working Run open')
+      assert.deepEqual(snapshot.tasks.find(task => task.taskId === first.subject), unaffected)
+      const facts = await controlFacts(medium.persistence)
+      const terminal = facts.filter(fact => fact.kind === 'run/failed')
+      assert.equal(terminal.length, 1, 'cancellation affected another Run')
+      assert.equal(terminal[0].subject, before.taskId)
+      assert.equal(terminal[0].payload.runId, before.runId)
+      assert.equal(failed.runs[0].detail, terminal[0].payload.reason)
+      assert(terminal[0].payload.reason.startsWith('session-turn-failed: '))
+      const source = JSON.parse(terminal[0].payload.reason.slice('session-turn-failed: '.length))
+      const transcript = await readLog(medium.persistence, before.sessionId)
+      const ended = transcript.findLast(event => event.type === 'turn/end')
+      assert.deepEqual(source, { sessionId: before.sessionId, turn: before.openTurn, seq: ended.seq, reason: ended.data.reason })
+      assert.deepEqual(ended.data.reason, { kind: 'aborted', reason: { kind: 'user' } })
+      assert.equal(terminal[0].commandId, `turn-failed:${before.sessionId}/${ended.seq}/${before.runId}`)
+      assert(!facts.some(fact => fact.kind === 'run/submitting'), 'the lifecycle probe unexpectedly submitted work')
+      const safeOwner = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === first.subject).payload.agentId
+      const unaffectedSessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === safeOwner).payload.sessionId
+      assert.notEqual(unaffectedSessionId, before.sessionId)
+      const safeTranscript = await readLog(medium.persistence, unaffectedSessionId)
+      assert.equal(safeTranscript.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
+      const header = transcript.findLast(event => event.type === 'request/header').data.header
+      const declaredTools = header.tools.map(tool => tool.name).sort()
+      assert.deepEqual(declaredTools, [...TOOLS, 'singularity_decompose_task'].sort())
+      await mkdir(dirname(screenshot), { recursive: true })
+      await page.screenshot({ path: screenshot, fullPage: true })
+      const evidence = { leg: stage, host: server.command, hostPid: server.child.pid,
+        origin: new URL(server.url).origin, chromium: context.browser().version(), preset: PRESET_NAME,
+        dismissedFirstRun, screenshot, taskId: before.taskId, runId: before.runId, sessionId: before.sessionId,
+        stop: { native: true, observed: before, source, terminal: terminal[0] },
+        unaffectedSessionId, unaffectedBefore: unaffected, unaffectedAfter: snapshot.tasks.find(task => task.taskId === first.subject),
+        read: failed, declaredTools, model: header.config, controlFactCount: facts.length }
+      process.stdout.write(JSON.stringify(evidence, null, 2) + '\n')
+      return evidence
+    }
+    await send(page, stage === 'working' ? PROPOSE_PROMPT : FULL_PROMPT)
+    process.stderr.write('browser-probe: ' + (stage ?? 'live') + ' native turn started\n')
+    if (stage !== undefined) {
+      before = await waitForRun(medium.persistence, page, stage)
+      before = { ...before, signal: 'SIGKILL', hostPid: server.child.pid }
+      process.stderr.write('browser-probe: durable ' + stage + ' Run observed; killing host\n')
+      server.child.kill('SIGKILL')
+      await server.exited
+      server = await boot(port, extra, home)
+      assert.notEqual(server.child.pid, before.hostPid, 'the restarted host reused its predecessor process')
+      await page.goto(server.url, { waitUntil: 'domcontentloaded' })
+      await dismissFirstRun(page)
+      await waitForTools(page, ['singularity_propose_task'])
+      const prompt = stage === 'working'
+        ? 'The existing Task ' + before.taskId + ' already has Run ' + before.runId + '. Submit its ASCII letter counter using singularity_submit_program. The domain runs Node ES module source as node program.mjs <input path>; import node:fs and print only the count. Then call singularity_task_status. Do not propose a new Task.'
+        : 'The existing Task ' + before.taskId + ' and Run ' + before.runId + ' were submitted before restart. Call only singularity_task_status for that Task. Do not propose or submit again.'
+      await send(page, prompt)
+      process.stderr.write('browser-probe: restarted host; native continuation sent to existing session\n')
+      await waitForTools(page, stage === 'working' ? TOOLS : ['singularity_task_status'])
+    } else await waitForTools(page, TOOLS)
+    await settle(page)
+    const facts = await controlFacts(medium.persistence)
+    const started = facts.find(fact => fact.kind === 'run/started')
+    assert(started !== undefined, 'the profile recorded no solve Run')
+    const taskId = before?.taskId ?? started.subject
+    const runId = before?.runId ?? started.payload.runId
+    const holder = facts.find(fact => fact.kind === 'task/assigned' && fact.subject === taskId).payload.agentId
+    const sessionId = facts.find(fact => fact.kind === 'agent/opened' && fact.payload.agentId === holder).payload.sessionId
+    const domainDir = stage === 'submitted' ? join(home, 'domain') : join(ROOT, 'deployment/domain/letters')
+    const result = await provenance(medium.persistence, taskId, runId, sessionId, domainDir)
+    if (before !== undefined) {
+      assert.equal(sessionId, before.sessionId, 'native resume changed the responsible session')
+      assert.equal(result.receipt.consumption.workspace.ref, before.workspace, 'recovery changed the Run workspace')
+      assert.deepEqual(result.receipt.consumption.inputs, before.inputDigests)
+      if (before.submission !== null) assert.deepEqual(result.receipt.submission, before.submission)
+    }
+    for (const tool of TOOLS) assert(result.tools.includes(tool), 'actual session did not call ' + tool)
+    await mkdir(dirname(screenshot), { recursive: true })
+    await page.screenshot({ path: screenshot, fullPage: true })
+    const evidence = { leg: stage ?? 'live', controlledVerifierDelayMs: stage === 'submitted' ? 2000 : 0,
+      host: server.command, origin: new URL(server.url).origin,
+      hostPid: server.child.pid,
+      chromium: context.browser().version(), preset: PRESET_NAME, dismissedFirstRun, screenshot,
+      taskId, runId, sessionId, crash: before ?? null, ...result }
+    process.stdout.write(JSON.stringify(evidence, null, 2) + '\n')
+    return evidence
   } catch (error) {
-    process.stderr.write(
-      `browser-probe: ${error instanceof ProbeError ? error.message : (error?.stack ?? String(error))}\n`,
-    )
+    const facts = await controlFacts(medium.persistence)
+    const sessions = await medium.persistence.list()
+    const failures = []
+    for (const stored of sessions) {
+      if (stored.header.id === CONTROL_SESSION) continue
+      const events = await readLog(medium.persistence, stored.header.id)
+      const tool = toolFacts(events)
+      failures.push({ sessionId: stored.header.id,
+        model: events.findLast(event => event.type === 'request/header')?.data.header.config ?? null,
+        turnEnd: events.findLast(event => event.type === 'turn/end')?.data ?? null,
+        calls: tool.calls.map(event => ({ seq: event.seq, turn: event.data.turn, name: event.data.name, callId: event.data.callId })),
+        results: tool.results })
+    }
+    process.stdout.write(JSON.stringify({ leg: stage ?? 'live', failure: diagnosticOf(error), crash: before ?? null, sessions: failures,
+      control: facts.map(fact => ({ seq: fact.seq, kind: fact.kind, subject: fact.subject, payload: fact.payload })) }, null, 2) + '\n')
+    throw error
+  } finally {
+    await kill(server)
+    await medium.context.fiber.dispose()
+  }
+}
+
+async function isolatedHome(stage) {
+  const home = await mkdtemp(join(tmpdir(), 'singularity-browser-'))
+  try {
+    await copyFile(join(DSH_HOME, '.credentials.yaml'), join(home, '.credentials.yaml'))
+    await chmod(join(home, '.credentials.yaml'), 0o600)
+    const deployed = spawnSync(process.execPath, [join(ROOT, 'scripts/deploy.mjs')], {
+      cwd: ROOT, env: { ...process.env, DSH_HOME: home }, encoding: 'utf8',
+    })
+    assert.equal(deployed.status, 0, deployed.stderr || 'isolated profile deployment failed')
+    const extra = []
+    if (stage === 'submitted') {
+      const domain = join(home, 'domain')
+      await cp(join(ROOT, 'deployment/domain/letters'), domain, { recursive: true })
+      const verifier = join(domain, 'verifier.mjs')
+      const source = await readFile(verifier, 'utf8')
+      // The controlled verifier retains its criterion and selftests; delay exposes the durable submitted seam.
+      const delayed = source.replace("import { readFileSync } from 'node:fs'",
+        "import { readFileSync } from 'node:fs'\nawait new Promise(resolve => setTimeout(resolve, 2000))")
+      assert.notEqual(delayed, source, 'the controlled verifier has no declared import anchor')
+      await writeFile(verifier, delayed)
+      const overlay = join(home, 'crash.patch.yml')
+      await writeFile(overlay, '- id: singularity-assembly\n  config:\n    controlId: singularity-local\n    domainDir: ' +
+        JSON.stringify(domain) + '\n    workspaceRoot: ' + JSON.stringify(join(home, 'workspaces/singularity')) + '\n')
+      extra.push('--patch', overlay)
+    }
+    return { home, extra }
+  } catch (error) {
+    await rm(home, { recursive: true, force: true })
+    throw error
+  }
+}
+
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  assert(['--recovery', '--submitted', '--aborted'].filter(flag => process.argv.includes(flag)).length <= 1, 'select one lifecycle boundary')
+  const stage = process.argv.includes('--aborted') ? 'aborted' : process.argv.includes('--submitted') ? 'submitted' : process.argv.includes('--recovery') ? 'working' : undefined
+  const screenshotIndex = process.argv.indexOf('--screenshot')
+  assert(screenshotIndex === -1 || process.argv[screenshotIndex + 1] !== undefined, '--screenshot requires a path')
+  const screenshot = screenshotIndex === -1 ? join(tmpdir(), 'singularity-browser-' + (stage ?? 'live') + '.png') : process.argv[screenshotIndex + 1]
+  let isolated
+  let browser
+  try {
+    isolated = await isolatedHome(stage)
+    browser = await chromium.launch()
+    const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 900 } })
+    await runProbe(isolated.home, context, screenshot, stage, isolated.extra)
+  } catch (error) {
+    process.stderr.write('browser-probe: ' + diagnosticOf(error.stack ?? error) + '\n')
     process.exitCode = 1
   } finally {
-    await browser.close()
+    await browser?.close()
+    if (isolated !== undefined) await rm(isolated.home, { recursive: true, force: true })
   }
 }

@@ -1,187 +1,109 @@
-/**
- * One attempt at a task: start it, run the program, judge the artifact, settle it, and repair an attempt
- * a crash left in flight; the criterion's own verifier runs through the process port that lives here.
- *
- * @module @dangosys/dsh-singularity-next/submission
- */
-
-import { execFile, spawn } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
-import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../../src/environment/protocol.ts'
-import { refuse } from '../../src/protocol/refusal.ts'
+import { ProtocolRefusal, refuse } from '../../src/protocol/refusal.ts'
 import type { BubbleInput } from '../../src/task/bubble.ts'
-import type { TaskState } from '../../src/task/protocol.ts'
-import { projectTask, type TaskView } from '../../src/task/view.ts'
-import { runVerifierCommand, type VerifierInvocation } from '../../src/verifier/command.ts'
+import type { RunState, TaskState } from '../../src/task/protocol.ts'
+import { type TaskView } from '../../src/task/view.ts'
+import { runVerifierCommand } from '../../src/verifier/command.ts'
 import { runProductionVerdict } from '../../src/verifier/production.ts'
-import { bindCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
+import { taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
+import { workspaceOf } from './attempt.ts'
 import { commandOf } from './domain.ts'
-import { runIdOf, sha256 } from './ids.ts'
+import type { Execution } from './execution.ts'
+import { sha256 } from './ids.ts'
+import { spawnProcess } from './process.ts'
 
-/** What one submission produced, judged by the criterion's own implementation and recorded as facts. */
 export interface Submission {
   readonly taskId: string
   readonly runId: string
   readonly verdict: 'pass' | 'fail'
   readonly detail: string
-  /** The digest of the bytes judged, or null when no verdict was ever formed. */
   readonly artifactDigest: string | null
   readonly phase: TaskView['phase']
+  readonly dispatchError?: string
 }
-export function spawnProcess(invocation: VerifierInvocation): Promise<{ exitCode: number | null; stderr: string; failure?: string }> {
-  return new Promise(resolve => {
-    const child = invocation.shell
-      ? spawn(invocation.command, { shell: true, stdio: ['ignore', 'ignore', 'pipe'] })
-      : spawn(invocation.argv[0], invocation.argv.slice(1), { stdio: ['ignore', 'ignore', 'pipe'] })
-    let stderr = ''
-    child.stderr.setEncoding('utf8')
-    child.stderr.on('data', chunk => { stderr += chunk })
-    child.on('error', error => resolve({ exitCode: null, stderr, failure: error.message }))
-    child.on('close', code => resolve({ exitCode: code, stderr }))
-  })
-}
-export function workspaceOf(apparatus: Apparatus, taskId: string): string {
-  return join(apparatus.workspaceRoot, 'tasks', taskId)
-}
-export async function submit(apparatus: Apparatus, caller: Caller, callId: string, request: { readonly taskId: string; readonly program: string }): Promise<Submission> {
-  const { domain } = apparatus
-  const runId = runIdOf(apparatus.controlId, caller.sessionId, callId)
-  const committed = taskStateOf(apparatus, request.taskId)
-  // Only the holder may attempt the task, and this is checked before anything is written — including
-  // before the caller is bound, so a refused caller leaves neither a node nor a revision behind.
-  if (committed.responsibility?.agentId !== caller.agentId)
-    refuse(
-      'not-responsible',
-      `task "${request.taskId}" is the responsibility of agent "${committed.responsibility?.agentId ?? 'nobody'}", so agent "${caller.agentId}" cannot submit to it`,
-    )
-  const key = await bindCaller(apparatus, caller)
-  const recorded = committed.runs[runId]
-  // A redelivery: this call's run is settled, so nothing below runs again.
-  if (recorded !== undefined && recorded.status !== 'running') return answerOf(apparatus, committed, runId)
-  // A redelivery whose run is still in flight is refused rather than re-run: the attempt is running,
-  // and a second execution of one call could produce different bytes under the same command ids.
-  if (recorded !== undefined)
-    refuse(
-      'illegal-transition',
-      `run "${runId}" of task "${request.taskId}" is still running for this call; its attempt ends when it settles, and the next boot's repair settles an attempt this process left behind`,
-    )
-
-  const workspace = workspaceOf(apparatus, request.taskId)
-  // The loader admits a domain only when it declares exactly one input, so this is a name rather than a
-  // check: a second reading of that rule here would be a second place for it to disagree.
-  const declared = domain.inputs[0]!
-  // The digest the run is bound to is the one the loader computed over the domain's own bytes, never a
-  // re-read of the workspace: the material is staged from those exact bytes, and re-reading would let a
-  // file that changed under the deployment redefine what this attempt was judged against.
-  const frozen: BubbleInput = { name: declared.path, digest: declared.digest }
-  // The revision is derived from the request, never from workspace bytes: a program may rewrite its own
-  // input, and an id built from those bytes would make the retry a different command against siblings
-  // the first delivery already committed.
-  const basis = sha256(`${domain.templateDigest}\u0000${request.taskId}`)
-  const revisionId = `rev-${basis.slice(0, 16)}`
-  await apparatus.environments.createRevision({
-    commandId: `revision:${basis}`,
-    environmentId: apparatus.controlId,
-    revisionId,
-    manifest: { taskTemplate: apparatus.domain.templateDigest, task: request.taskId },
-  })
-
+export async function submit(apparatus: Apparatus, execution: Execution, caller: Caller, exec: ToolRunContext,
+  request: { readonly taskId: string; readonly program: string }, signal: AbortSignal): Promise<Submission> {
+  const state = taskStateOf(apparatus, request.taskId)
+  const requestId = 'submit-' + sha256(JSON.stringify([apparatus.controlId, caller.sessionId, String(exec.callId)]))
+  const requestDigest = sha256(JSON.stringify(request))
+  const recorded = Object.values(state.runs).find(run => run.request?.id === requestId)
+  if (recorded !== undefined) {
+    if (recorded.request!.digest !== requestDigest) refuse('command-conflict', 'this submission was committed with different content')
+    if (recorded.status !== 'running') return answerOf(apparatus, state, recorded.runId)
+    refuse('illegal-transition', 'this submission is in flight; do not execute it again')
+  }
+  if (state.responsibility?.agentId !== caller.agentId)
+    refuse('not-responsible', 'the caller is not responsible for this task')
+  const run = Object.values(state.runs).find(run => run.status === 'running')
+  if (run === undefined) refuse('illegal-transition', 'the task has no working Run; propose a new attempt before submitting')
   const commands = apparatus.tasks.forAgent(caller.agentId)
-  await commands.startRun({
-    commandId: `start:${request.taskId}/${runId}`,
-    taskId: request.taskId,
-    runId,
-    revision: { environmentId: apparatus.controlId, revisionId, digest: revisionDigestOf(apparatus, revisionId) },
-  })
-  await commands.openBubble({
-    commandId: `bubble:${request.taskId}/${runId}`,
-    taskId: request.taskId,
-    runId,
-    inputs: [frozen],
-    workspace: { kind: 'dir', ref: workspace },
-    model: caller.model,
-    tools: [{ name: 'node', version: process.version, implementationDigest: await toolchainDigest() }],
-    conditions: [],
-  })
-
-  // The submitted text lands at the domain's `file` in both shapes: a program to be run, or the source
-  // the criterion judges. What differs is only whether something else produces the artifact, and that
-  // is `domain.submission` — the one place this layer reads a submission shape.
-  const filePath = join(workspace, domain.file)
-  await mkdir(dirname(filePath), { recursive: true })
-  await writeFile(filePath, request.program, 'utf8')
-  if (domain.submission === 'program') {
-    const inputPath = join(workspace, declared.path)
-    await writeFile(join(workspace, domain.artifact), await runProgram(filePath, inputPath), 'utf8')
-  }
-  await judgeAndRecord(apparatus, request.taskId, runId, workspace, frozen)
-  await apparatus.tasks.settle({ commandId: `settle:${request.taskId}/${runId}`, taskId: request.taskId, runId }, key)
-  return answerOf(apparatus, taskStateOf(apparatus, request.taskId), runId)
-}
-export async function judgeAndRecord(apparatus: Apparatus, taskId: string, runId: string, workspace: string, declared: BubbleInput): Promise<void> {
-  const { domain } = apparatus
-  const artifactPath = join(workspace, domain.artifact)
-  const judged = await runProductionVerdict({
-    runId,
-    criterion: domain.criterion,
-    implementations: domain.verifiers,
-    inputs: [declared],
-    workspace,
-    artifactPath: domain.artifact,
-    // The `{input}` vocabulary is closed and names exactly one staged path — the single input the loader
-    // requires — so a verifier that needs it is handed that one and nothing else.
-    command: commandOf(domain.verifier, artifactPath, join(workspace, declared.name)),
-    // The digest of the bytes about to run, read here: a verifier rebuilt under this deployment must be
-    // reported as a different implementation, never judged anyway.
-    runJudge: async execution => {
-      const implementationDigest = await digestOf(domain.verifier.program, 'the verifier implementation')
-      const ran = await runVerifierCommand({ command: execution.command, artifactPath: execution.artifactPath, inputs: execution.inputs }, spawnProcess)
-      return { verdict: ran.verdict, implementationDigest, detail: ran.detail }
-    },
-  })
-  const verdict = { runId, criterionId: judged.criterionId, verdict: judged.verdict, implementationDigest: judged.implementationDigest, artifactDigest: judged.artifactDigest, inputDigests: judged.inputDigests, ...(judged.detail === undefined ? {} : { detail: judged.detail }) }
-  await apparatus.tasks.recordVerdict({ commandId: `verdict:${taskId}/${runId}`, taskId, verdict })
-}
-export function answerOf(apparatus: Apparatus, state: TaskState, runId: string): Submission {
-  const run = state.runs[runId]
-  if (run === undefined) refuse('unknown-run', `task "${state.taskId}" holds no run "${runId}", so it has no result to return`)
-  const evidence = run.evidence.find(entry => entry.criterionId === apparatus.domain.criterion.criterionId)
-  return {
-    taskId: state.taskId,
-    runId,
-    verdict: evidence?.verdict ?? 'fail',
-    detail: evidence?.detail ?? run.failureReason ?? '',
-    artifactDigest: evidence?.artifactDigest ?? null,
-    phase: projectTask(state).phase,
-  }
-}
-export function revisionDigestOf(apparatus: Apparatus, revisionId: string): string {
-  const digest = apparatus.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, apparatus.controlId)?.revisions[revisionId]?.contentDigest
-  if (digest === undefined)
-    refuse('unknown-revision', `the revision "${revisionId}" this call created is not in the committed cut; a pin names the digest the environment holds, never one this layer computed for it`)
-  return digest
-}
-/**
- * The toolchain digest, read once per process: the bytes this interpreter is running, never one read
- * again later that could name a binary replaced underneath it.
- */
-let toolchain: Promise<string> | undefined
-const toolchainDigest = (): Promise<string> => (toolchain ??= digestOf(process.execPath, 'the node toolchain'))
-
-export const digestOnDisk = (path: string): Promise<string | undefined> => readFile(path).then(bytes => sha256(bytes), () => undefined)
-
-/** Run the submitted program for real, with the input path as its only argument. */
-function runProgram(programPath: string, inputPath: string): Promise<string> {
-  return new Promise(resolve => {
-    execFile(process.execPath, [programPath, inputPath], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }, (_error, stdout) => resolve(stdout))
-  })
-}
-async function digestOf(path: string, what: string): Promise<string> {
+  const reservation = await commands.beginSubmission({ commandId: requestId, taskId: request.taskId, runId: run.runId, requestId, requestDigest })
+  if (!reservation.fresh) refuse('illegal-transition', 'this submission is in flight; do not execute it again')
+  const workspace = workspaceOf(apparatus, request.taskId, run.runId)
+  let executionFailure: string | undefined
   try {
-    return sha256(await readFile(path))
+    await execution.drain(exec)
+    signal.throwIfAborted()
+    const filePath = join(workspace, apparatus.domain.file)
+    await mkdir(dirname(filePath), { recursive: true })
+    await writeFile(filePath, request.program, 'utf8')
+    if (apparatus.domain.submission === 'program') {
+      const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, apparatus.domain.inputs[0]!.path)] }, signal)
+      await writeFile(join(workspace, apparatus.domain.artifact), output.stdout, 'utf8')
+      executionFailure = output.failure
+    }
+    const inputDigests = await Promise.all(apparatus.domain.inputs.map(async input => ({ name: input.path, digest: sha256(await readFile(join(workspace, input.path))) })))
+    const programDigest = sha256(await readFile(filePath))
+    if (programDigest !== sha256(request.program)) refuse('evidence-input-mismatch', 'the executed program changed its submitted source')
+    await commands.submitRun({ commandId: 'seal:' + requestId, taskId: request.taskId, runId: run.runId,
+      submission: { requestId, requestDigest, programDigest, artifactDigest: sha256(await readFile(join(workspace, apparatus.domain.artifact))), inputDigests,
+        source: await execution.sealTranscript(exec), ...(executionFailure === undefined ? {} : { executionFailure }) } })
   } catch (error) {
-    refuse('evidence-input-mismatch', `${what} (${path}) could not be read (${error instanceof Error ? error.message : String(error)}); a run cannot be bound to bytes that are not there`)
+    if (taskStateOf(apparatus, request.taskId).runs[run.runId]!.stage === 'submitting')
+      await commands.failRun({ commandId: 'submission-failed:' + requestId, taskId: request.taskId, runId: run.runId, reason: String(error) })
+    throw error
   }
+  if (executionFailure !== undefined) {
+    await commands.failRun({ commandId: 'execution-failed:' + requestId, taskId: request.taskId, runId: run.runId, reason: executionFailure })
+    return answerOf(apparatus, taskStateOf(apparatus, request.taskId), run.runId)
+  }
+  try {
+    await judgeAndRecord(apparatus, request.taskId, run, signal)
+    await apparatus.tasks.settle({ commandId: 'settle:' + request.taskId + '/' + run.runId, taskId: request.taskId, runId: run.runId }, 'agent:' + caller.agentId)
+  } catch (error) {
+    if (error instanceof ProtocolRefusal && error.refusal.code === 'write-not-durable') throw error
+    if (taskStateOf(apparatus, request.taskId).runs[run.runId]!.status === 'running') {
+      try { await commands.failRun({ commandId: 'verification-failed:' + requestId, taskId: request.taskId, runId: run.runId, reason: 'verification-failed: ' + String(error) }) }
+      catch (failure) { throw new AggregateError([error, failure], 'verification and failure persistence failed') }
+    }
+    throw error
+  }
+  return answerOf(apparatus, taskStateOf(apparatus, request.taskId), run.runId)
+}
+
+export async function judgeAndRecord(apparatus: Apparatus, taskId: string, run: RunState, signal?: AbortSignal): Promise<void> {
+  const { domain } = apparatus
+  const workspace = workspaceOf(apparatus, taskId, run.runId)
+  const declared: BubbleInput = run.bubble!.inputs[0]!
+  const judged = await runProductionVerdict({ runId: run.runId, criterion: domain.criterion, implementations: domain.verifiers,
+    inputs: [declared], workspace, artifactPath: domain.artifact,
+    command: commandOf(domain.verifier, join(workspace, domain.artifact), join(workspace, declared.name)),
+    runJudge: async execution => {
+      const implementationDigest = sha256(await readFile(domain.verifier.program))
+      const ran = await runVerifierCommand({ command: execution.command, artifactPath: execution.artifactPath, inputs: execution.inputs }, invocation => spawnProcess(invocation, signal))
+      return { verdict: ran.verdict, implementationDigest, detail: ran.detail }
+    } })
+  await apparatus.tasks.recordVerdict({ commandId: 'verdict:' + taskId + '/' + run.runId, taskId,
+    verdict: { runId: run.runId, criterionId: judged.criterionId, verdict: judged.verdict, implementationDigest: judged.implementationDigest,
+      artifactDigest: judged.artifactDigest, inputDigests: judged.inputDigests, ...(judged.detail === undefined ? {} : { detail: judged.detail }) } })
+}
+
+export function answerOf(apparatus: Apparatus, state: TaskState, runId: string): Submission {
+  const run = state.runs[runId]!
+  const evidence = run.evidence.find(entry => entry.criterionId === apparatus.domain.criterion.criterionId)
+  return { taskId: state.taskId, runId, verdict: run.status === 'verified' ? 'pass' : 'fail', detail: run.failureReason ?? evidence?.detail ?? '',
+    artifactDigest: evidence?.artifactDigest ?? run.submission?.artifactDigest ?? null, phase: run.status }
 }

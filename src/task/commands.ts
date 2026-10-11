@@ -1,47 +1,12 @@
-/**
- * The trusted command boundary: the one place cross-entity preconditions are checked, and the only
- * surface through which facts are produced.
- *
- * A per-subject reducer is pure and sees one subject, which is correct — but it means the
- * conditions that span entities (does the revision this run pins actually exist, has the agent been
- * opened, is the sub-task ready, is its budget spent) cannot be decided there. Discovering them
- * afterwards in a projection is a diagnosis, not a check: by then the work has already been
- * scheduled. So they are decided here, **inside the serial region that produces the fact**.
- *
- * Two properties make the region real:
- *
- * 1. **Every check runs inside the store's commit region**, handed to the append path as the
- *    `require` step. It reads the store's committed cut at the moment it runs, so the state it
- *    decides against is the state the fact will be appended to. A check performed earlier, against
- *    a cut read earlier, is a check against a state that may already be gone.
- * 2. **A command decides the parts a caller must not.** `assignTask` fills the responsible identity
- *    from the deployment's own table rather than from its argument, and `recordVerdict` fills the
- *    verifier's ref and version from the frozen criterion. A caller supplies what it did; it does
- *    not supply who it is. The executor a fact is stamped for arrives the same way: `forAgent`
- *    binds a surface to the agent's own entry in the deployment's table, and every fact that
- *    surface produces carries that agent's identity as its actor.
- *
- * There is no second queue here. A queue in this service would serialize reads that the store's own
- * region already serializes, and every command that did not need a cut would still pay for one —
- * which is how a service ends up folding the whole log three times per fact and reading none of it.
- *
- * The agent-facing view is narrower than this service on purpose: `forAgent` omits
- * `recordVerdict`, so the path that produces a verdict is not reachable from the path an agent
- * drives. That is the whole of "an agent cannot emit its own verdict" — a method it does not have,
- * rather than a rule it is asked to respect.
- *
- * @module singularity-core/task/commands
- */
-
 import type { ControlReadCut, ControlSessionStore } from '../control/session-store.ts'
 import type { Envelope } from '../protocol/envelope.ts'
-import type { EmitInput } from '../protocol/memory-log.ts'
+import type { Decision, EmitInput } from '../protocol/memory-log.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../agent/protocol.ts'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../environment/protocol.ts'
 import { assertPinnedRevision } from '../environment/binding.ts'
-import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from './protocol.ts'
+import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunSubmission, type TaskState } from './protocol.ts'
 import { unadjudicatedCriteria, unmetCriteria, verdictFor } from './run.ts'
 import { projectTree } from './tree.ts'
 import type { BubbleInput, BubbleTool } from './bubble.ts'
@@ -49,11 +14,6 @@ import type { DecompositionChild } from './decomposition.ts'
 
 /** What the deployment holds for one agent: the subjects-table key its acts are bound to. */
 export interface HeldAgent {
-  /**
-   * The binding this agent's facts stamp as their actor. It is a key into the store's one role
-   * table, resolved there and never restated here: the identity it names is the store's to answer,
-   * so a second copy of it cannot drift from the one the log stamps with.
-   */
   readonly as: string
 }
 
@@ -77,21 +37,7 @@ export interface TaskCommandOptions {
   readonly implementations: readonly { readonly ref: string; readonly version: string; readonly implementationDigest: string }[]
 }
 
-/**
- * The commands an agent drives: it may plan, delegate and attempt, but not judge.
- *
- * Every command carries its own `commandId`, because command identity is the caller's business
- * identity for the act - "the attempt to start run r1" - and the log answers a retry with the fact
- * it already committed. Deriving one here from the state would make two different commands collide
- * on one id, and the second would silently replay the first.
- */
 export interface AgentCommands {
-  /**
-   * The optional second parameter of every method below is the **binding**: the subjects-table key
-   * the calling surface's facts stamp as their actor. It is not part of the request and never part
-   * of the payload — a model-facing tool cannot reach it, because the assembly binds it from the
-   * live agent it resolved, and this interface is the trusted surface's own.
-   */
   admit(input: { readonly commandId: string; readonly taskId: string; readonly contract: unknown }, as?: string): Promise<Envelope>
   decompose(input: { readonly commandId: string; readonly parentTaskId: string; readonly children: readonly DecompositionChild[] }, as?: string): Promise<Envelope>
   assign(input: { readonly commandId: string; readonly taskId: string; readonly agentId: string }, as?: string): Promise<Envelope>
@@ -112,6 +58,19 @@ export interface AgentCommands {
     readonly tools: readonly BubbleTool[]
     readonly conditions: readonly string[]
   }, as?: string): Promise<Envelope>
+  beginSubmission(input: {
+    readonly commandId: string
+    readonly taskId: string
+    readonly runId: string
+    readonly requestId: string
+    readonly requestDigest: string
+  }, as?: string): Promise<Decision>
+  submitRun(input: {
+    readonly commandId: string
+    readonly taskId: string
+    readonly runId: string
+    readonly submission: RunSubmission
+  }, as?: string): Promise<Envelope>
   failRun(input: {
     readonly commandId: string
     readonly taskId: string
@@ -121,27 +80,12 @@ export interface AgentCommands {
 }
 
 export interface TaskCommands extends AgentCommands {
-  /**
-   * Settle one run from the evidence it holds: verified when every criterion has a passing verdict
-   * from its own verifier, failed (carrying the failing verdict's detail) when one did not pass, and
-   * refused while a criterion has no verdict at all.
-   *
-   * Not reachable from `forAgent`: a settlement is the apparatus's act, not a candidate's. The
-   * **failed** branch is emitted under the caller-supplied `as`, which is the subjects-table key of
-   * the run's responsible agent, because `task/run/failed` is the responsible agent's own fact and
-   * the reducer checks that; the verified branch is the apparatus's and is emitted under the
-   * scheduler's declared role.
-   */
   settle(
     input: { readonly commandId: string; readonly taskId: string; readonly runId: string },
     as?: string,
   ): Promise<Envelope>
   /** Not reachable from `forAgent`: producing a verdict is a verifier's act, not an agent's. */
   recordVerdict(input: { readonly commandId: string; readonly taskId: string; readonly verdict: VerdictInput }): Promise<Envelope>
-  /**
-   * Not reachable from `forAgent` either: the apparatus records what a run consumed, and an agent
-   * vouching for its own method use is the self-report this stack refuses everywhere else.
-   */
   recordConsumption(input: {
     readonly commandId: string
     readonly taskId: string
@@ -153,13 +97,6 @@ export interface TaskCommands extends AgentCommands {
   forAgent(agentId: string): AgentCommands
 }
 
-/**
- * Everything one command reads, taken from the committed cut at the moment its check runs.
- *
- * The two maps are functions, not values. A command that decides against one subject's state has no
- * business paying for a map of every task in the log, and most of them never look at one; the two
- * that do — the plan gate and the revision pin — ask for it inside the region that needs it.
- */
 interface Cut {
   readonly task: (taskId: string) => TaskState | undefined
   readonly agent: (agentId: string) => AgentState | undefined
@@ -243,6 +180,25 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         conditions: input.conditions,
       }, as),
 
+    beginSubmission: async (input, as) => {
+      let fresh = false
+      const envelope = await emitRaw(options, input.commandId, TASK_KINDS.runSubmitting, input.taskId, {
+        runId: input.runId,
+        requestId: input.requestId,
+        requestDigest: input.requestDigest,
+      }, as, () => {
+        const own = projectTree(cutOf(options).tasks()).find(plan => plan.parentTaskId === input.taskId)
+        const pending = own?.children.filter(child => child.status !== 'verified') ?? []
+        if (pending.length > 0)
+          refuse('illegal-transition', `cannot submit task "${input.taskId}" while its sub-task ${pending.map(child => `"${child.taskId}" (${child.status})`).join(', ')} has not verified`)
+        fresh = true
+      })
+      return { envelope, fresh }
+    },
+
+    submitRun: (input, as) =>
+      emitRaw(options, input.commandId, TASK_KINDS.runSubmitted, input.taskId, { runId: input.runId, submission: input.submission }, as),
+
     failRun: (input, as) =>
       emitRaw(
         options,
@@ -322,6 +278,8 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         reassign: input => commands.reassign(input, as),
         startRun: input => commands.startRun(input, as),
         openBubble: input => commands.openBubble(input, as),
+        beginSubmission: input => commands.beginSubmission(input, as),
+        submitRun: input => commands.submitRun(input, as),
         failRun: input => commands.failRun(input, as),
       }
     },
@@ -330,12 +288,6 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
   return commands
 }
 
-/**
- * The committed cut, as one command's check reads it.
- *
- * Every member reads through the store's fixed cut, so all of them agree with one another, and the
- * cut is taken once here rather than once per lookup.
- */
 function cutOf(options: TaskCommandOptions): Cut {
   const cut: ControlReadCut = options.store.load()
   return {
@@ -372,23 +324,6 @@ function requireOpenedNode(cut: Cut, agentId: string, action: string): void {
     )
 }
 
-/**
- * If any plan declares this task as a sub-task, the plan's gate decides. And if this task *is* a
- * plan, its own running sub-tasks decide: a parent does not work on the same acceptance at the same
- * time as the child it delegated that acceptance to.
- *
- * The tree's own status is the gate: `ready` means every dependency verified and the budget is not
- * spent. Anything else is refused with the tree's own reason, so the operator reads the same
- * sentence here as in a projection.
- *
- * The second half is the `waiting_children` phase of `docs/assembly-blueprint.md` §5, placed where
- * it can actually stop work. Writing it into the fold would delete the fact after the fact; this
- * check runs inside the commit region that produces `run/started`, so the conflicting attempt is
- * never recorded. It is deliberately "a sub-task is *running*" rather than "the plan is unfinished":
- * a parent's own run before its children start, and again after they verify, is the ordinary shape
- * of a campaign, and forbidding both would make the plan the only writer of the parent's criteria —
- * which is not what delegation means.
- */
 function requirePlanAllows(cut: Cut, taskId: string): void {
   const plans = projectTree(cut.tasks())
   for (const view of plans) {
@@ -424,22 +359,6 @@ function requireCriterion(cut: Cut, taskId: string, criterionId: string) {
   return criterion
 }
 
-/**
- * The fact one settlement is, produced inside the commit region from the evidence the run holds.
- *
- * **Why the producer reads evidence and never status.** A re-delivered command has to recompute the
- * very request it committed, because the journal matches a command by the shape of its fact and a
- * lost reply is answered from that fact. The run's status has moved by then — it is exactly what the
- * first settlement changed — so a producer that branched on it would compute a different fact, or
- * refuse, and the replay would become an `illegal-transition` instead of the answer it already has.
- * The evidence cannot move the other way: a criterion holds one verdict, so the same command
- * recomputes the same kind, subject and payload. A genuinely *different* command reaches the
- * reducers, and they refuse a second settlement in their own words.
- *
- * The checks are the ways a settlement is not yet decided: a run nobody started, and a criterion
- * nobody judged. A criterion that was judged and did not pass is not a missing check — it is the
- * failure this command records.
- */
 function settleRequest(
   options: TaskCommandOptions,
   input: { readonly commandId: string; readonly taskId: string; readonly runId: string },
@@ -478,13 +397,6 @@ function settleRequest(
   }
 }
 
-/**
- * Produce one fact, with its cross-subject preconditions handed to the append path.
- *
- * They are not run here, immediately before the call, because command identity has to be decided
- * first: a re-delivered command was already decided, and deciding it again against a state that has
- * moved on turns "give me back the result I lost" into a refusal.
- */
 async function emitRaw(
   options: TaskCommandOptions,
   commandId: string,

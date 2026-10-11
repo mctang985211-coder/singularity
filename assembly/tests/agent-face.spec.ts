@@ -15,7 +15,7 @@ import type { AgentTaskSurface, Proposal, Status } from '../src/driver.ts'
 import { agentFor, execFor } from './seam.ts'
 
 const TOOLS = ['singularity_propose_task', 'singularity_decompose_task', 'singularity_submit_program', 'singularity_task_status']
-const PROPOSAL: Proposal = { taskId: 'task-x', workspace: '/w', criterionId: 'c', phase: 'awaiting-run' }
+const PROPOSAL: Proposal = { taskId: 'task-x', runId: 'run-x', workspace: '/w', criterionId: 'c', phase: 'running' }
 const STATUS: Status = { phase: 'running', runs: 1, receipt: null }
 
 /** The services a mounted scope presents, with every registration the face makes. */

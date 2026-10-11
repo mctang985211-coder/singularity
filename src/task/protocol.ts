@@ -1,19 +1,3 @@
-/**
- * The declared surface of `task`: its state shape, its closed kind set, its version, and the roles
- * that may produce each kind.
- *
- * The facts themselves live beside it, one module per responsibility: the run (its shape, its rules
- * and what it consumed) in `run.ts`, the bubble in `bubble.ts`, the decomposition in
- * `decomposition.ts`, responsibility in `responsibility.ts`. What stays here is what the protocol
- * decides as a whole — one admitted contract per task, the kind set, and the version note below,
- * which is the one place a historical interpretation of this log is recorded.
- *
- * Payloads are closed: an undeclared member is a refusal, and a missing optional member stays
- * missing rather than becoming an invented value.
- *
- * @module singularity-core/task/protocol
- */
-
 import { digestOf } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type MemberSet, type ProtocolRegistry } from '../protocol/registry.ts'
@@ -28,33 +12,17 @@ import {
   methodConsumedKind,
   runFailedKind,
   runStartedKind,
+  runSubmittingKind,
+  runSubmittedKind,
   runVerifiedKind,
   type RunState,
 } from './run.ts'
 
 /** The run's own shape, re-exported here: every reader of the task protocol reads it from here. */
-export type { EvidenceRecord, RunState, RunStatus } from './run.ts'
+export type { EvidenceRecord, RunState, RunStatus, RunSubmission } from './run.ts'
 
 export const TASK_PROTOCOL = 'task'
-/**
- * Version 5. Older versions are **refused by name, with no compatibility layer**: this stack has no
- * distributed ledger to migrate, and review §5 is explicit that "no old data here" is not a licence
- * to change a version in place.
- *
- * The bumps are batched deliberately, so one version means one historical interpretation:
- *
- * - 3: `evidence/produced` gained a **required** `inputDigests`, and responsibility
- *   (`task/assigned` / `task/reassigned`) became a precondition of starting work.
- * - 4: `bubble/opened` gained a **required** isolation manifest (`model`, `tools`, `conditions`).
- *   A release pointer may only move to a revision whose execution context is recoverable, and a
- *   context that does not name the model and the implementation behind each tool name is not
- *   recoverable. So the manifest is required, and a bubble that omits it is refused, not defaulted.
- * - 5: `method/consumed` was added: the apparatus records a method a run actually loaded, at the
- *   revision that run pinned, with the source the claim came from. A run pinned to a revision proves
- *   nothing about which of its methods were used (`review.md` §4 R08), and a version that cannot
- *   carry that fact cannot be read as one that did.
- */
-export const TASK_VERSION = 5
+export const TASK_VERSION = 6
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'
@@ -64,24 +32,6 @@ export function verifierRoleOf(payload: { verifierRef: string; verifierVersion: 
   return `verifier:${payload.verifierRef}@${payload.verifierVersion}`
 }
 
-/**
- * The content identity of one recorded verdict — what a *reader* of a verdict may cite.
- *
- * A verdict lives once, in this protocol. Another protocol that needs to say "this was adjudicated on
- * these bytes" cites this value rather than recording a second copy of the judgment: the two pipelines
- * meet at evidence, not at code. The digest is taken over the verdict's content and never over its
- * position — no `seq`, no timestamp, no envelope digest — because the same judgment folded into a
- * different prefix is the same judgment, and a citation that moved with the log would be a citation of
- * the log rather than of the evidence. The emitter and actor are excluded for the same reason the
- * receipt excludes them: they are who the log stamped, and a reader cites the content.
- */
-/**
- * The digest of the verdict one run holds for one criterion of one artifact.
- *
- * A caller that cites a verdict does not compute the citation: it asks the protocol that recorded it.
- * The lookup is the reader's, so the citation cannot name a verdict that was never recorded, and the
- * caller never has to know the shape the digest is taken over.
- */
 export function recordedVerdictDigest(
   state: TaskState,
   where: string,
@@ -124,13 +74,6 @@ function verdictDigestOf(
   })
 }
 
-/**
- * The method revision a run is pinned to. Pin the digest too: an id alone can be re-pointed.
- *
- * The environment is named because a revision id is only unique **within** an environment; without
- * it, "which revision is this run pinned to" would have to be guessed by searching every
- * environment, and two environments could both hold a revision with that id.
- */
 export interface RevisionRef {
   readonly environmentId: string
   readonly revisionId: string
@@ -144,10 +87,6 @@ export interface TaskState {
   readonly contractDigest?: string
   readonly admittedBy?: string
   readonly admittedAt?: string
-  /**
-   * The fixed plan, when this task has one. Declared once and never revised: a plan that could be
-   * edited would make "which sub-task accepted which criterion" unanswerable after the fact.
-   */
   readonly decomposition?: Decomposition
   /** Who is answerable for this task. A task without one cannot be worked on at all. */
   readonly responsibility?: Responsibility
@@ -161,16 +100,14 @@ export const TASK_KINDS = {
   reassigned: 'task/reassigned',
   bubbleOpened: 'bubble/opened',
   runStarted: 'run/started',
+  runSubmitting: 'run/submitting',
+  runSubmitted: 'run/submitted',
   evidenceProduced: 'evidence/produced',
   runVerified: 'run/verified',
   runFailed: 'run/failed',
   methodConsumed: 'method/consumed',
 } as const
 
-/**
- * Declare the task protocol. Call once at load. The deployment's runnable verifiers are not
- * captured here: what can run today is a command-time question, not a replay-time one.
- */
 export function declareTaskProtocol(registry: ProtocolRegistry): void {
   registry.declare<TaskState>(TASK_PROTOCOL, TASK_VERSION, {
     initialState: { taskId: '', runs: {} },
@@ -210,6 +147,8 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
       [TASK_KINDS.bubbleOpened]: bubbleOpenedKind(TASK_KINDS.bubbleOpened, SCHEDULER_ROLE),
 
       [TASK_KINDS.runStarted]: runStartedKind(TASK_KINDS.runStarted, SCHEDULER_ROLE),
+      [TASK_KINDS.runSubmitting]: runSubmittingKind(TASK_KINDS.runSubmitting, SCHEDULER_ROLE),
+      [TASK_KINDS.runSubmitted]: runSubmittedKind(TASK_KINDS.runSubmitted, SCHEDULER_ROLE),
       // The role *is* the implementation: `verifierRoleOf` reads it out of the payload the criterion
       // was already checked against, and the log refuses the fact when the deployment holds no such
       // identity.

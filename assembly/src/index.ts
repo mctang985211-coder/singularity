@@ -16,21 +16,12 @@ import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { assertClosedKeys } from '../../src/protocol/envelope.ts'
 import { loadDomain } from './domain.ts'
 import { openDriver } from './driver.ts'
-import { spawnProcess } from './submission.ts'
+import { createExecution } from './execution.ts'
+import { spawnProcess } from './process.ts'
 
 export const name = 'singularity-assembly'
 
-/**
- * The one seam this plugin declares.
- *
- * The child-session services (`sessions`, `agents`, `agentLoop`, `agentPresets`) are deliberately **not**
- * listed. An `inject` name a profile does not provide makes the entire bundle skip silently — measured,
- * and it is the failure mode this repository has already paid for once. A deployment that mounts this
- * plugin and never schedules a sub-task needs none of them, and one that does schedule gets a named
- * refusal from {@link advance} rather than a package that quietly vanished. So the seams are read off the
- * context where they are used, and their absence is reported there.
- */
-export const inject = ['sessionPersistence']
+export const inject = ['agents', 'tools', 'sessions', 'sessionPersistence']
 
 const CONFIG_MEMBERS = ['controlId', 'domainDir', 'workspaceRoot'] as const
 
@@ -57,10 +48,8 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     domain,
     persistence: ctx.sessionPersistence,
     seams: ctx as ChildSessionSeams,
+    execution: (admission, onTurnFailure) => createExecution(ctx, admission, onTurnFailure),
   })
-  // No `advance` on this service: the driver advances the plans itself — after a decompose, after a run
-  // settles, and on the first call from a live agent — so an entry point here would be a second way to
-  // do one thing, with no caller. It comes back when something outside this package needs to ask for it.
   ctx.provide('singularity', {
     forCall: (exec: ToolRunContext) => driver.forCall(exec),
     read: () => driver.read(),

@@ -1,38 +1,5 @@
-/**
- * The run: one attempt at a task — how it starts, what judged it, how it settled, and what it used.
- *
- * Extracted from `protocol.ts` when E2's `method/consumed` kind pushed that file over its budget.
- * The split is by responsibility, not by line count: every kind here is a fact about **one run**,
- * every rule below is decided on the task's own subject, and `protocol.ts` keeps the task-level
- * facts, the declared surface and the version note — the division `bubble.ts` makes for the bubble.
- *
- * Three invariants live in these reducers, which is why nothing can talk around them:
- *
- * 1. **An executor never judges its own run.** The emitter role of a verdict must differ from the
- *    role that started the run. Roles and identities are stamped by the log from the kind's
- *    declaration, so no caller can claim to be a verifier — the check is not on a caller's word.
- * 2. **A verdict belongs to the verifier implementation its criterion names.** The emitter role is
- *    `verifier:<ref>@<version>`, so a deployment must actually hold that implementation's identity
- *    to emit its verdicts, and the reducer refuses a verdict whose implementation is not the
- *    criterion's.
- * 3. **A run settles verified only when every criterion has a passing verdict**, and the refusal
- *    names the criterion that is missing. No partial acceptance.
- *
- * What admission checks and what the fold checks are deliberately different. Admission requires
- * that the criterion's verifier is runnable **now**; the fold only reads the recorded shape, so a
- * log stays explainable after a verifier retires.
- *
- * **`method/consumed`** (E2, `docs/tdd-seams.md` §4) is a fact about one run for the same reason:
- * pinning a revision proves nothing about which of its methods were used (R08), so the apparatus
- * records what the run actually loaded — at the revision that run pinned, and with the source the
- * claim came from. The emitter is the runtime role, never the scheduler and never an agent: a
- * candidate's own agent saying "I used the method" is precisely the self-report the rest of this
- * stack refuses.
- *
- * @module singularity-core/task/run
- */
-
 import { refuse } from '../protocol/refusal.ts'
+import { assertClosedKeys } from '../protocol/envelope.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import { assertInputsBound, BUBBLE_INPUT_MEMBERS, inputList, type Bubble, type BubbleInput } from './bubble.ts'
 import type { AcceptanceCriterion, TaskContract } from './contract.ts'
@@ -41,6 +8,17 @@ import { digest, maybeText, record, requireContractOf, requireRun, revisionRef, 
 import type { RevisionRef, TaskState } from './protocol.ts'
 
 export type RunStatus = 'running' | 'verified' | 'failed'
+type RunStage = 'working' | 'submitting' | 'submitted'
+
+export interface RunSubmission {
+  readonly executionFailure?: string
+  readonly requestId: string
+  readonly requestDigest: string
+  readonly programDigest: string
+  readonly artifactDigest: string
+  readonly inputDigests: readonly BubbleInput[]
+  readonly source: { readonly sessionId: string; readonly eventCount: number; readonly digest: string }
+}
 
 /** One verifier's verdict on one criterion of one run. */
 export interface EvidenceRecord {
@@ -49,10 +27,6 @@ export interface EvidenceRecord {
   /** Which verifier implementation decided it: the criterion's own, or the fold refuses. */
   readonly verifierRef: string
   readonly verifierVersion: string
-  /**
-   * The content digest of the implementation that actually decided it. A verdict recorded for
-   * implementation A cannot be inherited by implementation B, even if B keeps A's name and version.
-   */
   readonly implementationDigest: string
   /** The artifact content the verdict was formed on. A later artifact change does not inherit it. */
   readonly artifactDigest: string
@@ -65,13 +39,6 @@ export interface EvidenceRecord {
   readonly at: string
 }
 
-/**
- * One method the apparatus recorded a run as consuming, and where that claim came from.
- *
- * The revision the fact named is **not** kept here: the reducer refuses a fact whose revision is not
- * the run's pin, so the run's own `revision` is that value, and a second copy of it in this record
- * would be a value stated twice with nothing keeping the two in step.
- */
 interface MethodConsumption {
   readonly method: string
   readonly source: string
@@ -84,6 +51,10 @@ export interface RunState {
   readonly revision: RevisionRef
   readonly startedAt: string
   readonly status: RunStatus
+  readonly stage: RunStage
+  readonly request?: { readonly id: string; readonly digest: string }
+  readonly submission?: RunSubmission
+  readonly submittedAt?: string
   /** The declared execution context. A verdict about this run is bound to its inputs. */
   readonly bubble?: Bubble
   readonly evidence: readonly EvidenceRecord[]
@@ -96,23 +67,14 @@ export interface RunState {
 const APPENDED = { appended: true } as const
 const METHOD_CONSUMED_MEMBERS = ['runId', 'revision', 'method', 'source'] as const
 const RUN_STARTED_MEMBERS = ['runId', 'revision'] as const
+const RUN_SUBMITTING_MEMBERS = ['runId', 'requestId', 'requestDigest'] as const
+const RUN_SUBMITTED_MEMBERS = ['runId', 'submission'] as const
+const SUBMISSION_MEMBERS = ['requestId', 'requestDigest', 'programDigest', 'artifactDigest', 'inputDigests', 'source', 'executionFailure'] as const
+const SOURCE_MEMBERS = ['sessionId', 'eventCount', 'digest'] as const
 const RUN_VERIFIED_MEMBERS = ['runId'] as const
 const RUN_FAILED_MEMBERS = ['runId', 'reason'] as const
 const EVIDENCE_PRODUCED_MEMBERS = ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'inputDigests', 'detail'] as const
 
-/**
- * The verdict one criterion's **own** verifier recorded for one run, or `undefined` when it recorded
- * none.
- *
- * "Its own" is the whole of the lookup: a criterion names a ref and a version, so only an entry
- * carrying both is a verdict *on that criterion*. One implementation deciding under another
- * criterion's id is not a judgement of it, and reading the evidence by `criterionId` alone would
- * accept it.
- *
- * This is the one owner of that matching. The `run/verified` reducer and the settlement command both
- * ask it, so the two cannot disagree about which criteria a run has answered — a disagreement would
- * be a run the command verifies and the fold refuses, or the reverse.
- */
 export function verdictFor(run: RunState, criterion: AcceptanceCriterion): EvidenceRecord | undefined {
   return run.evidence.find(
     entry =>
@@ -136,9 +98,6 @@ export function unmetCriteria(contract: TaskContract, run: RunState): readonly A
 export function runStartedKind(kind: string, emitter: string): KindRule<TaskState> {
   return defineKind<TaskState, { runId: string; revision: RevisionRef }, { revision: MemberSet }>({
     guarantees: APPENDED,
-    // The closed set is a declared value, and it is the one the parse boundary enforces: a list
-    // written here at the call site — or a conditional one, as the fifth review wrote — cannot
-    // widen what the log accepts, and the inventory compares this declaration rather than a sample.
     members: RUN_STARTED_MEMBERS,
     nested: { revision: REVISION_MEMBERS },
     emitter,
@@ -154,6 +113,9 @@ export function runStartedKind(kind: string, emitter: string): KindRule<TaskStat
       requireResponsible(state, envelope.actor, where)
       if (state.runs[payload.runId] !== undefined)
         refuse('illegal-transition', `${where} starts run "${payload.runId}" again; one run id is one attempt`)
+      const running = Object.values(state.runs).find(run => run.status === 'running')
+      if (running !== undefined)
+        refuse('illegal-transition', `${where} cannot start run "${payload.runId}" while run "${running.runId}" is running; one task has one unsettled attempt`)
       return {
         ...state,
         runs: {
@@ -165,10 +127,87 @@ export function runStartedKind(kind: string, emitter: string): KindRule<TaskStat
             revision: payload.revision,
             startedAt: envelope.at,
             status: 'running',
+            stage: 'working',
             evidence: [],
             consumed: [],
           },
         },
+      }
+    },
+  })
+}
+
+export function runSubmittingKind(kind: string, emitter: string): KindRule<TaskState> {
+  return defineKind<TaskState, { runId: string; requestId: string; requestDigest: string }, {}>({
+    guarantees: APPENDED,
+    members: RUN_SUBMITTING_MEMBERS,
+    nested: {},
+    emitter,
+    parse: (raw, where) => {
+      const source = record(raw, where)
+      return { runId: text(source, 'runId', where), requestId: text(source, 'requestId', where), requestDigest: digest(source, 'requestDigest', where) }
+    },
+    reduce: (state, envelope, payload) => {
+      const where = `${kind} #${envelope.seq}`
+      const run = requireRun(state, payload.runId, where)
+      requireResponsible(state, envelope.actor, where)
+      if (run.status !== 'running' || run.stage !== 'working')
+        refuse('illegal-transition', `${where} cannot begin submission of run "${payload.runId}" in ${run.status}/${run.stage}`)
+      if (run.bubble === undefined)
+        refuse('illegal-transition', `${where} cannot begin submission before run "${payload.runId}" declares its bubble`)
+      if (run.evidence.length !== 0)
+        refuse('illegal-transition', `${where} cannot begin submission after run "${payload.runId}" has already been judged`)
+      return {
+        ...state,
+        runs: { ...state.runs, [payload.runId]: { ...run, stage: 'submitting', request: { id: payload.requestId, digest: payload.requestDigest } } },
+      }
+    },
+  })
+}
+
+export function runSubmittedKind(kind: string, emitter: string): KindRule<TaskState> {
+  return defineKind<TaskState, { runId: string; submission: RunSubmission }, { submission: MemberSet }>({
+    guarantees: APPENDED,
+    members: RUN_SUBMITTED_MEMBERS,
+    nested: { submission: SUBMISSION_MEMBERS },
+    emitter,
+    parse: (raw, where, nested) => {
+      const payload = record(raw, where)
+      const at = `${where}.submission`
+      const submission = record(payload['submission'], at)
+      assertClosedKeys(submission, nested.submission, at)
+      const sourceAt = `${at}.source`
+      const source = record(submission['source'], sourceAt)
+      assertClosedKeys(source, SOURCE_MEMBERS, sourceAt)
+      const eventCount = source['eventCount']
+      if (typeof eventCount !== 'number' || !Number.isSafeInteger(eventCount) || eventCount < 0)
+        refuse('malformed-payload', `${sourceAt}.eventCount must be a non-negative safe integer`)
+      const executionFailure = maybeText(submission, 'executionFailure', at)
+      return {
+        runId: text(payload, 'runId', where),
+        submission: {
+          requestId: text(submission, 'requestId', at),
+          requestDigest: digest(submission, 'requestDigest', at),
+          programDigest: digest(submission, 'programDigest', at),
+          artifactDigest: digest(submission, 'artifactDigest', at),
+          inputDigests: inputList(submission['inputDigests'], `${at}.inputDigests`, BUBBLE_INPUT_MEMBERS),
+          source: { sessionId: text(source, 'sessionId', sourceAt), eventCount, digest: digest(source, 'digest', sourceAt) },
+          ...(executionFailure === undefined ? {} : { executionFailure }),
+        },
+      }
+    },
+    reduce: (state, envelope, payload) => {
+      const where = `${kind} #${envelope.seq}`
+      const run = requireRun(state, payload.runId, where)
+      requireResponsible(state, envelope.actor, where)
+      if (run.status !== 'running' || run.stage !== 'submitting')
+        refuse('illegal-transition', `${where} cannot submit run "${payload.runId}" in ${run.status}/${run.stage}`)
+      if (run.request?.id !== payload.submission.requestId || run.request.digest !== payload.submission.requestDigest)
+        refuse('command-conflict', `${where} does not match the submission request reserved for run "${payload.runId}"`)
+      assertInputsBound(run.bubble, payload.submission.inputDigests, where)
+      return {
+        ...state,
+        runs: { ...state.runs, [payload.runId]: { ...run, stage: 'submitted', submission: payload.submission, submittedAt: envelope.at } },
       }
     },
   })
@@ -226,6 +265,9 @@ export function evidenceProducedKind(
       const run = requireRun(state, payload.runId, where)
       if (run.status !== 'running')
         refuse('illegal-transition', `${where} judges run "${payload.runId}", which already settled ${run.status}`)
+      if (run.submission?.executionFailure !== undefined) refuse('illegal-transition', `${where} cannot judge a failed program execution`)
+      if (run.stage === 'submitting')
+        refuse('illegal-transition', `${where} cannot judge run "${payload.runId}" before its submission is sealed`)
 
       const criterion = contract.criteria.find(candidate => candidate.criterionId === payload.criterionId)
       if (criterion === undefined)
@@ -255,6 +297,8 @@ export function evidenceProducedKind(
       // A verdict is bound to the inputs the run declared it executed against. Without this,
       // swapping an input after the fact would leave the old pass standing.
       assertInputsBound(run.bubble, payload.inputDigests, where)
+      if (run.submission !== undefined && run.submission.artifactDigest !== payload.artifactDigest)
+        refuse('evidence-input-mismatch', `${where} judges artifact ${payload.artifactDigest}, but run "${payload.runId}" submitted ${run.submission.artifactDigest}`)
 
       if (run.evidence.some(entry => entry.criterionId === payload.criterionId))
         refuse(
@@ -309,6 +353,8 @@ export function runVerifiedKind(kind: string, emitter: string): KindRule<TaskSta
       const run = requireRun(state, payload.runId, where)
       if (run.status !== 'running')
         refuse('illegal-transition', `${where} settles run "${payload.runId}" again; it is already ${run.status}`)
+      if (run.submission?.executionFailure !== undefined)
+        refuse('illegal-transition', `${where} cannot verify run "${payload.runId}" after a failed program execution`)
 
       // Invariant 3: every criterion needs a passing verdict from its own implementation. Which
       // verdict counts as a criterion's is `verdictFor`'s rule, asked here rather than restated.
@@ -353,25 +399,6 @@ export function runFailedKind(kind: string, emitter: string): KindRule<TaskState
   })
 }
 
-/**
- * `method/consumed` (E2): the apparatus records that a run used one method of the revision it was
- * pinned to, and where that claim comes from.
- *
- * Four rules, all on the task's own subject:
- *
- * 1. **The run exists.** A consumption fact about an attempt nobody started is refused by name.
- * 2. **The revision is the run's pin** (`sameRevision`: environment, revision id and content
- *    digest). A method version the run was never pinned to is not one it can have consumed, so
- *    "I used something I was not pinned to" is not expressible.
- * 3. **One `(runId, method)` pair is consumed once.** A second fact for the same pair is
- *    `evidence-conflict`, exactly as a second verdict on one criterion is.
- * 4. **`source` is required and non-empty** — parsed by the closed payload, not defaulted. It
- *    answers "where does this claim come from", and a claim with no source is not a record.
- *
- * What it deliberately does **not** decide: whether the run has settled. Consumption is what the
- * apparatus observed while the attempt ran, and a report written after the settlement is still a
- * record of it; refusing those would refuse the honest order of a real execution.
- */
 export function methodConsumedKind(kind: string, emitter: string): KindRule<TaskState> {
   return defineKind<TaskState, { runId: string; revision: RevisionRef; method: string; source: string }, { revision: MemberSet }>({
     guarantees: APPENDED,
@@ -390,6 +417,8 @@ export function methodConsumedKind(kind: string, emitter: string): KindRule<Task
     reduce: (state, envelope, payload) => {
       const where = `${kind} #${envelope.seq}`
       const run = requireRun(state, payload.runId, where)
+      if (run.status !== 'running' || run.stage !== 'working')
+        refuse('illegal-transition', `${where} cannot record method consumption for run "${payload.runId}" in ${run.status}/${run.stage}`)
       if (!sameRevision(run.revision, payload.revision))
         refuse(
           'evidence-input-mismatch',

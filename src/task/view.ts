@@ -1,31 +1,12 @@
-/**
- * The one read projection for a task, and the two renderings of it.
- *
- * There is exactly one projection per subject, owned here. An agent reads it as text; a UI
- * consumes the same `TaskView` object unchanged. Neither re-derives anything — that is what keeps
- * a second interpretation of the facts from existing.
- *
- * The **receipt** is where the guarantee vocabulary pays off. An execution receipt is *derived*
- * from the run's own recorded facts at read time, so it is never written and the protocol declares
- * no kind for it. It carries what the verdicts actually pinned — the verifier implementation and
- * the artifact content it judged — so a later artifact change cannot inherit an old verdict. The
- * facts are its only input: the bound it names is the prefix it was folded from, and its
- * consumption says whether a verdict has been formed on those inputs yet or only declared.
- *
- * A phase is never inferred from absence. A task that has a contract and no run is
- * `awaiting-run`, not `failed`; a failure with no recorded reason reports `null` rather than an
- * invented sentence.
- *
- * @module singularity-core/task/view
- */
+/** Shared task projection and execution receipts derived from each run's sealed control prefix. */
 
-import { digestOf, type Envelope } from '../protocol/envelope.ts'
+import { assertEnvelope, digestOf, type Envelope } from '../protocol/envelope.ts'
 import { foldSubject } from '../protocol/fold.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 import type { BubbleInput } from './bubble.ts'
 import type { AcceptanceCriterion, TaskContract } from './contract.ts'
-import { TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunState, type RunStatus, type TaskState } from './protocol.ts'
+import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunState, type RunStatus, type RunSubmission, type TaskState } from './protocol.ts'
 
 /** One criterion and the verdict it received, as a reader sees it. */
 export interface CriterionVerdictView {
@@ -77,46 +58,15 @@ export interface ReceiptView {
   readonly runId: string
   readonly contractDigest: string
   readonly revision: RevisionRef
-  /**
-   * The committed read bound the receipt was derived from: one past the sequence number the last
-   * fact of the folded prefix carries itself. It is computed **from those facts**, never from the
-   * array's length and never from a number a caller states beside them — the two come apart exactly
-   * when the array is not a log prefix, which is why such an array derives no receipt at all (see
-   * `projectReceipt`). A receipt therefore cannot name a bound that does not hold its own evidence:
-   * a prefix that stops before the run settled yields no receipt, and a bound past the last fact the
-   * array holds is refused rather than reported. Two readers holding the same prefix agree on the
-   * bound, and re-deriving from that prefix reproduces the receipt, which is what makes "this
-   * receipt accounts for exactly these facts" a property a reader checks instead of one it assumes.
-   */
+  /** One past this run's terminal control fact; later facts do not move this bound. */
   readonly cutoff: number
   readonly executor: { readonly emitter: string; readonly actor: string }
   readonly status: 'verified' | 'failed'
   readonly startedAt: string
   readonly finishedAt: string
-  /**
-   * What the attempt consumed, and which of the two the receipt can honestly say it is.
-   *
-   * `'declared'` means no verdict has been recorded yet: the list is the run's own statement of the
-   * inputs it would work on. `'judged'` means a verdict **fact** exists for this run, so the list is
-   * read from that verdict's recorded `inputDigests` rather than from the bubble.
-   *
-   * That one bit is the whole of what the log establishes, and it is worth stating exactly. The two
-   * lists are equal **by construction**: `evidence/produced` is refused unless its inputs are exactly
-   * the run's declared ones (`assertInputsBound`), so no log can hold a run whose judged inputs differ
-   * from its declaration. A verdict emitted with the bubble's digests and no bytes read at all is
-   * therefore indistinguishable, in the log and in this projection, from one whose inputs a verifier
-   * hashed from the bytes it actually read: nothing records the read, and a verifier's own digest
-   * claim is not independent testimony about itself. Do not read `'judged'` as "the bytes were read"
-   * — it means "a verdict was recorded against the declared inputs", and a reader that needs more
-   * than that needs evidence this stack does not hold.
-   *
-   * So the distinction is the content here, not a second copy of the values: what changes between
-   * the two bases is whether a verdict exists at all, and a consumer that treats `'declared'` as
-   * "not yet judged" is reading the one thing this field is entitled to say.
-   *
-   * The workspace has no judged counterpart — no fact records the directory anything actually read
-   * — so it stays a declaration on both bases, and is reported as one.
-   */
+  readonly submission: RunSubmission | null
+  readonly source: RunSubmission['source'] | null
+  /** Judged inputs name a recorded verdict; the workspace remains the run's declaration. */
   readonly consumption: {
     readonly basis: typeof DECLARED_BASIS | typeof JUDGED_BASIS
     readonly inputs: readonly BubbleInput[]
@@ -202,45 +152,31 @@ export function projectTask(state: TaskState): TaskView {
   }
 }
 
-/**
- * Derive one terminal run's execution receipt from the committed facts it is derived from.
- *
- * The facts are the whole input, and they must be a **contiguous log prefix**: each fact's own
- * sequence number has to be its position in the array, so the array is `seq 0…n-1` with nothing
- * missing. The receipt's `cutoff` is then one past the last sequence number the array carries, which
- * is the same number as its length — but derived from the facts rather than from the length, so a
- * caller cannot choose it by choosing the array. A subject-filtered array (this task's facts with
- * another subject's facts between them) fails that check and derives nothing: its facts are real,
- * the ones between them are real too, so a bound over it would claim facts this receipt never saw.
- * Both shapes below are refusals, not a re-labelled receipt. Only a prefix can say what a receipt
- * has to say — "this bound accounts for exactly the facts I was folded from" — and a filtered array
- * cannot.
- *
- * The old shape took a state and a cutoff as independent arguments, which let a caller pass a head
- * state with `1` and get the seq-4 verdict back under a one-fact claim. A parameter that can be
- * wrong is a parameter that will be, so there is none.
- *
- * Refuses a run that has not settled *within that prefix*: a receipt is what a terminal run leaves
- * behind, and deriving one for an attempt these facts still show running would be a completion
- * claim nobody made.
- */
+/** Validate the supplied log prefix and derive a receipt at this run's terminal control fact. */
 export function projectReceipt(
   registry: ProtocolRegistry,
   entries: readonly Envelope[],
   taskId: string,
   runId: string,
 ): ReceiptView {
-  // The bound, from the facts: one past the last sequence number this array carries. `seq` is
-  // positional in the log, so an array that is a prefix ends at its own length - and one that is not
-  // does not, whatever its length. That difference is the whole guard below: the bound is derived
-  // from the facts, so a caller cannot choose it by choosing which facts to hand in.
-  const cutoff = 1 + (entries.at(-1)?.seq ?? 0)
-  if (cutoff !== entries.length)
-    refuse(
-      'unknown-run',
-      `the ${entries.length} fact(s) handed in are not a contiguous log prefix: the last carries seq ${entries.at(-1)?.seq}, so a receipt folded from them could only name a bound of ${cutoff} over facts it does not hold. A receipt is derived from the prefix a reader holds, never from an array a caller filtered`,
-    )
-  const state = foldSubject<TaskState>(registry, entries, TASK_PROTOCOL, TASK_VERSION, taskId)
+  let cutoff: number | undefined
+  let previousDigest: string | null = null
+  for (const [index, entry] of entries.entries()) {
+    const checked = assertEnvelope(entry)
+    if (checked.seq !== index)
+      refuse('chain-broken', `receipt input is not a contiguous log prefix: position ${index} carries seq ${checked.seq}`)
+    if (checked.prevDigest !== previousDigest)
+      refuse('chain-broken', `receipt input fact #${checked.seq} does not link to its predecessor`)
+    const rule = registry.ruleFor(checked.protocol, checked.version, checked.kind)
+    const payload = rule.parse(checked.payload, `${checked.protocol}@${checked.version} ${checked.kind} #${checked.seq}`)
+    if (
+      checked.protocol === TASK_PROTOCOL && checked.version === TASK_VERSION && checked.subject === taskId &&
+      (checked.kind === TASK_KINDS.runVerified || checked.kind === TASK_KINDS.runFailed) &&
+      (payload as { readonly runId: string }).runId === runId
+    ) cutoff ??= checked.seq + 1
+    previousDigest = checked.digest
+  }
+  const state = foldSubject<TaskState>(registry, entries.slice(0, cutoff), TASK_PROTOCOL, TASK_VERSION, taskId)
   const run = state?.runs[runId]
   if (state === undefined || run === undefined)
     refuse('unknown-run', `the ${entries.length} fact(s) handed in hold no run "${runId}" of task "${taskId}", so there is no receipt to derive`)
@@ -250,15 +186,9 @@ export function projectReceipt(
       'illegal-transition',
       `run "${runId}" is still running in the ${entries.length} fact(s) handed in; a receipt is what a terminal run leaves behind`,
     )
-  // Unreachable by construction - the one reducer that settles a run stamps the time together with
-  // the status - so this is not a rule that can fire; it is how the receipt reads a settled run's
-  // time as a settled value rather than as something a caller might have left out.
-  if (run.finishedAt === undefined)
+  if (run.finishedAt === undefined || cutoff === undefined)
     refuse('illegal-transition', `run "${runId}" settled ${run.status} without a settlement time; the log cannot produce that`)
 
-  // Judged or only declared: the verdict's own record is the honest source for the inputs, and the
-  // receipt says which of the two it is reporting. Every verdict of a run is bound to the run's
-  // bubble at record time, so `evidence[0]` carries the one judged list there can be.
   const judged = run.evidence[0]
   const declared = run.bubble?.inputs ?? []
 
@@ -277,6 +207,8 @@ export function projectReceipt(
     status: run.status,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
+    submission: run.submission ?? null,
+    source: run.submission?.source ?? null,
     criteria: contract.criteria.map(criterion => {
       const judged = verdictOf(run, criterion.criterionId)
       return {

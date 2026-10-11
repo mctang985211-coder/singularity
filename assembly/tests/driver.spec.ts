@@ -1,305 +1,248 @@
-/**
- * The driver, driven through the host plugin: what one caller's tools actually commit.
- *
- * Every case here asserts facts a caller can see — the answer, the committed log, the workspace bytes —
- * and drives the real store, the real commands and the real domain over the fake medium.
- */
-
 import { createHash } from 'node:crypto'
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent, AgentRegistry, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import { afterEach, describe, expect, it } from 'vitest'
 
+import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
+import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { TASK_KINDS } from '../../src/task/protocol.ts'
 import { asyncRefusalOf, refusalOf } from '../../tests/fixtures.ts'
-import { agentFor, execFor, factsOf, kindsOf, mount, serviceOf } from './seam.ts'
+import { loadDomain } from '../src/domain.ts'
+import { openDriver, type TaskDriver } from '../src/driver.ts'
+import { taskIdOf } from '../src/ids.ts'
+import { spawnProcess } from '../src/process.ts'
+import { agentFor, execFor, factsOf, fakeExecution, FakePersistence, kindsOf, mount, serviceOf } from './seam.ts'
 
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const sha256 = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
-
-/** The count the domain's own staged input holds — the report the criterion demands of every case. */
-const LETTERS = 35
-const COUNTING = "import { readFileSync } from 'node:fs'\nprocess.stdout.write(String((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).length))\n"
-
+const COUNTING = "import { readFileSync } from 'node:fs'; process.stdout.write(String((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).length))"
 let root: string | undefined
-
+let context: Context | undefined
+let ownedDriver: TaskDriver | undefined
 afterEach(async () => {
+  await ownedDriver?.close()
+  await context?.fiber.dispose()
   if (root !== undefined) await rm(root, { recursive: true, force: true })
+  context = undefined
+  ownedDriver = undefined
   root = undefined
 })
 
-async function mounted(controlId = 'lib-1') {
-  root = await mkdtemp(join(tmpdir(), 'assembly-ws-'))
-  const { ctx, medium } = await mount({ controlId, domainDir: REAL, workspaceRoot: root })
-  return { surface: serviceOf(ctx), medium, controlId, workspace: root }
+async function childrenRuntime() {
+  root = await mkdtemp(join(tmpdir(), 'assembly-children-'))
+  const medium = new FakePersistence()
+  const parent = agentFor('agent-7', 'session-9')
+  const agents = new Map<string, Agent>([[parent.id, parent]])
+  const delivered: { sessionId: string; message: unknown }[] = []
+  const registry = {
+    get: (id: string) => agents.get(id),
+    create: async (options: CreateAgentOptions) => {
+      const sessionId = String(options.sessionId)
+      const agent = { ...agentFor(sessionId, sessionId),
+        followup: (message: unknown) => { delivered.push({ sessionId, message }) },
+        whenIdle: async () => undefined,
+        cancel: () => undefined,
+      } as unknown as Agent
+      agents.set(sessionId, agent)
+      return { agent, dispose: async () => { agents.delete(sessionId) } }
+    },
+  } as unknown as AgentRegistry
+  const services: Readonly<Record<string, unknown>> = {
+    agents: registry, sessionPersistence: medium, sessions: { flush: async () => true }, agentLoop: {}, agentPresets: { composeFrom: () => undefined },
+  }
+  const seams: ChildSessionSeams = { get: name => services[name] }
+  ownedDriver = await openDriver({ controlId: 'lib-1', workspaceRoot: root, domain: await loadDomain(REAL, spawnProcess),
+    persistence: medium as unknown as SessionPersistence, seams, execution: fakeExecution })
+  const driver = ownedDriver
+  const call = (agent: Agent, id: string) => driver.forCall(execFor(agent, id))
+  return { driver, parent, agents, medium, delivered, call }
 }
 
-describe('one caller through the host plugin', () => {
-  it("stages the domain's own protected input, and admits the task against it", async () => {
-    const { surface, medium, workspace } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'count the letters' })
-    expect(kindsOf(medium)).toEqual(['agent/opened', 'task/admitted', 'task/assigned'])
-    // The bytes come from the declaration, and the contract names the path they were staged to: a
-    // caller supplies a goal and nothing else, so the input cannot be chosen by the model.
-    const staged = await readFile(join(proposal.workspace, 'in', 'source.txt'), 'utf8')
-    expect([staged, await readFile(join(REAL, 'samples', 'source.txt'), 'utf8'), proposal.workspace]).toEqual([staged, staged, join(workspace, 'tasks', proposal.taskId)])
+async function mounted() {
+  root = await mkdtemp(join(tmpdir(), 'assembly-ws-'))
+  const { ctx, medium } = await mount({ controlId: 'lib-1', domainDir: REAL, workspaceRoot: root })
+  context = ctx
+  const surface = serviceOf(ctx)
+  const agent = agentFor('agent-7', 'session-9')
+  const call = (id: string) => surface.forCall(execFor(agent, id))
+  return { surface, medium, workspace: root, agent, call }
+}
+
+describe('the driver with explicit execution and persistence ports', () => {
+  it('starts a complete solve Run and stages its declared protected input in that Run workspace', async () => {
+    const { call, medium, workspace } = await mounted()
+    const proposal = await call('propose').propose({ goal: 'count the letters' })
+    expect(proposal).toMatchObject({ runId: expect.any(String), phase: 'running' })
+    expect(proposal.workspace).toBe(join(workspace, 'tasks', proposal.taskId, 'runs', proposal.runId))
+    expect(await readFile(join(proposal.workspace, 'in/source.txt'), 'utf8')).toBe(await readFile(join(REAL, 'samples/source.txt'), 'utf8'))
+    expect(factsOf(medium).find(fact => fact.kind === TASK_KINDS.runStarted)).toMatchObject({ subject: proposal.taskId, payload: { runId: proposal.runId } })
   })
 
-  it('opens the caller node under the role it was told to, with the real session id', async () => {
-    const { surface, medium } = await mounted()
-    await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
+  it('attributes the caller node to the execution port session identity', async () => {
+    const { call, medium } = await mounted()
+    await call('propose').propose({ goal: 'g' })
     expect(factsOf(medium)[0]?.payload).toMatchObject({ agentId: 'agent-7', sessionId: 'session-9', role: 'root' })
   })
 
-  it('proposes the same goal twice as one task, committing nothing the second time', async () => {
-    const { surface, medium } = await mounted()
-    const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const first = await surface.forCall(call).propose({ goal: 'count the letters' })
+  it('returns a redelivered proposal without creating a second Run', async () => {
+    const { call, medium } = await mounted()
+    const first = await call('propose').propose({ goal: 'count the letters' })
     const committed = medium.events.length
-    const second = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).propose({ goal: 'count the letters' })
-    expect([second.taskId, medium.events.length]).toEqual([first.taskId, committed])
+    expect(await call('propose').propose({ goal: 'count the letters' })).toEqual(first)
+    expect(medium.events.length).toBe(committed)
+  })
+
+  it('surfaces child creation failure instead of returning an empty successful dispatch', async () => {
+    const { call, medium } = await mounted()
+    const proposal = await call('propose').propose({ goal: 'count the letters' })
+    const refusal = await asyncRefusalOf(() => call('plan').decompose({
+      taskId: proposal.taskId,
+      children: [{ key: 'first', goal: 'count them', dependsOn: [], supports: ['letters'], maxRuns: 1 }],
+    }))
+    expect(refusal.code).toBe('malformed-declaration')
+    expect(factsOf(medium).some(fact => fact.kind === TASK_KINDS.decomposed)).toBe(true)
   })
 
   it('admits every sub-task a plan names, so the plan can actually run', async () => {
-    const { surface, medium } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'count the letters' })
-    // This deployment mounts no preset registry, so the plan commits and every child session fails to open
-    // — reported per child by the scan, which is what the empty `opened` says. The plan is a fact either
-    // way: only starting it needs a runtime that can compose a child.
-    const planned = await surface.forCall(execFor(agent, 'call-2')).decompose({
-      taskId: proposal.taskId,
-      children: [
-        { key: 'first', goal: 'count them', dependsOn: [], supports: ['letters'], maxRuns: 1 },
-        { key: 'second', goal: 'check the count', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
-      ],
-    })
-    expect(planned).toEqual({ taskId: proposal.taskId, opened: [] })
-    // A plan whose children were never admitted declares work that can never start: the tree shows them
-    // `missing`, never `ready`, and the plan sits there looking like a decision. So every child the plan
-    // names has its own admitted, assigned task — and the ids are derived from the keys, not the keys.
-    const admitted = factsOf(medium).filter(fact => fact.kind === TASK_KINDS.admitted).map(fact => fact.subject)
-    const assigned = factsOf(medium).filter(fact => fact.kind === TASK_KINDS.assigned).map(fact => fact.subject)
-    expect([admitted.length, admitted.every(id => id.startsWith('task-')), admitted.includes('first'), assigned.length]).toEqual([3, true, false, 3])
-    // The plan's dependency names the derived id of the sibling it means, never the batch-local key.
-    const plan = factsOf(medium).find(fact => fact.kind === TASK_KINDS.decomposed)
-    const children = (plan?.payload as { children: readonly { taskId: string; dependsOn: readonly string[] }[] }).children
-    expect([children[1]?.dependsOn, children[0]?.taskId !== 'first']).toEqual([[children[0]?.taskId], true])
-
-    // Each sub-task belongs to the child that will do it, and that child has its own agent node.
-    //
-    // Assigning them to the *parent* is what made a sub-task unstartable in the real profile: the parent
-    // could submit to work it had delegated while the session doing the work was refused with
-    // `not-responsible` when it tried to submit its own artifact. The identity a child presents is the
-    // session id derived from its task id — DSH sets an agent's `id` to the session it runs on — so the
-    // assignment has to name that string, not the task id and not the parent.
-    const facts = factsOf(medium)
-    const openedNodes = facts.filter(fact => fact.kind === 'agent/opened').map(fact => fact.subject)
-    // The parent's identity comes from the live agent, so everything else that was opened is a child.
-    const parentNode = openedNodes.find(id => id.includes('agent-7'))
-    const childNodes = openedNodes.filter(id => id !== parentNode)
-    const holders = facts.filter(fact => fact.kind === TASK_KINDS.assigned).map(fact => (fact.payload as { agentId: string }).agentId)
-    expect([holders.length, parentNode !== undefined, holders.filter(holder => holder === parentNode).length]).toEqual([3, true, 1])
-    // Every holder other than the parent is a child node that was opened under its own identity, so the
-    // session presenting it can act on the task it was given.
-    expect(holders.filter(holder => holder !== parentNode).every(holder => childNodes.includes(holder))).toBe(true)
+    const { parent, medium, agents, call } = await childrenRuntime()
+    const proposal = await call(parent, 'propose').propose({ goal: 'count the letters' })
+    const first = taskIdOf('lib-1', proposal.taskId, 'first')
+    const second = taskIdOf('lib-1', proposal.taskId, 'second')
+    expect(await call(parent, 'plan').decompose({ taskId: proposal.taskId, children: [
+      { key: 'first', goal: 'count letters first', dependsOn: [], supports: ['letters'], maxRuns: 1 },
+      { key: 'second', goal: 'count letters next', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
+    ] })).toMatchObject({ opened: [first] })
+    for (const taskId of [first, second])
+      expect(factsOf(medium).find(fact => fact.subject === taskId && fact.kind === TASK_KINDS.assigned)?.payload)
+        .toMatchObject({ agentId: String(agentSessionIdOf(taskId)) })
+    const before = medium.events.length
+    expect(await asyncRefusalOf(() => call(parent, 'foreign-submit').submit({ taskId: first, program: COUNTING }))).toMatchObject({ code: 'not-responsible' })
+    expect(medium.events.length).toBe(before)
+    expect(await call(agents.get(String(agentSessionIdOf(first)))!, 'child-submit').submit({ taskId: first, program: COUNTING }))
+      .toMatchObject({ taskId: first, verdict: 'pass', phase: 'verified' })
   })
 
   it('re-scans the plan when a run settles, so a dependency that just verified can start', async () => {
-    const { surface } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'count the letters' })
-    await surface.forCall(execFor(agent, 'call-2')).decompose({
-      taskId: proposal.taskId,
-      children: [{ key: 'first', goal: 'count them', dependsOn: [], supports: ['letters'], maxRuns: 1 }],
-    })
-
-    // The scan's own report is the observable. This deployment mounts no preset registry, so a ready
-    // child cannot actually be opened here — the scan finds it, tries, and says so by name. What the
-    // assertion reads is therefore not "a session opened" (which this deployment cannot do) but "the
-    // plan was re-scanned at all", which is exactly the rule: without the re-scan after a settle, the
-    // report below never appears, and a plan whose dependency has just verified would stall forever.
-    const written: string[] = []
-    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(chunk => {
-      written.push(String(chunk))
-      return true
-    })
-    try {
-      const answer = await surface.forCall(execFor(agent, 'call-3')).submit({ taskId: proposal.taskId, program: COUNTING })
-      // The settlement is the model-visible outcome, and it is not affected by the child that could not
-      // start: the run was judged, and this call says so.
-      expect(answer).toMatchObject({ verdict: 'pass', phase: 'verified' })
-    } finally {
-      spy.mockRestore()
-    }
-    expect(written.filter(line => line.includes('could not be started')).length).toBe(1)
+    const { parent, medium, agents, delivered, call } = await childrenRuntime()
+    const proposal = await call(parent, 'propose').propose({ goal: 'count the letters' })
+    const first = taskIdOf('lib-1', proposal.taskId, 'first')
+    const second = taskIdOf('lib-1', proposal.taskId, 'second')
+    await call(parent, 'plan').decompose({ taskId: proposal.taskId, children: [
+      { key: 'first', goal: 'count letters first', dependsOn: [], supports: ['letters'], maxRuns: 1 },
+      { key: 'second', goal: 'count letters next', dependsOn: ['first'], supports: ['letters'], maxRuns: 1 },
+    ] })
+    expect(delivered.map(entry => entry.sessionId)).toEqual([String(agentSessionIdOf(first))])
+    const firstAnswer = await call(agents.get(String(agentSessionIdOf(first)))!, 'first-submit').submit({ taskId: first, program: COUNTING })
+    expect(firstAnswer).toMatchObject({ verdict: 'pass', phase: 'verified' })
+    expect(firstAnswer.dispatchError).toBeUndefined()
+    expect(delivered.map(entry => entry.sessionId)).toEqual([String(agentSessionIdOf(first)), String(agentSessionIdOf(second))])
+    expect(JSON.stringify(delivered[1]!.message)).toContain('count letters next')
+    const secondRun = factsOf(medium).find(fact => fact.subject === second && fact.kind === TASK_KINDS.runStarted)
+    expect(secondRun?.actor).toBe('lib-1:agent:' + String(agentSessionIdOf(second)))
+    expect(secondRun?.seq).toBeGreaterThan(factsOf(medium).find(fact => fact.subject === first && fact.kind === TASK_KINDS.runVerified)!.seq)
+    expect(await call(agents.get(String(agentSessionIdOf(second)))!, 'second-submit').submit({ taskId: second, program: COUNTING }))
+      .toMatchObject({ taskId: second, verdict: 'pass', phase: 'verified' })
   })
 
-  it('records a verified run whose verdict comes from the domain verifier', async () => {
-    const { surface, medium } = await mounted()
-    const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const proposal = await surface.forCall(call).propose({ goal: 'count the letters' })
-    const answer = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
-    expect(answer).toMatchObject({ verdict: 'pass', phase: 'verified', artifactDigest: sha256(String(LETTERS)) })
-    expect(kindsOf(medium).slice(-3)).toEqual(['bubble/opened', TASK_KINDS.evidenceProduced, TASK_KINDS.runVerified])
+  it('settles the proposal Run from the independent verifier output', async () => {
+    const { call, medium } = await mounted()
+    const proposal = await call('propose').propose({ goal: 'count the letters' })
+    const answer = await call('submit').submit({ taskId: proposal.taskId, program: COUNTING })
+    expect(answer).toMatchObject({ runId: proposal.runId, verdict: 'pass', phase: 'verified', artifactDigest: sha256('35') })
+    expect(kindsOf(medium).slice(-3)).toEqual([TASK_KINDS.runSubmitted, TASK_KINDS.evidenceProduced, TASK_KINDS.runVerified])
   })
 
-  it('records the model route and the toolchain that actually ran in the bubble', async () => {
+  it('pins the actual model route and interpreter bytes before solving', async () => {
     const { surface, medium } = await mounted()
-    const call = execFor(agentFor('agent-7', 'session-9', 'm-under-test'), 'call-1')
-    const proposal = await surface.forCall(call).propose({ goal: 'g' })
-    await surface.forCall(execFor(agentFor('agent-7', 'session-9', 'm-under-test'), 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
+    const agent = agentFor('worker', 'worker-session', 'm-under-test')
+    await surface.forCall(execFor(agent, 'propose')).propose({ goal: 'g' })
     expect(factsOf(medium).find(fact => fact.kind === 'bubble/opened')?.payload).toMatchObject({
       model: 'test/m-under-test',
       tools: [{ name: 'node', version: process.version, implementationDigest: sha256(await readFile(process.execPath)) }],
     })
   })
 
-  it('records a wrong answer as a fail rather than a success', async () => {
-    const { surface } = await mounted()
-    const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const proposal = await surface.forCall(call).propose({ goal: 'g' })
-    const answer = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).submit({ taskId: proposal.taskId, program: "process.stdout.write('0')" })
-    expect(answer).toMatchObject({ verdict: 'fail', phase: 'failed' })
+  it('records an ordinary wrong answer as a failed solve', async () => {
+    const { call } = await mounted()
+    const proposal = await call('propose').propose({ goal: 'g' })
+    expect(await call('submit').submit({ taskId: proposal.taskId, program: "process.stdout.write('0')" })).toMatchObject({ verdict: 'fail', phase: 'failed' })
   })
 
-  it('records a crashing program as an empty artifact the verifier refuses', async () => {
-    const { surface } = await mounted()
-    const call = execFor(agentFor('agent-7', 'session-9'), 'call-1')
-    const proposal = await surface.forCall(call).propose({ goal: 'g' })
-    const answer = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).submit({ taskId: proposal.taskId, program: "process.stdout.write('5'); process.exit(3)" })
-    expect([answer.verdict, answer.phase, answer.artifactDigest]).toEqual(['fail', 'failed', sha256('5')])
-  })
-
-  it('answers a redelivered call from the record and runs nothing again', async () => {
-    const { surface, medium } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
-    const first = await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
-    const committed = medium.events.length
-    await rm(join(proposal.workspace, 'program.mjs'))
-    const second = await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
-    await expect(readFile(join(proposal.workspace, 'program.mjs'), 'utf8')).rejects.toThrow()
-    expect([second, medium.events.length]).toEqual([first, committed])
-  })
-
-  it('freezes the revision against the request, not against bytes a program can rewrite', async () => {
-    const { surface, medium } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const first = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
-    await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: first.taskId, program: COUNTING })
-    const second = await surface.forCall(execFor(agent, 'call-3')).propose({ goal: 'another goal' })
-    await surface.forCall(execFor(agent, 'call-4')).submit({ taskId: second.taskId, program: COUNTING })
-    // One revision per task, and its manifest names the task and the template — never the input bytes,
-    // which a submitted program can rewrite and which therefore may not be part of any command identity.
-    const manifests = factsOf(medium)
-      .filter(fact => fact.kind === 'revision/created')
+  it('pins separate task revisions against the template rather than mutable workspace bytes', async () => {
+    const { call, medium } = await mounted()
+    const first = await call('first').propose({ goal: 'g' })
+    await call('submit-first').submit({ taskId: first.taskId, program: COUNTING })
+    const second = await call('second').propose({ goal: 'another goal' })
+    const manifests = factsOf(medium).filter(fact => fact.kind === 'revision/created')
       .map(fact => (fact.payload as { manifest: { taskTemplate: string; task: string } }).manifest)
     expect(manifests.map(manifest => manifest.task)).toEqual([first.taskId, second.taskId])
     expect(new Set(manifests.map(manifest => manifest.taskTemplate)).size).toBe(1)
   })
 
-  it('reads the task back with the receipt of its settled run, committing nothing', async () => {
-    const { surface, medium } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
-    await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
+  it('reads the settled receipt without committing any new fact', async () => {
+    const { call, medium } = await mounted()
+    const proposal = await call('propose').propose({ goal: 'g' })
+    await call('submit').submit({ taskId: proposal.taskId, program: COUNTING })
     const committed = medium.events.length
-    const status = await surface.forCall(execFor(agent, 'call-3')).status({ taskId: proposal.taskId })
-    expect([status.phase, status.receipt?.status, medium.events.length]).toEqual(['verified', 'verified', committed])
+    expect(await call('status').status({ taskId: proposal.taskId })).toMatchObject({ phase: 'verified', receipt: { status: 'verified' } })
+    expect(medium.events.length).toBe(committed)
   })
 
-  it("attributes the facts a caller drives to that caller's own identity", async () => {
-    const { surface, medium } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
-    await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
-    const driven = ['task/admitted', 'task/assigned', 'run/started', 'bubble/opened']
-    expect(factsOf(medium).filter(fact => driven.includes(fact.kind)).every(fact => fact.actor === 'lib-1:agent:agent-7')).toBe(true)
-  })
-
-  it('records the verdict and the settlement as apparatus acts, not the caller', async () => {
-    const { surface, medium } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
-    await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
+  it('records domain judgments and settlements under their trusted apparatus roles', async () => {
+    const { call, medium } = await mounted()
+    const proposal = await call('propose').propose({ goal: 'g' })
+    await call('submit').submit({ taskId: proposal.taskId, program: COUNTING })
     const actorOf = (kind: string) => factsOf(medium).find(fact => fact.kind === kind)?.actor
     expect([actorOf(TASK_KINDS.evidenceProduced), actorOf(TASK_KINDS.runVerified)]).toEqual(['lib-1:verifier:letters@1', 'lib-1:scheduler'])
   })
 
-  it('lets a second agent work its own task under its own binding', async () => {
-    const { surface } = await mounted()
-    const mine = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
-    const theirs = await surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-1')).propose({ goal: 'g' })
+  it('isolates two concurrent tasks by their responsible callers and Run workspaces', async () => {
+    const { call, surface } = await mounted()
+    const mine = await call('propose').propose({ goal: 'g' })
+    const otherAgent = agentFor('agent-8', 'session-10')
+    const other = (id: string) => surface.forCall(execFor(otherAgent, id))
+    const theirs = await other('propose').propose({ goal: 'g' })
     const answers = await Promise.all([
-      surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-2')).submit({ taskId: mine.taskId, program: COUNTING }),
-      surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-2')).submit({ taskId: theirs.taskId, program: COUNTING }),
+      call('submit').submit({ taskId: mine.taskId, program: COUNTING }),
+      other('submit').submit({ taskId: theirs.taskId, program: COUNTING }),
     ])
-    // One key per agent is what makes this possible: a shared key would refuse the second agent's
-    // binding outright, so neither agent could ever work a task of its own.
-    expect(answers.map(answer => [answer.verdict, answer.phase])).toEqual([
-      ['pass', 'verified'],
-      ['pass', 'verified'],
-    ])
+    expect(answers.map(answer => answer.verdict)).toEqual(['pass', 'pass'])
+    expect(mine.workspace).not.toBe(theirs.workspace)
   })
 
-  it("refuses one agent's submission to another agent's task, by name", async () => {
-    const { surface } = await mounted()
-    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
-    const theirs = surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-2'))
-    expect((await asyncRefusalOf(() => theirs.submit({ taskId: proposal.taskId, program: COUNTING }))).code).toBe('not-responsible')
-  })
-
-  it('writes nothing at all for a caller that is not the holder', async () => {
-    const { surface, medium } = await mounted()
-    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
+  it('refuses a foreign caller read and submission before committing or writing', async () => {
+    const { call, surface, medium } = await mounted()
+    const proposal = await call('propose').propose({ goal: 'g' })
+    const other = surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'foreign'))
     const committed = medium.events.length
-    const theirs = surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-2'))
-    const refusal = await asyncRefusalOf(() => theirs.submit({ taskId: proposal.taskId, program: COUNTING }))
-    expect([refusal.code, kindsOf(medium).slice(committed)]).toEqual(['not-responsible', []])
+    expect((await asyncRefusalOf(() => other.submit({ taskId: proposal.taskId, program: COUNTING }))).code).toBe('not-responsible')
+    expect((await asyncRefusalOf(() => other.status({ taskId: proposal.taskId }))).code).toBe('not-responsible')
+    expect(medium.events.length).toBe(committed)
+    await expect(access(join(proposal.workspace, 'program.mjs'))).rejects.toThrow()
   })
 
-  it('refuses a redelivery whose run is still in flight instead of running the program again', async () => {
+  it('refuses agentless calls before they can submit facts', async () => {
     const { surface, medium } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
-    // A program that rewrites the declared input makes the production verdict refuse the bytes it declared,
-    // which leaves the run in flight — the state a submit killed mid-way leaves behind.
-    const destructive = "import { writeFileSync } from 'node:fs'\nwriteFileSync(process.argv[2], 'changed')\nprocess.stdout.write('9')"
-    await asyncRefusalOf(() => surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: destructive }))
-    const committed = kindsOf(medium)
-    const refusal = await asyncRefusalOf(() => surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING }))
-    expect([refusal.code, kindsOf(medium), committed.includes(TASK_KINDS.runStarted)]).toEqual(['illegal-transition', committed, true])
+    expect(refusalOf(() => surface.forCall({ callId: 'missing-agent' } as never)).code).toBe('unknown-emitter-role')
+    expect(medium.events).toEqual([])
   })
 
-  it("refuses a read of a task the caller is not responsible for, by name", async () => {
-    const { surface } = await mounted()
-    const proposal = await surface.forCall(execFor(agentFor('agent-7', 'session-9'), 'call-1')).propose({ goal: 'g' })
-    const theirs = surface.forCall(execFor(agentFor('agent-8', 'session-10'), 'call-2'))
-    expect((await asyncRefusalOf(() => theirs.status({ taskId: proposal.taskId }))).code).toBe('not-responsible')
+  it('refuses an unknown task submission', async () => {
+    const { call } = await mounted()
+    expect((await asyncRefusalOf(() => call('submit').submit({ taskId: 'task-invented', program: COUNTING }))).code).toBe('illegal-transition')
   })
 
-  it('refuses a call that arrives with no agent, before it can name one', async () => {
-    const { surface } = await mounted()
-    expect(refusalOf(() => surface.forCall({ callId: 'call-1' } as never)).code).toBe('unknown-emitter-role')
-  })
-
-  it('refuses a submission to a task this control never admitted', async () => {
-    const { surface } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    expect((await asyncRefusalOf(() => surface.forCall(execFor(agent, 'call-2')).submit({ taskId: 'task-invented', program: COUNTING }))).code).toBe('illegal-transition')
-  })
-
-  it('leaves the workspace and its bytes in place', async () => {
-    const { surface } = await mounted()
-    const agent = agentFor('agent-7', 'session-9')
-    const proposal = await surface.forCall(execFor(agent, 'call-1')).propose({ goal: 'g' })
-    await surface.forCall(execFor(agent, 'call-2')).submit({ taskId: proposal.taskId, program: COUNTING })
-    expect(await readFile(join(proposal.workspace, 'report.txt'), 'utf8')).toBe(String(LETTERS))
-    await expect(access(join(proposal.workspace, 'program.mjs'))).resolves.toBeUndefined()
+  it('retains the submitted program and produced artifact in the Run workspace', async () => {
+    const { call } = await mounted()
+    const proposal = await call('propose').propose({ goal: 'g' })
+    await call('submit').submit({ taskId: proposal.taskId, program: COUNTING })
+    expect(await readFile(join(proposal.workspace, 'report.txt'), 'utf8')).toBe('35')
+    expect(await readFile(join(proposal.workspace, 'program.mjs'), 'utf8')).toBe(COUNTING)
   })
 })

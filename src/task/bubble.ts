@@ -1,31 +1,3 @@
-/**
- * The bubble: the execution context one run happened in, declared before it is judged.
- *
- * A bubble is the **input snapshot** — the named content digests the work was done against — plus a
- * reference to the workspace. That is the minimum this phase needs, and it is deliberately not a
- * sandbox platform: no mounts, no caches, no `$DSH_HOME` handling. Upstream owns confinement, and
- * the frozen repo's own bubble docstring claimed a hiding its code never performed.
- *
- * Why it exists at all is the binding: **a verdict must name the inputs it was formed against, and
- * they must be the ones the run declared.** Without that, swapping an input after the fact leaves an
- * old `pass` standing. The binding is a pure same-subject check, because the bubble and the verdict
- * are both facts about the task.
- *
- * The declared input digests are a *claim about content*, not proof of it. Proving that the bytes
- * actually read hash to those digests is the execution adapter's job at the point of judging; a
- * string comparison here cannot establish it, and this module does not pretend otherwise.
- *
- * **The isolation manifest is required, not decorative.** Fixing only the skill text or a tool's
- * name does not fix what ran: the tool's implementation can be rebuilt behind its name, and the
- * model behind a route can be swapped. So a bubble also declares the model identity, every tool's
- * content digest, and the observable external conditions. A bubble that cannot say what its tools
- * were is not a reproducible execution context, so the reducer refuses it rather than defaulting.
- * The tool digest is the same idea as a criterion's `implementationDigest`: a name a deployment can
- * re-point is not an identity.
- *
- * @module singularity-core/task/bubble
- */
-
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
@@ -68,19 +40,6 @@ const BUBBLE_TOOL_MEMBERS = ['name', 'implementationDigest', 'version'] as const
 
 const DIGEST = /^[0-9a-f]{64}$/
 
-/**
- * Read one closed list of named input digests. Names are unique; a repeat is refused, not merged.
- *
- * The closed set is a **required** parameter, because the entry belongs to the kind that declares it:
- * the parse boundary hands `nested.inputs` (or `nested.inputDigests`) over, so the declaration is what
- * closes each element and a reader cannot widen the shape without the declaration changing.
- *
- * It has no default. It used to default to `BUBBLE_INPUT_MEMBERS`, which is the declaration constant
- * itself, so the two callers outside a kind's declaration — the verifier's and the measure adapter's
- * request readers — closed the entry with the same set they would have named, and dropping the
- * argument was a semantic no-op no check could see. Required, the declaration is named at every place
- * that closes an entry, and a caller that means a different set has to say which one.
- */
 export function inputList(raw: unknown, where: string, members: MemberSet): readonly BubbleInput[] {
   if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of named inputs, got ${raw === null ? 'null' : typeof raw}`)
   const seen = new Set<string>()
@@ -97,12 +56,6 @@ export function inputList(raw: unknown, where: string, members: MemberSet): read
   })
 }
 
-/**
- * The binding: a verdict's inputs must be exactly the run's declared inputs.
- *
- * Order-sensitive and total, because "the same inputs" is the only thing that makes an old verdict
- * about this run rather than about a different one.
- */
 export function assertInputsBound(bubble: Bubble | undefined, declared: readonly BubbleInput[], where: string): void {
   if (bubble === undefined)
     refuse(
@@ -124,14 +77,6 @@ export function assertInputsBound(bubble: Bubble | undefined, declared: readonly
   }
 }
 
-/**
- * Every tool the execution could reach. Names are unique: two tools with one name are one tool.
- *
- * The closed set has no default: the only caller is the rule that declares `nested.tools`, so the
- * declaration is the only value this reader can close with. Round six's drift — the declaration
- * printing one shape while the reader enforced another — needs a second value in this body, and
- * there is none.
- */
 function toolList(raw: unknown, where: string, members: MemberSet): readonly BubbleTool[] {
   if (!Array.isArray(raw))
     refuse('malformed-payload', `${where} must be an array of the tools the execution could reach, got ${raw === null ? 'null' : typeof raw}`)
@@ -200,6 +145,8 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
       requireResponsible(state, envelope.actor, where)
       if (run.status !== 'running')
         refuse('illegal-transition', `${where} opens an execution context for run "${payload.runId}", which already settled ${run.status}`)
+      if (run.stage !== 'working')
+        refuse('illegal-transition', `${where} cannot open a bubble for run "${payload.runId}" in ${run.stage}`)
       if (run.bubble !== undefined)
         refuse(
           'illegal-transition',

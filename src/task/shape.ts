@@ -1,15 +1,3 @@
-/**
- * The task protocol's shared shape readers.
- *
- * Extracted so the protocol stays inside the file budget, and so the decomposition and bubble
- * rules that land beside it read a payload exactly the way the original five kinds do. Every
- * reader refuses by name; none normalizes, defaults or repairs.
- *
- * The type-only imports point back at `protocol.ts`, so at run time the dependency runs one way.
- *
- * @module singularity-core/task/shape
- */
-
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { TaskContract } from './contract.ts'
@@ -42,19 +30,6 @@ export function digest(source: Record<string, unknown>, key: string, where: stri
   return value
 }
 
-/**
- * The revision pin, read once for every slice that carries one.
- *
- * `task`, `measure` and `strategy` all name the revision a fact is about, and each declared its own
- * copy of the set until the fifth round made a member set a value: three copies of one shape is three
- * places a fourth member could appear in one and not the others. The digest is part of it because an
- * id alone can be re-pointed.
- *
- * The set is required rather than defaulted to `REVISION_MEMBERS`, for the reason the other shape
- * readers lost their defaults: the default *was* the declaration, so a caller that dropped the
- * argument closed the pin with the same set it would have named and no check could tell the two
- * apart. Every caller names the declaration it means, and `plan.ts`'s incumbent names the same one.
- */
 export const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as const
 
 export function revisionRef(raw: unknown, where: string, members: readonly string[]): RevisionRef {
@@ -63,13 +38,6 @@ export function revisionRef(raw: unknown, where: string, members: readonly strin
   return { environmentId: text(source, 'environmentId', where), revisionId: text(source, 'revisionId', where), digest: digest(source, 'digest', where) }
 }
 
-/**
- * Two revision references name the same content. An id alone is not enough: it can be re-pointed.
- *
- * It lives beside the shape it compares, in the module that owns `RevisionRef`'s closed member set:
- * both the task protocol (a run's pin) and the strategy protocol (a slot's candidate) compare
- * revisions, and the comparison is theirs to share while neither imports the other.
- */
 export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
   return left.environmentId === right.environmentId && left.revisionId === right.revisionId && left.digest === right.digest
 }

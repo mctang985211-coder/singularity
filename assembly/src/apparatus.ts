@@ -1,11 +1,3 @@
-/**
- * The apparatus: one control store, the commands that own its facts, the callers bound to it, and the
- * domain they are about — the whole persistent surface. Agent keys arrive through `declareSubject`
- * because Web agents are minted at runtime.
- *
- * @module @dangosys/dsh-singularity-next/apparatus
- */
-
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 

@@ -11,6 +11,7 @@
       "@deepseek-ai/dsh-session": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-session/lib/types/index.d.ts"],
       "@deepseek-ai/dsh-session/types": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-session/lib/types/types.d.ts"],
       "@deepseek-ai/dsh-session-persistence": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-session-persistence/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-session-persistence-jsonl": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/types/index.d.ts"],
       "@deepseek-ai/dsh-tools": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-tools/lib/types/index.d.ts"],
       "@deepseek-ai/schemastery": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/schemastery/lib/types/index.d.ts"],
       "@deepseek-ai/*": ["/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/*"]

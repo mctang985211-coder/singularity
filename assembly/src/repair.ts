@@ -1,55 +1,66 @@
-/**
- * Repair: every run the last process left in flight, settled by the next boot. One with a verdict is
- * settled as it stands, one whose frozen bytes are still there is judged again, and one whose bytes are
- * gone — or whose declaration this deployment no longer carries — settles failed by a name. A per-run
- * reason never leaves here as a throw: a host that would not boot because one old attempt cannot be
- * repeated turns one task's debris into an outage.
- *
- * @module @dangosys/dsh-singularity-next/repair
- */
-
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { refuse } from '../../src/protocol/refusal.ts'
-import type { BubbleInput } from '../../src/task/bubble.ts'
-import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
+import { TASK_PROTOCOL, TASK_VERSION, type RunState, type TaskState } from '../../src/task/protocol.ts'
 import { declareCaller, type Apparatus } from './apparatus.ts'
-import { digestOnDisk, judgeAndRecord, workspaceOf } from './submission.ts'
+import { workspaceOf } from './attempt.ts'
+import { sha256 } from './ids.ts'
+import { judgeAndRecord } from './submission.ts'
 
 export async function repair(apparatus: Apparatus): Promise<void> {
   for (const [taskId, state] of apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)) {
     for (const run of Object.values(state.runs)) {
       if (run.status !== 'running') continue
-      const agentId = state.responsibility?.agentId
-      // Unreachable by construction: `run/started` refuses an attempt nobody is answerable for.
-      if (agentId === undefined) refuse('not-responsible', `task "${taskId}" holds the running run "${run.runId}" with no responsible agent; the log cannot produce that`)
+      const agentId = state.responsibility!.agentId
       const key = declareCaller(apparatus, agentId)
-      if (run.evidence.some(entry => entry.criterionId === apparatus.domain.criterion.criterionId)) {
-        await apparatus.tasks.settle({ commandId: `settle:${taskId}/${run.runId}`, taskId, runId: run.runId }, key)
+      const commands = apparatus.tasks.forAgent(agentId)
+      const submission = run.submission
+      if (submission?.executionFailure !== undefined) {
+        await commands.failRun({ commandId: 'execution-failed:' + submission.requestId, taskId, runId: run.runId, reason: submission.executionFailure })
         continue
       }
-      const frozen = run.bubble?.inputs[0]
-      const workspace = workspaceOf(apparatus, taskId)
-      const failure = await unfrozen(apparatus, workspace, run.runId, frozen)
+      let failure: string | undefined
+      if (run.stage === 'working') {
+        if (run.bubble !== undefined) continue
+        failure = 'incomplete-preparation: the Run started without a committed execution bubble'
+      } else if (run.stage === 'submitting') {
+        failure = 'interrupted-submission: execution did not reach its frozen submission; do not execute it again'
+      } else {
+        failure = await sealedFailure(apparatus, state, run)
+      }
       if (failure !== undefined) {
-        await apparatus.tasks.forAgent(agentId).failRun({ commandId: `fail:${taskId}/${run.runId}`, taskId, runId: run.runId, reason: failure })
+        await commands.failRun({ commandId: 'repair-failed:' + taskId + '/' + run.runId, taskId, runId: run.runId, reason: failure })
         continue
       }
-      await judgeAndRecord(apparatus, taskId, run.runId, workspace, frozen!)
-      await apparatus.tasks.settle({ commandId: `settle:${taskId}/${run.runId}`, taskId, runId: run.runId }, key)
+      if (run.evidence.length === 0) await judgeAndRecord(apparatus, taskId, run)
+      await apparatus.tasks.settle({ commandId: 'settle:' + taskId + '/' + run.runId, taskId, runId: run.runId }, key)
     }
   }
 }
-export async function unfrozen(apparatus: Apparatus, workspace: string, runId: string, declared: BubbleInput | undefined): Promise<string | undefined> {
+
+async function sealedFailure(apparatus: Apparatus, state: TaskState, run: RunState): Promise<string | undefined> {
+  const submission = run.submission!
   const { domain } = apparatus
-  const expected = domain.inputs[0]
-  if (declared === undefined) return `run "${runId}" declares no frozen input, so there is nothing for a judgement to be bound to`
-  if (expected === undefined || declared.name !== expected.path)
-    return `run "${runId}" was frozen against the input "${declared.name}", which this deployment no longer declares (it declares "${expected?.path ?? 'none'}"), so the judgement it was frozen for cannot be repeated`
-  if ((await digestOnDisk(join(workspace, domain.artifact))) === undefined) return `the artifact of run "${runId}" is gone from ${workspace}, so the judgement it was frozen for cannot be repeated`
-  const digest = await digestOnDisk(join(workspace, expected.path))
-  if (digest === undefined) return `the input "${expected.path}" of run "${runId}" cannot be read from ${workspace}, so the bytes it declared cannot be read`
-  if (digest !== declared.digest)
-    return `the input "${expected.path}" of run "${runId}" no longer hashes to the digest the run declared (declared ${declared.digest.slice(0, 12)}…, found ${digest.slice(0, 12)}…), so the judgement it was frozen for cannot be repeated`
+  const workspace = workspaceOf(apparatus, state.taskId, run.runId)
+  const expected: readonly { readonly name: string; readonly digest: string }[] = [
+    { name: domain.file, digest: submission.programDigest },
+    { name: domain.artifact, digest: submission.artifactDigest },
+    ...submission.inputDigests,
+  ]
+  for (const input of submission.inputDigests)
+    if (!domain.inputs.some(declared => declared.path === input.name && declared.digest === input.digest))
+      return 'unrecoverable-submission: the deployment no longer declares the frozen input ' + input.name
+  for (const file of expected) {
+    let found: string
+    try { found = sha256(await readFile(join(workspace, file.name))) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      return 'unrecoverable-submission: frozen file is missing: ' + file.name
+    }
+    if (found !== file.digest) return 'unrecoverable-submission: frozen file digest changed: ' + file.name
+  }
+  const criterion = state.contract!.criteria[0]!
+  if (criterion.verifierRef !== domain.verifier.ref || criterion.verifierVersion !== domain.verifier.version ||
+    criterion.implementationDigest !== sha256(await readFile(domain.verifier.program)))
+    return 'unrecoverable-verifier: the original verifier implementation is no longer deployed'
   return undefined
 }

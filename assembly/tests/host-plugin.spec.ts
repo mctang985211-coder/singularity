@@ -8,11 +8,13 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Context } from '@deepseek-ai/cordis'
+import { AgentRegistry } from '@deepseek-ai/dsh-agent'
+import { SessionStore } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { asyncRefusalOf } from '../../tests/fixtures.ts'
 import { Config, apply, inject, name } from '../src/index.ts'
-import { FakePersistence, mount } from './seam.ts'
+import { FakePersistence } from './seam.ts'
 
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 
@@ -30,8 +32,14 @@ async function workspaceRoot(): Promise<string> {
 
 describe('the host plugin', () => {
   it('provides the one service the agent face drives', async () => {
-    const mounted = await mount({ controlId: 'lib-1', domainDir: REAL, workspaceRoot: await workspaceRoot() })
-    expect(typeof mounted.ctx.singularity.forCall).toBe('function')
+    const ctx = new Context()
+    new AgentRegistry(ctx)
+    new SessionStore(ctx)
+    ctx.provide('tools', { guard: () => ctx.effect(() => () => undefined) })
+    ctx.provide('sessionPersistence', new FakePersistence() as never)
+    await apply(ctx, { controlId: 'lib-1', domainDir: REAL, workspaceRoot: await workspaceRoot() })
+    expect(typeof ctx.singularity.forCall).toBe('function')
+    await ctx.fiber.dispose()
   })
 
   it('refuses a config member the shape does not declare, by name', async () => {
@@ -45,7 +53,7 @@ describe('the host plugin', () => {
     expect(() => Config({ controlId: 'lib-1', domainDir: REAL })).toThrow()
   })
 
-  it('declares the seam it opens its control store over', () => {
-    expect([name, inject]).toEqual(['singularity-assembly', ['sessionPersistence']])
+  it('declares identity, tool admission and session persistence ports', () => {
+    expect([name, inject]).toEqual(['singularity-assembly', ['agents', 'tools', 'sessions', 'sessionPersistence']])
   })
 })

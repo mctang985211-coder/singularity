@@ -19,7 +19,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { runVerifierSelftest } from '../../src/verifier/implementation.ts'
 import { asyncRefusalOf } from '../../tests/fixtures.ts'
 import { loadDomain } from '../src/domain.ts'
-import { spawnProcess } from '../src/submission.ts'
+import { spawnProcess } from '../src/process.ts'
 
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const sha256 = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex')

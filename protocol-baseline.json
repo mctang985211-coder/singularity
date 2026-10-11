@@ -166,7 +166,7 @@
     },
     {
       "protocol": "task",
-      "version": 5,
+      "version": 6,
       "subject": "the task id",
       "kinds": [
         {
@@ -214,6 +214,21 @@
           "name": "run/started",
           "members": [
             "revision",
+            "runId"
+          ]
+        },
+        {
+          "name": "run/submitted",
+          "members": [
+            "runId",
+            "submission"
+          ]
+        },
+        {
+          "name": "run/submitting",
+          "members": [
+            "requestDigest",
+            "requestId",
             "runId"
           ]
         },

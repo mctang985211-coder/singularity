@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { loadDomain } from '../src/domain.ts'
-import { spawnProcess } from '../src/submission.ts'
+import { spawnProcess } from '../src/process.ts'
 import { prepareWorkspace } from '../src/workspace.ts'
 
 const sha256 = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex')

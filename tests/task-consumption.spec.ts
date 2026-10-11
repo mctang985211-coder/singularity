@@ -25,7 +25,7 @@ import {
 import { unconsumedMethods } from '../src/task/consumption.ts'
 import { CHILD, createRevision, deployment, ENVIRONMENT, openAgent, pin, planned, REVISION, RUN } from './command-fixtures.ts'
 import { refusalOf } from './fixtures.ts'
-import { admitted, assigned, REVISION as PIN, RUN_ID, SCHEDULER, started, TASK_ID, taskRegistry } from './task-fixtures.ts'
+import { admitted, assigned, failed, REVISION as PIN, RUN_ID, SCHEDULER, started, TASK_ID, taskRegistry } from './task-fixtures.ts'
 
 /** The method names this revision declares, as a deployment read them out of its own manifest. */
 const DECLARED = ['word-count', 'limit-check', 'normalize']
@@ -108,6 +108,7 @@ describe('the declared methods nothing consumed, below a cutoff', () => {
   it('does not count a method consumed at another revision', async () => {
     const log = await running()
     const elsewhere = { environmentId: PIN.environmentId, revisionId: 'r0002', digest: 'c'.repeat(64) }
+    await log.emit(failed('attempt complete'))
     await log.emit({
       commandId: 'start-run-2',
       protocol: TASK_PROTOCOL,

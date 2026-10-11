@@ -1336,17 +1336,17 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "if (recorded !== undefined && recorded.status !== 'running') return answerOf(apparatus, committed, runId)",
-          "replace": "if (false) return answerOf(apparatus, committed, runId)"
+          "find": "if (recorded.status !== 'running') return answerOf(apparatus, state, recorded.runId)",
+          "replace": "if (false) return answerOf(apparatus, state, recorded.runId)"
         }
       ],
       "run": {
         "kind": "vitest",
         "args": [
-          "assembly/tests/driver.spec.ts"
+          "assembly/tests/execution-integrity.spec.ts"
         ]
       },
-      "witness": "answers a redelivered call from the record and runs nothing again"
+      "witness": "returns identical content from the recorded result after its files are deleted"
     },
     {
       "id": "assembly-m2-verifier-digest-bytes",
@@ -1374,8 +1374,8 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "const inputPath = join(workspace, declared.path)\n    await writeFile(join(workspace, domain.artifact), await runProgram(filePath, inputPath), 'utf8')",
-          "replace": "const inputPath = join(workspace, declared.path)\n    await writeFile(join(workspace, domain.artifact), await runProgram(filePath, filePath), 'utf8')"
+          "find": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, apparatus.domain.inputs[0]!.path)] }, signal)",
+          "replace": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, filePath] }, signal)"
         }
       ],
       "run": {
@@ -1384,26 +1384,26 @@
           "assembly/tests/driver.spec.ts"
         ]
       },
-      "witness": "records a verified run whose verdict comes from the domain verifier"
+      "witness": "settles the proposal Run from the independent verifier output"
     },
     {
       "id": "assembly-m4-anonymous-caller",
-      "rule": "a call with no live agent is refused rather than attributed",
+      "rule": "a call belongs to the exact live DSH registry agent and rejects an anonymous or replacement caller",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
-          "file": "assembly/src/apparatus.ts",
-          "find": "if (agent === undefined)\n    refuse('unknown-emitter-role'",
-          "replace": "if (false)\n    refuse('unknown-emitter-role'"
+          "file": "assembly/src/execution.ts",
+          "find": "if (agent === undefined || ctx.agents.get(agent.id) !== agent)",
+          "replace": "if (false)"
         }
       ],
       "run": {
         "kind": "vitest",
         "args": [
-          "assembly/tests/driver.spec.ts"
+          "assembly/tests/execution.spec.ts"
         ]
       },
-      "witness": "refuses a call that arrives with no agent, before it can name one"
+      "witness": "accepts the exact registry agent and rejects a replacement object with the same identity"
     },
     {
       "id": "assembly-m5-per-agent-key",
@@ -1422,7 +1422,7 @@
           "assembly/tests/driver.spec.ts"
         ]
       },
-      "witness": "refuses one agent's submission to another agent's task, by name"
+      "witness": "isolates two concurrent tasks by their responsible callers and Run workspaces"
     },
     {
       "id": "assembly-m6-repair-settles-recorded",
@@ -1431,8 +1431,8 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "if (run.status !== 'running') continue",
-          "replace": "if (true) continue"
+          "find": "if (run.evidence.length === 0) await judgeAndRecord(apparatus, taskId, run)",
+          "replace": "if (run.evidence.length === 0) await judgeAndRecord(apparatus, taskId, run)\n      else continue"
         }
       ],
       "run": {
@@ -1441,7 +1441,7 @@
           "assembly/tests/recovery.spec.ts"
         ]
       },
-      "witness": "settles a run whose verdict was recorded but whose settlement was lost"
+      "witness": "settles a sealed submission with a committed verdict without invoking its verifier again"
     },
     {
       "id": "assembly-m7-repair-artifact-gone",
@@ -1450,8 +1450,8 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "if ((await digestOnDisk(join(workspace, domain.artifact))) === undefined) return `the artifact of run \"${runId}\" is gone from ${workspace}, so the judgement it was frozen for cannot be repeated`",
-          "replace": "if (false) return `the artifact of run \"${runId}\" is gone from ${workspace}, so the judgement it was frozen for cannot be repeated`"
+          "find": "return 'unrecoverable-submission: frozen file is missing: ' + file.name",
+          "replace": "continue"
         }
       ],
       "run": {
@@ -1460,7 +1460,7 @@
           "assembly/tests/recovery.spec.ts"
         ]
       },
-      "witness": "settles a run whose frozen artifact is gone, failed by a name"
+      "witness": "fails when the sealed missing-artifact bytes cannot be recovered"
     },
     {
       "id": "assembly-m8-closed-config",
@@ -1507,8 +1507,8 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "await apparatus.tasks.settle({ commandId: `settle:${request.taskId}/${runId}`, taskId: request.taskId, runId }, key)",
-          "replace": "await apparatus.tasks.settle({ commandId: `settle:${request.taskId}/${runId}`, taskId: request.taskId, runId })"
+          "find": "await apparatus.tasks.settle({ commandId: 'settle:' + request.taskId + '/' + run.runId, taskId: request.taskId, runId: run.runId }, 'agent:' + caller.agentId)",
+          "replace": "await apparatus.tasks.settle({ commandId: 'settle:' + request.taskId + '/' + run.runId, taskId: request.taskId, runId: run.runId })"
         }
       ],
       "run": {
@@ -1517,7 +1517,7 @@
           "assembly/tests/driver.spec.ts"
         ]
       },
-      "witness": "records a wrong answer as a fail rather than a success"
+      "witness": "records an ordinary wrong answer as a failed solve"
     },
     {
       "id": "assembly-m11-revision-digest-read-back",
@@ -1525,9 +1525,9 @@
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
-          "file": "assembly/src/submission.ts",
-          "find": "digest: revisionDigestOf(apparatus, revisionId)",
-          "replace": "digest: ''"
+          "file": "assembly/src/attempt.ts",
+          "find": "digest: revision.contentDigest",
+          "replace": "digest: '0'.repeat(64)"
         }
       ],
       "run": {
@@ -1536,7 +1536,7 @@
           "assembly/tests/driver.spec.ts"
         ]
       },
-      "witness": "records a verified run whose verdict comes from the domain verifier"
+      "witness": "settles the proposal Run from the independent verifier output"
     },
     {
       "id": "assembly-m13-effect-owns-section",
@@ -1574,7 +1574,7 @@
           "assembly/tests/driver.spec.ts"
         ]
       },
-      "witness": "refuses a read of a task the caller is not responsible for, by name"
+      "witness": "refuses a foreign caller read and submission before committing or writing"
     },
     {
       "id": "assembly-m15-frozen-input-drift",
@@ -1583,8 +1583,8 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "if (digest !== declared.digest)",
-          "replace": "if (false)"
+          "find": "if (found !== file.digest) return 'unrecoverable-submission: frozen file digest changed: ' + file.name",
+          "replace": "if (false) return 'unrecoverable-submission: frozen file digest changed: ' + file.name"
         }
       ],
       "run": {
@@ -1593,7 +1593,7 @@
           "assembly/tests/recovery.spec.ts"
         ]
       },
-      "witness": "settles a run whose frozen input changed, failed by a name, and still completes the mount"
+      "witness": "fails when the sealed input bytes cannot be recovered"
     },
     {
       "id": "assembly-m16-placeholders-closed",
@@ -1620,8 +1620,8 @@
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
-          "file": "assembly/src/submission.ts",
-          "find": "const toolchainDigest = (): Promise<string> => (toolchain ??= digestOf(process.execPath, 'the node toolchain'))",
+          "file": "assembly/src/attempt.ts",
+          "find": "const toolchainDigest = (): Promise<string> => (toolchain ??= readFile(process.execPath).then(sha256))",
           "replace": "const toolchainDigest = (): Promise<string> => Promise.resolve(sha256('not the interpreter'))"
         }
       ],
@@ -1631,7 +1631,7 @@
           "assembly/tests/driver.spec.ts"
         ]
       },
-      "witness": "records the model route and the toolchain that actually ran in the bubble"
+      "witness": "pins the actual model route and interpreter bytes before solving"
     },
     {
       "id": "assembly-m18-frozen-name-not-declared",
@@ -1640,8 +1640,8 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "if (expected === undefined || declared.name !== expected.path)",
-          "replace": "if (expected === undefined)"
+          "find": "if (!domain.inputs.some(declared => declared.path === input.name && declared.digest === input.digest))",
+          "replace": "if (false)"
         }
       ],
       "run": {
@@ -1651,25 +1651,6 @@
         ]
       },
       "witness": "settles a run frozen against an input this deployment no longer declares, and still opens"
-    },
-    {
-      "id": "assembly-m19-frozen-input-compared-to-disk",
-      "rule": "the frozen input is compared against the bytes on disk, not against its own claim",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/repair.ts",
-          "find": "const digest = await digestOnDisk(join(workspace, expected.path))",
-          "replace": "const digest = declared.digest"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/recovery.spec.ts"
-        ]
-      },
-      "witness": "settles a run whose frozen input changed, failed by a name, and still completes the mount"
     },
     {
       "id": "assembly-m20-tool-tells-how-program-runs",
@@ -1697,27 +1678,27 @@
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "  if (recorded !== undefined)\n    refuse(\n      'illegal-transition',\n      `run \"${runId}\" of task \"${request.taskId}\" is still running for this call; its attempt ends when it settles, and the next boot's repair settles an attempt this process left behind`,\n    )",
-          "replace": "  if (false)\n    refuse('illegal-transition', 'unreachable')"
+          "find": "  if (recorded !== undefined) {\n    if (recorded.request!.digest !== requestDigest) refuse('command-conflict', 'this submission was committed with different content')\n    if (recorded.status !== 'running') return answerOf(apparatus, state, recorded.runId)\n    refuse('illegal-transition', 'this submission is in flight; do not execute it again')\n  }\n",
+          "replace": ""
         }
       ],
       "run": {
         "kind": "vitest",
         "args": [
-          "assembly/tests/driver.spec.ts"
+          "assembly/tests/recovery.spec.ts"
         ]
       },
-      "witness": "refuses a redelivery whose run is still in flight instead of running the program again"
+      "witness": "refuses a redelivered submission still in flight without repeating its program"
     },
     {
       "id": "assembly-m22-revision-names-the-request",
-      "rule": "the run revision is derived from the request, never from bytes a program can rewrite",
+      "rule": "the solve Run revision binds the declared template and Task before execution begins",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
-          "file": "assembly/src/submission.ts",
-          "find": "const basis = sha256(`${domain.templateDigest}\\u0000${request.taskId}`)",
-          "replace": "const basis = sha256(`${domain.templateDigest}\\u0000${await readFile(filePath, 'utf8')}`)"
+          "file": "assembly/src/attempt.ts",
+          "find": "const basis = sha256(`${apparatus.domain.templateDigest}\\u0000${taskId}`)",
+          "replace": "const basis = sha256(apparatus.domain.templateDigest)"
         }
       ],
       "run": {
@@ -1726,26 +1707,26 @@
           "assembly/tests/driver.spec.ts"
         ]
       },
-      "witness": "freezes the revision against the request, not against bytes a program can rewrite"
+      "witness": "pins separate task revisions against the template rather than mutable workspace bytes"
     },
     {
       "id": "assembly-m23-holder-checked-before-writing",
-      "rule": "a caller that is not the holder is refused before anything is written",
+      "rule": "submission reservation requires the current Task holder before execution begins",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
-          "file": "assembly/src/submission.ts",
-          "find": "  if (committed.responsibility?.agentId !== caller.agentId)\n    refuse(\n      'not-responsible',\n      `task \"${request.taskId}\" is the responsibility of agent \"${committed.responsibility?.agentId ?? 'nobody'}\", so agent \"${caller.agentId}\" cannot submit to it`,\n    )\n  const key = await bindCaller(apparatus, caller)",
-          "replace": "  const key = await bindCaller(apparatus, caller)"
+          "file": "src/task/run.ts",
+          "find": "      const run = requireRun(state, payload.runId, where)\n      requireResponsible(state, envelope.actor, where)\n      if (run.status !== 'running' || run.stage !== 'working')",
+          "replace": "      const run = requireRun(state, payload.runId, where)\n      if (run.status !== 'running' || run.stage !== 'working')"
         }
       ],
       "run": {
         "kind": "vitest",
         "args": [
-          "assembly/tests/driver.spec.ts"
+          "tests/task-submission.spec.ts"
         ]
       },
-      "witness": "writes nothing at all for a caller that is not the holder"
+      "witness": "refuses missing context, foreign responsibility and different inputs without committing"
     },
     {
       "id": "assembly-m24-plan-belongs-to-holder",
@@ -1917,6 +1898,82 @@
         ]
       },
       "witness": "re-scans the plan when a run settles, so a dependency that just verified can start"
+    },
+    {
+      "id": "core-w1-single-active-run",
+      "rule": "a Task has one unsettled Run even without a decomposition plan",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/run.ts",
+          "find": "      if (running !== undefined)\n",
+          "replace": "      if (false)\n"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-submission.spec.ts"
+        ]
+      },
+      "witness": "serializes two starts even when no child plan owns the Task"
+    },
+    {
+      "id": "core-w1-reserved-request-digest",
+      "rule": "the sealed submission names the content identity reserved before execution",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/run.ts",
+          "find": "run.request.digest !== payload.submission.requestDigest",
+          "replace": "false"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-submission.spec.ts"
+        ]
+      },
+      "witness": "requires the reserved request and refuses beginning after a verdict"
+    },
+    {
+      "id": "core-w2-receipt-terminal-cutoff",
+      "rule": "a formal Run receipt stays at its terminal control cutoff when later facts arrive",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/view.ts",
+          "find": "cutoff ??= checked.seq + 1",
+          "replace": "cutoff = entries.length"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-receipt.spec.ts"
+        ]
+      },
+      "witness": "receipt fixed when other facts and attempts arrive"
+    },
+    {
+      "id": "core-w2-receipt-every-sequence",
+      "rule": "a formal Run receipt checks every supplied envelope sequence independently of its valid digest chain",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "src/task/view.ts",
+          "find": "if (checked.seq !== index)",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-receipt.spec.ts"
+        ]
+      },
+      "witness": "rejects an interior sequence collision even when the last sequence matches the array length"
     }
   ]
 }

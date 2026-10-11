@@ -240,7 +240,7 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
 
     // The exact surface, `recordVerdict` included in its absence: the boundary is a method the agent
     // view does not have, not a rule it is asked to respect.
-    expect(Object.keys(asAgent).sort()).toEqual(['admit', 'assign', 'decompose', 'failRun', 'openBubble', 'reassign', 'startRun'])
+    expect(Object.keys(asAgent).sort()).toEqual(['admit', 'assign', 'beginSubmission', 'decompose', 'failRun', 'openBubble', 'reassign', 'startRun', 'submitRun'])
     expect(() => commands.forAgent('agent-nobody-holds')).toThrowError(/not one this deployment holds/)
   })
 

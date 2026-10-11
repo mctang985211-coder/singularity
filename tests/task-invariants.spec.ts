@@ -191,7 +191,7 @@ describe('what the protocol does not know', () => {
     expect(refusalOf(() => projectReceipt(registry, held, TASK_ID, 'run-ghost')).code).toBe<RefusalCode>('unknown-run')
   })
 
-  it('declares exactly the ten kinds this slice needs, and no receipt kind', () => {
+  it('declares the complete run lifecycle without a receipt fact', () => {
     // Sorted, because `kindsOf` sorts: `evidence/produced` < `method/consumed` < `run/*` < `task/*`.
     expect(taskRegistry().kindsOf(TASK_PROTOCOL, TASK_VERSION)).toEqual([
       TASK_KINDS.bubbleOpened,
@@ -199,6 +199,8 @@ describe('what the protocol does not know', () => {
       TASK_KINDS.methodConsumed,
       TASK_KINDS.runFailed,
       TASK_KINDS.runStarted,
+      TASK_KINDS.runSubmitted,
+      TASK_KINDS.runSubmitting,
       TASK_KINDS.runVerified,
       TASK_KINDS.admitted,
       TASK_KINDS.assigned,

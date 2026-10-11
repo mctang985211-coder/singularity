@@ -1,8 +1,4 @@
-/**
- * The host seam these specs drive the assembly through: a real in-memory session persistence, a real
- * cordis context, and an agent-shaped caller. Nothing here mocks the assembly's own collaborators —
- * the store, the commands and the domain are the real ones.
- */
+/** Driver specs use a persistence and execution port double with real domain commands and projection. */
 
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -20,9 +16,13 @@ import {
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import type { ControlEventData } from '../../src/control/session-store.ts'
-import type { Envelope } from '../../src/protocol/envelope.ts'
-import { apply, type Config } from '../src/index.ts'
-import type { AgentTaskSurface } from '../src/driver.ts'
+import { digestOf, type Envelope } from '../../src/protocol/envelope.ts'
+import { refuse } from '../../src/protocol/refusal.ts'
+import type { Config } from '../src/index.ts'
+import { openDriver, type AgentTaskSurface } from '../src/driver.ts'
+import { loadDomain } from '../src/domain.ts'
+import type { Admission, Execution } from '../src/execution.ts'
+import { spawnProcess } from '../src/process.ts'
 
 /**
  * The medium: every event in memory, with one hook that makes an append die like a killed process. It
@@ -136,14 +136,36 @@ export function agentFor(agentId: string, sessionId: string, model = 'model-unde
 
 /** One tool call: the live agent that made it, and DSH's own call id. */
 export function execFor(agent: Agent, callId: string): ToolRunContext {
-  return { callId, agent } as unknown as ToolRunContext
+  return { callId, agent, signal: new AbortController().signal } as unknown as ToolRunContext
 }
 
-/** Mount the real host plugin over the fake medium, exactly as a profile would. */
+/** This fixed execution double does not claim real DSH transcript provenance. */
+export const fakeExecution = (_admission: Admission): Execution => ({
+  assertCaller: exec => {
+    if (exec.agent === undefined) refuse('unknown-emitter-role', 'the execution double received an agentless call')
+    return exec.agent
+  },
+  drain: async () => undefined,
+  sealTranscript: async exec => {
+    if (exec.agent === undefined) refuse('unknown-emitter-role', 'the execution double received an agentless call')
+    const sessionId = String(exec.agent.session.id)
+    return { sessionId, eventCount: 0, digest: digestOf({ testDouble: true, sessionId, eventCount: 0, events: [] }) }
+  },
+  close: async () => undefined,
+})
+
+/** Compose the real driver with explicit test ports; host apply is covered separately. */
 export async function mount(config: Config, medium = new FakePersistence()): Promise<{ ctx: Context; medium: FakePersistence }> {
   const ctx = new Context()
-  ctx.provide('sessionPersistence', medium as unknown as SessionPersistence)
-  await apply(ctx, config as Config & Record<string, unknown>)
+  const driver = await openDriver({
+    ...config,
+    domain: await loadDomain(config.domainDir, spawnProcess),
+    persistence: medium as unknown as SessionPersistence,
+    seams: ctx,
+    execution: fakeExecution,
+  })
+  ctx.provide('singularity', driver)
+  ctx.effect(() => () => driver.close())
   return { ctx, medium }
 }
 

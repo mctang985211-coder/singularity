@@ -50,6 +50,7 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
     expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-old']?.revision).toEqual(firstPin)
 
     // A later run may choose the newer revision, explicitly, and is recorded with that choice.
+    await commands.failRun({ commandId: 'end-old', taskId: PARENT, runId: 'run-old', reason: 'attempt complete' })
     await commands.startRun({
       commandId: 'r-new',
       taskId: PARENT,
