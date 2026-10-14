@@ -98,6 +98,28 @@ describe('a fully checked domain decomposition', () => {
     expect(factsOf(h.medium)).toEqual(before)
   })
 
+  it('refuses handoff evidence citing an unverified Task and names the offending id', async () => {
+    const h = await setup()
+    const before = factsOf(h.medium)
+    const refusal = await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, h.caller,
+      { taskId: h.parent.taskId, children: [
+        { ...children[0]!, key: 'cite', handoff: { context: 'carry prior work', evidence: [h.parent.taskId] } },
+      ] }))
+    expect(refusal).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining(h.parent.taskId) })
+    expect(factsOf(h.medium)).toEqual(before)
+    expect(h.dispatched).toEqual([])
+  })
+
+  it('accepts a handoff that cites no evidence', async () => {
+    const h = await setup()
+    await decompose(h.apparatus, h.scheduler, h.caller,
+      { taskId: h.parent.taskId, children: [
+        { ...children[0]!, key: 'fresh', handoff: { context: 'fresh investigation, nothing to reuse', evidence: [] } },
+      ] })
+    expect(factsOf(h.medium).some((fact) => fact.kind === 'task/decomposed')).toBe(true)
+    expect(h.dispatched).toEqual(['dispatch'])
+  })
+
   it.each([
     ['unknown-template', [{ ...children[0]!, template: 'missing' }]],
     ['missing-producer', [{ ...children[1]!, dependsOn: [] }]],

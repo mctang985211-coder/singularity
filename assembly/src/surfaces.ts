@@ -58,7 +58,7 @@ export async function decompose(
   }
   const prepared = children.map((child) => {
     if ((child.template === undefined) === (child.contract === undefined))
-      refuse('malformed-declaration', 'choose a template or a task contract')
+      refuse('malformed-declaration', 'declare exactly one of template or contract for each child')
     const dependsOn = child.dependsOn.map((key) => {
       const id = ids.get(key)
       if (id === undefined) refuse('malformed-declaration', 'unknown dependency ' + key)
@@ -101,8 +101,11 @@ export async function decompose(
       if (input.source.kind === 'artifact' && !dependsOn.includes(input.source.taskId) && !verified(input.source.taskId))
         refuse('malformed-declaration', 'artifact producers must be declared dependencies or verified visible evidence')
     bindingsForContract(contract, domain, assets)
-    if (child.handoff !== undefined && child.handoff.evidence.some((id) => !verified(id)))
-      refuse('not-responsible', 'handoff evidence must cite verified Tasks in the parent context')
+    if (child.handoff !== undefined) {
+      const unverified = child.handoff.evidence.filter((id) => !verified(id))
+      if (unverified.length > 0)
+        refuse('not-responsible', `handoff evidence may only reference verified Tasks visible in the parent context; offending: ${unverified.join(', ')}`)
+    }
     const tasks = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
     let ancestor = parent ?? (review?.target.kind === 'acceptance' ? tasks.get(review.target.taskId) : undefined)
     while (ancestor !== undefined) {

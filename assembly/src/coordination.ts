@@ -91,8 +91,10 @@ export async function answerChild(apparatus: Apparatus, caller: Caller, input: A
   if (question.parentAgentId !== caller.agentId) refuse('not-responsible', 'only the exact direct parent Run may answer')
   const { visible } = await readScopeOf(apparatus, caller.agentId)
   const evidence = input.evidence ?? []
-  if (evidence.some((id) => !visible!.has(id) || !Object.values(taskStateOf(apparatus, id).runs).some((r) => r.status === 'verified')))
-    refuse('not-responsible', 'answer evidence must cite verified Tasks in the parent context')
+  const unverified = evidence.filter((id) => !visible!.has(id)
+    || !Object.values(taskStateOf(apparatus, id).runs).some((r) => r.status === 'verified'))
+  if (unverified.length > 0)
+    refuse('not-responsible', `answer evidence may only reference verified Tasks visible in the parent context; offending: ${unverified.join(', ')}`)
   const answerId = 'answer-' + sha256(`${question.questionId}/${input.requestKey}`)
   await apparatus.store.emit(() => {
     const parent = parentPlan(apparatus, task!.taskId)

@@ -18,10 +18,10 @@ async function attempt<T>(step: () => Promise<T>) {
   }
 }
 export const taskGuidance = `Task is the workflow for exploration and construction; own your frozen contract and integrated result.
-Before tools, plan responsibilities, deliverables and dependencies, or explain why this Task is atomic. For non-atomic work the first tool must be singularity_decompose_task. Use one-off investigation contracts for unknown scope. One final artifact does not imply atomicity: independent mechanisms, correctness investigations and measurement anomalies need separate responsibilities.
+Before tools, plan responsibilities, deliverables and dependencies, or explain why this Task is atomic. For non-atomic work the first tool must be singularity_decompose_task: earlier reconnaissance repeats the children's work and cannot become verified evidence. Use one-off investigation contracts for unknown scope. One final artifact does not imply atomicity: independent mechanisms, correctness investigations and measurement anomalies need separate responsibilities.
 Define only smaller direct children with inputs, effect criteria and supports links. In handoff give decisions, exclusions and verified evidence references to reuse. A supported negative finding can complete an investigation.
 Use pinned TaskTemplates and their bound Skills/Tools. Read related Tasks and scoped trajectory pages before repeating an investigation; distinguish working claims from verified evidence. Ask the direct parent when scope is undecidable; answer child questions with singularity_answer.
-While children or blocking questions are pending, execution and submission are closed: coordinate, then end the turn. The host resumes this same Run with evidence. Consume verified results to select, integrate and independently check your artifact; explain how findings changed decisions. Write it, then singularity_submit(path).`
+While children or blocking questions are pending, execution and submission are closed: coordinate, then end the turn. The host resumes this same Run with evidence. Consume the verified results to select the artifact your contract requires and explain how findings changed decisions; when a child owns integration, submit its verified artifact instead of re-integrating. Write it, then singularity_submit(path).`
 export const reviewGuidance = `Judge the exact frozen subject and every assigned criterion independently.
 Choose checks and evidence appropriate to that standard. Protected failed checks cannot become a pass.
 You may create bounded evidence Tasks; their results receive independent review. Judge the subject yourself.
@@ -134,7 +134,7 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
   const delegation = defineTool({
     name: 'singularity_decompose_task',
     description:
-      'After planning, create Tasks before executing distinct responsibilities; only atomic work executes directly. Give direct children bounded deliverables and effect criteria supporting parent criteria. Choose a pinned template or one-off contract. dependsOn and artifact input sources may name batch keys or child IDs; verified input bytes are materialized at inputs[].name. Returns at admission: end the turn while children work, then integrate their reviewed evidence when resumed.',
+      'After planning, create Tasks before executing distinct responsibilities; only atomic work executes directly. Give direct children bounded deliverables and effect criteria supporting parent criteria. Choose a pinned template or one-off contract. dependsOn and artifact input sources may name batch keys or child IDs; verified input bytes are materialized at inputs[].name. Returns at admission: end the turn while children work, then select and submit from their reviewed evidence when resumed.',
     parameters: {
       children: {
         type: 'array',
