@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { openDriver, type TaskDriver } from '../src/driver.ts'
+import { openApparatus } from '../src/apparatus.ts'
+import { propose } from '../src/surfaces.ts'
 import { loadDomain } from '../src/domain.ts'
 import type { TurnFailure, TurnFailureHandler } from '../src/execution.ts'
 import { spawnProcess } from '../src/process.ts'
@@ -24,15 +26,19 @@ async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'assembly-lifecycle-'))
   roots.push(root)
   const medium = new FakePersistence()
+  const domain = await loadDomain(domainDir, spawnProcess)
+  const apparatus = await openApparatus('lifecycle', root, domain, medium as never, attachmentsAt(root))
+  const model = { provider: 'test', model: 'model-under-test' }
+  const a = await propose(apparatus, { agentId: 'session-a', sessionId: 'session-a', model }, 'propose-a', { goal: 'count a' })
+  const b = await propose(apparatus, { agentId: 'session-b', sessionId: 'session-b', model }, 'propose-b', { goal: 'count b' })
+  await apparatus.store.close()
   let report!: TurnFailureHandler
   const driver = await openDriver({ controlId: 'lifecycle', workspaceRoot: root,
-    domain: await loadDomain(domainDir, spawnProcess), persistence: medium as never, attachments: attachmentsAt(root), seams: {},
+    domain, persistence: medium as never, attachments: attachmentsAt(root), seams: {},
     execution: (admission, onFailure) => { report = onFailure; return fakeExecution(admission) },
   })
   drivers.push(driver)
   const call = (id: string, sessionId = 'session-a') => driver.forCall(execFor(agentFor(sessionId, sessionId), id))
-  const a = await call('propose-a').propose({ goal: 'count a' })
-  const b = await call('propose-b', 'session-b').propose({ goal: 'count b' })
   return { driver, medium, report, call, a, b }
 }
 
@@ -68,7 +74,8 @@ describe('a failed DSH solve turn', () => {
   it('propagates failure persistence errors through unload', async () => {
     const h = await setup()
     h.medium.failAppendOf('run/failed')
-    h.report(failure)
+    const reported = h.report(failure)
+    await expect(reported).rejects.toThrow('write-not-durable')
     await expect(h.driver.close()).rejects.toThrow('driver unload failed')
     expect(factsOf(h.medium).some(fact => fact.kind === 'run/failed')).toBe(false)
   })

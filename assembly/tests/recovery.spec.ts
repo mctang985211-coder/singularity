@@ -20,6 +20,10 @@ import { openDriver } from '../src/driver.ts'
 import { repair } from '../src/repair.ts'
 import { spawnProcess } from '../src/process.ts'
 import { submit } from '../src/submission.ts'
+import { acceptanceSubject, IMPROVEMENT_TEMPLATE, REVIEW_TEMPLATE, SUBJECT_INPUT } from '../src/review.ts'
+import { loadMethod, methodEnvironment, seedMethod } from '../src/method.ts'
+import { assertImprovementOwner } from '../src/improvement.ts'
+import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { attachmentsAt, agentFor, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
 
 const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
@@ -63,6 +67,122 @@ async function reopen(fixture: Fixture, domain: Domain = fixture.domain): Promis
 }
 
 const current = (apparatus: Apparatus, fixture: Fixture) => taskStateOf(apparatus, fixture.taskId).runs[fixture.runId]!
+
+it('restores working Runs without activating an unrelated rejected asset proposal', async () => {
+  const fixture = await working()
+  await fixture.apparatus.environments.createRevision({ commandId: 'rejected-proposal', environmentId: methodEnvironment(fixture.apparatus),
+    revisionId: 'rejected', manifest: { rootTemplate: 'absent', templates: [], skills: [], tools: [] } })
+  const apparatus = await reopen(fixture)
+  await repair(apparatus)
+  expect(current(apparatus, fixture).status).toBe('running')
+  await apparatus.store.close()
+})
+
+it('restores the activated failed Task owner so its existing retry tool can reopen the same contract', async () => {
+  const fixture = await working()
+  await fixture.apparatus.tasks.forAgent(CALLER.agentId).failRun({ commandId: 'failed-turn', taskId: TASK,
+    runId: fixture.runId, reason: 'interrupted native turn' })
+  const contract = taskStateOf(fixture.apparatus, TASK).contract
+  await fixture.apparatus.store.close()
+  const agent = agentFor(CALLER.agentId, CALLER.sessionId)
+  const driver = await openDriver({ controlId: 'lib-1', workspaceRoot: fixture.root, domain: fixture.domain,
+    persistence: fixture.medium as never, attachments: attachmentsAt(fixture.root),
+    seams: { agents: { get: () => agent } as never }, execution: fakeExecution })
+  try {
+    await driver.activate(CALLER.sessionId)
+    const reopened = await driver.forCall(execFor(agent, 'retry-after-reload')).retry({ taskId: TASK })
+    expect(reopened).toMatchObject({ taskId: TASK, phase: 'running' })
+    const task = (await driver.forCall(execFor(agent, 'status')).status({ taskId: TASK })).task
+    expect(task.contract).toEqual(contract)
+    expect(task.runs.map(run => run.status)).toEqual(['failed', 'running'])
+  } finally { await driver.close() }
+})
+
+it('restores prompt responsibilities from the exact frozen Run rather than inherited agent instructions', async () => {
+  const fixture = await working()
+  const method = await seedMethod(fixture.apparatus)
+  const domain = (await loadMethod(fixture.apparatus, method)).domain
+  for (const purpose of ['review', 'improve', 'evaluation']) {
+    const caller = { ...CALLER, agentId: purpose, sessionId: purpose }
+    await bindCaller(fixture.apparatus, caller)
+    const template = domain.templates.get(purpose === 'review' ? REVIEW_TEMPLATE
+      : purpose === 'improve' ? IMPROVEMENT_TEMPLATE : domain.rootTemplate)!
+    const commands = fixture.apparatus.tasks.forAgent(caller.agentId)
+    await commands.admit({ commandId: `admit:${purpose}`, taskId: purpose,
+      contract: { ...contractFor(domain, template, 'The parent uses a coding preset.'), assets: method } })
+    await commands.assign({ commandId: `assign:${purpose}`, taskId: purpose, agentId: caller.agentId })
+    await startAttempt(fixture.apparatus, caller, purpose, `run:${purpose}`, method, { domain, purpose })
+  }
+  await fixture.apparatus.store.close()
+  const driver = await openDriver({ controlId: 'lib-1', workspaceRoot: fixture.root, domain: fixture.domain,
+    persistence: fixture.medium as never, attachments: attachmentsAt(fixture.root), seams: {}, execution: fakeExecution })
+  try {
+    expect(driver.purpose(CALLER.agentId)).toBe('solve')
+    expect(['review', 'improve', 'evaluation'].map(id => driver.purpose(id))).toEqual(['review', 'improve', 'evaluation'])
+    expect(driver.purpose('new-human-session')).toBe('solve')
+  } finally { await driver.close() }
+})
+
+it('allows evaluation only inside the accepted root improvement tree, including ordinary delegated nodes', async () => {
+  const fixture = await working()
+  const { apparatus, taskId } = fixture
+  expect(() => assertImprovementOwner(apparatus, CALLER.agentId)).toThrow('only the accepted root')
+  const method = await seedMethod(apparatus)
+  const domain = (await loadMethod(apparatus, method)).domain
+  const template = domain.templates.get(IMPROVEMENT_TEMPLATE)!
+  for (const id of ['improvement', 'delegated-programming']) {
+    const caller = { ...CALLER, agentId: id, sessionId: id }
+    await bindCaller(apparatus, caller)
+    const commands = apparatus.tasks.forAgent(id)
+    await commands.admit({ commandId: `admit:${id}`, taskId: id, contract: { ...contractFor(domain, template, template.goal), assets: method } })
+    await commands.assign({ commandId: `assign:${id}`, taskId: id, agentId: id })
+    await startAttempt(apparatus, caller, id, `run:${id}`, method,
+      { domain, purpose: id === 'improvement' ? 'improve' : 'solve', relatedTo: { taskId, runId: fixture.runId } })
+  }
+  await apparatus.tasks.forAgent('improvement').decompose({ commandId: 'delegate', parentTaskId: 'improvement',
+    children: [{ taskId: 'delegated-programming', dependsOn: [], supports: [template.criterion.criterionId], maxRuns: 1 }] })
+  expect(() => assertImprovementOwner(apparatus, 'improvement')).toThrow('has not passed independent acceptance')
+  expect(() => assertImprovementOwner(apparatus, 'delegated-programming')).toThrow('has not passed independent acceptance')
+  await submit(apparatus, execution, CALLER, execFor(agentFor(CALLER.agentId, CALLER.sessionId), 'complete-root'),
+    { taskId, program: PROGRAM }, new AbortController().signal)
+  expect(() => assertImprovementOwner(apparatus, 'improvement')).not.toThrow()
+  expect(() => assertImprovementOwner(apparatus, 'delegated-programming')).not.toThrow()
+  expect(() => assertImprovementOwner(apparatus, CALLER.agentId)).toThrow('requires a working improvement')
+  await apparatus.store.close()
+})
+
+it('resumes the first frozen acceptance subject across verifier temporary directories and rejects changed evidence', async () => {
+  const fixture = await submitted()
+  const { taskId } = fixture
+  const apparatus = await reopen(fixture)
+  fixture.apparatus = apparatus
+  const run = current(apparatus, fixture)
+  const criterion = fixture.template.criterion
+  const judgement = { ...criterion, runId: run.runId, verdict: 'pass' as const,
+    artifactDigest: run.submission!.artifactDigest, inputDigests: run.submission!.inputDigests,
+    detail: 'verifier exited 0 in judged-first' }
+  const subject = await acceptanceSubject(apparatus, taskId, run, judgement)
+  const bytes = Buffer.from(JSON.stringify(subject))
+  const operationId = `accept:${taskId}/${run.runId}`
+  const reviewId = `review-${sha256(`${apparatus.controlId}/${operationId}/${sha256(bytes)}`).slice(0, 24)}`
+  const agentId = String(agentSessionIdOf(reviewId))
+  await bindCaller(apparatus, { ...CALLER, agentId, sessionId: agentId })
+  const method = await seedMethod(apparatus)
+  const domain = { ...apparatus.domain, inputs: [...apparatus.domain.inputs.filter(input => input.ref !== SUBJECT_INPUT),
+    { ref: SUBJECT_INPUT, digest: sha256(bytes), bytes, sourcePath: '' }] }
+  const template = domain.templates.get(REVIEW_TEMPLATE)!
+  const commands = apparatus.tasks.forAgent(agentId)
+  await commands.admit({ commandId: 'review-admit', taskId: reviewId, contract: { ...contractFor(domain, template, template.goal), assets: method } })
+  await commands.assign({ commandId: 'review-assign', taskId: reviewId, agentId })
+  await startAttempt(apparatus, { ...CALLER, agentId, sessionId: agentId }, reviewId, operationId, method,
+    { domain, purpose: 'review', relatedTo: { taskId, runId: run.runId } })
+  const reopened = await reopen(fixture)
+  await expect(acceptanceSubject(reopened, taskId, current(reopened, fixture), { ...judgement, detail: 'verifier exited 0 in judged-second' }))
+    .resolves.toEqual(subject)
+  await expect(acceptanceSubject(reopened, taskId, current(reopened, fixture), { ...judgement, implementationDigest: 'f'.repeat(64) }))
+    .rejects.toThrow('changed its frozen subject')
+  await reopened.store.close()
+})
 
 interface Manifest {
   task: string
@@ -209,7 +329,7 @@ describe('recovery of the committed Run stage', () => {
 
     expect(current(apparatus, fixture)).toMatchObject({ status: 'failed', stage: 'submitting', failureReason: expect.stringContaining('interrupted-submission') })
     expect(await submit(apparatus, { ...execution, drain: async () => { throw new Error('redelivery must not execute') } }, CALLER, exec, request, new AbortController().signal))
-      .toMatchObject({ runId: fixture.runId, verdict: 'fail', detail: expect.stringContaining('interrupted-submission') })
+      .toMatchObject({ runId: fixture.runId, verdict: 'unknown', detail: expect.stringContaining('interrupted-submission') })
     expect(fixture.medium.events.length).toBe(committed)
     await expect(access(join(fixture.workspace, fixture.template.file))).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -269,7 +389,7 @@ describe('recovery of the committed Run stage', () => {
       .toMatchObject({ status: 'failed', submission: sealed, source: sealed.source })
     const committed = fixture.medium.events.length
     expect(await submit(apparatus, execution, CALLER, exec, request, new AbortController().signal))
-      .toMatchObject({ runId: fixture.runId, verdict: 'fail', phase: 'failed', detail: sealed.executionFailure })
+      .toMatchObject({ runId: fixture.runId, verdict: 'unknown', phase: 'failed', detail: sealed.executionFailure })
     expect(fixture.medium.events.length).toBe(committed)
     expect(await readFile(join(fixture.workspace, fixture.template.input.name) + '.runs', 'utf8')).toBe('execution\n')
   })
@@ -380,12 +500,12 @@ describe('recovery of the committed Run stage', () => {
 
   it('retains the committed result and workspace through driver close and reopen', async () => {
     const fixture = await working()
+    await submit(fixture.apparatus, execution, CALLER, execFor(agentFor(CALLER.agentId, CALLER.sessionId), 'driver-submit'), { taskId: TASK, program: PROGRAM }, new AbortController().signal)
     await fixture.apparatus.store.close()
     const options = { controlId: 'lib-1', workspaceRoot: fixture.root, domain: fixture.domain,
       persistence: fixture.medium as unknown as SessionPersistence, seams: {}, execution: fakeExecution, attachments: attachmentsAt(fixture.root) }
     const agent = agentFor(CALLER.agentId, CALLER.sessionId)
     const driver = await openDriver(options)
-    await driver.forCall(execFor(agent, 'driver-submit')).submit({ taskId: TASK, program: PROGRAM })
     const status = await driver.forCall(execFor(agent, 'status')).status({ taskId: TASK })
     const committed = fixture.medium.events.length
     await driver.close()

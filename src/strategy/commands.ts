@@ -1,38 +1,9 @@
-/**
- * The round command boundary: the acts that freeze a round, receive its candidates and close it.
- *
- * Two things are decided here rather than by a caller, and both are decided **inside the store's
- * commit region** — the `require` step of the append path, which reads the committed cut at the
- * moment the fact will be appended:
- *
- * 1. **The annealed edit budget.** `openRound` derives it from the round number and the deployment's
- *    annealing policy (`editBudgetFor`, `rounds-1` rather than `/T`, so the last round really does
- *    reach the minimum). A caller supplies no budget, and the value it produces is frozen in the
- *    opening fact. Deriving it from "how many history entries there are" — the previous system's
- *    round (`review.md` R01) — made the budget move whenever a candidate was re-measured.
- * 2. **The decision itself is recomputed against the facts it will be appended to.** A decision is
- *    composed from a projection at call time and then re-projected inside the region; if the two
- *    disagree the append is refused and the caller is told to recompute. The band it carries is the
- *    one the projection was given, so the fact and the arithmetic that produced it cannot disagree. Without that check a
- *    decision computed before a late submission, a late trial or a late evaluation would close the
- *    round out over facts it never saw — and the reducer, which sees only the round's own subject,
- *    cannot notice a measurement that arrived after the decision was composed.
- *
- * The submission gates themselves (slot range, an occupied slot, the budget, the reserved
- * exploration slot, an after-close submission) are the reducer's, and the reducer runs inside the
- * same serial region: the command surface cannot bypass them and does not duplicate them. What this
- * boundary adds is the one submission condition the round's own state cannot decide — that the
- * evaluation a slot names is an evaluation of the revision that slot offers.
- *
- * @module singularity-core/strategy/commands
- */
-
 import type { ControlReadCut, ControlSessionStore } from '../control/session-store.ts'
 import { digestOf, type Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { RevisionRef } from '../task/protocol.ts'
 import { sameRevision } from '../task/shape.ts'
-import { editBudgetFor, type Calibration } from './decision.ts'
+import { type Calibration } from './decision.ts'
 import {
   STRATEGY_KINDS,
   STRATEGY_PROTOCOL,
@@ -42,7 +13,6 @@ import {
 } from './protocol.ts'
 import { projectRound, type MeasureSlice, type RoundDecision } from './view.ts'
 
-/** The round's own plan, as the opening fact will freeze it. `editBudget` is not a caller's choice. */
 export interface OpenRoundInput {
   readonly commandId: string
   readonly roundId: string
@@ -50,7 +20,7 @@ export interface OpenRoundInput {
   readonly round: number
   readonly incumbent: RevisionRef
   readonly candidates: number
-  readonly explorationSlots: number
+
   readonly historyCutoff: number
   /** The digest of the measurement settings every pooled candidate must have been measured under. */
   readonly caliber: string
@@ -65,7 +35,7 @@ export interface SubmitCandidateInput {
   readonly revision: RevisionRef
   readonly evaluationId: string
   readonly edits: readonly StructuralEdit[]
-  readonly exploratory: boolean
+
 }
 
 export interface DecideRoundInput {
@@ -75,10 +45,6 @@ export interface DecideRoundInput {
 
 export interface StrategyCommandOptions {
   readonly store: ControlSessionStore
-  /** How many rounds the run has: rounds are numbered `1..rounds`, and `rounds` reaches the floor. */
-  readonly rounds: number
-  readonly firstBudget: number
-  readonly minimumBudget: number
   /** The noise basis this deployment decides against, with its provenance (`measured`/`declared`). */
   readonly calibration: Calibration
   /**
@@ -95,15 +61,6 @@ export interface StrategyCommands {
 }
 
 export function createStrategyCommands(options: StrategyCommandOptions): StrategyCommands {
-  // The one policy check that no later fact can catch: a budget that *grows* with the round inverts
-  // the method (a round is supposed to get sparser), while a non-integer or negative budget is
-  // refused by the opening payload's own reader at the fact boundary.
-  if (options.minimumBudget > options.firstBudget)
-    refuse(
-      'malformed-declaration',
-      `the edit budget must anneal downward: minimumBudget ${options.minimumBudget} exceeds firstBudget ${options.firstBudget}`,
-    )
-
   return {
     openRound: input =>
       emitRaw(
@@ -115,16 +72,11 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
           round: input.round,
           incumbent: input.incumbent,
           candidates: input.candidates,
-          explorationSlots: input.explorationSlots,
-          editBudget: editBudgetFor(input.round, options.rounds, options.firstBudget, options.minimumBudget),
           historyCutoff: input.historyCutoff,
           caliber: input.caliber,
           weights: input.weights,
         },
         () => {
-          // Cross-subject: the round number names a round in this log, not merely inside one subject.
-          // Two rounds numbered alike would anneal the same budget and occupy one position in the
-          // history the next round reads, so the number would stop being an identifier.
           for (const [subject, state] of options.store.load().statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION)) {
             if (subject === input.roundId || state.plan === undefined) continue
             if (state.plan.round !== input.round) continue
@@ -147,13 +99,13 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
           revision: input.revision,
           evaluationId: input.evaluationId,
           edits: input.edits,
-          exploratory: input.exploratory,
-        },
+          },
         () => {
           const cut = options.store.load()
           // The reducer names a submission to a round that was never opened; the anchor below is
           // about a real round, so it stays out of the way of that refusal.
-          if (cut.stateOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, input.roundId)?.plan === undefined) return
+          const round = cut.stateOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, input.roundId)
+          if (round?.plan === undefined) return
           const evaluation = options.measuresAt(cut).evaluationOf(input.evaluationId)
           // An evaluation that is not in the log yet is not a lie: measurement takes time, and the
           // projection reports the slot as unmeasured with its own reason. An evaluation that *is*

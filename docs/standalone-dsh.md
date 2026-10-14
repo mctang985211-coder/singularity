@@ -23,12 +23,8 @@ harness 内实例（`harness/.dsh`）**零共享状态**。singularity-core 的�
 | `PATH`（前插） | `…/dsh/node_modules/.bin` | `dsh` 命令解析到私有安装 |
 | `DSH_CONTROL_INSTALLED` | `…/dsh/node_modules/@deepseek-ai` | 探针的模块 resolve hook（[dsh-control-runtime.mjs](../scripts/dsh-control-runtime.mjs)）从这里解析全部 `@deepseek-ai/*` |
 | `DSH_HOME` | `…/home` | credentials-local 读 `$DSH_HOME/.credentials.yaml`；任何会话/存储状态落这里 |
-| `SINGULARITY_LLM_PROVIDER` / `_MODEL` / `_BASE_URL` | `yingjun` / `deepseek-v4.1-flash` / `https://yingjun.xyz/v1` | [llm-route.mjs](../scripts/llm-route.mjs) 的路由覆盖 |
-| `SINGULARITY_LLM_API` | `openai-responses` | 网关协议：Responses 端点（`<baseURL>/responses`） |
-| `SINGULARITY_LLM_API_KEY_ENV` / `_REASONING` | `YINGJUN_API_KEY` / `max` | 凭据的 env 键名 + 思考强度（pi-ai 的 `GenerateOptions.reasoningEffort`） |
 
 运行前统一 source env.sh。当前探针 hook 在变量缺省时也解析到本私有安装/home，**不会回到全局安装**；
-模型路由缺省仍由 `llm-route.mjs` 的部署默认值决定，因此正式验收同时核对实际 session request header 的 provider/model。
 `PATH` 中的裸 dsh 与探针显式解析入口是不同接线，不能据 hook 缺省安全就省略 env.sh。
 
 ## 用法
@@ -36,28 +32,14 @@ harness 内实例（`harness/.dsh`）**零共享状态**。singularity-core 的�
 ```sh
 . /home/ROXY/singularity-next/env.sh
 cd /home/ROXY/code/singularity-core
-pnpm build                         # core 类型检查，不覆盖 assembly，不产出装配 JS
-pnpm exec tsc -p assembly/tsconfig.json --noEmit
-pnpm test                          # 单元/spec 回归
-node scripts/gates.mjs --probe      # 静态门禁检测器自检
-pnpm verify                        # build + test + gates：全部离线，不含任何探针
-node scripts/model-smoke.mjs        # 真实模型冒烟
-node scripts/rsi-live.mjs           # 脚本级 RSI 证据，不能代替产品闭环
-
-# 装配层产品路径：构建 → 落私有 profile → 浏览器验证
-node assembly/build.mjs
+pnpm build
+pnpm test
+pnpm gates
 node scripts/deploy.mjs
-node scripts/browser-probe.mjs            # 真实 Chromium + 真实模型：工具、判决、receipt
-node scripts/browser-probe.mjs --recovery # 当前只在 propose turn 完成后重启，未覆盖在飞求解
-node scripts/browser-probe.mjs --panel       # 真浏览器读面板与同 cut 一致
-node scripts/browser-probe.mjs --decompose   # 真实依赖链：子任务产物进入后序输入
-node scripts/browser-probe.mjs --submitted   # durable submitted 后真实 SIGKILL 恢复
-node scripts/browser-probe.mjs --aborted     # 原生 Stop 的准确 session 失败出口
-dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open   # 手动点一次
+dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
 ```
 
-`pnpm verify` 是**离线**回归：它不启动浏览器、不调用模型。任何「产品合同已通过」的结论只能来自上面
-带 `--` 的探针，或来自最终的单命令验收（见 [assembly-blueprint §9](assembly-blueprint.md#9-剩余构建顺序与检查点)）。
+从原生界面提交领域任务和自然语言验收要求，节点通过普通 DSH 主 agent 会话自主执行。本轮按用户要求，确认真实执行启动后停止监控，由用户报告断点；收到断点后核对 Task/Run、封存产物、独立判决、资产使用和发布记录。离线回归不能证明领域效果。
 
 部署出来的 profile 在 `home/profiles/singularity-next-web/`（`scripts/deploy.mjs` 整目录重写；linked root
 指向本 checkout 的 `assembly/`）。模型路由与领域目录都写在 `deployment/profile/cordis.patch.yml`，
@@ -67,17 +49,11 @@ dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open   # �
 
 - `dsh --version` → **0.2.0-rc.2**（与全局安装、harness checkout 三方同版本，将来接
   profile 契约零落差）；
-- `model-smoke.mjs` 在这套环境端到端通过：§1 真实补全（yingjun responses，4201ms，
-  回答 `"four"`）+ §2 真实 agent turn（完整事件序列、session 持有模型产出的 assistant 消息）；
-- **隔离证明**：冒烟后三方核对——独立 home 无会话残留（探针按纪律把会话写进各自的
-  `mkdtemp` tmpdir，home 只供凭据读取）、`~/.dsh/sessions` 与 `harness/.dsh/sessions`
-  的目录清单与运行前逐字相同。
-
 ## 当前验收与完成边界
 
-基线 `35b0c7c` 的本轮复核已通过 core typecheck、assembly 独立 typecheck、spec 回归和门禁自检；
-未重新部署、未运行真实模型、未重跑完整 `pnpm verify`。反例与当前探针缺口见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)。
-新 G1/G2/G3 与最终发布验收按 [assembly-blueprint.md §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 交付，不能据上述历史 smoke 标为完成。
+本轮以 `67c7ffe` 和现有未提交改动为基线，清理后全量回归曾通过（61 个文件、706 项）。本次恢复修复未新增或运行 spec，typecheck、构建、摘要、gates 与 diff 检查通过。新构建已部署并重启私有 DSH，原改进会话已重发同一冻结 evolve 请求，原候选 Run 的 seq418/419 已成功执行工作区核查；基线 trial 未重复。确认候选实际执行后已停止监控。最新检查点和费用见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)。
+21:14 的两路独立求解/验收链构建已就绪，相关 111 项回归及现有检查通过；当前宿主仍执行 19:17 装载的构建，未再次中断单候选。下一次启动装载并行实现；真实两路重叠和吞吐待后续批次验证。
+G1/G2/G3 与最终发布验收按 [assembly-blueprint.md §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 交付，当前没有候选结果或 RSI 赢家发布完成事实。
 
 ## 环境边界
 
@@ -87,4 +63,4 @@ dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open   # �
   harness 的任何文件；
 - **本次 G1/G2/G3 全部在私有独立 DSH 完成**，不以旧 harness 启动或集成为前置；旧仓只读参考。
 - 最终验收使用隔离测试 home/profile 装载被验证的同一插件产物，保留私有凭据来源；不重写已有用户会话或全局配置。
-- 模型调用的有限预算与领域效果阈值在 G3 实验前冻结；探针自动批准不算真实 Web 人审。
+- 本轮使用 high 思考与 3 亿原生 tokens 总预算，包含审核成本。发布需独立审核和真实评估通过。

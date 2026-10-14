@@ -1,20 +1,3 @@
-/**
- * The panel's shell half: one sidebar row, one page, and an iframe between them.
- *
- * Hand-written, and it has to be. The Host reads `exports["./client"]` off the package and serves those
- * exact bytes — there is no bundler at runtime — so this file is both the source and the artifact, which
- * is why it is a `window.__ModuleLoader__.load` wrapper rather than an ES module and why it may only
- * `require` the platform's seed words.
- *
- * **What it does not do is draw the task list.** That is `/singularity/panel`, a page this package
- * serves itself and mounts here in an iframe — the structure the previous singularity's web surface
- * used. The reason is not taste: a page that renders inside the shell's React tree can only be reached
- * by driving the shell (open a session, pick a preset, get a workspace), so the panel's own evidence
- * needed a chat surface to exist at all, and a shell restyle was a way for the task list to break. An
- * iframe whose `src` is this package's own route decouples both: the page is verifiable on its own.
- *
- * @module @dangosys/dsh-singularity-next/client
- */
 window.__ModuleLoader__.load({
   id: '@dangosys/dsh-singularity-next',
   factory: require => {
@@ -22,26 +5,75 @@ window.__ModuleLoader__.load({
     const exports = module.exports
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
+    const blocksText = content =>
+      content
+        .filter(block => block.type === 'text')
+        .map(block => block.text)
+        .join('\n')
+
+    module.exports.transcriptRows = (entries, session, inbox) => {
+      const rows = []
+      const admitted = new Set()
+      const durableMessages = new Set()
+      const liveRows = new Map()
+      for (const entry of entries) {
+        if (entry.type === 'transient') {
+          const event = entry.event
+          if (event.type !== 'assistant/live-chunk' || event.data.chunk.type !== 'text-delta') continue
+          const index = liveRows.get(event.data.attemptId)
+          if (index === undefined) {
+            liveRows.set(event.data.attemptId, rows.length)
+            rows.push({ role: 'assistant', text: event.data.chunk.text })
+          } else {
+            rows[index].text += event.data.chunk.text
+          }
+          continue
+        }
+        const event = entry.event
+        if (event.type === 'user/message') {
+          durableMessages.add(event.data.id)
+          if (event.data.source.rpcId !== undefined) admitted.add(event.data.source.rpcId)
+          const text = blocksText(event.data.content)
+          if (text) rows.push({ role: 'user', text })
+        } else if (event.type === 'assistant/message') {
+          const text = blocksText(event.data.message.content)
+          if (text) rows.push({ role: 'assistant', text })
+        }
+      }
+      for (const target of ['next-turn', 'next-step']) {
+        for (const item of inbox?.[target] ?? []) {
+          const source = item?.source
+          if (durableMessages.has(item.id) || source === undefined) continue
+          if (source.rpcId !== undefined) {
+            if (admitted.has(source.rpcId)) continue
+            admitted.add(source.rpcId)
+          }
+          const text = blocksText(item.content)
+          if (text) rows.push({ role: 'user', text })
+        }
+      }
+      for (const pending of session.pendingSubmissions) {
+        if (!admitted.has(pending.requestId) && pending.text) rows.push({ role: 'user', text: pending.text })
+      }
+      return rows
+    }
+
+
     const { createElement } = require('react')
 
-    /** The panel's own page, and its identity: one id for the rail row and the page it opens. */
     const PANEL_PATH = '/singularity/panel/'
     const PANEL_ID = 'singularity-tasks'
 
-    /**
-     * The page. An iframe and nothing else, so the panel's rendering is the panel's own page's business
-     * and this file has no opinion about the task log at all.
-     */
+    let attachFrame = () => undefined
     function TasksPage() {
       return createElement('iframe', {
-        src: PANEL_PATH,
-        title: 'Singularity tasks',
+        src: PANEL_PATH, ref: element => attachFrame(element),
+        title: 'Singularity map',
         'data-panel-frame': PANEL_ID,
         style: { border: 0, width: '100%', height: '100%', display: 'block' },
       })
     }
 
-    /** The rail row's icon. The shell shows the registered `label` as its text. */
     function TasksIcon(props) {
       return createElement(
         'svg',
@@ -60,20 +92,60 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Required service: the slot registry every entry of this panel is registered into. */
-    const inject = ['slots']
+    const inject = ['slots', 'sessions']
 
-    /**
-     * Claim one sidebar row and one main page, under one id.
-     *
-     * Both registrations ride `ctx.slots.inject`, which runs the callback when the slot's declaration
-     * exists and runs it again if the declaring package is ever unloaded — so this plugin does not depend
-     * on being loaded after the sidebar, and does not have to unregister by hand.
-     */
     function apply(ctx) {
+      let frame, current, dispose, generation = 0
+      const post = data => frame?.contentWindow?.postMessage(data, location.origin)
+      const clear = () => { generation++; dispose?.(); dispose = undefined; current = undefined }
+      attachFrame = element => { frame = element; if (element === null) clear() }
+      const bind = async id => {
+        clear()
+        if (id === null) return
+        const version = generation
+        const reference = ctx.sessions.retain(id, { source: 'singularity' })
+        dispose = () => reference.release()
+        let binding
+        try { binding = await reference.ready }
+        catch (error) {
+          if (version !== generation) return
+          clear()
+          throw error
+        }
+        if (version !== generation) return
+        current = binding
+        const inbox = binding.session.projections.faceOf('inbox')
+        const paint = () => {
+          if (version !== generation) return
+          const snapshot = binding.session.getSnapshot()
+          if (snapshot.openState === 'error') { post({ type: 'singularity:session-error', sessionId: id, message: snapshot.openError.message }); return }
+          post({ type: 'singularity:transcript', sessionId: id, rows: module.exports.transcriptRows(binding.eventSource.getSnapshot().entries, snapshot, inbox.getSnapshot()) })
+        }
+        paint()
+        const stops = [binding.eventSource.subscribe(paint), binding.session.subscribe(paint), inbox.subscribe(paint)]
+        dispose = () => { stops.forEach(stop => stop()); reference.release() }
+      }
+      const receive = event => {
+        if (event.source !== frame?.contentWindow || event.origin !== location.origin) return
+        const data = event.data
+        if (data.type === 'singularity:open') void bind(data.sessionId).catch(error => post({ type: 'singularity:session-error', sessionId: data.sessionId, message: String(error) }))
+        if (data.type === 'singularity:prompt') {
+          const submit = async () => {
+            if (current === undefined || ctx.sessions.binding(data.sessionId) !== current) throw new Error('Session binding changed')
+            const handle = current.session.beginSubmission({ mode: 'queue', text: data.text, attachments: [] })
+            try {
+              const result = await current.session.prompt([{ type: 'text', text: data.text }], 'queue', undefined, handle.requestId)
+              if (!result.ok) throw new Error(JSON.stringify(result.error))
+            } catch (error) { handle.abandon(); throw error }
+          }
+          void submit().catch(error => post({ type: 'singularity:session-error', sessionId: data.sessionId, message: String(error) }))
+        }
+      }
+      window.addEventListener('message', receive)
+      ctx.effect(() => () => { clear(); window.removeEventListener('message', receive) })
       ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, TasksPage))
       ctx.slots.inject('sidebar.panellist', () =>
-        ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 60, label: 'Tasks' }, TasksIcon),
+        ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 60, label: 'Singularity' }, TasksIcon),
       )
     }
 

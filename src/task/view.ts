@@ -17,7 +17,7 @@ export interface CriterionVerdictView {
   readonly verifierVersion: string
   /** The content digest of the implementation the criterion names. */
   readonly implementationDigest: string
-  readonly verdict: 'pass' | 'fail' | 'unjudged'
+  readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown' | 'unjudged'
   /** The implementation that actually decided it, or `null` while unjudged. */
   readonly decidedBy: string | null
   /** The artifact content the verdict was formed on, or `null` while unjudged. */
@@ -78,7 +78,7 @@ export interface ReceiptView {
     readonly verifierRef: string
     readonly verifierVersion: string
     readonly implementationDigest: string
-    readonly verdict: 'pass' | 'fail' | 'unjudged'
+    readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown' | 'unjudged'
     readonly artifactDigest: string | null
     readonly actor: string | null
   }[]

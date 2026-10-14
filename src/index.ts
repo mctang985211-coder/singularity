@@ -179,7 +179,6 @@ export {
 } from './measure/execution.ts'
 
 export {
-  editBudgetFor,
   noveltyOf,
   select,
   type Calibration,

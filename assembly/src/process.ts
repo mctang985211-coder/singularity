@@ -1,15 +1,23 @@
+import { existsSync } from 'node:fs'
+import { dirname, isAbsolute } from 'node:path'
+import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
+import { confinedArgv, type BubbleWorld } from './bubble.ts'
 import { spawn, type SpawnOptions } from 'node:child_process'
 import type { VerifierInvocation } from '../../src/verifier/command.ts'
 
-export function spawnProcess(invocation: VerifierInvocation, signal?: AbortSignal, cwd?: string): Promise<{
+export function spawnProcess(invocation: VerifierInvocation, signal?: AbortSignal, cwd?: string, world?: BubbleWorld): Promise<{
   exitCode: number | null; stdout: string; stderr: string; failure?: string
 }> {
   signal?.throwIfAborted()
+  const argv = invocation.shell ? ['/bin/bash', '-c', invocation.command] : [...invocation.argv]
+  if (isAbsolute(argv[0]!) && !existsSync(argv[0]!)) return Promise.resolve({ exitCode: null, stdout: '', stderr: '', failure: `process-execution-failed: ENOENT ${argv[0]}` })
+  const directory = cwd ?? dirname(argv[1] !== undefined && isAbsolute(argv[1]) ? argv[1] : process.execPath)
+  const policy = world ?? { root: directory, writable: cwd !== undefined, protected: [],
+    references: argv.filter(arg => isAbsolute(arg)).map(path => dirname(path)).filter(path => path !== '/') }
+  const confined = confinedArgv(argv, policy, directory)
   return new Promise(resolve => {
-    const options: SpawnOptions = { stdio: ['ignore', 'pipe', 'pipe'], detached: true, ...(cwd === undefined ? {} : { cwd }) }
-    const child = invocation.shell
-      ? spawn(invocation.command, { ...options, shell: true })
-      : spawn(invocation.argv[0], invocation.argv.slice(1), options)
+    const options: SpawnOptions = { stdio: ['ignore', 'pipe', 'pipe'], detached: true, cwd: directory, env: { ...scrubbedParentEnv(), HOME: directory, TMPDIR: '/tmp' } }
+    const child = spawn(confined[0]!, confined.slice(1), options)
     let stdout = '', stderr = '', size = 0, failure: string | undefined
     const kill = () => {
       if (child.pid === undefined) return

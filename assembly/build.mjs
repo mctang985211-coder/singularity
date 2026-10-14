@@ -24,9 +24,9 @@ async function filesAt(root, directory) {
 }
 
 async function inputsAt(root) {
-  return [...await filesAt(root, 'src'), ...await filesAt(root, 'assembly/src'), ...await filesAt(root, 'assembly/presets'),
+  return [...await filesAt(root, 'src'), ...await filesAt(root, 'assembly/src'), ...await filesAt(root, 'assembly/frontend'), ...await filesAt(root, 'assembly/presets'),
     'package.json', 'pnpm-lock.yaml', 'tsconfig.json', 'assembly/tsconfig.json', 'assembly/build.mjs', 'assembly/package.json',
-    'assembly/client.js', 'assembly/panel.js', 'assembly/panel.css', 'assembly/panel.html', 'assembly/cordis.patch.yml'].sort()
+    'assembly/client.js', 'assembly/review.mjs', 'assembly/panel.html', 'assembly/cordis.patch.yml'].sort()
 }
 
 async function hashes(root, files) {
@@ -77,7 +77,7 @@ export async function checkBuild(root = ROOT) {
 
 export async function buildAssembly(root = ROOT) {
   const inputs = await hashes(root, await inputsAt(root))
-  for (const config of ['tsconfig.json', 'assembly/tsconfig.json'])
+  for (const config of ['tsconfig.json', 'assembly/tsconfig.json', 'assembly/frontend/tsconfig.json'])
     execFileSync(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--noEmit', '-p', config],
       { cwd: root, stdio: 'inherit' })
   const here = join(root, 'assembly')
@@ -90,6 +90,13 @@ export async function buildAssembly(root = ROOT) {
         formats: ['es'], fileName: (_format, entryName) => `${entryName}.js`,
       },
       rollupOptions: { external: id => id.startsWith('@deepseek-ai/') || id.startsWith('node:') },
+    },
+  })
+  await build({ configFile: false, root: here, logLevel: 'warn',
+    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+    build: { outDir: join(here, 'lib/panel'), emptyOutDir: true,
+      lib: { entry: join(here, 'frontend/panel.tsx'), formats: ['es'], fileName: () => 'panel.js', cssFileName: 'panel' },
+      rollupOptions: { output: { codeSplitting: false } },
     },
   })
   assert.deepEqual(await hashes(root, await inputsAt(root)), inputs, 'source bytes changed during the build')

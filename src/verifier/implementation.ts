@@ -34,14 +34,14 @@ export interface VerifierInput {
 
 /** The one shape a judgement has. Nothing here is a score or a confidence: pass, or fail. */
 export interface VerifierVerdict {
-  readonly verdict: 'pass' | 'fail'
+  readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown'
   readonly detail?: string
 }
 
 /** One known sample: an input, and the verdict the implementation must produce for it. */
 export interface VerifierSelftestSample {
   readonly name: string
-  readonly expected: 'pass' | 'fail'
+  readonly expected: 'pass' | 'fail' | 'partial' | 'unknown'
   readonly input: VerifierInput
 }
 
@@ -68,8 +68,9 @@ export interface VerifierImplementation {
 /** One sample whose observed verdict disagreed with what the sample declared. */
 interface SelftestFailure {
   readonly name: string
-  readonly expected: 'pass' | 'fail'
-  readonly actual: 'pass' | 'fail'
+  readonly expected: 'pass' | 'fail' | 'partial' | 'unknown'
+  readonly actual: 'pass' | 'fail' | 'partial' | 'unknown'
+  readonly detail?: string
 }
 
 /** What running the selftest observed: how many samples ran, and which ones disagreed. */
@@ -138,7 +139,8 @@ export async function runVerifierSelftest(implementation: VerifierImplementation
   for (const sample of samples) {
     const verdict = await implementation.judge(sample.input)
     if (verdict.verdict !== sample.expected)
-      failures.push({ name: sample.name, expected: sample.expected, actual: verdict.verdict })
+      failures.push({ name: sample.name, expected: sample.expected, actual: verdict.verdict,
+        ...(verdict.detail === undefined ? {} : { detail: verdict.detail }) })
   }
   return {
     ref: implementation.ref,

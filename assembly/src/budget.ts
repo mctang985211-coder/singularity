@@ -1,16 +1,13 @@
 import { lastAssistantStreamChunk, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
-import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { assertClosedKeys } from '../../src/protocol/envelope.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import type { Apparatus } from './apparatus.ts'
 
 export interface CampaignLimits {
-  readonly rootSolves: number
-  readonly children: number
-  readonly childRuns: number
   readonly nativeTokens: number
+  readonly unknownUsageReservations?: readonly { readonly sessionId: string; readonly seq: number; readonly tokens: number }[]
 }
 const usageOf = (event: SessionEvent): number | undefined => event.type === 'assistant/message' ? event.data.usage?.totalTokens
   : event.type === 'assistant/attempt' ? lastAssistantStreamChunk(event.data.stream, 'usage')?.usage.totalTokens : undefined
@@ -25,30 +22,42 @@ export function nativeTokensOf(events: readonly SessionEvent[]): number {
 }
 
 export function createCampaignBudget(apparatus: Apparatus, limits: CampaignLimits) {
-  assertClosedKeys({ ...limits }, ['rootSolves', 'children', 'childRuns', 'nativeTokens'], 'campaign budget')
-  for (const [key, value] of Object.entries(limits))
-    if (!Number.isSafeInteger(value) || value < 1) refuse('malformed-declaration', `campaign budget ${key} must be a positive safe integer`)
+  assertClosedKeys({ ...limits }, ['nativeTokens', 'unknownUsageReservations'], 'campaign budget')
+  if (!Number.isSafeInteger(limits.nativeTokens) || limits.nativeTokens < 1)
+    refuse('malformed-declaration', 'campaign budget nativeTokens must be a positive safe integer')
+  const reservations = limits.unknownUsageReservations ?? []
+  const positions = new Set<string>()
+  for (const reservation of reservations) {
+    assertClosedKeys({ ...reservation }, ['sessionId', 'seq', 'tokens'], 'unknown usage reservation')
+    if (reservation.sessionId.length === 0 || !Number.isSafeInteger(reservation.seq) || reservation.seq < 0 ||
+      !Number.isSafeInteger(reservation.tokens) || reservation.tokens < 1)
+      refuse('malformed-declaration', 'usage reservations require an exact session/event and a positive token upper bound')
+    const position = JSON.stringify([reservation.sessionId, reservation.seq])
+    if (positions.has(position)) refuse('malformed-declaration', 'duplicate unknown usage reservation')
+    positions.add(position)
+  }
   const sessions = new Map<string, Map<number, SessionEvent>>()
   const pending = new Map<string, { output: number; usage?: number; unknown?: true }>()
-  const starts = new Map<string, string>()
-  const tasks = () => [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
-  const childOf = (taskId: string): boolean => tasks().some(parent => parent.decomposition?.children.some(child => child.taskId === taskId))
-  const countRoots = (): number => apparatus.store.load().entries().filter(fact => fact.kind === TASK_KINDS.runStarted && !childOf(fact.subject)).length
   const report = () => {
-    const unknown: { sessionId: string; seq: number | null }[] = [...sessions.entries()].flatMap(([sessionId, events]) => [...events.values()]
+    const missing = [...sessions.entries()].flatMap(([sessionId, events]) => [...events.values()]
       .filter(event => isAttempt(event) && usageOf(event) === undefined).map(event => ({ sessionId, seq: Number(event.seq) })))
+    const reserved = reservations.filter(held => missing.some(event => event.sessionId === held.sessionId && event.seq === held.seq))
+    const unknown: { sessionId: string; seq: number | null }[] = missing.filter(event =>
+      !reserved.some(held => held.sessionId === event.sessionId && held.seq === event.seq))
     unknown.push(...[...pending.entries()].filter(([, request]) => request.unknown === true).map(([sessionId]) => ({ sessionId, seq: null })))
     const known = [...sessions.values()].flatMap(events => [...events.values()]).filter(isAttempt)
       .reduce((sum, event) => sum + (usageOf(event) ?? 0), 0)
     const inFlight = [...pending.values()].reduce((sum, request) => sum + (request.usage ?? 0), 0)
-    return { rootSolves: countRoots(), tokens: unknown.length === 0 ? known + inFlight : null, unknown }
+    const reservedTokens = reserved.reduce((sum, held) => sum + held.tokens, 0)
+    return { tokens: unknown.length === 0 ? known + inFlight + reservedTokens : null,
+      knownTokens: known + inFlight, reservedTokens, reservations: reserved, unknown }
   }
   const beforeRequest = (maximum?: number): number => {
     const observed = report()
     if (observed.tokens === null) refuse('budget-exhausted', 'native usage is unknown; no further model request is permitted')
     const reserved = [...pending.values()].filter(request => request.usage === undefined).reduce((sum, request) => sum + request.output, 0)
     const remaining = limits.nativeTokens - observed.tokens - reserved
-    if (remaining <= 0) refuse('budget-exhausted', `native token budget ${limits.nativeTokens} is exhausted; actual usage ${observed.tokens}`)
+    if (remaining <= 0) refuse('budget-exhausted', `native token budget ${limits.nativeTokens} is exhausted; usage plus explicit reservations ${observed.tokens}`)
     return Math.min(maximum ?? remaining, remaining)
   }
   const observe = (sessionId: string, event: SessionEvent): void => {
@@ -73,21 +82,11 @@ export function createCampaignBudget(apparatus: Apparatus, limits: CampaignLimit
     restore: async () => {
       const owners = new Set([...apparatus.store.load().statesOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION).values()].map(agent => agent.sessionId))
       for (const session of await apparatus.persistence.list())
-        if (session.header.agentPreset === 'singularity-next' || owners.has(String(session.header.id))) await enroll(String(session.header.id))
+        if (owners.has(String(session.header.id))) await enroll(String(session.header.id))
     },
-    assertPlan: (children: readonly { readonly maxRuns: number }[]): void => {
-      if (children.length > limits.children || children.some(child => child.maxRuns > limits.childRuns))
-        refuse('budget-exhausted', `campaign allows ${limits.children} children and ${limits.childRuns} Runs per child`)
-    },
-    startRun: async <T>(taskId: string, runId: string, commit: () => Promise<T>): Promise<T> => {
+    startRun: async <T>(_taskId: string, _runId: string, commit: () => Promise<T>): Promise<T> => {
       beforeRequest()
-      if (childOf(taskId)) {
-        const childRuns = apparatus.store.load().entries().filter(fact => fact.kind === TASK_KINDS.runStarted && fact.subject === taskId).length
-        if (childRuns >= limits.childRuns) refuse('budget-exhausted', `child ${taskId} has exhausted ${limits.childRuns} Runs`)
-      } else if (countRoots() + [...starts.values()].filter(id => !childOf(id)).length >= limits.rootSolves)
-        refuse('budget-exhausted', `campaign root solve budget ${limits.rootSolves} is exhausted`)
-      starts.set(runId, taskId)
-      try { return await commit() } finally { starts.delete(runId) }
+      return commit()
     },
     stream: async function* (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>, stop: () => void): AsyncIterable<StreamChunk> {
       const sessionId = String(options.sessionId)

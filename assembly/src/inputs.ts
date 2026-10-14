@@ -32,7 +32,7 @@ export function assertTemplateContract(domain: Domain, contract: TaskContract): 
   const input = contract.inputs[0]
   if (input === undefined || input.source.kind !== template.input.source.kind)
     refuse('evidence-input-mismatch', 'the Task input does not match its frozen template')
-  const expected = contractFor(domain, template, contract.goal, input.source.kind === 'artifact' ? input.source.taskId : undefined)
+  const expected = { ...contractFor(domain, template, contract.goal, input.source.kind === 'artifact' ? input.source.taskId : undefined), ...(contract.assets === undefined ? {} : { assets: contract.assets }) }
   if (contractDigest(contract) !== contractDigest(expected))
     refuse('evidence-input-mismatch', 'the Task input or criterion does not match its frozen template')
   return template

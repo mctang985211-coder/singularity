@@ -102,7 +102,7 @@ export interface FrozenAggregate {
 export interface SlotView {
   readonly slot: number
   readonly evaluationId: string
-  readonly exploratory: boolean
+
   /** The pooled caliber digest, or `null` when this slot's measurement is not there yet. */
   readonly caliberDigest: string | null
   readonly quality: number | null
@@ -133,8 +133,7 @@ export interface RoundDecision {
   readonly round: number
   readonly incumbent: RevisionRef
   readonly candidates: number
-  readonly explorationSlots: number
-  readonly editBudget: number
+
   readonly historyCutoff: number
   /** The noise basis the selection was made against, with its source (`measured` / `declared`). */
   readonly calibration: Calibration
@@ -292,7 +291,6 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
     return {
       slot: submission.slot,
       evaluationId: submission.evaluationId,
-      exploratory: submission.exploratory,
       caliberDigest: null,
       quality: null,
       cost: null,
@@ -303,12 +301,11 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
       novelty,
       constraintsMet: false,
       admissible: false,
-      reason: `no evaluation "${submission.evaluationId}" is in this log, so slot ${submission.slot} has no aggregate to compare; measure the candidate and record its evaluation first`,
+      reason: reason ?? `no evaluation "${submission.evaluationId}" is in this log, so slot ${submission.slot} has no aggregate to compare; measure the candidate and record its evaluation first`,
     }
   return {
     slot: submission.slot,
     evaluationId: submission.evaluationId,
-    exploratory: submission.exploratory,
     caliberDigest: evaluation.caliberDigest,
     quality: evaluation.quality,
     cost: evaluation.cost,
@@ -379,10 +376,9 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
   const candidates: Candidate[] = Array.from({ length: plan.candidates }, (_, slot): Candidate => {
     const entry = planned.find(item => item.submission.slot === slot)
     if (entry === undefined)
-      return { slot, exploratory: false, assets: [], measurement: null, constraintsMet: false, inadmissible: 'no candidate was submitted to this slot' }
+      return { slot, assets: [], measurement: null, constraintsMet: false, inadmissible: 'no candidate was submitted to this slot' }
     return {
       slot,
-      exploratory: entry.submission.exploratory,
       assets: assetsOf(entry.submission.edits),
       // The argmax compares in the measurement's direction: a lower error rate enters as the larger
       // number, so `select` needs no direction of its own.
@@ -403,8 +399,6 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
     round: plan.round,
     incumbent: plan.incumbent,
     candidates: plan.candidates,
-    explorationSlots: plan.explorationSlots,
-    editBudget: plan.editBudget,
     historyCutoff: plan.historyCutoff,
     calibration: decided === undefined ? calibration : decided.calibration,
     caliber: plan.caliber,

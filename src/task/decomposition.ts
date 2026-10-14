@@ -1,33 +1,3 @@
-/**
- * The decomposition fact: one complete fact declaring a task's sub-tasks.
- *
- * One fact, not one fact per edge. DSH's `append` is not a multi-record crash-atomic transaction,
- * so a decomposition split across several facts could be observed half-declared after a crash; the
- * only honest way to express a business-atomic operation is a single complete fact.
- *
- * What the fact decides, all in the reducer and all on the parent's own subject:
- *
- * - a decomposition is declared **once**; a later one is refused rather than merged;
- * - every `dependsOn` names a child this same fact declares, so B has no dependency reaching
- *   outside the declared set and can therefore be checked here at all;
- * - `supports` names contributions to criteria of the **parent's own contract**; the parent still
- *   needs its own independent verification;
- * - the graph is **acyclic**;
- * - `maxRuns` is the sub-task's declared budget, and no kind can raise it.
- *
- * What it deliberately does NOT decide: whether the children exist as admitted tasks, and whether
- * they are ready. Those are cross-subject questions, so they are checked at the serial command
- * boundary before a scheduler may start work, and shown by `projectTree` for readers. Copying a
- * child's contract into the parent would be the same fact recorded twice.
- *
- * **Who may plan.** The fact is stamped with its emitter's actor, and the reducer requires that
- * actor to be the task's current holder. A plan decides what work will happen and who it will be
- * attributed to, which is a decision about the holder's own task, so the holder is the one who
- * makes it — the same reason a transfer requires the holder.
- *
- * @module singularity-core/task/decomposition
- */
-
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
@@ -133,8 +103,8 @@ function childrenOf(raw: unknown, where: string, members: MemberSet): readonly D
   return children
 }
 
-/** Pure preflight and replay use the same complete plan rules. */
-export function assertDecomposition(raw: unknown, contract: TaskContract, parentTaskId: string): readonly DecompositionChild[] {
+/** Pure preflight and replay use the same dependency rules. */
+export function assertDecomposition(raw: unknown, contract: Pick<TaskContract, 'criteria'>, parentTaskId: string): readonly DecompositionChild[] {
   const where = `decomposition of "${parentTaskId}"`
   const children = childrenOf(raw, where, DECOMPOSITION_CHILD_MEMBERS)
   const declared = new Set(children.map(entry => entry.taskId))
@@ -185,13 +155,13 @@ export function decomposedKind(kind: string, emitter: string): KindRule<TaskStat
       // The plan is the holder's act, and the identity is the one the log stamps: a caller cannot
       // claim it, and an agent bound to a task it does not hold cannot write its plan.
       requireResponsible(state, envelope.actor, where)
-      if (state.decomposition !== undefined)
-        refuse(
-          'illegal-transition',
-          `${where} decomposes task "${envelope.subject}" again (declared at ${state.decomposition.at}); a plan is fixed once declared`,
-        )
+      const existing = state.decomposition?.children ?? []
+      const added = new Set(payload.children.map(child => child.taskId))
+      if (existing.some(child => added.has(child.taskId)))
+        refuse('illegal-transition', `${where} repeats an existing child`)
+      const children = assertDecomposition([...existing, ...payload.children], contract, envelope.subject)
+      return { ...state, decomposition: { children, at: envelope.at } }
 
-      return { ...state, decomposition: { children: assertDecomposition(payload.children, contract, envelope.subject), at: envelope.at } }
     },
   })
 }

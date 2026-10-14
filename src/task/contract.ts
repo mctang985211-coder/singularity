@@ -54,6 +54,7 @@ interface TaskInput {
 /** Fixed at admission; a later contract is a different task. */
 export interface TaskContract {
   readonly goal: string
+  readonly assets?: { readonly environmentId: string; readonly revisionId: string; readonly digest: string }
   readonly template: TaskTemplateRef
   /** Fixed sources; an upstream artifact's bytes are bound when a Run opens its Bubble. */
   readonly inputs: readonly TaskInput[]
@@ -61,7 +62,7 @@ export interface TaskContract {
   readonly criteria: readonly AcceptanceCriterion[]
 }
 
-export const CONTRACT_MEMBERS = ['goal', 'template', 'inputs', 'criteria'] as const
+export const CONTRACT_MEMBERS = ['goal', 'template', 'inputs', 'criteria', 'assets'] as const
 export const CRITERION_MEMBERS = ['criterionId', 'statement', 'verifierRef', 'verifierVersion', 'implementationDigest'] as const
 
 /** A sha256 hex content digest: the only form this stack accepts as a content identity. */
@@ -186,7 +187,11 @@ export function assertContractShape(raw: unknown, field: string, members: Member
 
   const criteria = criterionList(rawCriteria, `${field}.criteria`, CRITERION_MEMBERS)
 
-  return { goal, template, inputs, criteria }
+  const held = record['assets'] === undefined ? undefined : requireRecord(record['assets'], `${field}.assets`)
+  if (held !== undefined) assertClosedKeys(held, ['environmentId', 'revisionId', 'digest'], `${field}.assets`, 'malformed-contract')
+  return { goal, template, inputs, criteria, ...(held === undefined ? {} : { assets: {
+    environmentId: requireText(held['environmentId'], `${field}.assets.environmentId`), revisionId: requireText(held['revisionId'], `${field}.assets.revisionId`), digest: requireDigest(held['digest'], `${field}.assets.digest`),
+  } }) }
 }
 
 /**

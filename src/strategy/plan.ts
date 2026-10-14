@@ -1,28 +1,3 @@
-/**
- * The frozen plan of a round: the one fact that fixes what a round is measured under.
- *
- * The plan is one fact rather than a member on each kind because every part of it must be decided
- * **once, before any candidate exists**: the common incumbent, the slot count, the reserved
- * exploration slots, the annealed budget, the frozen history cutoff, the weights — and the
- * **caliber**, the digest of the measurement settings the round pools under.
- *
- * Why the caliber is here and not only on the evaluations. Two candidates may be compared only if
- * they answer the same question (`docs/phase-cd-design.md` §5.4: equal `caliberDigestOf`). While the
- * round had no caliber of its own, the only comparability check possible was *between* the
- * candidates at hand, so a single submission measured under different weights and judgement was
- * pooled with whatever else arrived, and nothing exposed it until a *second* candidate happened to
- * differ — which is a coincidence, not a check. A round now names the question it asks; a submission
- * that answers a different one is refused a place in the ranking, by name.
- *
- * Why this module exists. This is the `round/opened` kind, its payload reader and its reducer, split
- * out exactly as `task/decomposition.ts` holds the decomposition kind: the runtime dependency runs
- * one way — `protocol.ts` imports this module for the kind, and this module imports only *types*
- * from `protocol.ts` — so there is no import cycle to reason about, and the file budget is met by
- * responsibility rather than by shaving the reasoning out of the comments.
- *
- * @module singularity-core/strategy/plan
- */
-
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
@@ -40,10 +15,6 @@ export interface RoundPlan {
   readonly incumbent: RevisionRef
   /** m slots, `0..m-1`. */
   readonly candidates: number
-  /** How many of the last slots are reserved for exploration. */
-  readonly explorationSlots: number
-  /** Structural edits a candidate may declare, annealed from `round`. */
-  readonly editBudget: number
   /** The frozen log position: this round reads only facts below it (R03). */
   readonly historyCutoff: number
   /**
@@ -60,7 +31,7 @@ export interface RoundPlan {
 
 const APPENDED = { appended: true } as const
 const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
-const OPENED_MEMBERS = ['round', 'incumbent', 'candidates', 'explorationSlots', 'editBudget', 'historyCutoff', 'caliber', 'weights'] as const
+const OPENED_MEMBERS = ['round', 'incumbent', 'candidates', 'historyCutoff', 'caliber', 'weights'] as const
 
 /** A non-negative integer. Absent, fractional, negative and non-numeric are all refusals. */
 export function count(source: Record<string, unknown>, key: string, where: string): number {
@@ -84,13 +55,6 @@ function openedPayload(raw: unknown, where: string, nested: { readonly incumbent
   if (round < 1) refuse('malformed-payload', `${where}.round must be an integer >= 1, got ${round}; round numbering is explicit, never a count of history entries`)
   const candidates = count(source, 'candidates', where)
   if (candidates < 1) refuse('malformed-payload', `${where}.candidates must be at least 1, got ${candidates}: a round with no slot has no candidate to decide`)
-  const explorationSlots = count(source, 'explorationSlots', where)
-  if (explorationSlots > candidates)
-    refuse(
-      'malformed-payload',
-      `${where}.explorationSlots is ${explorationSlots} of ${candidates} slots; a reservation cannot exceed the plan it reserves from`,
-    )
-
   const weights = record(source['weights'], `${where}.weights`)
   assertClosedKeys(weights, nested.weights, `${where}.weights`)
   const quality = weights['quality']
@@ -106,8 +70,6 @@ function openedPayload(raw: unknown, where: string, nested: { readonly incumbent
     round,
     incumbent: revisionRef(source['incumbent'], `${where}.incumbent`, nested.incumbent),
     candidates,
-    explorationSlots,
-    editBudget: count(source, 'editBudget', where),
     historyCutoff: count(source, 'historyCutoff', where),
     caliber: digest(source, 'caliber', `${where}.caliber`),
     weights: { quality: quality as number, cost: cost as number },

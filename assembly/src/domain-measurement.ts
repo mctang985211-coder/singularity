@@ -6,6 +6,7 @@ import type { AcceptanceCriterion } from '../../src/task/contract.ts'
 import { list, record, text } from './shape.ts'
 
 export interface DomainMeasurement {
+  readonly module: string
   readonly baseline: number
   readonly criterion: AcceptanceCriterion
   readonly unit: string
@@ -41,7 +42,7 @@ export async function loadMeasurement(path: string): Promise<DomainMeasurement> 
     return raw
   })
   const measure = ports['measure'] as (source: string, signal: AbortSignal) => Promise<unknown>
-  return { baseline, direction, tools, conditions, unit: text(declared, 'unit', 'measurement description'),
+  return { module: path, baseline, direction, tools, conditions, unit: text(declared, 'unit', 'measurement description'),
     criterion: { criterionId: 'domain-quality', statement: 'Measure the submitted implementation under the frozen domain apparatus',
       verifierRef: 'domain-measurement', verifierVersion: '1', implementationDigest: digest },
     measure: async (source, signal) => {

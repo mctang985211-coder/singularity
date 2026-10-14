@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const { editBudgetFor, noveltyOf, select } = await import(pathToFileURL(join(ROOT, 'src/strategy/decision.ts')).href)
+const { noveltyOf, select } = await import(pathToFileURL(join(ROOT, 'src/strategy/decision.ts')).href)
 
 const corpus = JSON.parse(readFileSync(join(ROOT, 'tests/vectors/strategy-decision-vectors.json'), 'utf8'))
 const ledger = readFileSync(join(ROOT, 'docs/divergence-ledger.md'), 'utf8')
@@ -171,14 +171,6 @@ function expectationOf(expected) {
   return { winner: expected.winner, admitted: expected.admitted }
 }
 
-function compareEditBudget(vector) {
-  const input = vector.input
-  const port = (round) => editBudgetFor(round, input.rounds, input.first, input.minimum)
-  const upstream = (round) => upstreamEditBudget(round - 1, input.rounds, input.minimum, input.first)
-  if (input.roundsToCheck === undefined) return { actual: port(input.round), reference: upstream(input.round) }
-  return { actual: input.roundsToCheck.map(port), reference: input.roundsToCheck.map(upstream) }
-}
-
 function compareNovelty(vector) {
   const input = vector.input
   const history = { acceptedAssets: input.acceptedAssets ?? [], deltas: [] }
@@ -217,7 +209,7 @@ function compareSelect(vector) {
   }
 }
 
-const COMPARISONS = { editBudgetFor: compareEditBudget, noveltyOf: compareNovelty, select: compareSelect }
+const COMPARISONS = { noveltyOf: compareNovelty, select: compareSelect }
 
 // ---------------------------------------------------------------------------------------------
 // Run

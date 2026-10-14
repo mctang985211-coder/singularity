@@ -1,5 +1,7 @@
 # 装配前质量审核
 
+> 历史装配前审核；裁定与当前计划见 [context](context.md) 和 [assembly-blueprint](assembly-blueprint.md)。 历史正文按基线保留。
+
 日期：2026-10-10。审核基线：`singularity-core` **`1a7dc126915bd4efa715ccbf250d54bc1e0ea583`**；旧 Singularity `6a0eddec10519bc8c30ed9c7bb9998865f89754f`；DSH checkout `639ed015397290b3745d163aafe02ffee4aa3f84`，实际宿主 `0.2.0-rc.2`；RRSI `be50316e1db05914068a973f322770ef08ed7ba1`。
 
 **结论：可以开始装配层建设；“装配前置全部完成”还需要收窄。** 提交、领域状态机、真实验证与测量、两轮选择和发布原语已经有可运行证据；多会话权限、批准重送、完整发布依据和跨轮历史仍有以下缺口。建议先做 G0 修复，再接标准 Web 聊天中的单任务纵切。后续设计见 [assembly-blueprint.md](assembly-blueprint.md)。
@@ -10,7 +12,6 @@
 
 - `1a7dc12` 上独立运行 `pnpm verify`：**327 tests / 29 test files / 21 gates**，构建、测试、门禁与门禁自检均通过。门禁内的控制 store、执行、恢复、测量、round、发布、CD 与领域对照探针随之运行。
 - 追加反例使用真实 DSH JSONL 控制 store 或纯内存协议管线；临时目录执行后删除。审批来源和晚到测量用明确标注的 double；没有真实用户被发问，也没有模型调用。
-- 检查了 [live-campaign.md](live-campaign.md) 及其原始日志。它证明模型产物、子任务依赖、验证、测量、receipt 与两轮决定能相连；本次没有重跑需要网络和凭据的 live campaign。
 - 未重跑旧仓全量测试或所有变异。旧仓用于接口、行为和装配方式对照；通过本次门禁不能推导本文新发现已受测试保护。
 
 值得保留的实现：持久化屏障失败后不公开希望状态；重开先确认屏障再 adopt；跨实体检查放在唯一提交队列；未知载荷拒绝；执行者与验证/测量服务分离；缺失 trial 保留固定分母；内容绑定与领域版本明确。这些已经比第一轮架子扎实。

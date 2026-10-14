@@ -28,77 +28,6 @@
   },
   "vectors": [
     {
-      "id": "schedule.anneal.first-round",
-      "kind": "deterministic",
-      "function": "editBudgetFor",
-      "source": "rrsi/schedule.py:43",
-      "input": { "round": 1, "rounds": 20, "first": 4, "minimum": 1 },
-      "expected": 4,
-      "upstream": { "call": "edit_budget(0, 20, b_min=1, b_max=4)", "value": 4 },
-      "portNote": "The two denominators agree at t=0: the first round gets b_max either way."
-    },
-    {
-      "id": "schedule.anneal.last-round",
-      "kind": "port-adapted",
-      "function": "editBudgetFor",
-      "source": "rrsi/schedule.py:48",
-      "input": { "round": 20, "rounds": 20, "first": 4, "minimum": 1 },
-      "expected": 1,
-      "upstream": { "call": "edit_budget(19, 20, b_min=1, b_max=4)", "value": 2 },
-      "portNote": "ADR tightening #1 (counterexample for /(rounds-1)): dividing by T leaves the last in-range round at 2, so a 20-round run never gets a budget of 1."
-    },
-    {
-      "id": "schedule.anneal.mid-round",
-      "kind": "port-adapted",
-      "function": "editBudgetFor",
-      "source": "rrsi/schedule.py:48",
-      "input": { "round": 13, "rounds": 20, "first": 4, "minimum": 1 },
-      "expected": 2,
-      "upstream": { "call": "edit_budget(12, 20, b_min=1, b_max=4)", "value": 3 },
-      "portNote": "Same stretch, one round earlier: the rounds-1 denominator makes round 13 the first sparse round instead of round 14."
-    },
-    {
-      "id": "schedule.anneal.table-20",
-      "kind": "port-adapted",
-      "function": "editBudgetFor",
-      "source": "rrsi/schedule.py:53",
-      "input": { "roundsToCheck": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], "rounds": 20, "first": 4, "minimum": 1 },
-      "expected": [4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1],
-      "upstream": { "call": "budget_table(20, b_min=1, b_max=4)", "value": [4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2] },
-      "portNote": "The whole anneal, so the divergence is visible at rounds 13 and 20 rather than argued from one sample."
-    },
-    {
-      "id": "schedule.anneal.upstream-endpoint",
-      "kind": "upstream-native",
-      "function": "editBudgetFor",
-      "source": "tests/test_core.py:63",
-      "input": { "round": 21, "rounds": 20, "first": 4, "minimum": 1 },
-      "expected": 1,
-      "upstream": { "call": "edit_budget(t=20, T=20, b_min=1, b_max=4) — the out-of-range endpoint budget_table never asks for", "value": 1 },
-      "portNote": "Upstream's own test asserts edit_budget(T, T, ...) == b_min; the port's out-of-range clamp reaches the same value at round 21, and reaches it in range at round 20."
-    },
-    {
-      "id": "schedule.anneal.one-round",
-      "kind": "port-adapted",
-      "function": "editBudgetFor",
-      "source": "rrsi/schedule.py:43",
-      "input": { "round": 1, "rounds": 1, "first": 4, "minimum": 1 },
-      "expected": 1,
-      "upstream": { "call": "edit_budget(0, 1, b_min=1, b_max=4)", "value": 4 },
-      "portNote": "A one-round run is its own last round, so it gets the minimum: the point of tightening #1 is that the last round is sparse and attributable, and with T=1 the last round is round 1."
-    },
-    {
-      "id": "schedule.anneal.round-zero",
-      "kind": "deterministic",
-      "function": "editBudgetFor",
-      "source": "rrsi/schedule.py:47",
-      "input": { "round": 0, "rounds": 20, "first": 4, "minimum": 1 },
-      "expected": 4,
-      "upstream": { "call": "edit_budget(t=-1, T=20, b_min=1, b_max=4) — t clamped to 0", "value": 4 },
-      "portNote": "Both sides clamp an out-of-range low round to the first round, so a 0-based caller gets the first-round budget instead of a negative one."
-    },
-
-    {
       "id": "novelty.two-edits-one-class",
       "kind": "deterministic",
       "function": "noveltyOf",
@@ -166,7 +95,6 @@
       "upstream": { "call": "novelty(['prompt'], {}) — a task template has no upstream K member of its own", "value": 0 },
       "portNote": "The K axis differs on purpose (ADR 0001): upstream's nine harness components have no `template`, and `prompt` is its default bucket for anything unclassified, so a task template is structural here and non-structural there."
     },
-
     {
       "id": "selection.floor.argmax",
       "kind": "upstream-native",

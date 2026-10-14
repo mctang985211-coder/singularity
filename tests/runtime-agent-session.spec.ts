@@ -96,7 +96,7 @@ describe('the load-time seam assertion', () => {
   it('refuses a context missing every seam, naming each one', () => {
     const refusal = refusalOf(() => assertRuntimeSeams({} as Seams))
     expect(refusal).toMatchObject({ code: 'malformed-declaration', detail: expect.stringContaining('ctx.sessionPersistence') })
-    for (const name of ['ctx.sessions', 'ctx.agents', 'ctx.agentLoop']) expect(refusal.detail).toContain(name)
+    expect(refusal.detail).toContain('ctx.sessionPersistence')
   })
 
   it('names only the absent seam, and accepts a context that has them all', () => {
@@ -118,7 +118,7 @@ describe('the load-time seam assertion', () => {
 
     // The mounted plugin really provides its service: the assertion must not name what is there.
     const refusal = refusalOf(() => assertRuntimeSeams(context))
-    for (const name of ['ctx.sessions', 'ctx.agents', 'ctx.agentLoop']) expect(refusal.detail).toContain(name)
+    expect(refusal.detail).toContain('ctx.sessions')
     expect([refusal.code, refusal.detail.includes('ctx.sessionPersistence')]).toEqual(['malformed-declaration', false])
   })
 })
@@ -213,11 +213,10 @@ describe('the derived session id', () => {
 })
 
 describe('creating and resuming', () => {
-  it('creates a session that was never created, even when the caller asked to resume', async () => {
+  it('refuses resume when the exact session has no persisted history', async () => {
     const live = harness()
-    const opened = await openAgentSession(live.context, { agentId: 'never-created', resume: true })
-    expect([opened.resumed, live.calls]).toEqual([false, [{ kind: 'create', sessionId: 'singularity:agent:never-created' }]])
-    await closeAgentSession('never-created')
+    await expect(openAgentSession(live.context, { agentId: 'never-created', resume: true })).rejects.toThrow('resume requires persisted history')
+    expect(live.calls).toEqual([])
   })
 
   it('resumes a persisted session for the same exact id and reports resumed', async () => {
@@ -237,7 +236,7 @@ describe('creating and resuming', () => {
   it('names the write lease when resume finds another live handle holding it', async () => {
     const live = harness({ persisted: true, resumeFails: new SessionAlreadyOwnedError(SessionId('singularity:agent:held')) })
     const refusal = await asyncRefusalOf(() => openAgentSession(live.context, { agentId: 'held', resume: true }))
-    expect(refusal).toMatchObject({ code: 'concurrent-writer', detail: expect.stringContaining('write lease') })
+    expect(refusal).toMatchObject({ code: 'concurrent-writer', detail: expect.stringContaining('singularity:agent:held') })
   })
 
   it('keeps an unnamed repair failure identifiable, text included', async () => {
@@ -296,10 +295,10 @@ describe('closing', () => {
     // the module's own claim bookkeeping stops a second claim from replacing the first.
     const refusal = await asyncRefusalOf(() => openAgentSession(live.context, { agentId: 'live-agent', resume: false }))
     expect(refusal.code).toBe<RefusalCode>('concurrent-writer')
-    expect(live.disposed).toHaveLength(1)
+    expect(live.disposed).toHaveLength(0)
 
     await closeAgentSession('live-agent')
-    expect(live.disposed).toHaveLength(2)
+    expect(live.disposed).toHaveLength(1)
   })
 
   it('refuses a second context claiming one session id, and keeps the first lease releasable', async () => {
@@ -309,8 +308,7 @@ describe('closing', () => {
 
     const refusal = await asyncRefusalOf(() => openAgentSession(second.context, { agentId: 'one-lease', resume: false }))
     expect(refusal.code).toBe<RefusalCode>('concurrent-writer')
-    // The refused open released the handle it had just created: no lease without a holder.
-    expect(second.disposed).toEqual(['singularity:agent:one-lease'])
+    expect(second.disposed).toEqual([])
 
     await closeAgentSession('one-lease')
     expect(first.disposed).toEqual(['singularity:agent:one-lease'])

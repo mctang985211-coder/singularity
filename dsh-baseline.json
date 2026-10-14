@@ -26,10 +26,6 @@
     {
       "name": "@deepseek-ai/dsh-session-persistence-jsonl",
       "version": "0.2.0-rc.2"
-    },
-    {
-      "name": "@deepseek-ai/dsh-user-approval",
-      "version": "0.2.0-rc.2"
     }
   ],
   "checkout": {

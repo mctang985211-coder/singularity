@@ -1,5 +1,7 @@
 # G1 记录：一条真实 Web 会话走完「提出 → 执行 → 独立判决 → 凭证」
 
+> 固定基线实测记录；本轮 G1/G2 阻塞项见 [context](context.md)，本文不能作为新合同已通过的证据。 历史正文按基线保留。
+
 日期：2026-10-11。基线：本树 `11aed98`（本轮开工时的 HEAD，当时 `assembly/` 还是未提交的初稿）；
 宿主：私有 DSH `0.2.0-rc.2`（[standalone-dsh.md](standalone-dsh.md)）。
 
@@ -68,12 +70,8 @@ linked root。离线、不经 pnpm、不碰全局 home。preset `singularity-nex
 |---|---|---|
 | 可构建、可装载的包 | `node assembly/build.mjs`；`tsc -p assembly/tsconfig.json --noEmit` | 产出 `lib/index.js` + `lib/agent.js`；类型检查干净 |
 | 真实 profile 组成 | `node scripts/deploy.mjs`；`dsh --profile singularity-next-web --dump-config` | 退出 0；装配行与 preset 行就位；stderr 无 `skipping profile bundle` |
-| 浏览器选 preset、真调工具 | `node scripts/browser-probe.mjs` | Chromium `156.0.8078.4`、1440×900；会话日志在 `seq 3` 记下 `agent-preset/selected = singularity-next`（header 里的 `standard` 是建会话时的默认值，不是最终选择）；模型调用 `propose`/`submit`/`status`；`verdict: pass`、`phase: verified`、`receiptStatus: verified`、产物摘要 `19b8d5c5…`；截图 `$DSH_HOME/artifacts/browser-probe.png`。**独立重跑三次**：装配 owner 一次（`session-5fd751f1…`，`run-6e9aea7431ea837a`）、Lead 两次（`session-7af9d1ba…` / `session-d2d7be50…`，`run-1eb8cd17a136c1fb`），判决与产物摘要逐字相同 |
-| SIGKILL 后同会话恢复 | `node scripts/browser-probe.mjs --recovery` | 第一轮提出任务 → `SIGKILL` → 同 profile 同端口重启 → 页面重载后恢复**同一个** session，第二轮的 receipt 指向 kill 前那个 task。owner 一次（`session-36ab4199…` / `task-aa26a5681d9cf5b0`）、Lead 两次（`session-5b874f92…` / `task-73794bf0eccff948`，`session-d3d42453…` / `task-be51614d77464c83`），每次都 `verdict: pass`、`receiptStatus: verified`；截图 `browser-probe-recovery.png` |
-| 崩溃窗口的收尾 | `node scripts/assembly-repair-probe.mjs` | 真实 profile 在探针 control 上启动，收掉两条在飞 run（一条 verified、一条具名 failed），重开幂等 |
 | 旧域形状的在飞 run 不再拖垮宿主 | 把保留的旧 control 会话与旧工作区放回后 `dsh --profile singularity-next-web --help` | 退出 0、`did not activate` 0 行；三条旧 run 全部以「frozen against the input "source"，本部署不再声明该输入」具名 failed |
 | 独立 pass/fail | 同上两条 + `assembly/tests` | 判决只来自 domain 的 verifier 进程；崩溃、空产物、改内容都记成 fail |
-| 固定来源 receipt | `assembly-repair-probe` 的 receipt 断言；`singularity_task_status` | receipt 由同一份提交前缀投影，运行中的 run 返回 null 而不是空白凭证 |
 | 全树 | `pnpm verify` | 构建、测试、门禁与门禁自检全绿 |
 
 ## 3. 变异证明（本轮新增的 45 条规则）
@@ -113,31 +111,15 @@ linked root。离线、不经 pnpm、不碰全局 home。preset `singularity-nex
 
 ### The assembly package
 
-| claim | rule it attacks | verdict | witness (the failing test) |
-|---|---|---|---|
-| `mutate:assembly-m1-replay-guard` | a redelivered submission answers from the committed record and re-runs nothing | caught | answers a redelivered call from the record and runs nothing again |
-| `mutate:assembly-m2-verifier-digest-bytes` | the verifier implementation digest is the digest of the declared program bytes | caught | reads every domain string from the declared file, digesting the verifier bytes |
-| `mutate:assembly-m3-program-argv-input` | the program is run for real with the declared input path as its argument | caught | records a verified run whose verdict comes from the domain verifier |
-| `mutate:assembly-m4-anonymous-caller` | a call with no live agent is refused rather than attributed | caught | refuses a call that arrives with no agent, before it can name one |
-| `mutate:assembly-m5-per-agent-key` | one caller key per agent: a shared key would let one agent work another agent's task | caught | refuses one agent's submission to another agent's task, by name |
-| `mutate:assembly-m6-repair-settles-recorded` | an in-flight run with a recorded verdict is settled by the repair, not skipped | caught | settles a run whose verdict was recorded but whose settlement was lost |
-| `mutate:assembly-m7-repair-artifact-gone` | a run whose frozen artifact is gone is settled failed by name | caught | settles a run whose frozen artifact is gone, failed by a name |
-| `mutate:assembly-m8-closed-config` | the deployment config is closed: an undeclared key is refused | caught | refuses a config member the shape does not declare, by name |
-| `mutate:assembly-m9-effect-owns-tools` | every registration the agent face makes is owned by the effect it opened | caught | owns every registration through the effect it opened |
-| `mutate:assembly-m10-fail-uses-responsible-binding` | a failing verdict settles the run failed through the responsible binding | caught | records a wrong answer as a fail rather than a success |
-| `mutate:assembly-m11-revision-digest-read-back` | the run pin carries the digest the environment holds, never an invented one | caught | records a verified run whose verdict comes from the domain verifier |
-| `mutate:assembly-m13-effect-owns-section` | the prompt section, not only the tools, is released by the owning effect | caught | owns every registration through the effect it opened |
-| `mutate:assembly-m14-read-holder-only` | a read of a task the caller is not responsible for is refused by name | caught | refuses a read of a task the caller is not responsible for, by name |
-| `mutate:assembly-m15-frozen-input-drift` | a frozen input whose bytes changed settles the run failed by name | caught | settles a run whose frozen input changed, failed by a name, and still completes the mount |
-| `mutate:assembly-m16-placeholders-closed` | a command template may name only the placeholders this version fills | caught | refuses a command template naming a placeholder this version cannot fill |
-| `mutate:assembly-m17-bubble-names-what-ran` | the bubble names the model route and the toolchain that actually ran | caught | records the model route and the toolchain that actually ran in the bubble |
-| `mutate:assembly-m18-frozen-name-not-declared` | a run frozen against an input this deployment no longer declares settles failed by name | caught | settles a run frozen against an input this deployment no longer declares, and still opens |
-| `mutate:assembly-m20-tool-tells-how-program-runs` | the submission tool describes where the submission goes and that stderr is not part of it | caught | tells the model how its program will be run, rather than leaving it to guess |
-| `mutate:assembly-m19-frozen-input-compared-to-disk` | the frozen input is compared against the bytes on disk, not against its own claim | caught | settles a run whose frozen input changed, failed by a name, and still completes the mount |
-| `mutate:assembly-m20-tool-tells-how-program-runs` | the submit tool tells the model how its program is run: as an ES module, judged on standard output | caught | tells the model how its program will be run, rather than leaving it to guess |
-| `mutate:assembly-m21-inflight-redelivery-refused` | a redelivery whose run is still in flight is refused, not re-executed | caught | refuses a redelivery whose run is still in flight instead of running the program again |
-| `mutate:assembly-m22-revision-names-the-request` | the run revision is derived from the request, never from bytes a program can rewrite | caught | freezes the revision against the request, not against bytes a program can rewrite |
-| `mutate:assembly-m23-holder-checked-before-writing` | a caller that is not the holder is refused before anything is written | caught | writes nothing at all for a caller that is not the holder |
+编辑、运行命令与目标见证见 [mutation-baseline.json](../mutation-baseline.json)。
+
+`mutate:assembly-m1-replay-guard`、`mutate:assembly-m2-verifier-digest-bytes`、`mutate:assembly-m3-program-argv-input`
+`mutate:assembly-m4-anonymous-caller`、`mutate:assembly-m5-per-agent-key`、`mutate:assembly-m6-repair-settles-recorded`
+`mutate:assembly-m7-repair-artifact-gone`、`mutate:assembly-m8-closed-config`、`mutate:assembly-m9-effect-owns-tools`
+`mutate:assembly-m10-fail-uses-responsible-binding`、`mutate:assembly-m11-revision-digest-read-back`、`mutate:assembly-m13-effect-owns-section`
+`mutate:assembly-m14-read-holder-only`、`mutate:assembly-m15-frozen-input-drift`、`mutate:assembly-m16-placeholders-closed`
+`mutate:assembly-m17-bubble-names-what-ran`、`mutate:assembly-m18-frozen-name-not-declared`
+`mutate:assembly-m21-inflight-redelivery-refused`、`mutate:assembly-m22-revision-names-the-request`、`mutate:assembly-m23-holder-checked-before-writing`
 
 ## 4. 写下来的边界
 

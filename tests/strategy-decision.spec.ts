@@ -11,7 +11,6 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  editBudgetFor,
   noveltyOf,
   select,
   type Calibration,
@@ -30,7 +29,7 @@ function measurement(quality: number, rest: Partial<Measurement> = {}): Measurem
 }
 
 function candidate(slot: number, rest: Partial<Candidate> = {}): Candidate {
-  return { slot, exploratory: false, assets: [], measurement: measurement(0.5), constraintsMet: true, inadmissible: null, ...rest }
+  return { slot, assets: [], measurement: measurement(0.5), constraintsMet: true, inadmissible: null, ...rest }
 }
 
 function delta(slot: number, deltaQuality: number, deltaCost: number | null = 0): History['deltas'][number] {
@@ -51,40 +50,11 @@ function admittedSlots(selection: Selection): number[] {
   return selection.outcomes.filter((entry) => entry.admitted).map((entry) => entry.slot)
 }
 
-/** Upstream `rrsi/schedule.py:43-50`: the same cosine divided by `T`, not by `T - 1`. */
-function upstreamBudget(round: number, rounds: number, first: number, minimum: number): number {
-  const step = Math.max(0, Math.min(round, rounds))
-  return Math.ceil(Number((minimum + (first - minimum) * 0.5 * (1 + Math.cos((Math.PI * step) / rounds))).toFixed(9)))
-}
-
 /** Upstream `rrsi/selection.py:84-86`: `beta0 + beta1·dS`, with no ceiling. */
 function upstreamCostBudget(gain: number): number {
   return 0.10 + 40 * gain
 }
 
-describe('editBudgetFor: the budget anneals by rounds-1 (ADR tightening #1)', () => {
-  it('reaches the minimum in the last round, where upstream stays one step above it', () => {
-    // Upstream's own table for T=20 divides by 20, so its last in-range round (t=19) is 2 and only
-    // the out-of-range endpoint t=T reaches b_min. That endpoint is never asked for by range(T).
-    expect(upstreamBudget(19, 20, 4, 1)).toBe(2)
-    expect(editBudgetFor(20, 20, 4, 1)).toBe(1)
-  })
-
-  it('is the rounds-1 anneal table end to end, and is monotone non-increasing', () => {
-    const table = Array.from({ length: 20 }, (_, index) => editBudgetFor(index + 1, 20, 4, 1))
-    expect(table).toEqual([4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1])
-  })
-
-  it('gives a one-round run the minimum: that round is its own last round', () => {
-    expect(upstreamBudget(0, 1, 4, 1)).toBe(4)
-    expect(editBudgetFor(1, 1, 4, 1)).toBe(1)
-  })
-
-  it('clamps an out-of-range round to the nearest end', () => {
-    expect(editBudgetFor(0, 20, 4, 1)).toBe(4)
-    expect(editBudgetFor(25, 20, 4, 1)).toBe(1)
-  })
-})
 
 describe('noveltyOf: mechanism types, not edits (R05)', () => {
   it('counts two skill edits as one class and two classes as two', () => {

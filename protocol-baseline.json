@@ -101,7 +101,7 @@
     },
     {
       "protocol": "release",
-      "version": 2,
+      "version": 3,
       "subject": "the environment whose head is moving",
       "kinds": [
         {
@@ -110,7 +110,8 @@
             "approvalId",
             "approvedBy",
             "draftDigest",
-            "revisionId"
+            "revisionId",
+            "review"
           ]
         },
         {
@@ -123,12 +124,12 @@
           ]
         }
       ],
-      "producedBy": "src/release/commands.ts createReleaseCommands (bootstrap draft or committed-winner draftFromDecision, and approve behind the native approval seam)",
+      "producedBy": "src/release/commands.ts createReleaseCommands (bootstrap draft or committed-winner draftFromDecision, and approveReview with exact independent review evidence)",
       "readBy": "src/release/commands.ts publish (rechecks the complete approved draft, committed decision/report, content and expected head before the one pointer switch)"
     },
     {
       "protocol": "strategy",
-      "version": 5,
+      "version": 7,
       "subject": "the round id",
       "kinds": [
         {
@@ -136,7 +137,6 @@
           "members": [
             "edits",
             "evaluationId",
-            "exploratory",
             "revision",
             "slot"
           ]
@@ -154,8 +154,6 @@
           "members": [
             "caliber",
             "candidates",
-            "editBudget",
-            "explorationSlots",
             "historyCutoff",
             "incumbent",
             "round",
@@ -168,7 +166,7 @@
     },
     {
       "protocol": "task",
-      "version": 8,
+      "version": 9,
       "subject": "the task id",
       "kinds": [
         {

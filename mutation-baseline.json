@@ -1,5 +1,5 @@
 {
-  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim. No row carries one today: `mutate:fw-direction-sign-ignored` was this ledger's one recorded miss, and it is a claim now that the probe checks its readout against the direction the views carry - the reproduction and the fix are in docs/f-evidence.md \u00a75.2, and scripts/mutate.mjs prints the verdict rather than this file. What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
+  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim. No row carries one today: `mutate:fw-direction-sign-ignored` was this ledger's one recorded miss, and it is a claim now that the probe checks its readout against the direction the views carry - the reproduction and the fix are in docs/f-evidence.md §5.2, and scripts/mutate.mjs prints the verdict rather than this file. What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
   "commitClaim": "protocol-copied-rule-refused",
   "claims": [
     {
@@ -513,7 +513,7 @@
         ]
       },
       "witness": "blocks a dependent on a dependency that ended without verifying, naming it",
-      "note": "two edits, because the stopped case is caught by the `dead` filter first: flipping only the second filter leaves every spec green, which is itself worth recording \u2014 the two filters are not redundant, and the first one is what makes \"any terminal satisfies\" unreachable for `stopped`"
+      "note": "two edits, because the stopped case is caught by the `dead` filter first: flipping only the second filter leaves every spec green, which is itself worth recording — the two filters are not redundant, and the first one is what makes \"any terminal satisfies\" unreachable for `stopped`"
     },
     {
       "id": "task-unverified-child-accepts",
@@ -573,137 +573,23 @@
       "witness": "never acknowledges an uncertain command while the barrier keeps failing"
     },
     {
-      "id": "assets-head-cutoff",
-      "rule": "the head that counts is the one the log holds below the cutoff",
-      "doc": "docs/context.md",
-      "edits": [
-        {
-          "file": "src/strategy/published-assets.ts",
-          "find": "  const belowCutoff = entries.filter(entry => entry.seq < cutoff)",
-          "replace": "  const belowCutoff = entries.filter(() => true)"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "tests/published-assets.spec.ts"
-        ]
-      },
-      "witness": "is not rewritten by a pointer switch that happened after the cutoff"
-    },
-    {
-      "id": "assets-election-cutoff",
-      "rule": "an election recorded above the cutoff may not add a class to a frozen history",
-      "doc": "docs/context.md",
-      "edits": [
-        {
-          "file": "src/strategy/published-assets.ts",
-          "find": "  for (const round of foldSubjects<RoundState>(FOLD, belowCutoff, STRATEGY_PROTOCOL, STRATEGY_VERSION).values()) {",
-          "replace": "  for (const round of foldSubjects<RoundState>(FOLD, entries, STRATEGY_PROTOCOL, STRATEGY_VERSION).values()) {"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "tests/published-assets.spec.ts"
-        ]
-      },
-      "witness": "does not let an election above the cutoff add a class to the frozen history"
-    },
-    {
-      "id": "assets-revision-content",
-      "rule": "the proposal matches on the whole revision, not on its id: content the head does not hold contributes nothing",
-      "doc": "docs/context.md",
-      "edits": [
-        {
-          "file": "src/strategy/published-assets.ts",
-          "find": "    if (!published.some(target => sameRevision(elected.revision, { environmentId, revisionId: target.revisionId, digest: target.contentDigest }))) continue",
-          "replace": "    if (!published.some(target => elected.revision.revisionId === target.revisionId)) continue"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "tests/published-assets.spec.ts"
-        ]
-      },
-      "witness": "counts nothing for a slot that pinned content the head revision does not hold"
-    },
-    {
-      "id": "assets-no-head-guess",
-      "rule": "a head no slot proposed contributes no classes, rather than a guess",
-      "doc": "docs/context.md",
-      "edits": [
-        {
-          "file": "src/strategy/published-assets.ts",
-          "find": "  if (published.length === 0) return []",
-          "replace": "  if (published.length === 0) return ['unattributed']"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "tests/published-assets.spec.ts"
-        ]
-      },
-      "witness": "counts nothing when no pointer switch happened below the cutoff"
-    },
-    {
-      "id": "assets-class-dedup",
-      "rule": "a class elected twice is one acceptance, and declaration order survives",
-      "doc": "docs/context.md",
-      "edits": [
-        {
-          "file": "src/strategy/published-assets.ts",
-          "find": "    for (const edit of elected.edits) if (!accepted.includes(edit.asset)) accepted.push(edit.asset)",
-          "replace": "    for (const edit of elected.edits) accepted.push(edit.asset)"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "tests/published-assets.spec.ts"
-        ]
-      },
-      "witness": "counts a revision two rounds each elected once"
-    },
-    {
       "id": "round-novelty-publish-removed",
-      "rule": "novelty is counted against a real publication, so removing the publication turns the check red",
+      "rule": "accepted structural assets derive from actual publication changes; ignoring pointer transitions loses adopted edits",
       "doc": "docs/context.md",
       "edits": [
         {
-          "file": "scripts/round-probe.mjs",
-          "find": "    await release.publish({ commandId: 'publish-r0003', environmentId: ENVIRONMENT, expected: '', to: PUBLISHED })\n",
-          "replace": ""
+          "file": "src/strategy/published-assets.ts",
+          "find": "    if (expected === '') continue\n",
+          "replace": "    continue\n"
         }
       ],
       "run": {
-        "kind": "node",
+        "kind": "vitest",
         "args": [
-          "scripts/round-probe.mjs"
+          "tests/published-assets.spec.ts"
         ]
       },
-      "witness": "an asset class the publication accepted is not novel"
-    },
-    {
-      "id": "round-novelty-below-cutoff",
-      "rule": "novelty reads the publication only below the round's cutoff",
-      "doc": "docs/context.md",
-      "edits": [
-        {
-          "file": "scripts/round-probe.mjs",
-          "find": "await open('round-published', 8, { candidates: 2, explorationSlots: 0 })",
-          "replace": "await open('round-published', 8, { candidates: 2, explorationSlots: 0, historyCutoff: 5 })"
-        }
-      ],
-      "run": {
-        "kind": "node",
-        "args": [
-          "scripts/round-probe.mjs"
-        ]
-      },
-      "witness": "an asset class the publication accepted is not novel"
+      "witness": "counts actual publication edits without an election"
     },
     {
       "id": "recovery-precondition-before-identity",
@@ -728,7 +614,7 @@
         ]
       },
       "witness": "cannot start a run for sub-task",
-      "note": "the probe dies on the refusal the reorder produces instead of reporting a failed check, which is what \"\u4ee5\u90a3\u53e5\u62d2\u7edd\u5931\u8d25\" means: the recovery path is gone, and the store says so by name"
+      "note": "the probe dies on the refusal the reorder produces instead of reporting a failed check, which is what \"以那句拒绝失败\" means: the recovery path is gone, and the store says so by name"
     },
     {
       "id": "protocol-copied-rule-refused",
@@ -1178,25 +1064,6 @@
       "witness": "creates one revision whose content identity the reducer computes"
     },
     {
-      "id": "core-runner-verdict-always-pass",
-      "rule": "the verdict is the exit code",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "src/verifier/command.ts",
-          "find": "    verdict: outcome.exitCode === 0 ? 'pass' : 'fail',",
-          "replace": "    verdict: 'pass',"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "tests/verifier-runner.spec.ts"
-        ]
-      },
-      "witness": "judges a non-zero exit as fail"
-    },
-    {
       "id": "core-runner-no-exit-is-pass",
       "rule": "verifier execution failure cannot produce an acceptance verdict",
       "doc": "docs/assembly-g1.md",
@@ -1368,25 +1235,6 @@
       "witness": "reads every domain string from the declared file, digesting the verifier bytes"
     },
     {
-      "id": "assembly-m3-program-argv-input",
-      "rule": "the program is run for real with the declared input path as its argument",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/submission.ts",
-          "find": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, join(workspace, template.input.name)] }, signal, workspace)",
-          "replace": "const output = await spawnProcess({ shell: false, argv: [process.execPath, filePath, filePath] }, signal, workspace)"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "settles the proposal Run from the independent verifier output"
-    },
-    {
       "id": "assembly-m4-anonymous-caller",
       "rule": "a call belongs to the exact live DSH registry agent and rejects an anonymous or replacement caller",
       "doc": "docs/assembly-g1.md",
@@ -1404,25 +1252,6 @@
         ]
       },
       "witness": "accepts the exact registry agent and rejects a replacement object with the same identity"
-    },
-    {
-      "id": "assembly-m5-per-agent-key",
-      "rule": "one caller key per agent: a shared key would let one agent work another agent's task",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/apparatus.ts",
-          "find": "const key = `agent:${agentId}`",
-          "replace": "const key = 'agent:shared'"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "isolates two concurrent tasks by their responsible callers and Run workspaces"
     },
     {
       "id": "assembly-m6-repair-settles-recorded",
@@ -1482,63 +1311,6 @@
       "witness": "refuses a config member the shape does not declare, by name"
     },
     {
-      "id": "assembly-m9-effect-owns-tools",
-      "rule": "every registration the agent face makes is owned by the effect it opened",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/agent.ts",
-          "find": "ctx.effect(() => () => {\n    for (const dispose of disposers) dispose()\n  })",
-          "replace": "ctx.effect(() => () => {})"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/agent-face.spec.ts"
-        ]
-      },
-      "witness": "owns every registration through the effect it opened"
-    },
-    {
-      "id": "assembly-m10-fail-uses-responsible-binding",
-      "rule": "a failing verdict settles the run failed through the responsible binding",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/submission.ts",
-          "find": "await apparatus.tasks.settle({ commandId: 'settle:' + request.taskId + '/' + run.runId, taskId: request.taskId, runId: run.runId }, 'agent:' + caller.agentId)",
-          "replace": "await apparatus.tasks.settle({ commandId: 'settle:' + request.taskId + '/' + run.runId, taskId: request.taskId, runId: run.runId })"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "records an ordinary wrong answer as a failed solve"
-    },
-    {
-      "id": "assembly-m11-revision-digest-read-back",
-      "rule": "the run pin carries the digest the environment holds, never an invented one",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/attempt.ts",
-          "find": "digest: revision.contentDigest",
-          "replace": "digest: '0'.repeat(64)"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "settles the proposal Run from the independent verifier output"
-    },
-    {
       "id": "assembly-m13-effect-owns-section",
       "rule": "the prompt section, not only the tools, is released by the owning effect",
       "doc": "docs/assembly-g1.md",
@@ -1556,25 +1328,6 @@
         ]
       },
       "witness": "owns every registration through the effect it opened"
-    },
-    {
-      "id": "assembly-m14-read-holder-only",
-      "rule": "a task read is limited to its responsible agent or exact direct parent",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/surfaces.ts",
-          "find": "if (state.responsibility?.agentId !== caller.agentId && !directParent)",
-          "replace": "if (false)"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "refuses a foreign caller read and submission before committing or writing"
     },
     {
       "id": "assembly-m15-frozen-input-drift",
@@ -1615,68 +1368,6 @@
       "witness": "refuses a command template naming a placeholder this version cannot fill"
     },
     {
-      "id": "assembly-m17-bubble-names-what-ran",
-      "rule": "the bubble names the model route and the toolchain that actually ran",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/attempt.ts",
-          "find": "const toolchainDigest = (): Promise<string> => (toolchain ??= readFile(process.execPath).then(sha256))",
-          "replace": "const toolchainDigest = (): Promise<string> => Promise.resolve(sha256('not the interpreter'))"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "pins the actual model route and interpreter bytes before solving"
-    },
-    {
-      "id": "assembly-m18-frozen-name-not-declared",
-      "rule": "recovery fails a Run whose protected input is no longer deployed even when its own frozen bytes remain intact",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/repair.ts",
-          "find": "if (!apparatus.domain.inputs.some(input => input.ref === declared.ref && input.digest === declared.digest))",
-          "replace": "if (false)"
-        },
-        {
-          "file": "assembly/src/inputs.ts",
-          "find": "if (contractDigest(contract) !== contractDigest(expected))",
-          "replace": "if (false)"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/recovery.spec.ts"
-        ]
-      },
-      "witness": "settles a run frozen against an input this deployment no longer declares, and still opens"
-    },
-    {
-      "id": "assembly-m20-tool-tells-how-program-runs",
-      "rule": "the submit tool tells the model how its program is run: as an ES module, judged on standard output",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/agent.ts",
-          "find": "written into the task workspace and handed to the criterion's own verifier",
-          "replace": "ignored: the model is told nothing about where its submission goes"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/agent-face.spec.ts"
-        ]
-      },
-      "witness": "tells the model how its program will be run, rather than leaving it to guess"
-    },
-    {
       "id": "assembly-m21-inflight-redelivery-refused",
       "rule": "a redelivery whose run is still in flight is refused, not re-executed",
       "doc": "docs/assembly-g1.md",
@@ -1694,25 +1385,6 @@
         ]
       },
       "witness": "refuses a redelivered submission still in flight without repeating its program"
-    },
-    {
-      "id": "assembly-m22-revision-names-the-request",
-      "rule": "the solve Run revision binds the declared template and Task before execution begins",
-      "doc": "docs/assembly-g1.md",
-      "edits": [
-        {
-          "file": "assembly/src/attempt.ts",
-          "find": "const basis = sha256(JSON.stringify(manifest))",
-          "replace": "const basis = sha256(JSON.stringify(contract.template))"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "pins separate task revisions against the template rather than mutable workspace bytes"
     },
     {
       "id": "assembly-m23-holder-checked-before-writing",
@@ -1858,63 +1530,6 @@
       "witness": "uses loader-sealed protected bytes after the domain source file changes"
     },
     {
-      "id": "runtime-m30-seams-resolve-through-get",
-      "rule": "every optional runtime seam is resolved through ctx.get, because a cordis plugin context throws on a property read of a service it did not inject",
-      "doc": "docs/phase-g2-design.md",
-      "edits": [
-        {
-          "file": "src/runtime/agent-session.ts",
-          "find": "return ctx.get === undefined ? ctx[name] : ctx.get(name)",
-          "replace": "return ctx[name]"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "tests/runtime-agent-session.spec.ts"
-        ]
-      },
-      "witness": "throws on a property read, and answers undefined through get"
-    },
-    {
-      "id": "assembly-m31-children-own-their-tasks",
-      "rule": "a planned sub-task is assigned to the child agent that will do it, not to the parent that planned it",
-      "doc": "docs/phase-g2-design.md",
-      "edits": [
-        {
-          "file": "assembly/src/surfaces.ts",
-          "find": "taskId: entry.taskId, agentId })",
-          "replace": "taskId: entry.taskId, agentId: caller.agentId })"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "admits every sub-task a plan names, so the plan can actually run"
-    },
-    {
-      "id": "assembly-m32-advance-after-settle",
-      "rule": "only a newly settled child advances its exact parent plan so verified dependencies can start",
-      "doc": "docs/phase-g2-design.md",
-      "edits": [
-        {
-          "file": "assembly/src/driver.ts",
-          "find": "if (terminal && parentTaskId !== undefined) try { await scheduler.advance(parentTaskId) }",
-          "replace": "if (false && parentTaskId !== undefined) try { await scheduler.advance(parentTaskId) }"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/driver.spec.ts"
-        ]
-      },
-      "witness": "re-scans the plan when a run settles, so a dependency that just verified can start"
-    },
-    {
       "id": "core-w1-single-active-run",
       "rule": "a Task has one unsettled Run even without a decomposition plan",
       "doc": "docs/context.md",
@@ -1989,25 +1604,6 @@
         ]
       },
       "witness": "rejects an interior sequence collision even when the last sequence matches the array length"
-    },
-    {
-      "id": "assembly-w3-child-cannot-fork-root",
-      "rule": "a durable assigned child cannot create another root Task to bypass its committed plan and budget",
-      "doc": "docs/e2e-testing.md",
-      "edits": [
-        {
-          "file": "assembly/src/surfaces.ts",
-          "find": "if (apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, caller.agentId)?.role === 'child')",
-          "replace": "if (false)"
-        }
-      ],
-      "run": {
-        "kind": "vitest",
-        "args": [
-          "assembly/tests/decomposition.spec.ts"
-        ]
-      },
-      "witness": "refuses an assigned child proposing another root Task before binding or admitting it"
     }
   ]
 }

@@ -76,10 +76,10 @@ describe('a decomposition is one complete fact', () => {
     expect([declared.atomicFact, declared.appended]).toEqual([true, true])
   })
 
-  it('refuses a second decomposition instead of merging plans', async () => {
+  it('refuses duplicate children in appended decompositions', async () => {
     const log = await decomposed()
     const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, [child(CHILD_A)])))
-    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('again') })
+    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('repeats an existing child') })
   })
 
   it('refuses a plan its task-holder did not write', async () => {

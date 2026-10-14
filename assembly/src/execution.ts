@@ -12,17 +12,10 @@ export interface TurnFailure {
   readonly sessionId: string
   readonly turn: number
   readonly seq: number
-  /**
-   * The endings that leave a working Run with no live turn able to settle it.
-   *
-   * `max-tokens` belongs here although the turn itself did not fail: the step reached its output
-   * ceiling, so the answer was cut off and nothing re-prompts the session. Ignoring it left the Run
-   * `working` forever — a real campaign waited on one until its deadline because neither a terminal
-   * fact nor a failure ever arrived.
-   */
+  /** Endings that leave a working Run without a turn able to settle it. */
   readonly reason: Extract<TurnEndReason, { kind: 'error' | 'aborted' | 'max-tokens' }>
 }
-export type TurnFailureHandler = (failure: TurnFailure) => void
+export type TurnFailureHandler = (failure: TurnFailure) => Promise<void> | void
 export interface TranscriptSource {
   readonly sessionId: string
   readonly eventCount: number
@@ -44,7 +37,7 @@ interface ActiveExecution {
 export function createExecution(ctx: Context, admission: Admission, onTurnFailure: TurnFailureHandler): Execution {
   const active = new Map<ToolExecutionToken, ActiveExecution>()
   const borrowed = new WeakSet<Agent>()
-  const failedTurns = new WeakMap<Agent, number>()
+  const failedTurns = new Map<Agent, { turn: number; done: Promise<void>; failure?: { readonly error: unknown } }>()
   let closed = false
   let closing: Promise<void> | undefined
   const assertCaller = (exec: ToolRunContext): Agent => {
@@ -56,7 +49,7 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     borrowed.add(agent)
     return agent
   }
-  const wait = async (entries: readonly ActiveExecution[]): Promise<void> => {
+  const wait = async (entries: readonly { readonly done: Promise<void>; readonly failure?: { readonly error: unknown } }[]): Promise<void> => {
     await Promise.all(entries.map(entry => entry.done))
     const failed = entries.find(entry => entry.failure !== undefined)
     if (failed?.failure !== undefined) throw failed.failure.error
@@ -88,9 +81,16 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     }
   })
   const report = (agent: Agent, failure: TurnFailure): void => {
-    if (ctx.agents.get(agent.id) !== agent || (failedTurns.get(agent) ?? -1) >= failure.turn) return
-    failedTurns.set(agent, failure.turn)
-    onTurnFailure(failure)
+    const previous = failedTurns.get(agent)
+    if (ctx.agents.get(agent.id) !== agent || (previous?.turn ?? -1) >= failure.turn) return
+    const pending: { turn: number; done: Promise<void>; failure?: { readonly error: unknown } } = {
+      turn: failure.turn, done: Promise.resolve(),
+    }
+    failedTurns.set(agent, pending)
+    pending.done = Promise.all([previous?.done, (async () => onTurnFailure(failure))()]).then(
+      () => { if (previous?.failure !== undefined) pending.failure = previous.failure },
+      error => { pending.failure = { error } },
+    )
   }
   const crashed = ctx.on('agent/error', ({ agent, turn, error }) => {
     report(agent, { sessionId: String(agent.session.id), turn, seq: Number(agent.session.seq),
@@ -104,19 +104,26 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     if (agent?.session !== session) return
     report(agent, { sessionId: String(session.id), turn: event.data.turn, seq: Number(event.seq), reason })
   })
+  const flushing = ctx.on('session/flush', async session => {
+    const agent = ctx.agents.get(session.id)
+    const pending = agent?.session === session ? failedTurns.get(agent) : undefined
+    if (pending !== undefined) await wait([pending])
+  })
   const close = (): Promise<void> => closing ??= (async () => {
     closed = true
     ended()
     crashed()
     const granted = [...active.values()].filter(entry => entry.exec.agent !== undefined && borrowed.has(entry.exec.agent))
     for (const entry of granted) entry.controller.abort(new Error('the execution port has closed'))
-    await wait(granted)
+    try { await Promise.all([wait(granted), wait([...failedTurns.values()])]) }
+    finally { flushing() }
   })()
   ctx.effect(function* () {
     yield guard
     yield listen
     yield ended
     yield crashed
+    yield flushing
     yield close
   })
   return {

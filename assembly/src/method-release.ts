@@ -1,58 +1,68 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../../src/environment/protocol.ts'
 import { createReleaseCommands } from '../../src/release/commands.ts'
-import { RELEASE_PROTOCOL, RELEASE_VERSION, type ReleaseDraft } from '../../src/release/protocol.ts'
-import type { ApprovalSeams } from '../../src/runtime/approval.ts'
-import { STRATEGY_PROTOCOL, STRATEGY_VERSION, type RoundState } from '../../src/strategy/protocol.ts'
+import { RELEASE_PROTOCOL, RELEASE_VERSION, type ReleaseState } from '../../src/release/protocol.ts'
+import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import type { RevisionRef } from '../../src/task/protocol.ts'
-import { refuse } from '../../src/protocol/refusal.ts'
 import type { Apparatus } from './apparatus.ts'
-import { loadMethod, methodEnvironment } from './method.ts'
-import { structuralEditsOf } from './evolution.ts'
+import { loadMethod, methodEnvironment, publishedMethod } from './method.ts'
+import { reviewSubject } from './review.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { nativeTokensOf } from './budget.ts'
+import { refuse } from '../../src/protocol/refusal.ts'
 import { MEASURE_PROTOCOL, MEASURE_VERSION, type EvaluationState } from '../../src/measure/protocol.ts'
 import { projectEvaluation } from '../../src/measure/view.ts'
-import { foldSubject } from '../../src/protocol/fold.ts'
-
+import { taskSessionsOf } from './evaluation-cost.ts'
+import { digestOf } from '../../src/protocol/envelope.ts'
+import { TASK_PROTOCOL } from '../../src/task/protocol.ts'
+import { STRATEGY_PROTOCOL } from '../../src/strategy/protocol.ts'
+import { explorationOf } from './improvement.ts'
 export type MethodRelease = { readonly bootstrap: RevisionRef } | { readonly roundId: string }
-
-export async function releaseMethod(apparatus: Apparatus, seams: ApprovalSeams, agent: Agent,
+export async function releaseMethod(apparatus: Apparatus, seams: ChildSessionSeams, agent: Agent,
   callId: string, request: MethodRelease, signal: AbortSignal): Promise<{ revision: RevisionRef; approvalId: string }> {
-  const release = createReleaseCommands({ store: apparatus.store, approvalSeams: seams })
+  const release = createReleaseCommands({ store: apparatus.store })
   const environmentId = methodEnvironment(apparatus)
-  const library = apparatus.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, environmentId)
-  let expected: string
-  let review: unknown
-  if ('bootstrap' in request) {
-    if (library?.pointer !== undefined) refuse('illegal-transition', 'bootstrap is only available for an unpublished Method library')
-    const method = await loadMethod(apparatus, request.bootstrap)
-    await release.draft({ commandId: `${callId}:draft`, revision: request.bootstrap })
-    expected = ''
-    review = { purpose: 'Bootstrap Method library', revision: request.bootstrap, assets: method.assets }
-  } else {
-    const draft = await release.draftFromDecision({ commandId: `${callId}:draft`, roundId: request.roundId })
-    const content = draft.payload as ReleaseDraft
-    if (content.basis.kind !== 'decision') throw new Error('a winner draft must bind its decision')
-    const basis = content.basis
-    expected = basis.expected
-    const cut = apparatus.store.load()
-    const round = cut.stateOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, request.roundId)!
-    const candidate = { environmentId, revisionId: content.revisionId, digest: content.contentDigest }
-    const before = (await loadMethod(apparatus, round.plan!.incumbent)).assets
-    const after = (await loadMethod(apparatus, candidate)).assets
-    const report = foldSubject<EvaluationState>(apparatus.registry, cut.entries().filter(fact => fact.seq < basis.decisionSeq),
-      MEASURE_PROTOCOL, MEASURE_VERSION, basis.evaluationId)!
-    review = { purpose: 'Publish selected Method', revision: candidate, basis: content.basis,
-      edits: structuralEditsOf(before, after), before, after,
-      report: projectEvaluation(report), calibration: round.decision!.calibration,
-      costUnit: 'native model tokens', metric: round.plan!.caliber,
-      experiment: apparatus.domain.measurement === undefined ? 'functional engineering comparison' : 'domain method comparison',
-      ...(apparatus.domain.measurement === undefined ? {} : { qualityUnit: 'baseline area ratio', baselineArea: apparatus.domain.measurement.baseline }) }
+  const drafted = 'bootstrap' in request
+    ? await release.draft({ commandId: `${callId}:draft`, revision: request.bootstrap })
+    : await release.draftFromDecision({ commandId: `${callId}:draft`, roundId: request.roundId })
+  const draft = drafted.payload as import('../../src/release/protocol.ts').ReleaseDraft
+  const revision = { environmentId, revisionId: draft.revisionId, digest: draft.contentDigest }
+  if (publishedMethod(apparatus)?.digest === revision.digest) {
+    const approved = apparatus.store.load().stateOf<ReleaseState>(RELEASE_PROTOCOL, RELEASE_VERSION, environmentId)!
+    return { revision, approvalId: approved.approvalId! }
   }
-  const draft = apparatus.store.load().stateOf<ReleaseDraft>(RELEASE_PROTOCOL, RELEASE_VERSION, environmentId)!
-  const approval = await release.approve({ commandId: `${callId}:approve`, environmentId, revisionId: draft.revisionId,
-    draftDigest: draft.draftDigest, approvedBy: `web-user:${agent.session.id}`,
-    ask: { agent, toolName: 'singularity_release_method', callId, reason: JSON.stringify(review, null, 2), signal } })
-  await release.publish({ commandId: `${callId}:publish`, environmentId, expected, to: draft.revisionId })
-  return { revision: { environmentId, revisionId: draft.revisionId, digest: draft.contentDigest },
-    approvalId: (approval.payload as { approvalId: string }).approvalId }
+  const prefix = apparatus.store.load().entries().slice(0, drafted.seq)
+  const trajectories: unknown[] = []
+  if (draft.basis.kind === 'decision') {
+    const evaluations = apparatus.store.load().statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION)
+    for (const id of [`${draft.basis.roundId}:bootstrap:evaluation`, draft.basis.evaluationId]) for (const trial of evaluations.get(id)!.observed) {
+      const result = JSON.parse(trial.detail!) as { taskId: string; runId: string }
+      trajectories.push({ evaluationId: id,
+        exploration: JSON.parse((await explorationOf(apparatus, result.taskId, result.runId)).toString('utf8')) })
+    }
+  }
+  const subject = { purpose: 'publication',
+    requirements: draft.basis.kind === 'decision'
+      ? 'Judge publication of this exact measured winner against the frozen round, independent acceptance, actual asset use and native token costs. Attribute effects to specific changed assets and recorded use, check hypotheses against independent results and distinguish transferable domain methods from stored task answers. Available but unused mechanisms are unestablished. Missing evaluation evidence, cross-trial leakage or answer memorization is not pass. Asset admission alone is insufficient. The publisher also includes this final review cost in the 25% ceiling before switching the pointer.'
+      : 'Judge initial publication of these seed assets against the independently accepted root and the exact exploration trace. This initializes the asset pointer; it is not a claim of RSI improvement or a candidate evaluation.',
+    draft, assets: (await loadMethod(apparatus, revision)).assets, trajectories,
+    trace: { cutoff: drafted.seq, digest: digestOf(prefix),
+      records: prefix.filter(fact => [TASK_PROTOCOL, MEASURE_PROTOCOL, STRATEGY_PROTOCOL, RELEASE_PROTOCOL].includes(fact.protocol)) },
+    context: 'Read singularity_method_history for the sealed results referenced by this exact committed trace.' }
+  const witness = await reviewSubject(apparatus, seams, agent, `${callId}:release-review`, subject, signal)
+  if (draft.basis.kind === 'decision') {
+    const evaluations = apparatus.store.load().statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION)
+    const candidate = projectEvaluation(evaluations.get(draft.basis.evaluationId)!)
+    const baseline = projectEvaluation(evaluations.get(`${draft.basis.roundId}:bootstrap:evaluation`)!)
+    let reviewCost = 0
+    for (const sessionId of taskSessionsOf(apparatus, witness.taskId)) {
+      const handle = await apparatus.persistence.open(SessionId(sessionId), 'read')
+      try { reviewCost += nativeTokensOf((await handle.read()).events) } finally { await handle.close() }
+    }
+    if (baseline.cost === null || candidate.cost === null || candidate.cost + reviewCost > baseline.cost * 1.25)
+      refuse('unapproved-revision', 'candidate plus final independent review exceeds the 25% native token cost ceiling')
+  }
+  await release.approveReview({ commandId: `${callId}:review`, environmentId, revisionId: draft.revisionId, draftDigest: draft.draftDigest, witness })
+  await release.publish({ commandId: `${callId}:publish`, environmentId, expected: draft.basis.kind === 'decision' ? draft.basis.expected : '', to: draft.revisionId })
+  const approved = apparatus.store.load().stateOf<ReleaseState>(RELEASE_PROTOCOL, RELEASE_VERSION, environmentId)!
+  return { revision, approvalId: approved.approvalId! }
 }

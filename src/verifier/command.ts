@@ -27,7 +27,7 @@ interface VerifierProcessOutcome {
 export type VerifierProcess = (invocation: VerifierInvocation) => Promise<VerifierProcessOutcome>
 
 export interface VerifierCommandResult {
-  readonly verdict: 'pass' | 'fail'
+  readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown'
   readonly artifactDigest: string
   readonly inputDigests: readonly { readonly name: string; readonly digest: string }[]
   readonly detail: string
@@ -121,7 +121,7 @@ export async function runVerifierCommand(request: VerifierCommandRequest, runPro
   const inputDigests = await hashInputs(inputs)
 
   return {
-    verdict: outcome.exitCode === 0 ? 'pass' : 'fail',
+    verdict: outcome.exitCode === 0 ? 'pass' : outcome.exitCode === 3 ? 'partial' : outcome.exitCode === 4 ? 'unknown' : outcome.exitCode === 1 ? 'fail' : 'unknown',
     artifactDigest,
     inputDigests,
     detail: describe(invocation, outcome, inputs),

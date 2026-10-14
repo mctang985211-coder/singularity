@@ -25,7 +25,7 @@ describe('core persistence boundary', () => {
   })
 })
 
-it.each(['assembly/src/plugin.ts', 'assembly/client.js', 'assembly/panel.js'])(
+it.each(['assembly/src/plugin.ts', 'assembly/client.js', 'assembly/frontend/panel.tsx'])(
   'rejects domain identity literals in %s while allowing domain data loaded through a port', file => {
     const domain = { criterion: { criterionId: 'controlled-criterion' }, verifier: { program: 'controlled-verifier.mjs' } }
     expect(domainFindings([{ file, text: "const criterion = 'controlled-criterion'" }], [domain])).toHaveLength(1)

@@ -8,7 +8,7 @@ import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from
 import { assertPinnedRevision } from '../environment/binding.ts'
 import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunSubmission, type TaskState } from './protocol.ts'
 import { unadjudicatedCriteria, unmetCriteria, verdictFor } from './run.ts'
-import { projectTree } from './tree.ts'
+import { childSettled, projectTree } from './tree.ts'
 import type { Bubble, BubbleInput, BubbleTool } from './bubble.ts'
 import type { DecompositionChild } from './decomposition.ts'
 
@@ -21,7 +21,7 @@ export interface HeldAgent {
 export interface VerdictInput {
   readonly runId: string
   readonly criterionId: string
-  readonly verdict: 'pass' | 'fail'
+  readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown'
   readonly implementationDigest: string
   readonly artifactDigest: string
   readonly inputDigests: readonly BubbleInput[]
@@ -201,9 +201,9 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         requestDigest: input.requestDigest,
       }, as, () => {
         const own = projectTree(cutOf(options).tasks()).find(plan => plan.parentTaskId === input.taskId)
-        const pending = own?.children.filter(child => child.status !== 'verified') ?? []
+        const pending = own?.children.filter(child => !childSettled(child)) ?? []
         if (pending.length > 0)
-          refuse('illegal-transition', `cannot submit task "${input.taskId}" while its sub-task ${pending.map(child => `"${child.taskId}" (${child.status})`).join(', ')} has not verified`)
+          refuse('illegal-transition', `cannot submit task "${input.taskId}" while its sub-task ${pending.map(child => `"${child.taskId}" (${child.status})`).join(', ')} has not settled`)
         fresh = true
       })
       return { envelope, fresh }

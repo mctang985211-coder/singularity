@@ -21,7 +21,10 @@ import type { ControlEventData } from '../../src/control/session-store.ts'
 import { digestOf, type Envelope } from '../../src/protocol/envelope.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import type { Config } from '../src/index.ts'
-import { openDriver, type AgentTaskSurface } from '../src/driver.ts'
+import type { AgentTaskSurface } from '../src/driver.ts'
+import { openApparatus, callerOf, type Apparatus } from '../src/apparatus.ts'
+import { retry, status } from '../src/surfaces.ts'
+import { submit } from '../src/submission.ts'
 import { loadDomain } from '../src/domain.ts'
 import type { Admission, Execution } from '../src/execution.ts'
 import { spawnProcess } from '../src/process.ts'
@@ -159,20 +162,23 @@ export const fakeExecution = (_admission: Admission): Execution => ({
 export const attachmentsAt = (root: string): LocalAttachmentStore =>
   new LocalAttachmentStore(new Context(), { dshHome: join(root, 'dsh-home') })
 
-/** Compose the real driver with explicit test ports; host apply is covered separately. */
-export async function mount(config: Config, medium = new FakePersistence()): Promise<{ ctx: Context; medium: FakePersistence }> {
+/** Exercise admission and submission primitives without imitating a model or review session. */
+export async function mount(config: Config, medium = new FakePersistence()): Promise<{ ctx: Context; medium: FakePersistence; apparatus: Apparatus }> {
   const ctx = new Context()
-  const driver = await openDriver({
-    ...config,
-    domain: await loadDomain(config.domainDir, spawnProcess),
-    persistence: medium as unknown as SessionPersistence,
-    attachments: attachmentsAt(config.workspaceRoot),
-    seams: ctx,
-    execution: fakeExecution,
-  })
-  ctx.provide('singularity', driver)
-  ctx.effect(() => () => driver.close())
-  return { ctx, medium }
+  const apparatus = await openApparatus(config.controlId, config.workspaceRoot, await loadDomain(config.domainDir, spawnProcess),
+    medium as unknown as SessionPersistence, attachmentsAt(config.workspaceRoot))
+  const execution = fakeExecution(() => undefined)
+  const surface = { forCall: (exec: ToolRunContext) => {
+    const caller = callerOf(exec.agent)
+    return {
+      retry: (input: Parameters<AgentTaskSurface['retry']>[0]) => retry(apparatus, caller, String(exec.callId), input),
+      submit: (input: Parameters<AgentTaskSurface['submit']>[0]) => submit(apparatus, execution, caller, exec, input, exec.signal),
+      status: (input: Parameters<AgentTaskSurface['status']>[0]) => status(apparatus, caller, input),
+    } as AgentTaskSurface
+  } }
+  ctx.provide('singularity', surface as never)
+  ctx.effect(() => () => apparatus.store.close())
+  return { ctx, medium, apparatus }
 }
 
 /** The service one mount provides: what a tool call reaches for its own surface. */

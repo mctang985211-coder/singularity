@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { cp, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { asyncRefusalOf } from '../../tests/fixtures.ts'
 import { agentFor, execFor, factsOf, mount, serviceOf } from './seam.ts'
+import { callerOf } from '../src/apparatus.ts'
+import { propose } from '../src/surfaces.ts'
 
 const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const counting = "import { readFileSync } from 'node:fs'; process.stdout.write(String((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).length))"
@@ -15,12 +17,13 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 async function setup(domain = domainDir) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), 'assembly-integrity-'))
   roots.push(workspaceRoot)
-  const { ctx, medium } = await mount({ controlId: 'integrity', domainDir: domain, workspaceRoot })
+  const { ctx, medium, apparatus } = await mount({ controlId: 'integrity', domainDir: domain, workspaceRoot })
   const agent = agentFor('worker', 'worker-session')
   const service = serviceOf(ctx)
   const call = (id: string) => service.forCall(execFor(agent, id))
-  const proposal = await call('propose').propose({ goal: 'count letters' })
-  return { call, proposal, medium }
+  const caller = callerOf(agent)
+  const proposal = await propose(apparatus, caller, 'propose', { goal: 'count letters' })
+  return { call, proposal, medium, apparatus, caller }
 }
 
 describe('complete solve and immutable submission', () => {
@@ -30,24 +33,33 @@ describe('complete solve and immutable submission', () => {
     expect(await call('status').status({ taskId: proposal.taskId })).toMatchObject({ phase: 'running', runs: 1, receipt: null })
   })
 
+  it('rejects a submission symlink before the host can overwrite another Run or input', async () => {
+    const { call, proposal } = await setup()
+    const protectedFile = join(proposal.workspace, 'protected.txt')
+    await writeFile(protectedFile, 'unchanged')
+    await symlink(protectedFile, join(proposal.workspace, 'program.mjs'))
+    await expect(call('submit').submit({ taskId: proposal.taskId, program: counting })).rejects.toThrow('symbolic link')
+    expect(await readFile(protectedFile, 'utf8')).toBe('unchanged')
+  })
+
   it('rejects a new solve request while that Task already has a working Run', async () => {
-    const { call, medium } = await setup()
+    const { call, medium, proposal } = await setup()
     const committed = medium.events.length
-    expect((await asyncRefusalOf(() => call('second-proposal').propose({ goal: 'count letters' }))).code).toBe('illegal-transition')
+    expect((await asyncRefusalOf(() => call('retry').retry({ taskId: proposal.taskId }))).code).toBe('illegal-transition')
     expect(medium.events.length).toBe(committed)
   })
 
-  it('rejects a proposal replay with a changed goal before preparing another Task', async () => {
-    const { call, medium } = await setup()
+  it('rejects a changed goal on the retry boundary before preparing another Task', async () => {
+    const { call, medium, proposal } = await setup()
     const committed = medium.events.length
-    expect((await asyncRefusalOf(() => call('propose').propose({ goal: 'changed' }))).code).toBe('command-conflict')
+    expect((await asyncRefusalOf(() => call('retry').retry({ taskId: proposal.taskId, goal: 'changed' } as never))).code).toBe('malformed-declaration')
     expect(medium.events.length).toBe(committed)
   })
 
   it('fails correct stdout when the producing process exits nonzero', async () => {
     const { call, proposal, medium } = await setup()
     const answer = await call('submit').submit({ taskId: proposal.taskId, program: "process.stdout.write('35'); process.exit(3)" })
-    expect(answer).toMatchObject({ verdict: 'fail', phase: 'failed' })
+    expect(answer).toMatchObject({ verdict: 'unknown', phase: 'failed' })
     expect(answer.detail).toContain('3')
     expect(factsOf(medium).some(fact => fact.kind === 'run/verified')).toBe(false)
     expect((await call('status').status({ taskId: proposal.taskId })).receipt).toMatchObject({
@@ -80,10 +92,10 @@ describe('complete solve and immutable submission', () => {
     const { call, proposal } = await setup()
     const requests = await Promise.allSettled([
       call('first').submit({ taskId: proposal.taskId, program: counting }),
-      call('second').submit({ taskId: proposal.taskId, program: "process.stdout.write('0')" }),
+      call('second').submit({ taskId: proposal.taskId, program: counting + '\n' }),
     ])
-    expect(requests[0]).toMatchObject({ status: 'fulfilled', value: { verdict: 'pass' } })
-    expect(requests[1]).toMatchObject({ status: 'rejected' })
+    expect(requests.filter(request => request.status === 'fulfilled')).toMatchObject([{ value: { verdict: 'pass' } }])
+    expect(requests.filter(request => request.status === 'rejected')).toHaveLength(1)
   })
 
   it('executes a concurrently redelivered submission only once', async () => {
@@ -96,20 +108,19 @@ describe('complete solve and immutable submission', () => {
       call('same-submit').submit(request),
     ])
     expect(await readFile(counter, 'utf8')).toBe('execution\n')
-    expect(answers).toMatchObject([
-      { status: 'fulfilled', value: { verdict: 'pass' } },
-      { status: 'rejected', reason: { refusal: { code: 'illegal-transition' } } },
-    ])
+    const successful = answers.find(answer => answer.status === 'fulfilled')!
+    expect(successful).toMatchObject({ value: { verdict: 'pass' } })
+    expect(answers.filter(answer => answer.status === 'rejected')).toMatchObject([{ reason: { refusal: { code: 'illegal-transition' } } }])
     const count = medium.events.length
-    expect(await call('same-submit').submit(request)).toEqual((answers[0] as PromiseFulfilledResult<unknown>).value)
+    expect(await call('same-submit').submit(request)).toEqual(successful.value)
     expect(medium.events.length).toBe(count)
   })
 
   it('keeps a receipt fixed after another Task is admitted', async () => {
-    const { call, proposal } = await setup()
+    const { call, proposal, apparatus, caller } = await setup()
     await call('submit').submit({ taskId: proposal.taskId, program: counting })
     const before = await call('status').status({ taskId: proposal.taskId })
-    await call('other').propose({ goal: 'another task' })
+    await propose(apparatus, { ...caller, agentId: 'other', sessionId: 'other-session' }, 'other', { goal: 'another human task' })
     expect(await call('status').status({ taskId: proposal.taskId })).toEqual(before)
   })
 

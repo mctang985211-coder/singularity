@@ -301,7 +301,7 @@ describe('submission freezes the attempt', () => {
   })
 
   it('rejects task v7 rather than guessing a failed Run cause', () => {
-    expect(TASK_VERSION).toBe(8)
+    expect(TASK_VERSION).toBe(9)
     expect(refusalOf(() => taskRegistry().ruleFor(TASK_PROTOCOL, 7, TASK_KINDS.runStarted))).toMatchObject({ code: 'version-mismatch' })
   })
 })

@@ -55,9 +55,12 @@ export interface TreeView {
   readonly criteria: readonly TreeCriterionView[]
   readonly ready: readonly string[]
   readonly blocked: readonly { readonly taskId: string; readonly reason: string }[]
-  /** Every criterion accepted **and** every declared sub-task verified. Never declared, always derived. */
+  /** Every criterion independently accepted after delegated work settled. */
   readonly complete: boolean
 }
+
+export const childSettled = (child: TreeChildView): boolean =>
+  child.status === 'verified' || child.status === 'stopped' || child.status === 'blocked'
 
 function runsOf(state: TaskState | undefined): readonly RunState[] {
   return state === undefined ? [] : Object.values(state.runs)
@@ -149,6 +152,8 @@ function projectOne(parent: TaskState, tasks: ReadonlyMap<string, TaskState>): T
 
     if (runs.some(run => run.status === 'verified')) return { ...shape, status: 'verified', reason: null }
     if (runs.some(run => run.status === 'running')) return { ...shape, status: 'running', reason: null }
+    const uncertain = runs.find(run => run.evidence.some(entry => entry.verdict === 'unknown'))
+    if (uncertain !== undefined) return { ...shape, status: 'blocked', reason: 'verification evidence is insufficient' }
     const interrupted = runs.find(run => run.failureCause === 'runtime')
     if (interrupted !== undefined)
       return { ...shape, status: 'stopped', reason: `runtime failure in Run "${interrupted.runId}"${interrupted.failureReason === undefined ? '' : ': ' + interrupted.failureReason}` }
@@ -188,6 +193,6 @@ function projectOne(parent: TaskState, tasks: ReadonlyMap<string, TaskState>): T
     blocked: children
       .filter(child => child.reason !== null)
       .map(child => ({ taskId: child.taskId, reason: child.reason as string })),
-    complete: criteria.every(criterion => criterion.satisfiedBy !== null) && children.every(child => child.status === 'verified'),
+    complete: criteria.every(criterion => criterion.satisfiedBy !== null) && children.every(childSettled),
   }
 }

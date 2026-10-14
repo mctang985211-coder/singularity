@@ -88,7 +88,7 @@ export interface ProductionExecution {
  * produced the verdict, computed from the bytes that ran — not the digest it was asked for.
  */
 export interface JudgedVerdict {
-  readonly verdict: 'pass' | 'fail'
+  readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown'
   readonly implementationDigest: string
   readonly detail?: string
 }
@@ -122,7 +122,7 @@ export interface ProductionVerdictRequest {
 export interface ProductionVerdict {
   readonly runId: string
   readonly criterionId: string
-  readonly verdict: 'pass' | 'fail'
+  readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown'
   readonly verifierRef: string
   readonly verifierVersion: string
   readonly implementationDigest: string
@@ -313,8 +313,8 @@ async function readInputDigests(inputs: readonly ProductionInput[]): Promise<rea
 async function acceptJudgedVerdict(runJudge: RealJudge, execution: ProductionExecution, criterion: AcceptanceCriterion): Promise<JudgedVerdict> {
   const judged = requireRecord(await runJudge(execution), 'the recorded judgement')
   const verdict = judged['verdict']
-  if (verdict !== 'pass' && verdict !== 'fail')
-    refuse('malformed-payload', `the recorded judgement.verdict must be "pass" or "fail", got ${JSON.stringify(verdict ?? null)}`)
+  if (verdict !== 'pass' && verdict !== 'fail' && verdict !== 'partial' && verdict !== 'unknown')
+    refuse('malformed-payload', `the recorded judgement.verdict must be pass, fail, partial or unknown, got ${JSON.stringify(verdict ?? null)}`)
   const implementationDigest = requireDigest(judged['implementationDigest'], 'the recorded judgement.implementationDigest')
   if (implementationDigest !== criterion.implementationDigest)
     refuse(

@@ -57,7 +57,7 @@ describe('the verifier command runner', () => {
     expect([result.verdict, result.artifactDigest]).toEqual(['pass', sha256('after')])
   })
 
-  it('judges a non-zero exit as fail, and reports the input bytes that were there after the run', async () => {
+  it('records a declared partial exit, and reports the input bytes that were there after the run', async () => {
     const input = join(directory, 'input.txt')
     const port: VerifierProcess = async () => {
       await writeFile(input, 'changed', 'utf8')
@@ -70,7 +70,7 @@ describe('the verifier command runner', () => {
     const result = await runVerifierCommand(request, port)
 
     expect([result.verdict, result.artifactDigest, result.inputDigests]).toEqual([
-      'fail',
+      'partial',
       sha256('broken'),
       [{ name: 'input.txt', digest: sha256('changed') }],
     ])

@@ -81,7 +81,7 @@ async function deployment(): Promise<Live> {
   declareMeasureProtocol(registry)
   declareStrategyProtocol(registry)
   const store = await ControlSessionStore.open({ persistence: context.sessionPersistence, controlId: 'direction', registry, subjects: SUBJECTS })
-  return { store, commands: createStrategyCommands({ store, rounds: 3, firstBudget: 4, minimumBudget: 1, calibration: CALIBRATION, measuresAt: sliceOf }) }
+  return { store, commands: createStrategyCommands({ store, calibration: CALIBRATION, measuresAt: sliceOf }) }
 }
 
 /** The measure slice as one round reads it: the real projection, at the cut it is handed. */
@@ -130,11 +130,10 @@ async function round(instance: Live, sides: readonly (readonly [string, Revision
   const caliber = caliberDigestOf(measureStateOf(instance.store, first[0]))
   if (caliber === undefined) throw new Error(`the measurement "${first[0]}" carries no caliber`)
   await instance.commands.openRound({
-    commandId: nextId('open'), roundId: 'round-1', round: 1, incumbent: INCUMBENT, candidates: sides.length, explorationSlots: 0,
-    historyCutoff: instance.store.load().entries().length, caliber, weights: WEIGHTS,
+    commandId: nextId('open'), roundId: 'round-1', round: 1, incumbent: INCUMBENT, candidates: sides.length, historyCutoff: instance.store.load().entries().length, caliber, weights: WEIGHTS,
   })
   for (const [slot, [evaluationId, revision]] of sides.entries())
-    await instance.commands.submitCandidate({ commandId: nextId('submit'), roundId: 'round-1', slot, revision, evaluationId, edits: [{ asset: 'skill', target: 'count' }], exploratory: false })
+    await instance.commands.submitCandidate({ commandId: nextId('submit'), roundId: 'round-1', slot, revision, evaluationId, edits: [{ asset: 'skill', target: 'count' }], })
 }
 
 describe('the direction a round ranks in is the measurement\'s own', () => {
@@ -168,7 +167,7 @@ describe('the direction a round ranks in is the measurement\'s own', () => {
       instance.store.emit({
         commandId: nextId('open'), protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind: STRATEGY_KINDS.roundOpened, subject: 'round-1',
         payload: {
-          round: 1, incumbent: INCUMBENT, candidates: 1, explorationSlots: 0, editBudget: 2, historyCutoff: 0,
+          round: 1, incumbent: INCUMBENT, candidates: 1, historyCutoff: 0,
           caliber: 'f'.repeat(64), metric: { direction: 'higher' }, weights: WEIGHTS,
         },
       }),

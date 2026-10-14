@@ -70,7 +70,7 @@ async function setup(quality = 0.8, decide = true, report = true) {
   }
   await evaluate('baseline-evaluation', baseline, 0.5)
   const baselineEvaluation = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'baseline-evaluation')!
-  const strategy = createStrategyCommands({ store, rounds: 1, firstBudget: 1, minimumBudget: 1, calibration,
+  const strategy = createStrategyCommands({ store, calibration,
     measuresAt: cut => ({ entries: cut.entries(), evaluationOf: evaluationId => {
       const state = cut.stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
       return state?.candidate === undefined ? undefined : { evaluationId, ...projectEvaluation(state),
@@ -81,16 +81,16 @@ async function setup(quality = 0.8, decide = true, report = true) {
       return state === undefined ? null : projectEvaluation(state)
     } }) })
   await strategy.openRound({ commandId: 'round-open', roundId: 'round', round: 1, incumbent: baseline,
-    candidates: 1, explorationSlots: 0, historyCutoff: store.load().entries().length,
+    candidates: 1, historyCutoff: store.load().entries().length,
     caliber: caliberDigestOf(baselineEvaluation)!, weights: { quality: 1, cost: 1 } })
   if (report) await evaluate('candidate-evaluation', candidate, quality)
   await strategy.submitCandidate({ commandId: 'candidate-submit', roundId: 'round', slot: 0, revision: candidate,
-    evaluationId: 'candidate-evaluation', edits: [{ asset: 'skill', target: 'count' }], exploratory: false })
+    evaluationId: 'candidate-evaluation', edits: [{ asset: 'skill', target: 'count' }], })
   const decision = decide ? await strategy.decideRound({ commandId: 'round-decide', roundId: 'round' }) : undefined
   return { store, registry, releases, release, approve, decision, baseline, candidate, evaluate }
 }
 
-describe('release@2 binds committed strategy decisions', () => {
+describe('release@3 binds committed strategy decisions', () => {
   it('drafts only the committed winner and binds its report, decision/calibration citation and expected head', async () => {
     const h = await setup()
     const draft = await h.releases.draftFromDecision({ commandId: 'decision-draft', roundId: 'round' })
@@ -100,7 +100,7 @@ describe('release@2 binds committed strategy decisions', () => {
     expect(draft.payload).toEqual({ revisionId: 'candidate', contentDigest: h.candidate.digest,
       draftDigest: digestOf({ revision: h.candidate, basis }), basis })
     expect(await h.releases.draftFromDecision({ commandId: 'decision-draft', roundId: 'round' })).toBe(draft)
-    expect(h.registry.versionsOf(RELEASE_PROTOCOL)).toEqual([2])
+    expect(h.registry.versionsOf(RELEASE_PROTOCOL)).toEqual([3])
   })
 
   it.each(['preview', 'no-winner'] as const)('refuses a %s without replacing the approved bootstrap draft', async state => {

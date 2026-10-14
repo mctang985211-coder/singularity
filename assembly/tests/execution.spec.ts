@@ -5,14 +5,14 @@ import { Session, SessionId, SessionStore } from '@deepseek-ai/dsh-session'
 import { ToolRuntime, defineTool, type ToolExecutionInput, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 
-import { createExecution, type Admission, type TurnFailure } from '../src/execution.ts'
+import { createExecution, type Admission, type TurnFailure, type TurnFailureHandler } from '../src/execution.ts'
 
 function deferred() {
   let resolve!: () => void
   const promise = new Promise<void>(done => { resolve = done })
   return { promise, resolve }
 }
-function harness(admission: Admission = () => undefined, onTurnFailure: (failure: TurnFailure) => void = () => undefined) {
+function harness(admission: Admission = () => undefined, onTurnFailure: TurnFailureHandler = () => undefined) {
   const ctx = new Context()
   ctx.provide('systemPrompt', { tools: () => () => undefined })
   const agents = new AgentRegistry(ctx)
@@ -33,6 +33,32 @@ function harness(admission: Admission = () => undefined, onTurnFailure: (failure
 }
 
 describe('the DSH execution port', () => {
+  it('flushes the exact session only after its reported failure is durable', async () => {
+    const commit = deferred()
+    let durable = false
+    const h = harness(undefined, async () => { await commit.promise; durable = true })
+    h.ctx.emit('agent/error', { agent: h.agent, turn: 1, step: 0, error: new Error('provider 503') })
+    const other = h.sessions.create(SessionId('other'))
+    await h.sessions.flush(other)
+    const flushed = h.sessions.flush(h.session)
+    let returned = false
+    void flushed.then(() => { returned = true })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(returned).toBe(false)
+    expect(durable).toBe(false)
+    commit.resolve()
+    await flushed
+    expect(durable).toBe(true)
+    await h.execution.close()
+  })
+
+  it('propagates failure persistence errors through the native flush barrier', async () => {
+    const h = harness(undefined, async () => { throw new Error('failure append failed') })
+    h.ctx.emit('agent/error', { agent: h.agent, turn: 1, step: 0, error: new Error('provider 503') })
+    await expect(h.sessions.flush(h.session)).rejects.toThrow('failure append failed')
+    await expect(h.execution.close()).rejects.toThrow('failure append failed')
+  })
+
   it('forwards agent runtime errors through the failure port once per exact live turn', async () => {
     const failures: TurnFailure[] = []
     const h = harness(undefined, failure => { failures.push(failure) })
@@ -85,9 +111,6 @@ describe('the DSH execution port', () => {
     const h = harness(undefined, failure => { failures.push(failure) })
     h.session.append('turn/start', { turn: 1 })
     const capped = h.session.append('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
-    // A Run whose owning turn ended at the ceiling has no live turn left to settle it: the step was
-    // cut off mid-answer, nothing re-prompts the session, and the Run would otherwise stay `working`
-    // forever — the campaign that found this waited on it until its deadline.
     expect(failures).toEqual([{ sessionId: 'root', turn: 1, seq: Number(capped.seq), reason: { kind: 'max-tokens' } }])
     await h.execution.close()
   })

@@ -15,7 +15,8 @@ import { refuse } from '../../src/protocol/refusal.ts'
 import { createTaskCommands, type HeldAgent, type TaskCommands } from '../../src/task/commands.ts'
 import type { Bubble } from '../../src/task/bubble.ts'
 import { declareTaskProtocol, SCHEDULER_ROLE, TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type TaskState } from '../../src/task/protocol.ts'
-import type { Domain } from './domain.ts'
+import type { DomainVerifier, Domain } from './domain.ts'
+import { addReviewVerifier } from './review.ts'
 import type { CampaignBudget } from './budget.ts'
 
 export interface Apparatus {
@@ -26,6 +27,7 @@ export interface Apparatus {
   readonly domain: Domain
   readonly store: ControlSessionStore
   readonly registry: ProtocolRegistry
+  readonly implementations: DomainVerifier[]
   readonly tasks: TaskCommands
   readonly environments: ReturnType<typeof createEnvironmentCommands>
   readonly agents: ReturnType<typeof createAgentNodeCommands>
@@ -51,6 +53,7 @@ function subjectsOf(controlId: string, domain: Domain): Record<string, string> {
 }
 export async function openApparatus(controlId: string, workspaceRoot: string, domain: Domain, persistence: SessionPersistence,
   attachments: Apparatus['attachments']): Promise<Apparatus> {
+  domain = await addReviewVerifier(domain, workspaceRoot)
   const registry = new ProtocolRegistry()
   declareTaskProtocol(registry)
   declareAgentProtocol(registry)
@@ -59,6 +62,7 @@ export async function openApparatus(controlId: string, workspaceRoot: string, do
   declareStrategyProtocol(registry)
   declareReleaseProtocol(registry)
   const store = await ControlSessionStore.open({ persistence, controlId, registry, subjects: subjectsOf(controlId, domain), cwd: workspaceRoot })
+  const implementations = [...domain.verifiers]
   const held = new Map<string, HeldAgent>()
   return {
     persistence,
@@ -69,7 +73,8 @@ export async function openApparatus(controlId: string, workspaceRoot: string, do
     store,
     registry,
     held,
-    tasks: createTaskCommands({ store, registry, agents: held, implementations: domain.verifiers }),
+    implementations,
+    tasks: createTaskCommands({ store, registry, agents: held, implementations }),
     environments: createEnvironmentCommands({ store, registry }),
     agents: createAgentNodeCommands({ store, registry }),
   }

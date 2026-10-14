@@ -155,14 +155,15 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
     execFileSync(process.execPath, [join(ROOT, 'node_modules/vitest/vitest.mjs'), 'run', 'tests/build-gates.spec.ts', 'assembly/tests/build.spec.ts'],
       { cwd: ROOT, stdio: 'inherit' })
   } else {
-    const sources = directory => treeFiles(join(ROOT, directory)).filter(file => /\.(ts|js)$/.test(file))
+    const sources = directory => treeFiles(join(ROOT, directory)).filter(file => /\.(ts|tsx|js)$/.test(file))
       .map(file => ({ file, text: readFileSync(file, 'utf8') }))
     const ledger = JSON.parse(readFileSync(join(ROOT, MUTATION_LEDGER), 'utf8'))
     const checks = [
       ['assembly-built', async () => { await checkBuild(); return [] }],
       ['core-no-durable-write', () => coreWriteFindings(sources('src'))],
       ['assembly-domain-free', () => domainFindings([...sources('assembly/src'),
-        ...['client.js', 'panel.js'].map(file => ({ file: 'assembly/' + file, text: readFileSync(join(ROOT, 'assembly', file), 'utf8') }))],
+        ...sources('assembly/frontend'),
+        ...['client.js'].map(file => ({ file: 'assembly/' + file, text: readFileSync(join(ROOT, 'assembly', file), 'utf8') }))],
         treeFiles(join(ROOT, 'deployment/domain')).filter(file => file.endsWith('task.json')).map(file => JSON.parse(readFileSync(file, 'utf8'))))],
       ['protocol-inventory', async () => inventoryFindingsWith(JSON.parse(readFileSync(join(ROOT, PROTOCOL_LEDGER), 'utf8')), await declaredProtocols())],
       ['dsh-alignment', () => alignmentFindingsWith(JSON.parse(readFileSync(join(ROOT, 'dsh-baseline.json'), 'utf8')))],

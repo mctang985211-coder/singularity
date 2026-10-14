@@ -3,7 +3,7 @@
 当前使用 Task v8。letters 的父模板 `count-source` 保留原保护输入；`extract-letters` 独立验收保序 ASCII 字母，
 `count-letters` 独立验收封存字母的 decimal 计数。child 的 `supports` 只说明工作关系，父判据由父自己的 verified Run 接受。
 
-用户明确：父可在完整计划内创建任务并选择已声明模板；已分配 child 执行自己的 Task/Run，不可另开根任务或发布计划。
+每个节点拥有完整 DSH standard 预设；已分配 child 继续自己的 Task/Run，也可选择已声明模板分解自己的 Task。
 自创 TaskTemplate 的准入与评估属于 W6。
 
 ## 实现与反例

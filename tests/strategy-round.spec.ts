@@ -17,7 +17,7 @@ import { ProtocolRegistry } from '../src/protocol/registry.ts'
 import type { RefusalCode } from '../src/protocol/refusal.ts'
 import type { RevisionRef } from '../src/task/protocol.ts'
 import { createStrategyCommands, type OpenRoundInput, type StrategyCommands, type SubmitCandidateInput } from '../src/strategy/commands.ts'
-import { editBudgetFor, type Calibration } from '../src/strategy/decision.ts'
+import { type Calibration } from '../src/strategy/decision.ts'
 import { declareStrategyProtocol, STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_ROLE, STRATEGY_VERSION, type RoundState } from '../src/strategy/protocol.ts'
 import { projectRound, type FrozenAggregate, type MeasureSlice, type RoundEvaluation } from '../src/strategy/view.ts'
 import { asyncRefusalOf } from './fixtures.ts'
@@ -50,13 +50,12 @@ const strategyLog = (): MemoryLog => new MemoryLog(strategyRegistry(), { subject
 const emit = (log: MemoryLog, kind: string, subject: string, payload: unknown): Envelope =>
   log.emit({ commandId: nextId('emit'), protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind, subject, payload })
 const plan = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-  round: 1, incumbent: INCUMBENT, candidates: 3, explorationSlots: 1,
-  editBudget: 2, historyCutoff: 0, caliber: CALIBER, weights: WEIGHTS,
+  round: 1, incumbent: INCUMBENT, candidates: 3, historyCutoff: 0, caliber: CALIBER, weights: WEIGHTS,
   ...over,
 })
 const emitPlan = (log: MemoryLog, subject: string, over: Record<string, unknown> = {}): Envelope => emit(log, STRATEGY_KINDS.roundOpened, subject, plan(over))
 const emitSubmission = (log: MemoryLog, subject: string, slot: number, over: Record<string, unknown> = {}): Envelope =>
-  emit(log, STRATEGY_KINDS.candidateSubmitted, subject, { slot, revision: CANDIDATE_A, evaluationId: `e-${slot}`, edits: SKILL, exploratory: false, ...over })
+  emit(log, STRATEGY_KINDS.candidateSubmitted, subject, { slot, revision: CANDIDATE_A, evaluationId: `e-${slot}`, edits: SKILL, ...over })
 const emitDecision = (log: MemoryLog, subject: string, over: Record<string, unknown> = {}): Envelope =>
   emit(log, STRATEGY_KINDS.roundDecided, subject, { winner: null, outcomes: [], calibration: FLOOR, ...over })
 /** One round's folded state as of the whole memory log. */
@@ -97,7 +96,7 @@ afterEach(async () => {
     await Promise.all([live.context.fiber.dispose(), rm(live.root, { recursive: true, force: true })])
   }
 })
-async function deployment(over: { rounds?: number; firstBudget?: number; minimumBudget?: number; calibration?: Calibration } = {}): Promise<Live> {
+async function deployment(over: { calibration?: Calibration } = {}): Promise<Live> {
   const root = await mkdtemp(join(tmpdir(), 'singularity-strategy-'))
   const context = new Context()
   await context.plugin(JsonlSessionPersistence, { root, compression: 'none' })
@@ -107,15 +106,14 @@ async function deployment(over: { rounds?: number; firstBudget?: number; minimum
   })
   const table = tableOf()
   const calibration = over.calibration ?? FLOOR
-  const commands = createStrategyCommands({ store, rounds: over.rounds ?? 3, firstBudget: over.firstBudget ?? 4, minimumBudget: over.minimumBudget ?? 1, calibration, measuresAt: cut => sliceOf(table, cut.entries()) })
+  const commands = createStrategyCommands({ store, calibration, measuresAt: cut => sliceOf(table, cut.entries()) })
   return { store, commands, table, calibration }
 }
 async function openThrough(live: Live, over: Partial<OpenRoundInput> = {}): Promise<string> {
   const roundId = over.roundId ?? nextId('round')
   await live.commands.openRound({
     commandId: nextId('open'), roundId, round: over.round ?? 1, incumbent: INCUMBENT,
-    candidates: over.candidates ?? 2, explorationSlots: over.explorationSlots ?? 0,
-    historyCutoff: over.historyCutoff ?? live.store.load().entries().length, caliber: over.caliber ?? CALIBER,
+    candidates: over.candidates ?? 2, historyCutoff: over.historyCutoff ?? live.store.load().entries().length, caliber: over.caliber ?? CALIBER,
     weights: WEIGHTS,
   })
   return roundId
@@ -123,8 +121,7 @@ async function openThrough(live: Live, over: Partial<OpenRoundInput> = {}): Prom
 const submitThrough = (live: Live, roundId: string, slot: number, over: Partial<SubmitCandidateInput> = {}): Promise<Envelope> =>
   live.commands.submitCandidate({
     commandId: over.commandId ?? nextId('submit'), roundId, slot, revision: over.revision ?? CANDIDATE_A,
-    evaluationId: over.evaluationId ?? `e-${slot}`, edits: over.edits ?? SKILL, exploratory: over.exploratory ?? false,
-  })
+    evaluationId: over.evaluationId ?? `e-${slot}`, edits: over.edits ?? SKILL, })
 const decideThrough = (live: Live, roundId: string): Promise<Envelope> => live.commands.decideRound({ commandId: nextId('decide'), roundId })
 const stateOf = (live: Live, roundId: string): RoundState | undefined => live.store.load().stateOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, roundId)
 const winnerOf = (envelope: Envelope): number | null => (envelope.payload as { winner: number | null }).winner
@@ -145,8 +142,8 @@ async function twoCandidateRound(
   return roundId
 }
 /** A round that declared two slots, was offered one measured candidate in slot 0, and nothing in slot 1. */
-async function halfRound(live: Live, explorationSlots = 0): Promise<string> {
-  const roundId = await openThrough(live, { candidates: 2, explorationSlots, historyCutoff: 5 })
+async function halfRound(live: Live): Promise<string> {
+  const roundId = await openThrough(live, { candidates: 2, historyCutoff: 5 })
   measuredAt(live.table, INCUMBENT, 0, 0.4)
   live.table.evaluations.set('e-0', evaluation('e-0', { candidate: CANDIDATE_A }))
   await submitThrough(live, roundId, 0, { evaluationId: 'e-0' })
@@ -157,10 +154,9 @@ describe('round/opened freezes one explicit round', async () => {
   it('carries the number, incumbent, plan, budget, cutoff and weights — and opens once', async () => {
     const log = strategyLog()
     const opened = emitPlan(log, 'round-1')
-    expect([Object.keys(opened.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.plan?.round]).toEqual([['caliber', 'candidates', 'editBudget', 'explorationSlots', 'historyCutoff', 'incumbent', 'round', 'weights'], 1])
+    expect([Object.keys(opened.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.plan?.round]).toEqual([['caliber', 'candidates', 'historyCutoff', 'incumbent', 'round', 'weights'], 1])
     await expectRefusal(() => emitPlan(log, 'round-1'), 'illegal-transition', 'a different round, and it gets a different subject')
     await expectRefusal(() => emitPlan(log, 'round-zero', { round: 0 }), 'malformed-payload', 'never a count of history entries')
-    await expectRefusal(() => emitPlan(log, 'round-wide', { explorationSlots: 4 }), 'malformed-payload', 'cannot exceed')
     await expectRefusal(() => emitPlan(log, 'round-empty', { candidates: 0 }), 'malformed-payload', 'at least 1')
     await expectRefusal(() => emitPlan(log, 'round-weightless', { weights: { quality: 0, cost: 15 } }), 'malformed-payload', 'cannot prefer')
   })
@@ -169,33 +165,29 @@ describe('round/opened freezes one explicit round', async () => {
 describe('the submission gate is the reducer\u2019s, inside the commit region', async () => {
   it('refuses every way a submission can violate the plan, and admits the two legal shapes', async () => {
     const log = strategyLog()
-    emitPlan(log, 'round-1', { explorationSlots: 2 })
-    emitSubmission(log, 'round-1', 2, { exploratory: true })
-    const wide = [{ asset: 'skill' as const, target: 'count' }, { asset: 'tool' as const, target: 'tokenizer' }, { asset: 'template' as const, target: 'report' }]
+    emitPlan(log, 'round-1', { })
+    emitSubmission(log, 'round-1', 2, { })
     await expectRefusal(() => emitSubmission(log, 'round-1', 3), 'illegal-transition', 'plans slots 0..2')
-    await expectRefusal(() => emitSubmission(log, 'round-1', 2, { exploratory: true }), 'evidence-conflict', 'one slot holds one candidate')
-    await expectRefusal(() => emitSubmission(log, 'round-1', 0, { edits: wide }), 'budget-exhausted', 'anneals to a budget of 2')
+    await expectRefusal(() => emitSubmission(log, 'round-1', 2, { }), 'evidence-conflict', 'one slot holds one candidate')
     await expectRefusal(() => emitSubmission(log, 'round-1', 0, { edits: [...SKILL, ...SKILL] }), 'malformed-payload', 'one structural change per target')
     // The revision is closed by the set the declaration names and hands to `revisionRef`, not by a copy
     // in the reader: one more member in the pin is refused by name.
     await expectRefusal(() => emitSubmission(log, 'round-1', 0, { revision: { ...CANDIDATE_A, note: 'extra' } }), 'malformed-payload', 'note')
-    await expectRefusal(() => emitSubmission(log, 'round-1', 1), 'illegal-transition', 'reserves for exploration')
     const both = [{ asset: 'skill' as const, target: 'count' }, { asset: 'tool' as const, target: 'count' }]
     emitSubmission(log, 'round-1', 0, { edits: both })
-    expect(roundIn(log, 'round-1')?.submissions.map(entry => [entry.slot, entry.exploratory])).toEqual([[2, true], [0, false]])
+    expect(roundIn(log, 'round-1')?.submissions.map(entry => entry.slot)).toEqual([2, 0])
 
     const quiet = 'gain 0.05 is inside the noise band 0.1'
-    // Slot 1 is a reserved exploration slot nobody took, closed out with a reason of its own.
     emitDecision(log, 'round-1', { winner: null, outcomes: [{ slot: 0, admitted: false, reason: quiet }, { slot: 1, admitted: false, reason: 'no candidate was submitted to this slot' }, { slot: 2, admitted: false, reason: quiet }] })
     expect(roundIn(log, 'round-1')?.decision?.winner).toBe(null)
-    await expectRefusal(() => emitSubmission(log, 'round-1', 1, { exploratory: true }), 'illegal-transition', 'after round 1 closed')
+    await expectRefusal(() => emitSubmission(log, 'round-1', 1, { }), 'illegal-transition', 'after round 1 closed')
   })
 })
 
 describe('a decision still refuses a winner it does not admit, an empty reason and a second decision', async () => {
   it('refuses an unadmitted winner, an outcome outside the plan, a blank reason and a second decision', async () => {
     const log = strategyLog()
-    emitPlan(log, 'round-1', { candidates: 2, explorationSlots: 0 })
+    emitPlan(log, 'round-1', { candidates: 2, })
     emitSubmission(log, 'round-1', 0)
     emitSubmission(log, 'round-1', 1)
     const both = [{ slot: 0, admitted: true, reason: 'the best aggregate of this round' }, { slot: 1, admitted: false, reason: 'in the noise band' }]
@@ -216,7 +208,7 @@ describe('a decision still refuses a winner it does not admit, an empty reason a
 describe('a decision covers the declared slots, not the submitted ones', async () => {
   it('refuses a decision that leaves a declared slot with no submission unaccounted, naming the slot', async () => {
     const log = strategyLog()
-    emitPlan(log, 'round-1', { candidates: 2, explorationSlots: 0 })
+    emitPlan(log, 'round-1', { candidates: 2, })
     emitSubmission(log, 'round-1', 0)
     const closed = [{ slot: 0, admitted: true, reason: 'the best aggregate of this round' }]
     await expectRefusal(() => emitDecision(log, 'round-1', { winner: 0, outcomes: closed }), 'illegal-transition', 'declared slot 1')
@@ -231,15 +223,15 @@ describe('a decision covers the declared slots, not the submitted ones', async (
 
   it('never admits a declared slot nobody submitted to, so only a submitted slot can be a winner', async () => {
     const log = strategyLog()
-    emitPlan(log, 'round-1', { candidates: 2, explorationSlots: 0 })
+    emitPlan(log, 'round-1', { candidates: 2, })
     emitSubmission(log, 'round-1', 0)
     const invented = [{ slot: 0, admitted: false, reason: 'in the noise band' }, { slot: 1, admitted: true, reason: 'a candidate nobody offered' }]
     await expectRefusal(() => emitDecision(log, 'round-1', { winner: 1, outcomes: invented }), 'illegal-transition', 'only a submitted slot can be a winner')
   })
 
-  it('does not refuse a round for leaving a reserved exploration slot empty, and records it', async () => {
+  it('does not refuse a round for leaving a candidate slot empty, and records it', async () => {
     const live = await deployment()
-    const roundId = await halfRound(live, 1)
+    const roundId = await halfRound(live)
     await decideThrough(live, roundId)
     const reserved = stateOf(live, roundId)?.decision?.outcomes.find(outcome => outcome.slot === 1)
     expect([reserved?.admitted, reserved?.reason]).toEqual([false, expect.stringContaining('no candidate was submitted to this slot')])
@@ -247,29 +239,21 @@ describe('a decision covers the declared slots, not the submitted ones', async (
 })
 
 describe('the round command service', async () => {
-  it('derives the annealed budget from the round number, freezes it, and refuses a reused round number', async () => {
-    const live = await deployment({ rounds: 3, firstBudget: 4, minimumBudget: 1 })
-    const first = await openThrough(live, { round: 1 })
-    const last = await openThrough(live, { roundId: 'round-last', round: 3 })
-    expect([stateOf(live, first)?.plan?.editBudget, stateOf(live, last)?.plan?.editBudget]).toEqual([editBudgetFor(1, 3, 4, 1), 1])
-
-    // The budget is the round's, not the caller's: the command surface never mentions one.
-    const budget = stateOf(live, first)?.plan?.editBudget ?? 0
-    const wide = Array.from({ length: budget + 1 }, (_, index) => ({ asset: 'skill' as const, target: `t${index}` }))
-    await expectRefusal(() => submitThrough(live, first, 0, { edits: wide }), 'budget-exhausted', 'anneals to a budget')
+  it('refuses a reused explicit round number', async () => {
+    const live = await deployment()
+    await openThrough(live, { round: 1 })
     await expectRefusal(() => openThrough(live, { roundId: 'round-dup', round: 1 }), 'illegal-transition', 'one number')
   })
 
   it('cannot bypass the submission gate, and a re-delivered command returns the fact it committed', async () => {
     const live = await deployment()
-    const roundId = await openThrough(live, { candidates: 2, explorationSlots: 1 })
+    const roundId = await openThrough(live, { candidates: 2, })
     const first = await submitThrough(live, roundId, 0, { commandId: 'submit-once' })
     expect((await submitThrough(live, roundId, 0, { commandId: 'submit-once' })).digest).toBe(first.digest)
     await expectRefusal(() => submitThrough(live, roundId, 0), 'evidence-conflict', 'one slot holds one candidate')
-    await expectRefusal(() => submitThrough(live, roundId, 1), 'illegal-transition', 'reserves for exploration')
 
     await decideThrough(live, roundId)
-    await expectRefusal(() => submitThrough(live, roundId, 1, { exploratory: true }), 'illegal-transition', 'after round 1 closed')
+    await expectRefusal(() => submitThrough(live, roundId, 1, { }), 'illegal-transition', 'after round 1 closed')
   })
 
   it('refuses a submission whose evaluation measured a different revision', async () => {
@@ -439,7 +423,5 @@ describe('the projection decides admissibility before any argmax', async () => {
     await expectRefusal(() => projectRound(basis, sliceOf(live.table, live.store.load().entries()), { floor: 0.1, source: 'guessed' } as unknown as Calibration), 'malformed-payload', 'measured')
   })
 
-  it('refuses an annealing policy that anneals upward', async () => {
-    expect(() => createStrategyCommands({ store: {} as ControlSessionStore, rounds: 3, firstBudget: 1, minimumBudget: 4, calibration: FLOOR, measuresAt: () => sliceOf(tableOf(), []) })).toThrow(/anneal downward/)
-  })
+
 })

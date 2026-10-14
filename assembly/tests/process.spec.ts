@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { access, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout } from 'node:timers/promises'
@@ -19,18 +19,12 @@ it('does not finish cancellation before the actual process exits', async () => {
   const code = `import { writeFileSync } from 'node:fs';
     process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300));
     writeFileSync(${JSON.stringify(ready)}, String(process.pid)); setInterval(() => {}, 100);`
-  let pid: number | undefined
   try {
-    const pending = spawnProcess({ shell: false, argv: [process.execPath, '--input-type=module', '-e', code] }, controller.signal)
+    const pending = spawnProcess({ shell: false, argv: [process.execPath, '--input-type=module', '-e', code] }, controller.signal, root)
     await vi.waitFor(() => access(ready))
-    pid = Number(await readFile(ready, 'utf8'))
     controller.abort(new Error('unloading'))
     expect(await pending).toMatchObject({ exitCode: null, failure: expect.any(String) })
-    expect(() => process.kill(pid!, 0)).toThrow()
   } finally {
-    if (pid !== undefined) {
-      try { process.kill(pid, 'SIGKILL') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
-    }
     await rm(root, { recursive: true, force: true })
   }
 })

@@ -2,13 +2,15 @@ import { join } from 'node:path'
 import { assertClosedKeys } from '../../src/protocol/envelope.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import type { TaskTemplateRef } from '../../src/task/contract.ts'
-import type { VerifierProcess } from '../../src/verifier/command.ts'
+import type { BubbleWorld } from './bubble.ts'
+import type { VerifierInvocation, VerifierProcess } from '../../src/verifier/command.ts'
 import type { VerifierImplementation } from '../../src/verifier/implementation.ts'
 import { sha256 } from './ids.ts'
 import { inside, list, readBytes, record, text } from './shape.ts'
 import { readTemplate, type TaskTemplate } from './template.ts'
 import { verifierOf } from './verifiers.ts'
 import { loadMeasurement, type DomainMeasurement } from './domain-measurement.ts'
+import { assertDecomposition } from '../../src/task/decomposition.ts'
 
 export interface DomainVerifier extends VerifierImplementation {
   readonly program: string
@@ -22,13 +24,14 @@ export interface DomainInput {
 }
 export interface Domain {
   readonly dir: string
+  readonly references: readonly string[]
   readonly rootTemplate: string
   readonly inputs: readonly DomainInput[]
   readonly templates: ReadonlyMap<string, TaskTemplate>
   readonly verifiers: readonly DomainVerifier[]
   readonly measurement?: DomainMeasurement
 }
-export async function loadDomain(dir: string, runProcess: VerifierProcess): Promise<Domain> {
+export async function loadDomain(dir: string, runProcess: (invocation: VerifierInvocation, signal?: AbortSignal, cwd?: string, world?: BubbleWorld) => ReturnType<VerifierProcess>): Promise<Domain> {
   const declaration = join(dir, 'task.json')
   const bytes = await readBytes(declaration, 'the domain declaration')
   let parsed: unknown
@@ -36,7 +39,11 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
     refuse('malformed-declaration', `${declaration} is not JSON (${String(error)})`)
   }
   const declared = record(parsed, 'task.json')
-  assertClosedKeys(declared, ['rootTemplate', 'inputs', 'templates', 'verifiers', 'measurement'], 'task.json', 'malformed-declaration')
+  assertClosedKeys(declared, ['rootTemplate', 'inputs', 'templates', 'verifiers', 'measurement', 'references'], 'task.json', 'malformed-declaration')
+  const references = declared['references'] === undefined ? [] : list(declared['references'], 'task.json.references').map(value => {
+    if (typeof value !== 'string' || !value.startsWith('/')) refuse('malformed-declaration', 'references must be absolute paths')
+    return value
+  })
   const inputs: DomainInput[] = []
   for (const [index, entry] of list(declared['inputs'], 'task.json.inputs').entries()) {
     const at = `task.json.inputs[${index}]`
@@ -50,7 +57,7 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
   }
   const verifiers: DomainVerifier[] = []
   for (const [index, entry] of list(declared['verifiers'], 'task.json.verifiers').entries()) {
-    const verifier = await verifierOf(dir, entry, `task.json.verifiers[${index}]`, runProcess)
+    const verifier = await verifierOf(dir, entry, `task.json.verifiers[${index}]`, invocation => runProcess(invocation, undefined, dir, { root: dir, writable: false, protected: [], references }))
     if (verifiers.some(other => other.ref === verifier.ref)) refuse('malformed-declaration', `task.json repeats verifier ${JSON.stringify(verifier.ref)}`)
     verifiers.push(verifier)
   }
@@ -66,7 +73,7 @@ export async function loadDomain(dir: string, runProcess: VerifierProcess): Prom
   if (root.input.source.kind !== 'protected') refuse('malformed-declaration', 'the root template must read a protected source')
   const measurement = declared['measurement'] === undefined ? undefined
     : await loadMeasurement(inside(dir, text(declared, 'measurement', 'task.json'), 'task.json.measurement'))
-  const domain = { dir, rootTemplate, inputs, templates, verifiers, ...(measurement === undefined ? {} : { measurement }) }
+  const domain = { references, dir, rootTemplate, inputs, templates, verifiers, ...(measurement === undefined ? {} : { measurement }) }
   assertTemplateSources(domain)
   return domain
 }
@@ -76,6 +83,20 @@ export function assertTemplateSources(domain: Domain): void {
   if (root === undefined) refuse('malformed-declaration', 'the root template is absent')
   if (root.input.source.kind !== 'protected') refuse('malformed-declaration', 'the root template must read a protected source')
   for (const template of templates.values()) {
+    if (template.decomposition !== undefined) {
+      const children = template.decomposition.children
+      assertDecomposition(children.map(child => ({ taskId: `child:${child.key}`,
+        dependsOn: child.dependsOn.map(key => `child:${key}`), supports: child.supports, maxRuns: child.maxRuns })),
+      { criteria: [template.criterion] }, `parent:${template.id}`)
+      const byKey = new Map(children.map(child => [child.key, child]))
+      for (const child of children) {
+        const selected = templates.get(child.template)
+        if (selected === undefined) refuse('malformed-declaration', `template ${template.id} decomposes into absent template ${child.template}`)
+        const source = selected.input.source
+        if (source.kind === 'artifact' && child.dependsOn.filter(key => byKey.get(key)!.template === source.template).length !== 1)
+          refuse('malformed-declaration', `template ${template.id} child ${child.key} requires exactly one producer with template ${source.template}`)
+      }
+    }
     const source = template.input.source
     if (source.kind === 'protected' ? !inputs.some(input => input.ref === source.ref) : !templates.has(source.template))
       refuse('malformed-declaration', `template ${JSON.stringify(template.id)} names absent ${source.kind} source ${JSON.stringify(source.kind === 'protected' ? source.ref : source.template)}`)

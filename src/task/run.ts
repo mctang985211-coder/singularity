@@ -31,7 +31,7 @@ export interface RunSubmission {
 /** One verifier's verdict on one criterion of one run. */
 export interface EvidenceRecord {
   readonly criterionId: string
-  readonly verdict: 'pass' | 'fail'
+  readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown'
   /** Which verifier implementation decided it: the criterion's own, or the fold refuses. */
   readonly verifierRef: string
   readonly verifierVersion: string
@@ -276,7 +276,7 @@ export function evidenceProducedKind(
     {
       runId: string
       criterionId: string
-      verdict: 'pass' | 'fail'
+      verdict: 'pass' | 'fail' | 'partial' | 'unknown'
       verifierRef: string
       verifierVersion: string
       implementationDigest: string
@@ -297,8 +297,8 @@ export function evidenceProducedKind(
     parse: (raw, where, nested) => {
       const source = record(raw, where)
       const verdict = source['verdict']
-      if (verdict !== 'pass' && verdict !== 'fail')
-        refuse('malformed-payload', `${where}.verdict must be "pass" or "fail", got ${JSON.stringify(verdict ?? null)}`)
+      if (verdict !== 'pass' && verdict !== 'fail' && verdict !== 'partial' && verdict !== 'unknown')
+        refuse('malformed-payload', `${where}.verdict must be pass, fail, partial or unknown, got ${JSON.stringify(verdict ?? null)}`)
       const detail = maybeText(source, 'detail', where)
       return {
         runId: text(source, 'runId', where),

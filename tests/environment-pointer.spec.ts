@@ -18,8 +18,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -38,7 +36,6 @@ import { declareEnvironmentProtocol, ENVIRONMENT_KINDS, ENVIRONMENT_PROTOCOL, EN
 import { APPROVER_ROLE, declareReleaseProtocol, RELEASE_KINDS, RELEASE_PROTOCOL, RELEASE_VERSION, releaseDraftOf } from '../src/release/protocol.ts'
 import { SCHEDULER_ROLE } from '../src/task/protocol.ts'
 import { createReleaseCommands } from '../src/release/commands.ts'
-import type { ApprovalSeams } from '../src/runtime/approval.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
 
 const ENVIRONMENT = 'env-a'
@@ -51,14 +48,14 @@ const OTHER_MANIFEST = { skills: ['count-words', 'bounded-size'] } as const
 
 const ACTOR = 'environment-service'
 const PUBLISHER = 'publisher-service'
-const APPROVAL_SEAM = 'approval-seam'
-const ALICE = 'human:alice'
+const APPROVER = 'review-service'
+const REVIEWER = 'reviewer-alice'
 
 const SUBJECTS: Readonly<Record<string, string>> = {
   [ENVIRONMENT_ROLE]: ACTOR,
   [PUBLISHER_ROLE]: PUBLISHER,
   [SCHEDULER_ROLE]: 'scheduler-service',
-  [APPROVER_ROLE]: APPROVAL_SEAM,
+  [APPROVER_ROLE]: APPROVER,
 }
 
 let counter = 0
@@ -145,38 +142,14 @@ async function createRevision(store: ControlSessionStore, revisionId: string, ma
 }
 
 
-/** Draft and approve one revision's content, as the pipeline and the human would. */
-type Listener = (session: Session, event: SessionEvent) => void
-
-/** The asking agent and its session: the seam double answers on its behalf, one audit id per ask. */
-const AGENT = { session: { id: 'agent-1' } } as unknown as Agent
-let auditIds = 0
-
-/**
- * A deployment double for the native seam: one grant, one `approval/asked` in the window. The real
- * service is observed in `scripts/release-probe.mjs`; here it stands in so the release rules — not
- * the answerer waterfall — are what these tests decide.
- */
-function seam(): ApprovalSeams {
-  const listeners = new Set<Listener>()
-  return {
-    approval: {
-      request: async () => {
-        auditIds += 1
-        const event = { type: 'approval/asked', data: { id: `audit-${auditIds}` } } as unknown as SessionEvent
-        for (const listener of [...listeners]) listener(AGENT.session, event)
-        return 'allowed-once'
-      },
-    },
-    feed: { on: (_name, listener) => { listeners.add(listener); return () => listeners.delete(listener) } },
-  }
-}
-
-/** Draft and approve one environment's revision, as the pipeline and a human would. */
+/** Trusted approval fixture for pointer command and reducer tests. */
 async function approve(store: ControlSessionStore, environmentId: string, revisionId: string, digest: string): Promise<void> {
-  const commands = createReleaseCommands({ store, approvalSeams: seam() })
-  const draft = await commands.draft({ commandId: `draft-${environmentId}-${revisionId}`, revision: { environmentId, revisionId, digest } })
-  await commands.approve({ commandId: `approve-${environmentId}-${revisionId}`, environmentId, revisionId, draftDigest: (draft.payload as { draftDigest: string }).draftDigest, approvedBy: ALICE, ask: { agent: AGENT, toolName: 'release_approve' } })
+  const draft = await createReleaseCommands({ store }).draft({ commandId: `draft-${environmentId}-${revisionId}`, revision: { environmentId, revisionId, digest } })
+  await store.emit({ commandId: `approve-${environmentId}-${revisionId}`, protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION,
+    kind: RELEASE_KINDS.approved, subject: environmentId, payload: {
+      revisionId, draftDigest: (draft.payload as { draftDigest: string }).draftDigest,
+      approvedBy: REVIEWER, approvalId: `review-${environmentId}-${revisionId}`,
+    } })
 }
 
 function publish(store: ControlSessionStore, to: string, expected = '', environmentId = ENVIRONMENT): Promise<unknown> {
@@ -318,7 +291,7 @@ describe('the command boundary decides the half the reducer cannot see', () => {
     // created, and the reducer cannot see that: only the publish precondition can.
     const forged = releaseDraftOf({ environmentId: ENVIRONMENT, revisionId: R1, digest: digestOf(OTHER_MANIFEST) }, { kind: 'bootstrap' })
     await store.emit({ commandId: 'forged-draft', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.drafted, subject: ENVIRONMENT, payload: forged })
-    await store.emit({ commandId: 'forged-approval', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.approved, subject: ENVIRONMENT, payload: { revisionId: forged.revisionId, draftDigest: forged.draftDigest, approvedBy: ALICE, approvalId: 'audit-forged' } })
+    await store.emit({ commandId: 'forged-approval', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.approved, subject: ENVIRONMENT, payload: { revisionId: forged.revisionId, draftDigest: forged.draftDigest, approvedBy: REVIEWER, approvalId: 'audit-forged' } })
 
     const refusal = await asyncRefusalOf(() => publish(store, R1))
     expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining(ENVIRONMENT) })

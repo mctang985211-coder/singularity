@@ -1,66 +1,129 @@
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SkillCandidate } from '@deepseek-ai/dsh-skill'
+import { digestOf } from '../../src/protocol/envelope.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type RunState, type TaskState } from '../../src/task/protocol.ts'
 import { taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import { workspaceOf } from './attempt.ts'
-import { loadMethod, methodOfRun } from './method.ts'
+import { methodForRun, methodOfRun, type MethodBindings, type MethodSkill } from './method.ts'
+import type { RevisionRef } from '../../src/task/protocol.ts'
+import type { TaskTemplate } from './template.ts'
+import { commandOf, templateOf } from './domain.ts'
 import { spawnProcess } from './process.ts'
+import { assertRunFile } from './workspace.ts'
 
-export async function consumeMethod(apparatus: Apparatus, taskId: string, run: RunState,
-  method: 'template' | 'skill' | 'tool', source: string): Promise<void> {
-  if (taskStateOf(apparatus, taskId).runs[run.runId]!.consumed.some(entry => entry.method === method)) return
-  await apparatus.tasks.recordConsumption({ commandId: `consume:${taskId}/${run.runId}/${method}`, taskId,
-    runId: run.runId, revision: run.revision, method, source })
+export async function consumeMethod(apparatus: Apparatus, taskId: string, run: RunState, asset: string, source: string): Promise<void> {
+  if (taskStateOf(apparatus, taskId).runs[run.runId]!.consumed.some(entry => entry.method === asset)) return
+  const reference = methodOfRun(apparatus, run)
+  if (reference === undefined) refuse('unknown-revision', 'Run has no asset Revision')
+  await apparatus.tasks.recordConsumption({ commandId: `consume:${taskId}/${run.runId}/${asset}`, taskId,
+    runId: run.runId, revision: run.revision, method: asset, source: `${reference.digest}/${source}` })
 }
-
-function workingFor(apparatus: Apparatus, agentId: string): { taskId: string; run: RunState }[] {
+function workingFor(apparatus: Apparatus, agentId: string) {
   return [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
     .filter(task => task.responsibility?.agentId === agentId)
-    .flatMap(task => Object.values(task.runs).filter(run => run.status === 'running' && run.stage === 'working')
-      .map(run => ({ taskId: task.taskId, run })))
+    .flatMap(task => Object.values(task.runs).filter(run => run.status === 'running' && run.stage === 'working').map(run => ({ task, run })))
 }
-
-export async function methodSkill(apparatus: Apparatus, agentId: string): Promise<string | undefined> {
-  const sections: string[] = []
-  for (const { taskId, run } of workingFor(apparatus, agentId)) {
-    const ref = methodOfRun(apparatus, run)
-    if (ref !== undefined) sections.push(`Method ${ref.digest} for Task ${taskId}, Run ${run.runId}:\n${(await loadMethod(apparatus, ref)).assets.skill}`)
-  }
-  return sections.length === 0 ? undefined : sections.join('\n\n')
+async function methodsFor(apparatus: Apparatus, agentId: string) {
+  return Promise.all(workingFor(apparatus, agentId).map(async ({ task, run }) => ({ task, run, ...await methodForRun(apparatus, run) })))
 }
-
-export async function observeMethodSkill(apparatus: Apparatus, sessionId: string, prompt: string, source: string): Promise<void> {
-  const agent = [...apparatus.store.load().statesOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION).values()]
-    .find(agent => agent.sessionId === sessionId)
-  if (agent === undefined) return
-  for (const { taskId, run } of workingFor(apparatus, agent.agentId)) {
-    const ref = methodOfRun(apparatus, run)
-    if (ref === undefined) continue
-    const text = `Method ${ref.digest} for Task ${taskId}, Run ${run.runId}:\n${(await loadMethod(apparatus, ref)).assets.skill}`
-    if (prompt.includes(text)) await consumeMethod(apparatus, taskId, run, 'skill', source)
-  }
+async function skillsFor(apparatus: Apparatus, agentId: string) {
+  return (await methodsFor(apparatus, agentId)).flatMap(({ task, run, reference, assets }) =>
+    assets.skills.map(skill => ({ taskId: task.taskId, run, reference, skill })))
 }
-
-export async function runMethodTool(apparatus: Apparatus, caller: Caller, taskId: string, callId: string,
-  signal: AbortSignal, candidate?: string): Promise<{ program: string; artifact: string }> {
-  const task = taskStateOf(apparatus, taskId)
-  if (task.responsibility?.agentId !== caller.agentId) refuse('not-responsible', 'the caller does not own this Task')
-  const run = Object.values(task.runs).find(run => run.status === 'running' && run.stage === 'working')
-  if (run === undefined) refuse('illegal-transition', 'the Task has no working Run')
-  const ref = methodOfRun(apparatus, run)
-  if (ref === undefined) refuse('unknown-revision', 'this Run has no Method tool')
-  const method = await loadMethod(apparatus, ref)
-  const template = method.domain.templates.get(task.contract!.template.id)!
+export interface MethodContext {
+  readonly method: RevisionRef
+  readonly template: { readonly id: string; readonly digest: string }
+  readonly guidance: string
+  readonly applicability?: string
+  readonly decomposition?: TaskTemplate['decomposition']
+  readonly bindings: MethodBindings
+  readonly boundSkills: readonly (MethodSkill & { readonly digest: string })[]
+  readonly references: readonly string[]
+  readonly localCheck: readonly string[]
+  readonly measurement?: { readonly module: string; readonly baseline: number; readonly unit: string;
+    readonly direction: 'higher' | 'lower'; readonly conditions: readonly string[] }
+}
+export async function methodContext(apparatus: Apparatus, taskId: string, run: RunState): Promise<MethodContext> {
+  const { reference, assets, domain, bindings } = await methodForRun(apparatus, run)
+  const template = templateOf(domain, taskStateOf(apparatus, taskId).contract!.template)
   const workspace = workspaceOf(apparatus, taskId, run.runId)
-  const path = join(workspace, 'method-tool.mjs')
-  await writeFile(path, method.assets.tool, 'utf8')
+  const boundSkills = bindings.skills.map(binding => {
+    const skill = assets.skills.find(skill => skill.name === binding.name)
+    if (skill === undefined || digestOf(skill) !== binding.digest) refuse('digest-mismatch', 'bound Skill differs from the pinned Revision')
+    return { ...skill, digest: binding.digest }
+  })
+  return { method: reference, template: { id: template.id, digest: template.digest }, guidance: template.goal,
+    ...(template.applicability === undefined ? {} : { applicability: template.applicability }),
+    ...(template.decomposition === undefined ? {} : { decomposition: template.decomposition }), bindings, boundSkills,
+    references: [domain.dir, ...domain.references],
+    localCheck: commandOf(template.verifier, join(workspace, template.artifact), join(workspace, template.input.name)),
+    ...(domain.measurement === undefined ? {} : { measurement: { module: domain.measurement.module,
+      baseline: domain.measurement.baseline, unit: domain.measurement.unit, direction: domain.measurement.direction,
+      conditions: domain.measurement.conditions } }) }
+}
+export async function recordMethodContext(apparatus: Apparatus, agentId: string): Promise<void> {
+  for (const { task, run } of workingFor(apparatus, agentId)) {
+    const context = await methodContext(apparatus, task.taskId, run)
+    await consumeMethod(apparatus, task.taskId, run, `guidance:${context.template.id}`, `context:${context.template.id}:${context.template.digest}`)
+    for (const skill of context.boundSkills)
+      await consumeMethod(apparatus, task.taskId, run, `skill:${skill.name}`, `context:skill:${skill.name}:${skill.digest}`)
+  }
+}
+export async function methodSkill(apparatus: Apparatus, agentId: string): Promise<string | undefined> {
+  const methods = await methodsFor(apparatus, agentId)
+  const tasks = await Promise.all(methods.map(async ({ task, run, domain }) => {
+    const template = templateOf(domain, task.contract!.template)
+    return { taskId: task.taskId, runId: run.runId, contract: task.contract,
+      workspace: workspaceOf(apparatus, task.taskId, run.runId), submission: template.submission,
+      input: template.input.name, artifact: template.artifact,
+      ...await methodContext(apparatus, task.taskId, run) }
+  }))
+  return tasks.length === 0 ? undefined : JSON.stringify({ assigned: tasks,
+    skills: methods.flatMap(({ task, assets }) => assets.skills.map(skill => ({ taskId: task.taskId, name: skill.name, description: skill.description }))) })
+}
+export async function mountMethodSkills(apparatus: Apparatus, agent: Agent): Promise<void> {
+  const ctx = agent.ctx
+  const skills = ctx.get('skills') as import('@deepseek-ai/dsh-skill').SkillRegistry
+  await ctx.plugin({ name: 'singularity-revision-skills', apply: (scope: typeof ctx) => {
+    const provider = `singularity-${agent.id}`
+    scope.effect(() => skills.registerProvider(() => ({ name: provider,
+      list: async () => ({ complete: false, candidates: (await skillsFor(apparatus, String(agent.id))).map(({ skill, taskId, run, reference }): SkillCandidate => ({
+        name: skill.name, description: skill.description, source: 'runtime', provider, rank: 0,
+        invocation: { modelInvocable: true, userInvocable: true }, locator: { taskId, runId: run.runId, methodDigest: reference.digest, name: skill.name, digest: digestOf(skill) },
+      })) }),
+      get: async candidate => {
+        const locator = candidate.locator as { taskId: string; runId: string; methodDigest: string; name: string; digest: string }
+        const held = (await skillsFor(apparatus, String(agent.id))).find(entry => entry.taskId === locator.taskId && entry.run.runId === locator.runId && entry.skill.name === locator.name)
+        if (held === undefined || held.reference.digest !== locator.methodDigest || digestOf(held.skill) !== locator.digest) refuse('unknown-revision', 'Skill binding belongs to another Run')
+        await consumeMethod(apparatus, held.taskId, held.run, `skill:${held.skill.name}`, `skill:${held.skill.name}:${locator.digest}`)
+        return { ...candidate, content: held.skill.content }
+      },
+    })))
+  } })
+}
+export async function runMethodTool(apparatus: Apparatus, caller: Caller, taskId: string, callId: string,
+  signal: AbortSignal, toolName: string, candidate?: string): Promise<{ program: string; artifact: string }> {
+  const task = taskStateOf(apparatus, taskId)
+  if (task.responsibility?.agentId !== caller.agentId) refuse('not-responsible', 'caller does not own this Task')
+  const run = Object.values(task.runs).find(run => run.status === 'running' && run.stage === 'working')
+  if (run === undefined) refuse('illegal-transition', 'Task has no working Run')
+  const method = await methodForRun(apparatus, run)
+  const template = templateOf(method.domain, task.contract!.template)
+  const tool = method.assets.tools.find(tool => tool.name === toolName)
+  if (tool === undefined) refuse('malformed-declaration', `Tool ${toolName} is absent from the pinned Revision`)
+  const workspace = workspaceOf(apparatus, taskId, run.runId)
+  const path = join(apparatus.workspaceRoot, 'assets', method.reference.digest, `${tool.name}.mjs`)
   const candidatePath = join(workspace, 'method-candidate.txt')
-  if (candidate !== undefined) await writeFile(candidatePath, candidate, 'utf8')
-  await consumeMethod(apparatus, taskId, run, 'tool', `tool:${caller.sessionId}/${callId}:${ref.digest}`)
-  const result = await spawnProcess({ shell: false, argv: [process.execPath, path, join(workspace, template.input.name),
-    ...(candidate === undefined ? [] : [candidatePath])] }, signal, workspace)
-  if (result.failure !== undefined || result.exitCode !== 0) throw new Error(result.failure ?? `Method tool exited ${result.exitCode}: ${result.stderr}`)
-  return { program: method.assets.tool, artifact: result.stdout }
+  if (candidate !== undefined) {
+    await assertRunFile(workspace, 'method-candidate.txt')
+    await writeFile(candidatePath, candidate, 'utf8')
+  }
+  const result = await spawnProcess({ shell: false, argv: [process.execPath, path, join(workspace, template.input.name), ...(candidate === undefined ? [] : [candidatePath])] }, signal, workspace,
+    { root: workspace, writable: true, protected: run.bubble!.inputs.map(input => join(workspace, input.name)), references: [method.domain.dir, ...method.domain.references] })
+  if (result.failure !== undefined || result.exitCode !== 0) throw new Error(result.failure ?? `Tool exited ${result.exitCode}: ${result.stderr}`)
+  await consumeMethod(apparatus, taskId, run, `tool:${tool.name}`, `tool:${tool.name}:${digestOf(tool)}:${caller.sessionId}/${callId}`)
+  return { program: tool.source, artifact: result.stdout }
 }

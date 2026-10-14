@@ -192,7 +192,7 @@ describe('a parent is accepted by verification, never by its children ending', (
     expect(view.complete).toBe(true)
   })
 
-  it('is incomplete while any declared sub-task has not verified, even with every criterion accepted', async () => {
+  it('is incomplete while any declared sub-task can still run, even with every parent criterion accepted', async () => {
     const registry = taskRegistry()
     const log = await planned(registry)
     await openRun(log, CHILD_A, 'a1')
@@ -208,7 +208,6 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(verified(PARENT, 'p1'))
     expect(tree(registry, log).complete).toBe(true)
 
-    // The parent's acceptance does not remove the requirement that B also verifies.
     const partial = await planned(registry)
     await openRun(partial, CHILD_A, 'a1')
     await partial.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
@@ -218,6 +217,18 @@ describe('a parent is accepted by verification, never by its children ending', (
     await partial.emit(judge(PARENT, 'p1', 'limits', INTEGRATION_VERIFIER))
     await partial.emit(verified(PARENT, 'p1'))
     expect(tree(registry, partial).complete).toBe(false)
+  })
+
+  it('retains failed and blocked branches after the parent independently passes', async () => {
+    const registry = taskRegistry()
+    const log = await planned(registry, { maxRunsA: 1 })
+    await openRun(log, CHILD_A, 'a1')
+    await log.emit(failed(CHILD_A, 'a1', 'discarded experiment', 'runtime'))
+    await openRun(log, PARENT, 'p1')
+    await log.emit(judge(PARENT, 'p1', 'counts', UNIT_VERIFIER))
+    await log.emit(judge(PARENT, 'p1', 'limits', INTEGRATION_VERIFIER))
+    await log.emit(verified(PARENT, 'p1'))
+    expect(tree(registry, log)).toMatchObject({ complete: true, children: [{ status: 'stopped' }, { status: 'blocked' }] })
   })
 })
 

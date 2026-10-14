@@ -102,7 +102,7 @@ describe('the verifier command adapter', () => {
     // A fail verdict is a successful judgement: the adapter's own exit code stays 0, the OK line is
     // printed, and the verdict is fail.
     const { judgement, ok } = readJudgement(result.stdout)
-    expect({ code: result.code, ok, verdict: judgement.verdict }).toEqual({ code: 0, ok: true, verdict: 'fail' })
+    expect({ code: result.code, ok, verdict: judgement.verdict }).toEqual({ code: 0, ok: true, verdict: 'partial' })
     expect(judgement.detail).toContain('exited 3')
     // The digest is still the digest of the bytes on disk, here the ones a command that exited 3
     // left behind.

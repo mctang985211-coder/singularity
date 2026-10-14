@@ -1,86 +1,3 @@
-/**
- * `strategy@5` — the explicit round: a plan frozen in one fact, a submission gate that is a refusal
- * rather than a sentence in a prompt, and a decision that carries the basis it was made on.
- *
- * The previous system derived the round from the number of history entries and the candidate index
- * (`review.md` R01: `historyFactsOf` used the candidate index as the round; `decision` used the
- * history entry count). So the annealed budget annealed against a number that moved whenever a
- * candidate was re-measured, and two candidates of one round could be drafted against different
- * incumbents and still be compared. A round here **carries its own number**, its common incumbent,
- * its slot count, its reserved exploration slots, its annealed budget, the log position its history
- * is frozen at, the caliber it pools under, and the weights it is measured under.
- *
- * What the reducer decides, on the round's own subject, and therefore inside the serial region that
- * produces the fact:
- *
- * 1. **A submission after the close is refused.** A candidate that arrives after the decision was
- *    otherwise measured against an incumbent nobody re-elected.
- * 2. **A slot outside `[0, candidates)` is refused**, and a slot that already holds one is refused
- *    with `evidence-conflict`: one slot, one candidate.
- * 3. **The annealed budget is real**: more structural edits than `editBudget` is `budget-exhausted`.
- * 4. **A reserved exploration slot is a slot, not advice.** The last `explorationSlots` slots are
- *    reserved, and a submission that does not declare `exploratory: true` may not occupy one. RRSI
- *    re-checks this against the diff after the critic (`loop.py:523-530`); the previous port kept the
- *    prompt sentence and dropped the check.
- * 5. **A decision covers every declared slot with a named reason**, and carries the **noise basis**
- *    it was made against. The coverage is the plan's `[0, candidates)`, not the submitted subset: a
- *    slot nobody submitted to is untested, and `admitted: false` with a reason that names it says so
- *    instead of leaving the slot out of the round's trajectory (R01). Such a slot can never be
- *    admitted, so a hand-made decision cannot elect a candidate that does not exist. `winner` is an
- *    admitted slot or `null`, and `null` means the incumbent stands.
- *
- * `edits` are the identity of the structural change (`asset` + `target`), not a line count: they are
- * what novelty counts and what a duplicate check can decide. A repeated `(asset, target)` inside one
- * submission is refused rather than de-duplicated, so a caller cannot pad a budget check.
- *
- * **Version 2** adds two required members in one bump, because both close a way a fact could not be
- * replayed from:
- *
- * - `round/opened.caliber`: the digest of the measurement settings the round pools under. Without
- *   it, comparability could only be checked *between* the submissions at hand, so one submission
- *   measured under other weights was pooled with whatever else arrived and nothing exposed it until
- *   a second candidate happened to differ.
- * - `round/decided.calibration`: the noise floor and its source (`measured` / `declared`), which
- *   `review.md` R07 requires the selection fact to retain. Until now the band survived only as prose
- *   inside the outcome reasons — a guarantee dressed as a sentence, which is the thing this rebuild
- *   exists to remove.
- *
- * Version 1 facts are refused by name with no compatibility layer, as every other bump in this stack
- * is: there is nothing to migrate, and inventing a default caliber or a default band would be
- * inventing the very facts the members exist to record.
- *
- * **Version 3** moves the **accepted language** of a decision, not its shape. A `round/decided` must
- * now account for every slot the round declared; version 2 accepted one that accounted only for the
- * slots somebody had submitted to, so a declared slot nobody offered a candidate to appeared in no
- * outcome and in no reason at all — `review.md` R01's sentence was false exactly there. The members
- * (`winner`, `outcomes`, `calibration`), the kind set and the reducers' other rules are unchanged:
- * what moved is which decisions count as complete, and a complete decision is what a replay of the
- * round's trajectory rests on. Version 2 facts are refused **by name** — `version-mismatch`, from
- * the same gate as version 1 — with no compatibility layer: the trajectory v2 left out cannot be
- * recovered from the fact, and reading its absence as "untested" would invent the very reason this
- * rule exists to record.
- *
- * **Version 4** removes `round/opened.metric.unit`. It was a required member no reader ever
- * consumed — the projection ranks on a direction and the round's own numbers, and the *label* named
- * a quantity nothing compared. Removing a required member changes the accepted shape exactly
- * as adding one does, so version 3 facts, which carry `unit`, are refused **by name** from the same
- * gate as versions 1 and 2, with no compatibility layer: this build cannot frame that payload, and
- * reading it as a round without a unit would be the silent reinterpretation the closed shape is for.
- *
- * **Version 5** removes `round/opened.metric` itself — the member version 4 kept when it dropped
- * `metric.unit`: its `direction` was the last plan member a comparison read and nothing checked. A
- * measurement declares its own direction (`measure@3`'s `evaluation/opened.metric.direction`, which
- * the caliber includes), and the round reads it there, so the round has no second declaration to
- * disagree with the measurement — the review executed exactly that disagreement, and it elected the
- * candidate the measurement's own metric called worse. The member is gone rather than compared
- * because a comparison of two declarations is a rule one of them can lose; one owner is not.
- * Version 4 facts, which carry `metric`, are refused **by name** from the same gate as versions 1
- * to 3, with no compatibility layer: a v4 payload cannot be framed by this build, and reading it as
- * a round without a metric would drop the declaration without saying so.
- *
- * @module singularity-core/strategy/protocol
- */
-
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type MemberSet, type ProtocolRegistry } from '../protocol/registry.ts'
@@ -96,16 +13,7 @@ import { count, openedKind, requirePlan, type RoundPlan } from './plan.ts'
 export type { RoundPlan } from './plan.ts'
 
 export const STRATEGY_PROTOCOL = 'strategy'
-/**
- * 5: `round/opened` no longer carries `metric`: the round ranks in the direction the measurement it
- * pools declares, so a version 4 fact is refused by name instead of being re-read as a round whose
- * second direction is dropped. 4: no `metric.unit`, a required member with no reader, so a version 3
- * fact is refused by name instead of being re-read as a round without a unit. 3: a decision's accepted
- * language — it accounts for every declared slot, not only the submitted ones, so an old decision is
- * refused by name rather than re-read as a complete one. 2: `round/opened` gained a required
- * `caliber`, and `round/decided` a required `calibration`.
- */
-export const STRATEGY_VERSION = 5
+export const STRATEGY_VERSION = 7
 
 /** The trusted role that freezes a round, receives its candidates and closes it. */
 export const STRATEGY_ROLE = 'strategy'
@@ -126,7 +34,7 @@ export interface CandidateSubmission {
   readonly revision: RevisionRef
   readonly evaluationId: string
   readonly edits: readonly StructuralEdit[]
-  readonly exploratory: boolean
+
   /** The identity the log stamped. Never what a caller asked for. */
   readonly actor: string
   readonly at: string
@@ -160,7 +68,7 @@ const APPENDED = { appended: true } as const
 const EDIT_MEMBERS = ['asset', 'target'] as const
 const OUTCOME_MEMBERS = ['slot', 'admitted', 'reason'] as const
 export const CALIBRATION_MEMBERS = ['floor', 'source'] as const
-const SUBMISSION_MEMBERS = ['slot', 'revision', 'evaluationId', 'edits', 'exploratory'] as const
+const SUBMISSION_MEMBERS = ['slot', 'revision', 'evaluationId', 'edits'] as const
 const DECIDED_MEMBERS = ['winner', 'outcomes', 'calibration'] as const
 
 /**
@@ -215,9 +123,6 @@ type Submission = Omit<CandidateSubmission, 'actor' | 'at'>
 
 function submissionPayload(raw: unknown, where: string, nested: { readonly edits: MemberSet; readonly revision: MemberSet }): Submission {
   const source = record(raw, where)
-  const exploratory = source['exploratory']
-  if (typeof exploratory !== 'boolean')
-    refuse('malformed-payload', `${where}.exploratory must be true or false, got ${exploratory === undefined ? 'nothing' : JSON.stringify(exploratory)}; a reserved slot turns on this member and a missing one is not a false one`)
   return {
     slot: count(source, 'slot', where),
     // Handed the declaration, so `nested.revision` is what closes the pin rather than the reader's own
@@ -225,7 +130,6 @@ function submissionPayload(raw: unknown, where: string, nested: { readonly edits
     revision: revisionRef(source['revision'], `${where}.revision`, nested.revision),
     evaluationId: text(source, 'evaluationId', where),
     edits: editList(source['edits'], `${where}.edits`, nested.edits),
-    exploratory,
   }
 }
 
@@ -256,7 +160,7 @@ function decidedPayload(raw: unknown, where: string, nested: { readonly outcomes
 }
 
 /**
- * Declare `strategy@5`. Call once at load. Nothing here reads another slice: the measure views and
+ * Declare `strategy@6`. Call once at load. Nothing here reads another slice: the measure views and
  * the frozen history arrive as inputs to the projection and to the command boundary.
  */
 export function declareStrategyProtocol(registry: ProtocolRegistry): void {
@@ -292,17 +196,6 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
               'evidence-conflict',
               `${where} offers slot ${payload.slot} again: ${occupied.actor} submitted revision "${occupied.revision.revisionId}" there at ${occupied.at}; one slot holds one candidate`,
             )
-          if (payload.edits.length > plan.editBudget)
-            refuse(
-              'budget-exhausted',
-              `${where} declares ${payload.edits.length} structural edits, but round ${plan.round} anneals to a budget of ${plan.editBudget}; a wider change is a different round, not a wider submission`,
-            )
-          const reservedFrom = plan.candidates - plan.explorationSlots
-          if (!payload.exploratory && payload.slot >= reservedFrom)
-            refuse(
-              'illegal-transition',
-              `${where} puts a non-exploratory candidate in slot ${payload.slot}, which round ${plan.round} reserves for exploration (slots ${reservedFrom}..${plan.candidates - 1} are reserved); declare exploratory: true or take a slot below ${reservedFrom}`,
-            )
           return {
             ...state,
             submissions: [
@@ -312,7 +205,6 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
                 revision: payload.revision,
                 evaluationId: payload.evaluationId,
                 edits: payload.edits,
-                exploratory: payload.exploratory,
                 actor: envelope.actor,
                 at: envelope.at,
               },

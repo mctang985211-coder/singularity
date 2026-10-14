@@ -4,6 +4,7 @@ import { basename, dirname, join } from 'node:path'
 import type { RunState, RunSubmission } from '../../src/task/protocol.ts'
 import type { Apparatus } from './apparatus.ts'
 import type { TaskTemplate } from './template.ts'
+import { assertRunFile } from './workspace.ts'
 
 export async function sealedBytes(apparatus: Apparatus, ref: FileAttachmentRef): Promise<Buffer> {
   const chunks: Uint8Array[] = []
@@ -12,8 +13,10 @@ export async function sealedBytes(apparatus: Apparatus, ref: FileAttachmentRef):
 }
 
 export async function sealFiles(apparatus: Apparatus, run: RunState, template: TaskTemplate, workspace: string): Promise<RunSubmission['files']> {
-  const save = async (name: string): Promise<FileAttachmentRef> =>
-    apparatus.attachments.saveFile({ name: basename(name), data: await readFile(join(workspace, name)) })
+  const save = async (name: string): Promise<FileAttachmentRef> => {
+    await assertRunFile(workspace, name)
+    return apparatus.attachments.saveFile({ name: basename(name), data: await readFile(join(workspace, name)) })
+  }
   return { program: await save(template.file), artifact: await save(template.artifact),
     inputs: await Promise.all(run.bubble!.inputs.map(async input => ({ name: input.name, attachment: await save(input.name) }))) }
 }

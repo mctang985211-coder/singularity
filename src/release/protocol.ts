@@ -7,7 +7,7 @@ import { digest, record, text } from '../task/shape.ts'
 import type { RevisionRef } from '../task/protocol.ts'
 
 export const RELEASE_PROTOCOL = 'release'
-export const RELEASE_VERSION = 2
+export const RELEASE_VERSION = 3
 export const APPROVER_ROLE = 'approver'
 export const RELEASE_KINDS = { drafted: 'release/drafted', approved: 'release/approved' } as const
 
@@ -32,6 +32,7 @@ export interface ReleaseState {
   readonly draftDigest: string
   readonly basis?: ReleaseBasis
   readonly approvedBy?: string
+  readonly review?: unknown
   readonly approvalId?: string
 }
 const BASIS_MEMBERS = ['kind', 'roundId', 'decisionSeq', 'decisionDigest', 'evaluationId', 'reportDigest', 'expected'] as const
@@ -74,12 +75,12 @@ export function declareReleaseProtocol(registry: ProtocolRegistry): void {
           return payload
         },
       }),
-      [RELEASE_KINDS.approved]: defineKind<ReleaseState, { revisionId: string; draftDigest: string; approvedBy: string; approvalId: string }, {}>({
-        guarantees: { appended: true }, members: ['revisionId', 'draftDigest', 'approvedBy', 'approvalId'], nested: {}, emitter: APPROVER_ROLE,
+      [RELEASE_KINDS.approved]: defineKind<ReleaseState, { revisionId: string; draftDigest: string; approvedBy: string; approvalId: string; review?: unknown }, {}>({
+        guarantees: { appended: true }, members: ['revisionId', 'draftDigest', 'approvedBy', 'approvalId', 'review'], nested: {}, emitter: APPROVER_ROLE,
         parse: (raw, where) => {
           const source = record(raw, where)
           return { revisionId: text(source, 'revisionId', where), draftDigest: digest(source, 'draftDigest', where),
-            approvedBy: text(source, 'approvedBy', where), approvalId: text(source, 'approvalId', where) }
+            approvedBy: text(source, 'approvedBy', where), approvalId: text(source, 'approvalId', where), ...(source['review'] === undefined ? {} : { review: source['review'] }) }
         },
         reduce: (state, _envelope, payload) => {
           if (state.draftDigest === '') refuse('illegal-transition', 'the environment has no draft to approve')
@@ -88,7 +89,7 @@ export function declareReleaseProtocol(registry: ProtocolRegistry): void {
           if (payload.draftDigest !== state.draftDigest)
             refuse('stale-approval', `approval names draft ${payload.draftDigest.slice(0, 12)} but the table holds ${state.draftDigest.slice(0, 12)}`)
           if (state.approvedBy !== undefined) refuse('illegal-transition', `the draft is already approved by "${state.approvedBy}"`)
-          return { ...state, approvedBy: payload.approvedBy, approvalId: payload.approvalId }
+          return { ...state, approvedBy: payload.approvedBy, approvalId: payload.approvalId, ...(payload.review === undefined ? {} : { review: payload.review }) }
         },
       }),
     },

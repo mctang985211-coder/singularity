@@ -6,14 +6,18 @@ import { afterEach, expect, it } from 'vitest'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 
 import { asyncRefusalOf } from '../../tests/fixtures.ts'
+import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
+import { ENVIRONMENT_KINDS, ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION } from '../../src/environment/protocol.ts'
 import { openApparatus, declareCaller } from '../src/apparatus.ts'
 import { startAttempt } from '../src/attempt.ts'
 import { loadDomain } from '../src/domain.ts'
 import { contractFor } from '../src/inputs.ts'
-import { createMethod } from '../src/method.ts'
+import { createMethod, loadMethod, methodOfRun, seedMethod } from '../src/method.ts'
+import { REVIEW_TEMPLATE, SUBJECT_INPUT } from '../src/review.ts'
+import { sha256 } from '../src/ids.ts'
 import { spawnProcess } from '../src/process.ts'
-import { historyOf } from '../src/read.ts'
-import { propose, status } from '../src/surfaces.ts'
+import { historyOf, templateDeclaration } from '../src/read.ts'
+import { propose, retry, status } from '../src/surfaces.ts'
 import { submit } from '../src/submission.ts'
 import { attachmentsAt, agentFor, execFor, fakeExecution, FakePersistence } from './seam.ts'
 
@@ -43,8 +47,8 @@ it('publishes the actual protected input, initial source and reusable template d
     delete template.workspace.initial
     return template
   })
-  expect(proposal.templates).toEqual(templates)
-  await expect(createMethod(apparatus, { rootTemplate: declared.rootTemplate, templates: proposal.templates, skill: 'Inspect source.', tool: 'process.stdout.write("inspection")' })).resolves.toMatchObject({ digest: expect.any(String) })
+  expect(proposal.templates.slice(0, templates.length)).toMatchObject(templates)
+  await expect(createMethod(apparatus, { rootTemplate: declared.rootTemplate, templates: proposal.templates, skills: [], tools: [] })).resolves.toMatchObject({ digest: expect.any(String) })
 })
 
 it('reads every settled Run and source from sealed attachments after workspace mutation', async () => {
@@ -64,6 +68,29 @@ it('reads every settled Run and source from sealed attachments after workspace m
   const history = await historyOf(apparatus, [])
   expect(history.tasks).toEqual([result.task])
   expect(history.decisions).toEqual([])
+})
+
+it('retries the exact failed contract and Revision after the publication pointer changes', async () => {
+  const { apparatus, persistence } = await fixture()
+  const first = await propose(apparatus, caller, 'first', { goal: 'Count letters; preserve the exact protected input and natural-language acceptance.' })
+  const task = apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, first.taskId)!
+  const original = methodOfRun(apparatus, task.runs[first.runId]!)!
+  await apparatus.tasks.forAgent(caller.agentId).failRun({ commandId: 'failed', taskId: first.taskId, runId: first.runId, reason: 'not accepted' })
+  const assets = (await historyOf(apparatus, [])).methods[0]!.assets
+  const changed = structuredClone(assets.templates) as { goal: string }[]
+  changed[0]!.goal = 'Changed published method instructions.'
+  const published = await createMethod(apparatus, { ...assets, templates: changed })
+  await apparatus.store.emit({ commandId: 'changed-head', protocol: ENVIRONMENT_PROTOCOL, version: ENVIRONMENT_VERSION,
+    kind: ENVIRONMENT_KINDS.pointerSwitched, subject: published.environmentId, payload: { expected: '', to: published.revisionId } })
+  const second = await retry(apparatus, caller, 'second', { taskId: first.taskId })
+  const after = (await status(apparatus, caller, { taskId: first.taskId })).task
+  expect(after.contract).toEqual(task.contract)
+  expect(methodOfRun(apparatus, apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, first.taskId)!.runs[second.runId]!)).toEqual(original)
+  expect(second).toMatchObject({ taskId: first.taskId, inputContent: first.inputContent, templates: first.templates })
+  const cutoff = persistence.events.length
+  expect(await retry(apparatus, caller, 'second', { taskId: first.taskId })).toEqual(second)
+  expect(persistence.events).toHaveLength(cutoff)
+  expect(await asyncRefusalOf(() => retry(apparatus, { ...caller, agentId: 'other' }, 'third', { taskId: first.taskId }))).toMatchObject({ code: 'not-responsible' })
 })
 
 it('allows only the exact direct parent to read its child sealed answer', async () => {
@@ -87,8 +114,52 @@ it('allows only the exact direct parent to read its child sealed answer', async 
 
 it('publishes complete immutable Method contents in the same history port', async () => {
   const { apparatus } = await fixture()
-  const declaration = JSON.parse(await readFile(join(letters, 'task.json'), 'utf8'))
-  const assets = { rootTemplate: declaration.rootTemplate, templates: declaration.templates, skill: 'Count.', tool: counting }
+  const assets = { rootTemplate: apparatus.domain.rootTemplate, templates: [...apparatus.domain.templates.values()].map(templateDeclaration), skills: [], tools: [{ name: 'count', source: counting }] }
   const reference = await createMethod(apparatus, assets)
   expect((await historyOf(apparatus, [])).methods).toEqual([{ reference, assets }])
+})
+
+it('keeps independent trial history inside its own tree and pinned Revision', async () => {
+  const { apparatus } = await fixture()
+  const original = await propose(apparatus, caller, 'original', { goal: 'count letters' })
+  await submit(apparatus, fakeExecution(() => undefined), caller, execFor(agentFor(caller.agentId, caller.sessionId), 'accepted'),
+    { taskId: original.taskId, program: counting }, new AbortController().signal)
+  const seed = methodOfRun(apparatus, apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, original.taskId)!.runs[original.runId]!)!
+  const assets = (await historyOf(apparatus, [])).methods[0]!.assets
+  const candidate = await createMethod(apparatus, { ...assets, skills: [{ name: 'candidate-answer', description: 'secret', capabilities: [], requiredTools: [], content: 'previous solved answer' }] })
+  const trialCaller = { ...caller, agentId: 'trial', sessionId: 'trial-session' }
+  const trial = await propose(apparatus, trialCaller, 'trial', { goal: 'count letters', method: seed },
+    { purpose: 'evaluation', relatedTo: { taskId: original.taskId, runId: original.runId } })
+  const history = await historyOf(apparatus, [], trialCaller.agentId)
+  expect(history.tasks.map(task => task.taskId)).toEqual([trial.taskId])
+  expect(history.methods.map(method => method.reference)).toEqual([seed])
+  expect(history.methods.some(method => method.reference.digest === candidate.digest)).toBe(false)
+  expect(history.tasks.flatMap(task => task.runs).every(run => run.artifact === null)).toBe(true)
+  expect(history.decisions).toEqual([])
+})
+
+it('exposes an audit frozen basis and candidate without exposing unrelated method assets', async () => {
+  const { apparatus } = await fixture()
+  const owner = await propose(apparatus, caller, 'owner', { goal: 'count letters' })
+  const seed = await seedMethod(apparatus)
+  const { assets, domain } = await loadMethod(apparatus, seed)
+  const withTool = (name: string) => ({ ...assets, tools: [{ name, source: counting }] })
+  const basis = await createMethod(apparatus, withTool('basis'))
+  const revision = await createMethod(apparatus, withTool('candidate'))
+  const unrelated = await createMethod(apparatus, withTool('unrelated'))
+  const bytes = Buffer.from(JSON.stringify({ purpose: 'asset-admission', taskId: owner.taskId, runId: owner.runId, basis, revision }))
+  const auditDomain = { ...domain, inputs: [...domain.inputs.filter(input => input.ref !== SUBJECT_INPUT),
+    { ref: SUBJECT_INPUT, digest: sha256(bytes), bytes, sourcePath: '' }] }
+  const reviewer = { ...caller, agentId: 'reviewer', sessionId: 'reviewer-session' }
+  declareCaller(apparatus, reviewer.agentId)
+  await apparatus.agents.open({ commandId: 'reviewer-agent', agentId: reviewer.agentId, sessionId: reviewer.sessionId, role: 'review' })
+  const template = auditDomain.templates.get(REVIEW_TEMPLATE)!
+  await apparatus.tasks.admit({ commandId: 'review-contract', taskId: 'review-task',
+    contract: { ...contractFor(auditDomain, template, template.goal), assets: seed } })
+  await apparatus.tasks.assign({ commandId: 'review-owner', taskId: 'review-task', agentId: reviewer.agentId })
+  await startAttempt(apparatus, reviewer, 'review-task', 'review-run', seed, { domain: auditDomain, purpose: 'review' })
+  const history = await historyOf(apparatus, [], reviewer.agentId)
+  expect(history.methods.map(method => method.reference)).toEqual([seed, basis, revision])
+  expect(history.tasks.map(task => task.taskId)).toEqual([owner.taskId, 'review-task'])
+  expect(history.methods.some(method => method.reference.digest === unrelated.digest)).toBe(false)
 })

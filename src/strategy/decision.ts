@@ -1,6 +1,6 @@
 /**
- * The pure decision layer of a round: RRSI's Algorithm 2 (`rrsi/selection.py`) and its annealed L0
- * edit budget (`rrsi/schedule.py`), ported from google-research/rrsi @ be50316 (Apache-2.0).
+ * The pure decision layer of a round: RRSI's Algorithm 2 (`rrsi/selection.py`)
+ * ported from google-research/rrsi @ be50316 (Apache-2.0).
  *
  * This module holds no facts, writes no log, imports nothing and throws nothing. Why that is the
  * whole contract: the previous port recomputed every old candidate's gain against the newest
@@ -41,15 +41,6 @@ export interface Measurement {
 /** One candidate, by the slot it was submitted to. */
 export interface Candidate {
   readonly slot: number
-  /**
-   * Whether this candidate was submitted into a reserved exploration slot.
-   *
-   * `select` never reads it. The reservation is a mechanical constraint on submission
-   * (`strategy@1` rejects a non-exploratory candidate that takes a reserved slot), and a second,
-   * softer reading of it here would let a candidate be admitted *for* being exploratory — the
-   * compensating rule this design forbids.
-   */
-  readonly exploratory: boolean
   /**
    * The structural asset classes this candidate changes, already verified against the real diff by
    * the adapter (ADR tightening #5). Read by `noveltyOf`, never by `select`: novelty must not enter
@@ -132,26 +123,6 @@ function signed(value: number): string {
 /** The band, labelled with where it came from (R06: measured or declared, never ambiguous). */
 function bandOf(calibration: Calibration): string {
   return `${calibration.floor.toFixed(4)} (${calibration.source})`
-}
-
-/**
- * The annealed L0 edit budget for the 1-based `round` of a `rounds`-round run.
- *
- * Upstream (`rrsi/schedule.py:48`) divides the cosine by `T`, so `budget_table(T)[-1]` never
- * reaches `b_min` — only the out-of-range endpoint `t = T` does, and `range(T)` never asks for it.
- * Dividing by `rounds - 1` makes the last round actually sparse and attributable (ADR tightening
- * #1). A run of one round is its own last round, so it gets `minimum`; out-of-range rounds clamp to
- * the nearest end, as upstream clamps `t` to `[0, T]`.
- *
- * The value is rounded to 9 decimals before the ceiling for the same reason upstream does it:
- * floating error at the endpoint must not turn `minimum` into `minimum + 1`.
- */
-export function editBudgetFor(round: number, rounds: number, first: number, minimum: number): number {
-  const last = Math.max(1, Math.trunc(rounds))
-  if (last <= 1) return minimum
-  const step = Math.min(Math.max(1, Math.trunc(round)), last) - 1
-  const value = minimum + (first - minimum) * 0.5 * (1 + Math.cos((Math.PI * step) / (last - 1)))
-  return Math.ceil(Number(value.toFixed(9)))
 }
 
 /**

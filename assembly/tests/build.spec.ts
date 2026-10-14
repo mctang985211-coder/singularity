@@ -20,8 +20,8 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'singularity-build-'))
   roots.push(root)
-  await mkdir(join(root, 'assembly/src'), { recursive: true })
-  await mkdir(join(root, 'src'))
+  await cp(join(checkout, 'assembly/src'), join(root, 'assembly/src'), { recursive: true })
+  await cp(join(checkout, 'src'), join(root, 'src'), { recursive: true })
   await mkdir(join(root, 'scripts'))
   for (const file of ['deploy.mjs', 'dsh-control-runtime.mjs']) await cp(join(checkout, 'scripts', file), join(root, 'scripts', file))
   await cp(join(checkout, 'deployment/profile'), join(root, 'deployment/profile'), { recursive: true })
@@ -29,12 +29,15 @@ async function fixture() {
   for (const file of ['package.json', 'pnpm-lock.yaml']) await cp(join(checkout, file), join(root, file))
   await cp(join(checkout, 'assembly/package.json'), join(root, 'assembly/package.json'))
   await cp(join(checkout, 'assembly/presets'), join(root, 'assembly/presets'), { recursive: true })
-  for (const file of ['client.js', 'panel.js', 'panel.css', 'panel.html', 'cordis.patch.yml', 'build.mjs'])
+  for (const file of ['client.js', 'review.mjs', 'panel.html', 'cordis.patch.yml', 'build.mjs'])
     await cp(join(checkout, 'assembly', file), join(root, 'assembly', file))
-  const compilerOptions = { module: 'nodenext', target: 'es2023', strict: true, noEmit: true, skipLibCheck: true,
+  await cp(join(checkout, 'assembly/frontend'), join(root, 'assembly/frontend'), { recursive: true })
+  const paths = JSON.parse(await readFile(join(checkout, 'tsconfig.json'), 'utf8')).compilerOptions.paths
+  const compilerOptions = { baseUrl: root, paths, module: 'nodenext', target: 'es2023', strict: true, noEmit: true, skipLibCheck: true,
     allowImportingTsExtensions: true }
   await writeFile(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions, include: ['src'] }))
-  await writeFile(join(root, 'assembly/tsconfig.json'), JSON.stringify({ compilerOptions, include: ['src'] }))
+  const assemblyPaths = JSON.parse(await readFile(join(checkout, 'assembly/tsconfig.json'), 'utf8')).compilerOptions.paths
+  await writeFile(join(root, 'assembly/tsconfig.json'), JSON.stringify({ compilerOptions: { ...compilerOptions, paths: assemblyPaths }, include: ['src'] }))
   await writeFile(join(root, 'src/value.ts'), 'export const value: number = 1\n')
   for (const entry of ['index', 'agent', 'web']) await writeFile(join(root, `assembly/src/${entry}.ts`),
     `import { value } from '../../src/value.ts'\nexport function apply() { return value }\n`)
@@ -52,7 +55,7 @@ describe('the deployable build', () => {
     expect(profile.name).toBe('singularity-next-web')
   }, 30_000)
 
-  it.each(['src/value.ts', 'assembly/client.js', 'assembly/panel.js', 'assembly/lib/web.js'])(
+  it.each(['src/value.ts', 'assembly/client.js', 'assembly/frontend/panel.tsx', 'assembly/lib/web.js'])(
     'rejects changed %s even if its modification time is preserved', async file => {
       const root = await fixture()
       await buildAssembly(root)
@@ -100,7 +103,7 @@ describe('the deployable build', () => {
     // config, so a template without them composes a row the host refuses to activate — and that
     // refusal is invisible to every check that only reads this checkout.
     for (const key of ['controlId', 'domainDir', 'workspaceRoot']) expect(patch).toContain(key + ':')
-    for (const key of ['rootSolves', 'children', 'childRuns', 'nativeTokens']) expect(patch).toContain(key + ':')
+    for (const key of ['nativeTokens']) expect(patch).toContain(key + ':')
   }, 30_000)
 
   it('declares the gateway retry policy the measured transport failure needs', async () => {

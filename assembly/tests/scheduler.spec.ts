@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
-import type { UserMessage } from '@deepseek-ai/dsh-llm'
+import { type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -11,11 +11,15 @@ import type { ChildSessionRequest, ChildSession, ChildSessionSeams } from '../..
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { postIdentifiedMessage } from '../../src/runtime/identified-message.ts'
 import { TASK_KINDS } from '../../src/task/protocol.ts'
+import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../../src/environment/protocol.ts'
 import type { TaskContract } from '../../src/task/contract.ts'
 import { asyncRefusalOf } from '../../tests/fixtures.ts'
 import { bindCaller, declareCaller, openApparatus, taskStateOf } from '../src/apparatus.ts'
 import { startAttempt, workspaceOf } from '../src/attempt.ts'
-import { runIdOf } from '../src/ids.ts'
+import { runIdOf, sha256 } from '../src/ids.ts'
+import { domainForRun, seedMethod } from '../src/method.ts'
+import { REVIEW_TEMPLATE, SUBJECT_INPUT } from '../src/review.ts'
+import { decompose } from '../src/surfaces.ts'
 import { createScheduler, type Scheduler } from '../src/scheduler.ts'
 import { schedulerMessage } from '../src/scheduler-message.ts'
 import { contractFor } from '../src/inputs.ts'
@@ -32,6 +36,38 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 const contentOf = (message: UserMessage) => message.content.map(block => block.type === 'text' ? block.text : '').join('\n')
+
+it('freezes the actual review responsibility and subject in recursively delegated Runs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'assembly-review-subject-'))
+  roots.push(root)
+  const apparatus = await openApparatus('review-subject', root, await loadDomain(domainDir, spawnProcess), new FakePersistence() as never, attachmentsAt(root))
+  const method = await seedMethod(apparatus)
+  const bytes = Buffer.from(JSON.stringify({ artifact: 'the exact result to review' }))
+  const input = { ref: SUBJECT_INPUT, bytes, digest: sha256(bytes), sourcePath: '' }
+  const domain = { ...apparatus.domain, inputs: [...apparatus.domain.inputs.filter(held => held.ref !== SUBJECT_INPUT), input] }
+  const runtime = nativeRuntime()
+  runtime.agent('review-session')
+  const caller = { agentId: 'review-session', sessionId: 'review-session', model: { provider: 'test', model: 'model-under-test' } }
+  await bindCaller(apparatus, caller)
+  const template = domain.templates.get(REVIEW_TEMPLATE)!
+  const commands = apparatus.tasks.forAgent(caller.agentId)
+  await commands.admit({ commandId: 'review-admit', taskId: 'review-parent', contract: { ...contractFor(domain, template, template.goal), assets: method } })
+  await commands.assign({ commandId: 'review-assign', taskId: 'review-parent', agentId: caller.agentId })
+  await startAttempt(apparatus, caller, 'review-parent', 'review-run', method, { domain, purpose: 'review' })
+  const scheduler = createScheduler(apparatus, runtime.seams, runtime.open)
+  schedulers.push(scheduler)
+  const result = await decompose(apparatus, scheduler, caller, { taskId: 'review-parent', children: [{
+    key: 'inspect', template: REVIEW_TEMPLATE, dependsOn: [], supports: ['review-approved'], maxRuns: 1,
+  }] })
+  const child = taskStateOf(apparatus, result.opened[0]!)
+  const run = Object.values(child.runs)[0]!
+  expect((apparatus.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, run.revision.environmentId)!
+    .revisions[run.revision.revisionId]!.manifest as { purpose: string }).purpose).toBe('review')
+  expect(child.contract!.inputs[0]!.source).toMatchObject({ digest: input.digest })
+  expect(await readFile(join(workspaceOf(apparatus, child.taskId, run.runId), template.input.name), 'utf8')).toBe(bytes.toString('utf8'))
+  expect((await domainForRun(apparatus, run)).inputs.find(held => held.ref === SUBJECT_INPUT)?.digest).toBe(input.digest)
+  await apparatus.store.close()
+})
 
 function nativeRuntime() {
   const agents = new Map<string, Agent>()
@@ -53,7 +89,7 @@ function nativeRuntime() {
     const created = {
       id: SessionId(id),
       get options() { return routes.get(id)! },
-      session: { id: SessionId(id), get seq() { return events.get(id)!.length },
+      session: { id: SessionId(id), header: { id: SessionId(id) }, get seq() { return events.get(id)!.length },
         requestHeader: () => headersAbsent.has(id) ? undefined : { config: routes.get(id)! } },
       followup: (message: UserMessage) => {
         beforePost?.(id, message)
@@ -78,8 +114,17 @@ function nativeRuntime() {
     opened.push(request)
     const id = String(agentSessionIdOf(request.agentId))
     const live = agents.get(id) ?? agent(id, request.model.model)
-    return { agentId: request.agentId, sessionId: id, resumed: events.get(id)!.length > 0, agent: live,
-      post: message => live.followup(message), wait: () => live.whenIdle(), stop: () => live.cancel({ kind: 'parent' }) }
+    const resumed = events.get(id)!.length > 0
+    const post = (message: UserMessage) => postIdentifiedMessage(seams, live, message,
+      message => live.followup(message))
+    let delivery: ChildSession['delivery']
+    if (resumed) delivery = await post(request.message)
+    else {
+      live.followup(request.message)
+      delivery = 'posted'
+    }
+    return { agentId: id, sessionId: id, resumed, agent: live, delivery,
+      post, wait: () => live.whenIdle(), stop: () => live.cancel({ kind: 'parent' }), close: async () => undefined }
   }
   return { agents, routes, headersAbsent, events, delivered, woken, stopped, opened, seams, open, agent, append,
     beforePost: (listener: typeof beforePost) => { beforePost = listener } }
@@ -136,12 +181,15 @@ describe('fact-driven child scheduling', () => {
     const h = await setup()
     const scheduler = h.make()
     expect(await scheduler.advance('parent-task')).toEqual(['child-task'])
-    expect(h.runtime.opened[0]).toMatchObject({ parent: h.parent, model: { provider: 'test', model: 'model-A' }, cwd: join(h.root, 'tasks', 'child-task') })
+    expect(h.runtime.opened[0]).toMatchObject({ parent: h.parent, model: { provider: 'test', model: 'model-A' } })
     const run = Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]!
     const message = h.runtime.delivered[0]!.message
     expect(contentOf(message)).toContain(run.bubble!.workspace.ref)
     expect(contentOf(message)).toContain(join(run.bubble!.workspace.ref, 'in/source.txt'))
-    expect(message.source).toMatchObject({ kind: 'singularity', controlId: 'scheduler', purpose: 'dispatch', parentTaskId: 'parent-task', taskId: 'child-task', runId: run.runId,
+    expect(contentOf(message)).toContain('Each singularity_submit_program call consumes one attempt')
+    expect(contentOf(message)).toContain('Submit only your final answer; never use submission to probe the interface')
+    expect(message.source).toMatchObject({ kind: 'singularity', purpose: 'dispatch' })
+    expect(h.runtime.opened[0]!.message.source).toMatchObject({ kind: 'singularity', controlId: 'scheduler', purpose: 'dispatch', parentTaskId: 'parent-task', taskId: 'child-task', runId: run.runId,
       factSeq: factsOf(h.medium).find(fact => fact.kind === TASK_KINDS.runStarted && fact.subject === 'child-task')!.seq })
   })
 
@@ -235,7 +283,7 @@ describe('fact-driven child scheduling', () => {
     expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
   })
 
-  it('keeps a stopped notice tied to its failing child when an unrelated sibling later verifies', async () => {
+  it('reports both a failed branch and the later completion of independent siblings with accurate provenance', async () => {
     const h = await setup(1, 'siblings')
     const scheduler = h.make()
     await scheduler.advance('parent-task')
@@ -248,7 +296,11 @@ describe('fact-driven child scheduling', () => {
     await scheduler.advance('parent-task')
     const terminal = factsOf(h.medium).findLast(fact => fact.subject === 'child-task' && fact.kind === TASK_KINDS.runFailed)!
     expect(first.source).toMatchObject({ taskId: 'child-task', runId: run.runId, factSeq: terminal.seq })
-    expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toEqual([{ sessionId: 'parent-session', message: first }])
+    const notices = h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')
+    expect(notices).toHaveLength(2)
+    expect(notices[0]).toEqual({ sessionId: 'parent-session', message: first })
+    expect(notices[1]!.message.source).toMatchObject({ taskId: 'child-task-sibling' })
+    expect(contentOf(notices[1]!.message)).toContain('settled')
   })
 
   it('refuses a plan outcome without a causal terminal instead of inventing notification provenance', async () => {
@@ -376,7 +428,7 @@ describe('fact-driven child scheduling', () => {
     expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
   })
 
-  it.each(['entered', 'claimed'] as const)('stops a recovered working Run whose instruction is %s and its external result is unknown', async state => {
+  it.each(['entered', 'claimed'] as const)('recovers entered work and refuses unconfirmed claimed delivery (%s)', async state => {
     const h = await setup(3)
     const first = h.make()
     await first.advance('parent-task')
@@ -385,6 +437,11 @@ describe('fact-driven child scheduling', () => {
     h.runtime.append(id, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
     if (state === 'entered') h.runtime.append(id, 'user/message', instruction)
     await first.close()
+    if (state === 'entered') {
+      await expect(h.make().advance('parent-task')).resolves.toEqual(['child-task'])
+      expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ status: 'running' }])
+      return
+    }
     await expect(h.make().advance('parent-task')).rejects.toThrow('unconfirmed')
     expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ status: 'failed', failureCause: 'runtime' }])
     expect(h.runtime.delivered.filter(entry => entry.sessionId === id)).toHaveLength(1)
