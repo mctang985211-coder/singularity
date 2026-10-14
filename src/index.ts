@@ -26,8 +26,7 @@ export {
   ProtocolRegistry,
   type Guarantees,
   type KindRule,
-  type ProtocolSpec,
-} from './protocol/registry.ts'
+  type ProtocolSpec } from './protocol/registry.ts'
 export { MemoryLog, type Decision, type EmitInput, type LogOptions } from './protocol/memory-log.ts'
 export { foldSubject, foldSubjects } from './protocol/fold.ts'
 
@@ -40,6 +39,7 @@ export {
   CONTRACT_MEMBERS,
   CRITERION_MEMBERS,
   type AcceptanceCriterion,
+  type VerifierCriterion,
   type TaskContract,
   type TaskTemplateRef,
   type TaskInputSource,
@@ -126,8 +126,7 @@ export {
 
 export {
   assertPinnedRevision,
-  projectBindings,
-} from './environment/binding.ts'
+  projectBindings } from './environment/binding.ts'
 export {
   declareEnvironmentProtocol,
   ENVIRONMENT_KINDS,
@@ -224,8 +223,7 @@ export {
 export {
   createReleaseCommands,
   type ReleaseCommandOptions,
-  type ReleaseCommands,
-} from './release/commands.ts'
+  type ReleaseCommands } from './release/commands.ts'
 
 export {
   assertVerifierRunnable,
@@ -246,3 +244,16 @@ export {
   type VerifierInvocation,
   type VerifierProcess,
 } from './verifier/command.ts'
+
+export {
+  declareReviewProtocol,
+  reviewCriterion,
+  REVIEW_PROTOCOL,
+  REVIEW_VERSION,
+  REVIEW_ROLE,
+  REVIEW_DIGEST,
+  type ReviewRun,
+  type Finding,
+  type ReviewTarget,
+} from './review/protocol.ts'
+export { createReviewCommands } from './review/commands.ts'

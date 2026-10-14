@@ -50,7 +50,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { refuse } from '../protocol/refusal.ts'
 import { BUBBLE_INPUT_MEMBERS, inputList, type BubbleInput } from '../task/bubble.ts'
-import { assertCriterionShape, CRITERION_MEMBERS, type AcceptanceCriterion } from '../task/contract.ts'
+import { assertCriterionShape, CRITERION_MEMBERS, type VerifierCriterion } from '../task/contract.ts'
 import {
   assertVerifierRunnable,
   runVerifierSelftest,
@@ -105,7 +105,7 @@ export type RealJudge = (execution: ProductionExecution) => Promise<JudgedVerdic
  */
 export interface ProductionVerdictRequest {
   readonly runId: string
-  readonly criterion: AcceptanceCriterion
+  readonly criterion: VerifierCriterion
   readonly implementations: readonly VerifierImplementation[]
   readonly inputs: readonly BubbleInput[]
   readonly workspace: string
@@ -139,7 +139,8 @@ function messageOf(error: unknown): string {
 
 function requireRecord(value: unknown, field: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
-    refuse('malformed-payload', `${field} must be an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`)
+    refuse('malformed-payload', `${field} must be an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`,
+    )
   return value as Record<string, unknown>
 }
 
@@ -159,7 +160,8 @@ function requireDigest(value: unknown, field: string): string {
 function requireCommand(value: unknown, field: string): VerifierCommand {
   if (typeof value === 'string') return requireText(value, field)
   if (Array.isArray(value) && value.length > 0) return value.map((entry, index) => requireText(entry, `${field}[${index}]`))
-  refuse('malformed-payload', `${field} must be a non-empty command line or a non-empty argv array, got ${JSON.stringify(value ?? null)}`)
+  refuse('malformed-payload', `${field} must be a non-empty command line or a non-empty argv array, got ${JSON.stringify(value ?? null)}`,
+  )
 }
 
 /**
@@ -171,19 +173,22 @@ function requireCommand(value: unknown, field: string): VerifierCommand {
  * declared thing, do not trust the name" discipline as the digest lookup, applied to paths.
  */
 function workspacePath(workspace: string, name: string, field: string): string {
-  if (isAbsolute(name)) refuse('malformed-payload', `${field} is ${JSON.stringify(name)}, an absolute path; a declared input is named inside the workspace`)
+  if (isAbsolute(name)) refuse('malformed-payload', `${field} is ${JSON.stringify(name)}, an absolute path; a declared input is named inside the workspace`,
+    )
   const root = resolve(workspace)
   const path = resolve(root, name)
   const inside = relative(root, path)
   if (inside === '' || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside))
-    refuse('malformed-payload', `${field} is ${JSON.stringify(name)}, which resolves outside the workspace; a declaration may not name bytes it is not bound to`)
+    refuse('malformed-payload', `${field} is ${JSON.stringify(name)}, which resolves outside the workspace; a declaration may not name bytes it is not bound to`,
+    )
   return path
 }
 
 /** The implementations this deployment holds, read as declarations before any of them is run. */
 function readImplementations(raw: unknown): readonly VerifierImplementation[] {
   if (!Array.isArray(raw))
-    refuse('malformed-payload', `request.implementations must be an array of the implementations this deployment holds, got ${raw === null ? 'null' : typeof raw}`)
+    refuse('malformed-payload', `request.implementations must be an array of the implementations this deployment holds, got ${raw === null ? 'null' : typeof raw}`,
+    )
   return raw.map((entry, index) => {
     const where = `request.implementations[${index}]`
     const record = requireRecord(entry, where)
@@ -191,7 +196,8 @@ function readImplementations(raw: unknown): readonly VerifierImplementation[] {
     requireText(record['version'], `${where}.version`)
     requireDigest(record['implementationDigest'], `${where}.implementationDigest`)
     if (typeof record['judge'] !== 'function')
-      refuse('malformed-payload', `${where}.judge must be a function; a declaration with no judge cannot pass its selftest`)
+      refuse('malformed-payload', `${where}.judge must be a function; a declaration with no judge cannot pass its selftest`,
+      )
     return entry as VerifierImplementation
   })
 }
@@ -211,7 +217,7 @@ function readInputs(raw: unknown, workspace: string): readonly ProductionInput[]
 
 interface ResolvedRequest {
   readonly runId: string
-  readonly criterion: AcceptanceCriterion
+  readonly criterion: VerifierCriterion
   readonly implementations: readonly VerifierImplementation[]
   readonly inputs: readonly ProductionInput[]
   readonly workspace: string
@@ -226,7 +232,8 @@ function readRequestShape(request: ProductionVerdictRequest): ResolvedRequest {
   const workspace = requireText(source['workspace'], 'request.workspace')
   const runJudge = source['runJudge']
   if (typeof runJudge !== 'function')
-    refuse('malformed-payload', 'request.runJudge must be a function; execution is a port, and a missing one is not a judgement')
+    refuse('malformed-payload', 'request.runJudge must be a function; execution is a port, and a missing one is not a judgement',
+    )
   return {
     runId: requireText(source['runId'], 'request.runId'),
     // The criterion's shape is the contract owner's rule, read here by the same function the
@@ -236,7 +243,8 @@ function readRequestShape(request: ProductionVerdictRequest): ResolvedRequest {
     implementations: readImplementations(source['implementations']),
     inputs: readInputs(source['inputs'], workspace),
     workspace,
-    artifactPath: workspacePath(workspace, requireText(source['artifactPath'], 'request.artifactPath'), 'request.artifactPath'),
+    artifactPath: workspacePath(workspace, requireText(source['artifactPath'], 'request.artifactPath'), 'request.artifactPath',
+    ),
     command: requireCommand(source['command'], 'request.command'),
     runJudge: runJudge as RealJudge,
   }
@@ -248,19 +256,24 @@ function readRequestShape(request: ProductionVerdictRequest): ResolvedRequest {
  * The digest is the key; the name only has to agree once a candidate is found, so a deployment that
  * rebuilt `ref@version` under different bytes is reported as not holding it, by name.
  */
-function resolveImplementation(implementations: readonly VerifierImplementation[], criterion: AcceptanceCriterion): VerifierImplementation {
+function resolveImplementation(implementations: readonly VerifierImplementation[], criterion: VerifierCriterion,
+): VerifierImplementation {
   const named = `${criterion.verifierRef}@${criterion.verifierVersion}`
-  const byDigest = implementations.filter(entry => entry.implementationDigest === criterion.implementationDigest)
-  const resolved = byDigest.find(entry => entry.ref === criterion.verifierRef && entry.version === criterion.verifierVersion)
+  const byDigest = implementations.filter((entry) => entry.implementationDigest === criterion.implementationDigest)
+  const resolved = byDigest.find(
+    (entry) => entry.ref === criterion.verifierRef && entry.version === criterion.verifierVersion,
+  )
   if (resolved !== undefined) return resolved
 
-  const sameName = implementations.filter(entry => entry.ref === criterion.verifierRef && entry.version === criterion.verifierVersion)
+  const sameName = implementations.filter(
+    (entry) => entry.ref === criterion.verifierRef && entry.version === criterion.verifierVersion,
+  )
   const held =
     byDigest.length > 0
-      ? `this deployment holds that digest as ${byDigest.map(entry => `${entry.ref}@${entry.version}`).join(', ')}, not as ${named}`
+      ? `this deployment holds that digest as ${byDigest.map((entry) => `${entry.ref}@${entry.version}`).join(', ')}, not as ${named}`
       : sameName.length === 0
         ? 'this deployment holds no implementation with that digest'
-        : `"${named}" is held only as ${sameName.map(entry => `${entry.implementationDigest.slice(0, 12)}…`).join(', ')}, a different implementation`
+        : `"${named}" is held only as ${sameName.map((entry) => `${entry.implementationDigest.slice(0, 12)}…`).join(', ')}, a different implementation`
   refuse(
     'unregistered-verifier',
     `criterion "${criterion.criterionId}" names the verifier ${named} implemented by ${criterion.implementationDigest.slice(0, 12)}…, but ${held}; a rebuilt implementation is not found by its name`,
@@ -277,7 +290,7 @@ async function assertSelftestHolds(implementation: VerifierImplementation): Prom
     ),
   )
   if (report.failures.length > 0) {
-    const disagreements = report.failures.map(failure => `"${failure.name}" declared ${failure.expected} but produced ${failure.actual}`).join('; ')
+    const disagreements = report.failures.map((failure) => `"${failure.name}" declared ${failure.expected} but produced ${failure.actual}`).join('; ')
     refuse(
       'unregistered-verifier',
       `the selftest of "${implementation.ref}@${implementation.version}" disagreed with its own declaration: ${disagreements}; a verifier that cannot produce both verdicts is not runnable here`,
@@ -310,12 +323,15 @@ async function readInputDigests(inputs: readonly ProductionInput[]): Promise<rea
 }
 
 /** Step 4: run the real judge, and accept its verdict only from the criterion's implementation. */
-async function acceptJudgedVerdict(runJudge: RealJudge, execution: ProductionExecution, criterion: AcceptanceCriterion): Promise<JudgedVerdict> {
+async function acceptJudgedVerdict(runJudge: RealJudge, execution: ProductionExecution, criterion: VerifierCriterion,
+): Promise<JudgedVerdict> {
   const judged = requireRecord(await runJudge(execution), 'the recorded judgement')
   const verdict = judged['verdict']
   if (verdict !== 'pass' && verdict !== 'fail' && verdict !== 'partial' && verdict !== 'unknown')
-    refuse('malformed-payload', `the recorded judgement.verdict must be pass, fail, partial or unknown, got ${JSON.stringify(verdict ?? null)}`)
-  const implementationDigest = requireDigest(judged['implementationDigest'], 'the recorded judgement.implementationDigest')
+    refuse('malformed-payload', `the recorded judgement.verdict must be pass, fail, partial or unknown, got ${JSON.stringify(verdict ?? null)}`,
+    )
+  const implementationDigest = requireDigest(judged['implementationDigest'], 'the recorded judgement.implementationDigest',
+  )
   if (implementationDigest !== criterion.implementationDigest)
     refuse(
       'wrong-verifier',

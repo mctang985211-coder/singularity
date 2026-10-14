@@ -20,16 +20,15 @@ const TASK = 'probe-task'
 const RUN = 'probe-run-1'
 const REVISION = { environmentId: 'probe-library', revisionId: 'r0001', digest: 'a'.repeat(64) }
 const CONTRACT = {
+  artifact: 'report.txt',
   goal: 'carry a control fact through a DSH session',
-  template: { id: 'control-probe', digest: createHash('sha256').update(await readFile(HERE)).digest('hex') },
+  template: { id: 'control-probe', digest: createHash('sha256').update(await readFile(HERE)).digest('hex'),
+  },
   inputs: [],
   criteria: [
     {
       criterionId: 'observed',
       statement: 'the probe observed the fact',
-      verifierRef: 'probe-verifier',
-      verifierVersion: '1',
-      implementationDigest: 'f'.repeat(64),
     },
   ],
 }
@@ -45,7 +44,7 @@ function registry() {
   return made
 }
 
-const admitRequest = commandId => ({
+const admitRequest = (commandId) => ({
   commandId,
   protocol: TASK_PROTOCOL,
   version: TASK_VERSION,
@@ -53,7 +52,7 @@ const admitRequest = commandId => ({
   subject: TASK,
   payload: { contract: CONTRACT },
 })
-const assignRequest = commandId => ({
+const assignRequest = (commandId) => ({
   commandId,
   protocol: TASK_PROTOCOL,
   version: TASK_VERSION,
@@ -61,19 +60,19 @@ const assignRequest = commandId => ({
   subject: TASK,
   payload: { agentId: 'probe-agent', agentIdentity: 'scheduler-1' },
 })
-const startRequest = commandId => ({
+const startRequest = (commandId) => ({
   commandId,
   protocol: TASK_PROTOCOL,
   version: TASK_VERSION,
   kind: TASK_KINDS.runStarted,
   subject: TASK,
-  payload: { runId: RUN, revision: REVISION },
+  payload: { runId: RUN, revision: REVISION, purpose: 'solve' },
 })
 
 const failures = []
 const gaps = []
-const line = value => console.log(JSON.stringify(value))
-const section = title => console.log(`\n== ${title}`)
+const line = (value) => console.log(JSON.stringify(value))
+const section = (title) => console.log(`\n== ${title}`)
 const check = (label, ok, detail = '') => {
   console.log(`  ${ok ? 'ok  ' : 'FAIL'}  ${label}${detail === '' ? '' : ` — ${detail}`}`)
   if (!ok) failures.push(label)
@@ -92,7 +91,8 @@ async function hold() {
     const [root, controlId, commandId] = process.argv.slice(3)
     const { ControlSessionStore } = await import('../src/control/session-store.ts')
     const live = await openPersistence(root)
-    const store = await ControlSessionStore.open({ persistence: live.persistence, controlId, registry: registry(), subjects: SUBJECTS })
+    const store = await ControlSessionStore.open({ persistence: live.persistence, controlId, registry: registry(), subjects: SUBJECTS,
+    })
 
     const admitted = await store.emit(admitRequest(`${commandId}-admit`))
     // A run needs someone answerable for it before it may start, so the probe records the
@@ -114,7 +114,7 @@ async function hold() {
       recoveredSeq: recovered.seq,
       recoveredDigest: recovered.digest,
       redeliveredSameFact: recovered.seq === committed.seq && recovered.digest === committed.digest,
-      facts: store.load().entries().map(entry => ({ seq: entry.seq, kind: entry.kind, digest: entry.digest })),
+      facts: store.load().entries().map((entry) => ({ seq: entry.seq, kind: entry.kind, digest: entry.digest })),
     })
     setInterval(() => {}, 1000)
   } catch (error) {
@@ -127,8 +127,9 @@ async function hold() {
 function waitForEvent(child, wanted, timeoutMs) {
   return new Promise((resolve, reject) => {
     let buffer = ''
-    const timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms waiting for the holder's "${wanted}" report`)), timeoutMs)
-    child.stdout.on('data', chunk => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms waiting for the holder's "${wanted}" report`)), timeoutMs,
+    )
+    child.stdout.on('data', (chunk) => {
       buffer += String(chunk)
       let index = buffer.indexOf('\n')
       while (index >= 0) {
@@ -177,8 +178,9 @@ async function probe() {
   try {
     // -----------------------------------------------------------------------
     section('1. a second process opening the same control session for write')
-    holder = spawn(process.execPath, [HERE, '--hold', root, CONTROL_ID, commandId], { stdio: ['ignore', 'pipe', 'pipe'] })
-    holder.stderr.on('data', chunk => {
+    holder = spawn(process.execPath, [HERE, '--hold', root, CONTROL_ID, commandId], { stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    holder.stderr.on('data', (chunk) => {
       holderStderr += String(chunk)
     })
     const reported = await waitForEvent(holder, 'holding', 20000)
@@ -194,13 +196,15 @@ async function probe() {
     // this check's own history showed, one that can answer differently.
     const rival = spawn(process.execPath, [HERE, '--claim', root, CONTROL_ID], { stdio: ['ignore', 'pipe', 'pipe'] })
     let rivalStderr = ''
-    rival.stderr.on('data', chunk => {
+    rival.stderr.on('data', (chunk) => {
       rivalStderr += String(chunk)
     })
-    const claimed = await waitForEvent(rival, 'claimed', 20000).catch(error => ({ event: 'claimed', granted: null, name: 'no-report', message: `${error.message} stderr=${rivalStderr.slice(-300)}` }))
-    await new Promise(resolve => rival.on('exit', resolve))
+    const claimed = await waitForEvent(rival, 'claimed', 20000).catch((error) => ({ event: 'claimed', granted: null, name: 'no-report', message: `${error.message} stderr=${rivalStderr.slice(-300)}`,
+    }))
+    await new Promise((resolve) => rival.on('exit', resolve))
     console.log(`  second process reported: ${JSON.stringify(claimed)}`)
-    check('a second process write open is refused', claimed.granted === false, `granted=${JSON.stringify(claimed.granted)} name=${JSON.stringify(claimed.name)}`)
+    check('a second process write open is refused', claimed.granted === false, `granted=${JSON.stringify(claimed.granted)} name=${JSON.stringify(claimed.name)}`,
+    )
     check(
       'a second process write open fails with SessionAlreadyOwnedError',
       claimed.name === 'SessionAlreadyOwnedError',
@@ -210,7 +214,7 @@ async function probe() {
     // -----------------------------------------------------------------------
     section('2. a read handle while the write handle is held')
     const reader = await live.persistence.open(sessionId, 'read')
-    const observedRead = (await reader.read()).events.map(event => ({
+    const observedRead = (await reader.read()).events.map((event) => ({
       seq: event.seq,
       type: event.type,
       ignorable: event.ignorable,
@@ -221,28 +225,30 @@ async function probe() {
     console.log(`  read handle observed: ${JSON.stringify(observedRead)}`)
     check(
       'the read handle is unaffected and every record is our type, marked ignorable',
-      observedRead.length === EXPECTED_FACTS && observedRead.every(event => event.type === CONTROL_EVENT_TYPE && event.ignorable === true),
+      observedRead.length === EXPECTED_FACTS && observedRead.every((event) => event.type === CONTROL_EVENT_TYPE && event.ignorable === true),
     )
 
     // -----------------------------------------------------------------------
     section('4a. a lost reply inside the live store (the holder re-delivered the same command id)')
-    console.log(`  committed #${reported.committedSeq} ${reported.committedDigest.slice(0, 12)}… → re-delivered #${reported.recoveredSeq} ${reported.recoveredDigest.slice(0, 12)}…`)
+    console.log(`  committed #${reported.committedSeq} ${reported.committedDigest.slice(0, 12)}… → re-delivered #${reported.recoveredSeq} ${reported.recoveredDigest.slice(0, 12)}…`,
+    )
     check(
       're-delivering the same command id returned the fact it committed, and appended nothing',
-      reported.redeliveredSameFact === true && reported.facts.filter(fact => fact.kind === TASK_KINDS.runStarted).length === 1,
+      reported.redeliveredSameFact === true && reported.facts.filter((fact) => fact.kind === TASK_KINDS.runStarted).length === 1,
     )
 
     // -----------------------------------------------------------------------
     section('3. SIGKILL the holder, then take over immediately')
-    const exited = new Promise(resolve => holder.once('exit', (code, signal) => resolve({ code, signal })))
+    const exited = new Promise((resolve) => holder.once('exit', (code, signal) => resolve({ code, signal })))
     holder.kill('SIGKILL')
     console.log(`  holder killed: ${JSON.stringify(await exited)}`)
     holder = null
 
     const startedAt = Date.now()
-    successor = await ControlSessionStore.open({ persistence: live.persistence, controlId: CONTROL_ID, registry: registry(), subjects: SUBJECTS })
+    successor = await ControlSessionStore.open({ persistence: live.persistence, controlId: CONTROL_ID, registry: registry(), subjects: SUBJECTS,
+    })
     const takeoverMs = Date.now() - startedAt
-    const facts = successor.load().entries().map(entry => ({ seq: entry.seq, kind: entry.kind, digest: entry.digest }))
+    const facts = successor.load().entries().map((entry) => ({ seq: entry.seq, kind: entry.kind, digest: entry.digest }))
     console.log(`  successor took over in ${takeoverMs}ms with: ${JSON.stringify(facts)}`)
     check('the successor takes over immediately, with no waiting period', takeoverMs < 5000, `${takeoverMs}ms`)
     check(
@@ -250,8 +256,10 @@ async function probe() {
       facts.length === reported.facts.length && facts.every((fact, index) => fact.digest === reported.facts[index]?.digest),
     )
     const folded = successor.load().stateOf(TASK_PROTOCOL, TASK_VERSION, TASK)
-    console.log(`  folded state: goal=${JSON.stringify(folded?.contract?.goal)} runs=${JSON.stringify(Object.keys(folded?.runs ?? {}))}`)
-    check('the adopted facts still fold to the same state', folded?.contract?.goal === CONTRACT.goal && folded?.runs?.[RUN] !== undefined)
+    console.log(`  folded state: goal=${JSON.stringify(folded?.contract?.goal)} runs=${JSON.stringify(Object.keys(folded?.runs ?? {}))}`,
+    )
+    check('the adopted facts still fold to the same state', folded?.contract?.goal === CONTRACT.goal && folded?.runs?.[RUN] !== undefined,
+    )
 
     // -----------------------------------------------------------------------
     section('4b. the same command id re-delivered by the successor, after the holder is gone')
@@ -259,13 +267,16 @@ async function probe() {
     try {
       crossProcess = { accepted: true, envelope: await successor.emit(startRequest(commandId)) }
     } catch (error) {
-      crossProcess = { accepted: false, code: error?.refusal?.code ?? error?.name, detail: error?.refusal?.detail ?? error?.message }
+      crossProcess = { accepted: false, code: error?.refusal?.code ?? error?.name, detail: error?.refusal?.detail ?? error?.message,
+      }
     }
     const after = [...successor.load().entries()]
     console.log(`  successor re-delivered ${JSON.stringify(commandId)}: ${JSON.stringify(crossProcess)}`)
-    console.log(`  the adopted log still holds ${after.length} facts; the original result is #${reported.committedSeq} ${reported.committedDigest.slice(0, 12)}…`)
+    console.log(`  the adopted log still holds ${after.length} facts; the original result is #${reported.committedSeq} ${reported.committedDigest.slice(0, 12)}…`,
+    )
     if (crossProcess.accepted && crossProcess.envelope.digest === reported.committedDigest) {
-      check('the successor returned the fact the dead process committed, and appended nothing', after.length === reported.facts.length)
+      check('the successor returned the fact the dead process committed, and appended nothing', after.length === reported.facts.length,
+      )
     } else {
       gap(
         'cross-process command recovery is not implemented',
@@ -287,13 +298,15 @@ async function probe() {
       version: TASK_VERSION,
       kind: TASK_KINDS.runStarted,
       subject: TASK,
-      payload: { runId: 'probe-run-2', revision: REVISION },
+      payload: { runId: 'probe-run-2', revision: REVISION, purpose: 'solve' },
     })
     const verifier = await live.persistence.open(sessionId, 'read')
     const finalRead = (await verifier.read()).events.length
     await verifier.close()
-    console.log(`  successor appended ${TASK_KINDS.runStarted} #${next.seq}; the stored log now holds ${finalRead} events`)
-    check('the successor settled the interrupted Run and appended a new attempt that a fresh read handle sees', finalRead === after.length + 2)
+    console.log(`  successor appended ${TASK_KINDS.runStarted} #${next.seq}; the stored log now holds ${finalRead} events`,
+    )
+    check('the successor settled the interrupted Run and appended a new attempt that a fresh read handle sees', finalRead === after.length + 2,
+    )
   } catch (error) {
     failures.push('the probe did not run to completion')
     console.log(`\nFAIL  the probe did not run to completion: ${error?.stack ?? String(error)}`)
@@ -318,11 +331,13 @@ async function claim(root, controlId) {
   const { ControlSessionStore } = await import('../src/control/session-store.ts')
   const live = await openPersistence(root)
   try {
-    const store = await ControlSessionStore.open({ persistence: live.persistence, controlId, registry: registry(), subjects: SUBJECTS })
+    const store = await ControlSessionStore.open({ persistence: live.persistence, controlId, registry: registry(), subjects: SUBJECTS,
+    })
     line({ event: 'claimed', granted: true, sessionId: String(store.sessionId) })
     await store.close()
   } catch (error) {
-    line({ event: 'claimed', granted: false, name: error?.name, constructor: error?.constructor?.name, message: error?.message })
+    line({ event: 'claimed', granted: false, name: error?.name, constructor: error?.constructor?.name, message: error?.message,
+    })
   } finally {
     await live.context.fiber.dispose()
   }

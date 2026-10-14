@@ -2,7 +2,7 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 
 export interface SchedulerMessageSource {
   readonly kind: 'singularity'
-  readonly purpose: 'dispatch' | 'plan-outcome' | 'resume'
+  readonly purpose: 'dispatch' | 'plan-outcome' | 'resume' | 'question' | 'answer'
   readonly controlId: string
   readonly parentTaskId: string
   readonly taskId: string

@@ -1,3 +1,5 @@
+import { lifecycleKinds, type TaskClosure, type RSIStatus, type RoundRequest } from './lifecycle.ts'
+import { questionKinds, type TaskQuestion } from './questions.ts'
 import { digestOf } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type MemberSet, type ProtocolRegistry } from '../protocol/registry.ts'
@@ -12,7 +14,6 @@ import {
   methodConsumedKind,
   runFailedKind,
   runStartedKind,
-  runSubmittingKind,
   runSubmittedKind,
   runVerifiedKind,
   type RunState,
@@ -22,7 +23,7 @@ import {
 export type { EvidenceRecord, RunState, RunStatus, RunSubmission } from './run.ts'
 
 export const TASK_PROTOCOL = 'task'
-export const TASK_VERSION = 9
+export const TASK_VERSION = 12
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'
@@ -35,11 +36,14 @@ export function verifierRoleOf(payload: { verifierRef: string; verifierVersion: 
 export function recordedVerdictDigest(
   state: TaskState,
   where: string,
-  { runId, criterionId, artifactDigest }: { readonly runId: string; readonly criterionId: string; readonly artifactDigest: string },
+  { runId, criterionId, artifactDigest,
+  }: { readonly runId: string; readonly criterionId: string; readonly artifactDigest: string },
 ): string {
   const run = state.runs[runId]
   if (run === undefined) refuse('unknown-run', `${where} cites a verdict of run "${runId}", which task "${state.taskId}" never started`)
-  const evidence = run.evidence.find(entry => entry.criterionId === criterionId && entry.artifactDigest === artifactDigest)
+  const evidence = run.evidence.find(
+    (entry) => entry.criterionId === criterionId && entry.artifactDigest === artifactDigest,
+  )
   if (evidence === undefined)
     refuse(
       'illegal-transition',
@@ -51,6 +55,7 @@ export function recordedVerdictDigest(
 function verdictDigestOf(
   runId: string,
   evidence: {
+    readonly reviewId: string
     readonly criterionId: string
     readonly verdict: string
     readonly verifierRef: string
@@ -63,6 +68,7 @@ function verdictDigestOf(
 ): string {
   return digestOf({
     runId,
+    reviewId: evidence.reviewId,
     criterionId: evidence.criterionId,
     verdict: evidence.verdict,
     verifierRef: evidence.verifierRef,
@@ -87,6 +93,10 @@ export interface TaskState {
   readonly contractDigest?: string
   readonly admittedBy?: string
   readonly admittedAt?: string
+  readonly closure?: TaskClosure
+  readonly rsi?: RSIStatus
+  readonly rounds?: readonly RoundRequest[]
+  readonly questions?: readonly TaskQuestion[]
   readonly decomposition?: Decomposition
   /** Who is answerable for this task. A task without one cannot be worked on at all. */
   readonly responsibility?: Responsibility
@@ -100,7 +110,6 @@ export const TASK_KINDS = {
   reassigned: 'task/reassigned',
   bubbleOpened: 'bubble/opened',
   runStarted: 'run/started',
-  runSubmitting: 'run/submitting',
   runSubmitted: 'run/submitted',
   evidenceProduced: 'evidence/produced',
   runVerified: 'run/verified',
@@ -112,6 +121,8 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
   registry.declare<TaskState>(TASK_PROTOCOL, TASK_VERSION, {
     initialState: { taskId: '', runs: {} },
     kinds: {
+      ...lifecycleKinds(),
+      ...questionKinds(),
       [TASK_KINDS.admitted]: defineKind<TaskState, { contract: TaskContract }, { contract: MemberSet }>({
         guarantees: { appended: true },
         members: ['contract'],
@@ -132,7 +143,8 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
             )
           for (const input of payload.contract.inputs)
             if (input.source.kind === 'artifact' && input.source.taskId === envelope.subject)
-              refuse('malformed-contract', `task "${envelope.subject}" declares its own artifact as input "${input.name}"`)
+              refuse('malformed-contract', `task "${envelope.subject}" declares its own artifact as input "${input.name}"`,
+              )
           return {
             taskId: envelope.subject,
             contract: payload.contract,
@@ -150,7 +162,6 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
       [TASK_KINDS.bubbleOpened]: bubbleOpenedKind(TASK_KINDS.bubbleOpened, SCHEDULER_ROLE),
 
       [TASK_KINDS.runStarted]: runStartedKind(TASK_KINDS.runStarted, SCHEDULER_ROLE),
-      [TASK_KINDS.runSubmitting]: runSubmittingKind(TASK_KINDS.runSubmitting, SCHEDULER_ROLE),
       [TASK_KINDS.runSubmitted]: runSubmittedKind(TASK_KINDS.runSubmitted, SCHEDULER_ROLE),
       // The role *is* the implementation: `verifierRoleOf` reads it out of the payload the criterion
       // was already checked against, and the log refuses the fact when the deployment holds no such

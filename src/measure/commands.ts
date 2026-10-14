@@ -42,8 +42,9 @@ import type { Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 import { assertInputsBound, type Bubble } from '../task/bubble.ts'
-import type { AcceptanceCriterion } from '../task/contract.ts'
-import { TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type RevisionRef, type RunState, type TaskState } from '../task/protocol.ts'
+import type { VerifierCriterion } from '../task/contract.ts'
+import { TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type RevisionRef, type RunState, type TaskState,
+} from '../task/protocol.ts'
 import type { MeasuredTrial } from './execution.ts'
 import {
   contextDigestOf,
@@ -71,20 +72,27 @@ export interface EvaluationPlanInput {
   readonly metric: EvaluationMetric
   readonly weights: EvaluationWeights
   readonly trials: number
-  readonly judgement: readonly AcceptanceCriterion[]
+  readonly judgement: readonly VerifierCriterion[]
 }
 
 export interface MeasureCommandOptions {
   readonly store: ControlSessionStore
   readonly registry: ProtocolRegistry
   /** The implementations this deployment holds, by the digest of their own bytes. */
-  readonly implementations: readonly { readonly ref: string; readonly version: string; readonly implementationDigest: string }[]
+  readonly implementations: readonly { readonly ref: string
+    readonly version: string
+    readonly implementationDigest: string }[]
 }
 
 export interface MeasureCommands {
   openEvaluation(input: EvaluationPlanInput): Promise<Envelope>
-  recordTrial(input: { readonly commandId: string; readonly evaluationId: string; readonly trial: TrialInput }): Promise<Envelope>
-  missTrial(input: { readonly commandId: string; readonly evaluationId: string; readonly slot: number; readonly reason: string }): Promise<Envelope>
+  recordTrial(input: { readonly commandId: string
+    readonly evaluationId: string
+    readonly trial: TrialInput }): Promise<Envelope>
+  missTrial(input: { readonly commandId: string
+    readonly evaluationId: string
+    readonly slot: number
+    readonly reason: string }): Promise<Envelope>
   checkConstraint(input: {
     readonly commandId: string
     readonly evaluationId: string
@@ -97,7 +105,9 @@ export interface MeasureCommands {
      * second judgment: the fact carries the digest of the verdict, and the reducer refuses a citation
      * of a criterion other than this one or of bytes this evaluation did not measure.
      */
-    readonly verdict?: { readonly criterionId: string; readonly evidenceDigest: string; readonly artifactDigest: string }
+    readonly verdict?: { readonly criterionId: string
+      readonly evidenceDigest: string
+      readonly artifactDigest: string }
     readonly detail?: string
   }): Promise<Envelope>
 }
@@ -112,12 +122,12 @@ interface Cut {
 interface OpenPlan {
   readonly run: EvaluationRun
   readonly metric: EvaluationMetric
-  readonly judgement: readonly AcceptanceCriterion[]
+  readonly judgement: readonly VerifierCriterion[]
 }
 
 export function createMeasureCommands(options: MeasureCommandOptions): MeasureCommands {
   const commands: MeasureCommands = {
-    openEvaluation: input => {
+    openEvaluation: (input) => {
       const action = `open evaluation "${input.evaluationId}"`
       // The context is *read*, never supplied: a caller that could declare the context two candidates
       // are compared under could make them comparable by assertion. The bubble it comes from is
@@ -146,7 +156,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
       )
     },
 
-    recordTrial: input => {
+    recordTrial: (input) => {
       // The metric is read before the payload is built and again inside the commit region. The two
       // reads cannot disagree: a second `evaluation/opened` is refused by the reducer, so a plan
       // that exists at all never changes - the same reason `recordVerdict` may fill its verifier
@@ -182,7 +192,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
       )
     },
 
-    missTrial: input => {
+    missTrial: (input) => {
       const action = `declare trial slot ${input.slot} of evaluation "${input.evaluationId}" missed`
       const plan = requireOpened(cutOf(options), input.evaluationId, action)
       return emitRaw(
@@ -203,7 +213,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
       )
     },
 
-    checkConstraint: input => {
+    checkConstraint: (input) => {
       const action = `check hard constraint "${input.criterionId}" of evaluation "${input.evaluationId}"`
       const plan = requireOpened(cutOf(options), input.evaluationId, action)
       const criterion = requireJudged(plan, input.evaluationId, input.criterionId, action)
@@ -228,7 +238,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
           // The same rule as a trial's numbers, on the fact that decides admissibility: a candidate
           // that measured its own run may not also certify that run's constraints. Without this the
           // non-compensating rule degrades to "…unless the candidate checks itself".
-          const judged = now.judgement.find(entry => entry.criterionId === input.criterionId)
+          const judged = now.judgement.find((entry) => entry.criterionId === input.criterionId)
           // Whether the plan judges that criterion at all is the reducer's rule; this lookup is only
           // to reach the implementation whose identity must not be the run's executor.
           if (judged !== undefined) requireNotExecutor(options, judged, requireRun(cutOf(options), now.run, action), action)
@@ -244,8 +254,8 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
 function cutOf(options: MeasureCommandOptions): Cut {
   const cut: ControlReadCut = options.store.load()
   return {
-    evaluation: evaluationId => cut.stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId),
-    task: taskId => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
+    evaluation: (evaluationId) => cut.stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId),
+    task: (taskId) => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
   }
 }
 
@@ -254,7 +264,8 @@ function requireOpened(cut: Cut, evaluationId: string, action: string): OpenPlan
   const state = cut.evaluation(evaluationId)
   const plan = state === undefined ? undefined : { run: state.run, metric: state.metric, judgement: state.judgement }
   if (plan === undefined || plan.run === undefined || plan.metric === undefined || plan.judgement === undefined)
-    refuse('illegal-transition', `cannot ${action}: no measurement plan is open for evaluation "${evaluationId}"; open the evaluation before anything is measured in it`)
+    refuse('illegal-transition', `cannot ${action}: no measurement plan is open for evaluation "${evaluationId}"; open the evaluation before anything is measured in it`,
+    )
   return { run: plan.run, metric: plan.metric, judgement: plan.judgement }
 }
 
@@ -262,7 +273,8 @@ function requireOpened(cut: Cut, evaluationId: string, action: string): OpenPlan
 function requireRun(cut: Cut, run: EvaluationRun, action: string): RunState {
   const state = cut.task(run.taskId)?.runs[run.runId]
   if (state === undefined)
-    refuse('unknown-run', `cannot ${action}: task "${run.taskId}" never started run "${run.runId}", so there is no execution context to measure in`)
+    refuse('unknown-run', `cannot ${action}: task "${run.taskId}" never started run "${run.runId}", so there is no execution context to measure in`,
+    )
   return state
 }
 
@@ -278,12 +290,12 @@ function requireBubbledRun(cut: Cut, run: EvaluationRun, action: string): RunSta
 }
 
 /** One hard constraint of the plan, or a refusal listing what the plan does declare. */
-function requireJudged(plan: OpenPlan, evaluationId: string, criterionId: string, action: string): AcceptanceCriterion {
-  const criterion = plan.judgement.find(entry => entry.criterionId === criterionId)
+function requireJudged(plan: OpenPlan, evaluationId: string, criterionId: string, action: string): VerifierCriterion {
+  const criterion = plan.judgement.find((entry) => entry.criterionId === criterionId)
   if (criterion === undefined)
     refuse(
       'unknown-criterion',
-      `cannot ${action}: evaluation "${evaluationId}" does not declare hard constraint "${criterionId}" (declared: ${plan.judgement.map(entry => entry.criterionId).join(', ') || 'none'})`,
+      `cannot ${action}: evaluation "${evaluationId}" does not declare hard constraint "${criterionId}" (declared: ${plan.judgement.map((entry) => entry.criterionId).join(', ') || 'none'})`,
     )
   return criterion
 }
@@ -296,8 +308,9 @@ function requireJudged(plan: OpenPlan, evaluationId: string, criterionId: string
  * replaying last month's facts cannot answer it.
  */
 function requireHeldImplementation(options: MeasureCommandOptions, implementationDigest: string, action: string): void {
-  if (!options.implementations.some(entry => entry.implementationDigest === implementationDigest))
-    refuse('unregistered-verifier', `cannot ${action}: this deployment holds no implementation with digest ${implementationDigest.slice(0, 12)}…, so it cannot have produced this measurement`)
+  if (!options.implementations.some((entry) => entry.implementationDigest === implementationDigest))
+    refuse('unregistered-verifier', `cannot ${action}: this deployment holds no implementation with digest ${implementationDigest.slice(0, 12)}…, so it cannot have produced this measurement`,
+    )
 }
 
 /**
@@ -310,11 +323,15 @@ function requireHeldImplementation(options: MeasureCommandOptions, implementatio
  * makes the check read the table the stamp comes from: a role it does not resolve never reaches this
  * function, because the append path resolves the emitter role from the same table before it runs.
  */
-function requireNotExecutor(options: MeasureCommandOptions, criterion: AcceptanceCriterion, run: RunState, action: string): void {
+function requireNotExecutor(options: MeasureCommandOptions, criterion: VerifierCriterion,
+  run: RunState,
+  action: string,
+): void {
   const role = verifierRoleOf({ verifierRef: criterion.verifierRef, verifierVersion: criterion.verifierVersion })
   const actor = options.store.identityOf(role)
   if (actor === run.actor)
-    refuse('self-reported-evidence', `cannot ${action}: "${actor}" (role ${role}) started run "${run.runId}" and cannot also measure its criterion "${criterion.criterionId}"`)
+    refuse('self-reported-evidence', `cannot ${action}: "${actor}" (role ${role}) started run "${run.runId}" and cannot also measure its criterion "${criterion.criterionId}"`,
+    )
 }
 
 /**
@@ -332,5 +349,6 @@ async function emitRaw(
   payload: unknown,
   require?: () => void,
 ): Promise<Envelope> {
-  return options.store.emit({ commandId, protocol: MEASURE_PROTOCOL, version: MEASURE_VERSION, kind, subject, payload }, require) as Promise<Envelope>
+  return options.store.emit({ commandId, protocol: MEASURE_PROTOCOL, version: MEASURE_VERSION, kind, subject, payload }, require,
+  ) as Promise<Envelope>
 }

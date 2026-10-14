@@ -23,9 +23,11 @@ import {
   type RevisionRef,
 } from '../src/index.ts'
 import { unconsumedMethods } from '../src/task/consumption.ts'
-import { CHILD, createRevision, deployment, ENVIRONMENT, openAgent, pin, planned, REVISION, RUN } from './command-fixtures.ts'
+import { CHILD, createRevision, deployment, ENVIRONMENT, openAgent, pin, planned, REVISION, RUN,
+} from './command-fixtures.ts'
 import { refusalOf } from './fixtures.ts'
-import { admitted, assigned, failed, REVISION as PIN, RUN_ID, SCHEDULER, started, TASK_ID, taskRegistry } from './task-fixtures.ts'
+import { admitted, assigned, failed, REVISION as PIN, RUN_ID, SCHEDULER, started, TASK_ID, taskRegistry,
+} from './task-fixtures.ts'
 
 /** The method names this revision declares, as a deployment read them out of its own manifest. */
 const DECLARED = ['word-count', 'limit-check', 'normalize']
@@ -79,12 +81,14 @@ describe('a consumption fact is bound to the run it names', () => {
 
   it('refuses a fact whose source is empty', async () => {
     const log = await running()
-    expect(refusalOf(() => log.emit(consumed({ method: 'word-count', source: '' }))).code).toBe<RefusalCode>('malformed-payload')
+    expect(refusalOf(() => log.emit(consumed({ method: 'word-count', source: '' }))).code).toBe<RefusalCode>('malformed-payload',
+    )
   })
 
   it('refuses a run this task never started', async () => {
     const log = await running()
-    expect(refusalOf(() => log.emit(consumed({ method: 'word-count', runId: 'run-nope' }))).code).toBe<RefusalCode>('unknown-run')
+    expect(refusalOf(() => log.emit(consumed({ method: 'word-count', runId: 'run-nope' }))).code).toBe<RefusalCode>('unknown-run',
+    )
   })
 })
 
@@ -92,7 +96,8 @@ describe('the declared methods nothing consumed, below a cutoff', () => {
   it('names the declared methods with no consumption fact', async () => {
     const log = await running()
     await log.emit(consumed({ method: 'limit-check' }))
-    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count)).toEqual(['word-count', 'normalize'])
+    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count)).toEqual(['word-count', 'normalize',
+    ])
   })
 
   it('does not count a consumption fact above the cutoff', async () => {
@@ -115,7 +120,7 @@ describe('the declared methods nothing consumed, below a cutoff', () => {
       version: TASK_VERSION,
       kind: TASK_KINDS.runStarted,
       subject: TASK_ID,
-      payload: { runId: 'run-2', revision: elsewhere },
+      payload: { purpose: 'solve', runId: 'run-2', revision: elsewhere },
     })
     await log.emit(consumed({ method: 'normalize', runId: 'run-2', revision: elsewhere }))
     expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count)).toEqual([
@@ -132,11 +137,16 @@ describe('the trusted command surface', () => {
     await openAgent(live)
     await createRevision(live)
     const commands = await planned(live)
-    await commands.startRun({ commandId: 'start-child', taskId: CHILD, runId: RUN, revision: pin(live) })
-    const recorded = await commands.recordConsumption({ commandId: 'consumed-1', taskId: CHILD, runId: RUN, revision: pin(live), method: 'word-count', source: SOURCE })
+    await commands.startRun({
+      purpose: 'solve',
+      commandId: 'start-child', taskId: CHILD, runId: RUN, revision: pin(live),
+    })
+    const recorded = await commands.recordConsumption({ commandId: 'consumed-1', taskId: CHILD, runId: RUN, revision: pin(live), method: 'word-count', source: SOURCE,
+    })
     const entries = live.store.load().entries()
     // The log stamps the role, not the caller: the apparatus's own role, never the scheduler's.
     expect(recorded.emitter).toBe('runtime')
-    expect(unconsumedMethods(entries, ENVIRONMENT, REVISION, ['word-count', 'limit-check'], entries.length)).toEqual(['limit-check'])
+    expect(unconsumedMethods(entries, ENVIRONMENT, REVISION, ['word-count', 'limit-check'], entries.length)).toEqual(['limit-check',
+    ])
   })
 })

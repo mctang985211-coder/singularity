@@ -1,143 +1,140 @@
-import { cp, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdtemp, rm, writeFile, readFile, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { asyncRefusalOf } from '../../tests/fixtures.ts'
-import { agentFor, execFor, factsOf, mount, serviceOf } from './seam.ts'
-import { callerOf } from '../src/apparatus.ts'
+import { openApparatus, callerOf, taskStateOf } from '../src/apparatus.ts'
+import { loadDomain } from '../src/domain.ts'
+import { spawnProcess } from '../src/process.ts'
 import { propose } from '../src/surfaces.ts'
-
-const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
-const counting = "import { readFileSync } from 'node:fs'; process.stdout.write(String((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).length))"
+import { readTask } from '../src/read.ts'
+import { submit } from '../src/submission.ts'
+import { sealedBytes } from '../src/sealed.ts'
+import { fixtureReview } from './review-fixture.ts'
+import { attachmentsAt, FakePersistence, agentFor, execFor, fakeExecution } from './seam.ts'
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => { await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))) })
 
-async function setup(domain = domainDir) {
-  const workspaceRoot = await mkdtemp(join(tmpdir(), 'assembly-integrity-'))
-  roots.push(workspaceRoot)
-  const { ctx, medium, apparatus } = await mount({ controlId: 'integrity', domainDir: domain, workspaceRoot })
-  const agent = agentFor('worker', 'worker-session')
-  const service = serviceOf(ctx)
-  const call = (id: string) => service.forCall(execFor(agent, id))
-  const caller = callerOf(agent)
-  const proposal = await propose(apparatus, caller, 'propose', { goal: 'count letters' })
-  return { call, proposal, medium, apparatus, caller }
+async function setup() {
+  const root = await mkdtemp(join(tmpdir(), 'sealed-submission-'))
+  roots.push(root)
+  const medium = new FakePersistence(),
+    apparatus = await openApparatus(
+      'submission',
+      root,
+      await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
+      medium as never,
+      attachmentsAt(root),
+    )
+  const agent = agentFor('worker', 'worker'),
+    caller = callerOf(agent),
+    proposal = await propose(apparatus, caller, 'root', { goal: 'count' })
+  const send = (id = 'submit') =>
+    submit(
+      apparatus,
+      fakeExecution(() => undefined),
+      caller,
+      execFor(agent, id),
+      { taskId: proposal.taskId, path: proposal.artifact },
+      new AbortController().signal,
+      fixtureReview(apparatus),
+    )
+  return { apparatus, proposal, medium, send, caller, agent }
 }
-
-describe('complete solve and immutable submission', () => {
-  it('starts the Run before the caller solves or submits', async () => {
-    const { call, proposal, medium } = await setup()
-    expect(factsOf(medium).filter(fact => fact.kind === 'run/started')).toHaveLength(1)
-    expect(await call('status').status({ taskId: proposal.taskId })).toMatchObject({ phase: 'running', runs: 1, receipt: null })
+describe('sealed file submission', () => {
+  it('refuses a second submission during review without failing the already sealed Run', async () => {
+    const h = await setup()
+    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '35')
+    let reviewing!: () => void, finish!: () => void
+    const started = new Promise<void>((resolve) => { reviewing = resolve })
+    const release = new Promise<void>((resolve) => { finish = resolve })
+    const judge = fixtureReview(h.apparatus)
+    const pending = submit(h.apparatus, fakeExecution(() => undefined), h.caller, execFor(h.agent, 'first'),
+      { taskId: h.proposal.taskId, path: h.proposal.artifact }, new AbortController().signal,
+      async (...args) => { reviewing(); await release; return judge(...args) })
+    await started
+    try {
+      await expect(h.send('second')).rejects.toThrow('no working Run')
+      expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId])
+        .toMatchObject({ status: 'running', stage: 'submitted' })
+    } finally { finish() }
+    expect((await pending).verdict).toBe('pass')
+    await h.apparatus.store.close()
   })
-
-  it('rejects a submission symlink before the host can overwrite another Run or input', async () => {
-    const { call, proposal } = await setup()
-    const protectedFile = join(proposal.workspace, 'protected.txt')
-    await writeFile(protectedFile, 'unchanged')
-    await symlink(protectedFile, join(proposal.workspace, 'program.mjs'))
-    await expect(call('submit').submit({ taskId: proposal.taskId, program: counting })).rejects.toThrow('symbolic link')
-    expect(await readFile(protectedFile, 'utf8')).toBe('unchanged')
+  it('judges the actual artifact and reuses its committed answer after workspace deletion', async () => {
+    const h = await setup()
+    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '35')
+    const answer = await h.send()
+    expect(answer.verdict).toBe('pass')
+    const run = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!
+    expect((await sealedBytes(h.apparatus, run.submission!.files.artifact)).toString()).toBe('35')
+    expect(run.submission!.files).not.toHaveProperty('program')
+    const count = h.medium.events.length
+    await rm(h.proposal.workspace, { recursive: true })
+    expect(await h.send()).toEqual(answer)
+    expect(h.medium.events).toHaveLength(count)
+    expect((await readTask(h.apparatus, taskStateOf(h.apparatus, h.proposal.taskId))).runs.at(-1)!.receipt?.source?.sessionId).toBe(
+      'worker',
+    )
+    await h.apparatus.store.close()
   })
-
-  it('rejects a new solve request while that Task already has a working Run', async () => {
-    const { call, medium, proposal } = await setup()
-    const committed = medium.events.length
-    expect((await asyncRefusalOf(() => call('retry').retry({ taskId: proposal.taskId }))).code).toBe('illegal-transition')
-    expect(medium.events.length).toBe(committed)
+  it('finishes a negative review and a failed acceptance without failing the reviewer Run', async () => {
+    const h = await setup()
+    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '0')
+    expect((await h.send()).verdict).toBe('fail')
+    const reviews = h.apparatus.store
+      .load()
+      .entries()
+      .filter((e) => e.kind === 'review/completed')
+    expect(reviews).toHaveLength(1)
+    expect(
+      h.apparatus.store
+        .load()
+        .entries()
+        .some((e) => e.kind === 'review/failed'),
+    ).toBe(false)
+    await h.apparatus.store.close()
   })
-
-  it('rejects a changed goal on the retry boundary before preparing another Task', async () => {
-    const { call, medium, proposal } = await setup()
-    const committed = medium.events.length
-    expect((await asyncRefusalOf(() => call('retry').retry({ taskId: proposal.taskId, goal: 'changed' } as never))).code).toBe('malformed-declaration')
-    expect(medium.events.length).toBe(committed)
+  it('refuses changed frozen inputs and symbolic artifact paths', async () => {
+    const h = await setup()
+    await writeFile(join(h.proposal.workspace, 'in/source.txt'), 'changed')
+    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '35')
+    await expect(h.send()).rejects.toThrow('evidence-input-mismatch')
+    expect(
+      h.apparatus.store
+        .load()
+        .entries()
+        .some((e) => e.kind === 'review/started'),
+    ).toBe(false)
+    await h.apparatus.store.close()
+    const s = await setup()
+    const outside = join(s.proposal.workspace, 'outside')
+    await writeFile(outside, '35')
+    await symlink(outside, join(s.proposal.workspace, s.proposal.artifact))
+    await expect(s.send()).rejects.toThrow('symbolic link')
+    expect(await readFile(outside, 'utf8')).toBe('35')
+    await s.apparatus.store.close()
   })
-
-  it('fails correct stdout when the producing process exits nonzero', async () => {
-    const { call, proposal, medium } = await setup()
-    const answer = await call('submit').submit({ taskId: proposal.taskId, program: "process.stdout.write('35'); process.exit(3)" })
-    expect(answer).toMatchObject({ verdict: 'unknown', phase: 'failed' })
-    expect(answer.detail).toContain('3')
-    expect(factsOf(medium).some(fact => fact.kind === 'run/verified')).toBe(false)
-    expect((await call('status').status({ taskId: proposal.taskId })).receipt).toMatchObject({
-      source: { sessionId: 'worker-session' }, submission: { executionFailure: expect.stringContaining('3') },
-    })
-  })
-
-  it('records a verification runtime failure instead of leaving the sealed Run running', async () => {
-    const domain = await mkdtemp(join(tmpdir(), 'assembly-verifier-'))
-    roots.push(domain)
-    await cp(domainDir, domain, { recursive: true })
-    const { call, proposal, medium } = await setup(domain)
-    await rm(join(domain, 'verifier.mjs'))
-    await expect(call('submit').submit({ taskId: proposal.taskId, program: counting })).rejects.toThrow('unregistered-verifier')
-    expect(await call('status').status({ taskId: proposal.taskId })).toMatchObject({ phase: 'failed' })
-    expect(factsOf(medium).find(fact => fact.kind === 'run/failed')).toMatchObject({
-      payload: { runId: proposal.runId, reason: expect.stringContaining('verification-failed') },
-    })
-  })
-
-  it('refuses changed content on redelivery without writing facts or files', async () => {
-    const { call, proposal, medium } = await setup()
-    await call('submit').submit({ taskId: proposal.taskId, program: counting })
-    const committed = medium.events.length
-    expect((await asyncRefusalOf(() => call('submit').submit({ taskId: proposal.taskId, program: "process.stdout.write('0')" }))).code).toBe('command-conflict')
-    expect(medium.events.length).toBe(committed)
-  })
-
-  it('allows only one concurrent submission to touch a Run', async () => {
-    const { call, proposal } = await setup()
-    const requests = await Promise.allSettled([
-      call('first').submit({ taskId: proposal.taskId, program: counting }),
-      call('second').submit({ taskId: proposal.taskId, program: counting + '\n' }),
-    ])
-    expect(requests.filter(request => request.status === 'fulfilled')).toMatchObject([{ value: { verdict: 'pass' } }])
-    expect(requests.filter(request => request.status === 'rejected')).toHaveLength(1)
-  })
-
-  it('executes a concurrently redelivered submission only once', async () => {
-    const { call, proposal, medium } = await setup()
-    const counter = join(proposal.workspace, 'executions.txt')
-    const program = `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(counter)}, ${JSON.stringify('execution\n')}); ${counting}`
-    const request = { taskId: proposal.taskId, program }
-    const answers = await Promise.allSettled([
-      call('same-submit').submit(request),
-      call('same-submit').submit(request),
-    ])
-    expect(await readFile(counter, 'utf8')).toBe('execution\n')
-    const successful = answers.find(answer => answer.status === 'fulfilled')!
-    expect(successful).toMatchObject({ value: { verdict: 'pass' } })
-    expect(answers.filter(answer => answer.status === 'rejected')).toMatchObject([{ reason: { refusal: { code: 'illegal-transition' } } }])
-    const count = medium.events.length
-    expect(await call('same-submit').submit(request)).toEqual(successful.value)
-    expect(medium.events.length).toBe(count)
-  })
-
-  it('keeps a receipt fixed after another Task is admitted', async () => {
-    const { call, proposal, apparatus, caller } = await setup()
-    await call('submit').submit({ taskId: proposal.taskId, program: counting })
-    const before = await call('status').status({ taskId: proposal.taskId })
-    await propose(apparatus, { ...caller, agentId: 'other', sessionId: 'other-session' }, 'other', { goal: 'another human task' })
-    expect(await call('status').status({ taskId: proposal.taskId })).toEqual(before)
-  })
-
-  it('returns identical content from the recorded result after its files are deleted', async () => {
-    const { call, proposal, medium } = await setup()
-    const first = await call('submit').submit({ taskId: proposal.taskId, program: counting })
-    const committed = medium.events.length
-    await rm(proposal.workspace, { recursive: true })
-    expect(await call('submit').submit({ taskId: proposal.taskId, program: counting })).toEqual(first)
-    expect(medium.events.length).toBe(committed)
-  })
-
-  it('retains the exact submitted program and source in the formal receipt', async () => {
-    const { call, proposal } = await setup()
-    await call('submit').submit({ taskId: proposal.taskId, program: counting })
-    const status = await call('status').status({ taskId: proposal.taskId })
-    expect(status.receipt).toMatchObject({ source: { sessionId: 'worker-session' }, submission: { requestId: expect.any(String) } })
-    expect(await readFile(join(proposal.workspace, 'program.mjs'), 'utf8')).toBe(counting)
+  it('refuses executor-generated approval as acceptance evidence', async () => {
+    const h = await setup(),
+      run = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!
+    await expect(
+      h.apparatus.tasks.recordVerdict({
+        commandId: 'self',
+        taskId: h.proposal.taskId,
+        verdict: {
+          runId: run.runId,
+          criterionId: 'letters',
+          reviewId: 'invented',
+          verifierRef: 'independent-review',
+          verifierVersion: '1',
+          implementationDigest: '1'.repeat(64),
+          verdict: 'pass',
+          artifactDigest: '2'.repeat(64),
+          inputDigests: run.bubble!.inputs,
+        },
+      }),
+    ).rejects.toThrow('self-reported-evidence')
+    await h.apparatus.store.close()
   })
 })

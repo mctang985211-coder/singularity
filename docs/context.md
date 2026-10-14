@@ -7,72 +7,48 @@
 
 ### 18.1 用户裁定与长期约束
 
-以 `/home/ROXY/code/docs` 的原始需求共同主干为准，旧 Singularity 只读复用；私有运行环境固定为 `/home/ROXY/singularity-next/`。全部节点是可独立继续的普通 DSH 主 agent。只提供编排基建，模型自主探索、分解、编程与验收；不使用导演脚本、预制候选、固定子树或工具顺序。
+以 `/home/ROXY/code/docs` 的 KISS 目标为准；旧 Singularity 只读参考，开发和运行使用 `/home/ROXY/singularity-next/`。所有节点拥有独立 DSH 主会话，保留文件、命令、编程和 Skill 能力。模型自主分解和探索，不预制候选、解答、子树、轮次或工具顺序。
 
-原生人类入口创建根 Task；节点仅可重试自己的失败 Run，保留同一契约、冻结输入和资产版本；新增任务统一分解准入。
-统一 TaskTemplate、Skill、Tool 不可变 Revision 与单一发布指针。仅根验收后创建的改进任务树可评估并自动固化候选；模型没有直接发布入口。未发布冻结版本可用于探索；每个 Run 固定版本、绑定和真实使用记录，根契约受保护。Independent Review → 真实评估 → 发布审核通过后自动固化。
+Task 只声明目标、冻结输入、交付物和可判断的标准。模板是可选来源；审核实现归独立 ReviewRun。执行节点不参与方法治理，改进归根任务关闭后的 RSI 链。历史实验只读，新实验使用新协议，不建兼容桥。
 
-以最简单的直接实现施工；先用最小公开行为 spec 固定真实轨迹已确认的错误，再修复。debug 与产品验收以真实 RTL 运行轨迹为准，不依赖复杂 spec。遇到无法从代码与既有裁定解决的分叉，带详细背景及选项提问。不兼容、不兜底，修复时删除作废代码和注释。
+SHA256 仅修改 `sha256_w_mem.v`，保持端口、复位、SHA224/SHA256 功能和逐周期时序；完整 core 面积基线 64858.4544 µm²，改善至少 1%。完整候选原生成本含提案、求解、验收与最终发布审核，最多为基线 125%。累计预算 3 亿 tokens，high reasoning；缺失 usage 明确停止，保守上界预留仍扣原预算，不当成实际候选费用。
 
 ### 18.2 当前状态与效果验收边界
 
-- 原生界面入口已接纳根 Task/Run，Bubble 挂载在预设选择后同样生效；前端 ReactFlow map 和节点自身 DSH 会话读取同一 committed snapshot。
-- 2026-10-13 接手基线为 `67c7ffe` 及现有未提交改动。真实重试关联、失败 flush 屏障和统一资产链已实现。清理时删除手工 approval 发布入口、独立 approval seam 及失效 release/cd/round 探针，发布只接受准确独立审核证据；发布历史变异检查迁至现有公开行为测试并确认捕获。清理后全量串行回归曾通过 61 个文件、706 项，保留的五个离线协议探针通过。19:15 起按实际恢复断点修改现有工具说明、共用读取范围和提案计费；本次未新增或运行 spec，以真实会话验证启动，类型检查、构建、摘要、gates 与 diff 检查通过。新构建已部署并重启私有 DSH（PID `1485313`，端口 `7331`）；离线检查不证明自主分解、独立验收或 RSI 效果完成。
-- 实际 SHA256 运行使用 `singularity-autonomous-v9`，根 `task-9eb7334b7e8f58b0`、Run `run-b19e96b4d2c43016` 与原生会话 `session-b0cbc80c-72dc-48f7-867c-4fa09911da8c`。模型自行提交局部测得 62225.9296 µm² 的产物（基线 64858.4544 µm²），自动创建 `review-4e7ab1c2610dc03d800556c1` 独立审核节点；根任务已由该独立节点通过验收，面积复测为 62225.9296 µm²（改善 4.0589%）；初始发布审核 `review-c35d880485916981445bbdc3` 已通过，统一发布指针自动切换至 `method-960772a2c32183c83f0607b1`；编排自动创建 `improve-71e04a36c02d7533f4eed028`、Run `run-d13c4db552ef49b7` 并冻结真实探索轨迹。候选评估和改进赢家发布仍待实际验证。
-- 只修改 `sha256_w_mem.v`；保持端口、复位、SHA224/SHA256 和逐周期时序，整核面积至少改善 1%。包含审核的原生 token 成本增幅不超过 25%，high 思考，总预算 3 亿 tokens。用户要求运行启动后停止监控，由用户报告实际断点；没有固定轮次、候选数或根/子节点数量。
-- 自主任务链、独立审核、自动固化及后续使用发布版本仍需真实运行验证；无赢家、预算耗尽、未改善或证据不足如实报告。
-- 私有 DSH 已重载，原改进 session 通过 retry 开启 `run-9a2930ea2b07825f`。`round-clean-1:bootstrap:evaluation` 于正式 seq199 补录基线 trial，准确引用 Task `task-268756582a71ebe4` 的 verified 重试 Run `run-dcdad2ee18eada48`，面积 64002.6336 µm²（改善 1.3196%），quality 0.9868047919439782，包含审核成本 32,661,485；未重新求解基线。候选 `method-fc46476332460066eaa0e1a8` 已进入 Task `task-2c78b4b37f2e318d` / Run `run-4e811a597dd79f43`（seq206 启动，seq209 evaluation/opened）。尚无候选结果、轮次决定或 RSI 赢家发布完成事实。
-- 2026-10-13 19:21（北京时间）实测确认恢复：改进 session 在 seq1440 重发同一冻结 `round-clean-1` 请求；现有 `evolve → createNativeSolve → openChildSession` 恢复原候选 `run-4e811a597dd79f43`，候选 seq415 的 continuation 明确引用原 Task/Run，seq416 请求使用原 yingjun/deepseek-v4.1-flash/high 路由，seq418 调用 bash 检查原工作区，seq419 成功返回原候选文件清单与校验值。已确认候选实际执行后停止监控。控制日志仍为 212 项事实，唯一指针仍为 `method-960772a2c32183c83f0607b1`，未新增 Task/Run 或重复基线；候选尚无正式提交、独立判决、trial 或轮次决定。
-- 启动检查点原生已知费用 170,506,427 tokens，预留 1,131,072，剩余 128,362,501，无新增未知 usage。本对基线成本 32,661,485，25% 上限 40,826,856.25；恢复前候选提案和求解成本下界已为 46,922,000（增幅 43.66%），尚未包含审核和新恢复开销，因此本对按冻结规则不能发布赢家；正式无赢家决定仍须真实结算。重启前局部 RTL 62233.4368 µm² 与四项测试通过不代替封存独立验收。
-- 本次沿既有端口完成三处修改：公开 evolve 说明同 round/冻结请求可幂等继续，明确同步调用中断后没有在飞 worker；task_status 与 history 共用原读取范围，改进节点可只读所属 evaluation，trial 间保持隔离；proposalCostOf 从原批次事件起点计到恢复请求，纳入新增消息并保留原基线/计划事实。计费范围和读取范围已实现并装载，候选正式 costBasis 与权限行为仍需后续实际调用核验。当前候选的 yosys/iverilog/sky130hd gaps 是固定 Revision 的未覆盖声明，不另建注册库或改写 Run 绑定。新构建的资产 Tool 消费、故障 flush 与赢家发布仍待实际证据。
-- 21:14 已按用户选择实现两路独立求解/验收链：基线冻结 evaluation 口径后启动候选，基线链结束后释放第二路；各链独立封存和记录 trial，全部结算后按固定 slot 提交候选和决定，发布审核仍在决定后。恢复可从本轮基线或先完成的候选 trial 读取原提案计费范围。类型检查、构建、新鲜度、gates、diff 与 111 项相关回归通过，未新增 spec。现有 PID `1485313` 的单候选仍实际执行，未为并行加载再次中断；新构建供下次宿主启动装载，真实两路重叠及吞吐尚未验证。
+- 基于 `f892376` 的 Task v10、Review v1、snapshot v6 历史验证包含 657 项测试、7 项协议门禁和五个离线探针；提示与工具说明修正另经构建、43 项方法/分解测试和 32 项读面/分解测试复验。该历史结果不代表当前 Task v12、Review v2、snapshot v7 的验证，也不证明领域收益。
+- 当前 Task v12、Review v2、snapshot v7 的完整 verify 通过 674 项测试与 7 项门禁；等待责任的 `assembly-m26-parent-waits-for-a-running-child` 变异被捕获。测试覆盖问答持久化、真实 Cordis Skill scope、方法固定版本、按文件工具授权、证据分页、审核贡献引用、原父 Run 通知及已提交孩子的冷恢复；验证日志位于实验目录 core-v12-final-verify.log，离线检查不等于复杂任务收敛。
+- 隔离实例位于 `/home/ROXY/singularity-next/task-rsi-20261014-core-v10/`。`letters3` 根 `task-0ba8dbedac505bea` 独立审核通过；RSI `improve-6a418dd39b84a823e81c73da` 自主提交候选、完成独立双侧测评并决定无赢家，报告经 `review-05005d3b91989f6d1016295b` 通过，control seq 73 记录 completed。该实例费用 3,866,739 tokens，无未知 usage；它证明流程闭环，未发布新方法，也不证明复杂任务机制有效。
+- 首次 SHA256 根 `task-e2f97f93931e506f` 包办探索，最终记录 80 次 bash、2 次 singularity_read、零分解；按用户纠正中断，未提交验收。已知费用 4,592,384 tokens，取消产生 1 条未知 usage，按声明上下文和输出上限保守预留 1,131,072；该预留不是实际可比较候选费用，旧实例不继续调用。
+- `sha256-task`、`sha256-plan` 提示验证仍延后分解至基线测量之后，已中断，各保守预留 1 条未知 usage。当前 `sha256-workflow` 使用 high reasoning，启动额度 67,663,909 tokens，继承累计费用保守上界 232,336,091。根 `task-92e516555123d8df` 先给计划，第一个工具为分解；control seq 15 形成 schedule `task-35e120a79d93827d` → integration `task-833f0219b5daacbd`，均支持父标准。根及 schedule 随后收到用户纠正的原生 steer，交付路径见 `workflow-correction-delivery-*.json`，不将该干预冒充默认提示的独立行为证明。
+- 原历史实例和已中断实例只读。累计费用详见实验目录 `inherited-accounting.json`、各 `*-experiment.json` 和原生事件；当前实例费用继续扣同一余额。不改写未知 usage，不另加预算。
+- SHA256 workflow 的保存终点：26 个任务、9 次分解、8 次提交、6 次通过、1 次失败、1 次审核未完成；根任务未提交。9 个分解没有 handoff，父子问答为零；方法消费事实仅 4 条。费用 53,854,161 tokens；该旧接线实例只读，不把局部审核冒充根闭环。逐任务审计入口为实验目录 core-v12-audit.json。
+- 待完成：新接线的原生端到端验证及复杂 SHA256 的协作效果验收。无赢家、无候选、证据不足、未达标或预算不足均如实记录。
 
 ### 18.3 当前结构边界
 
-唯一事实提交队列保留；文件、程序、模型、会话句柄在队列外运行，进程内资源不决定 Task/Run/预算。
-同 Task 一个未结算 Run；Task v9 的 `working → submitting → submitted` 固定请求、程序/产物/输入摘要与 transcript 前缀。
-预约端口复用 `Decision { envelope, fresh }`，只有新预约执行副作用；在飞同请求明确拒绝，结算后重送返回原结果。
-父提交闸等待派发工作结束；失败和证据不足的分支保留为轨迹，父 criterion 只由父自己的独立验收接受。输入依赖只消费 verified 封存产物。
-正式 receipt 固定在目标 Run 首次终态，并逐项核验公开完整前缀的序号、摘要与链。
-程序与 verifier 共用有界进程端口，取消/关闭等待真正退出，并终止继承进程组中的后代。
-审核和改进通用模板进入统一 Revision，具体对象是 Run 的冻结输入；递归子任务继承准确冻结输入。资产、验收和发布审核采用已发布版本或部署 seed，恢复保留审核 Run 原版本。改进输入包含经过封存摘要核验的真实原生会话轨迹。候选使用准入读取准确独立审核证据。每批原生提案成本包含改进节点及其候选编程分解树，按准确会话事件范围计算并均摊到候选；基线只计本批求解与验收，候选另计自己的资产审核；最终发布审核计入 25% 成本上限。验收恢复复用首次冻结的审核输入并核对结构化判决，不使用临时执行路径创建新审核；评估恢复复用已提交 trial 与提案成本范围，发布审核固定草案时的事实前缀。
-能力绑定、prompt、Skill 加载、Tool 执行和消费来源统一读取 Run 固定的资产 Revision。绑定在启动时从该版本 Skill 和同名 Tool 解析并冻结，未覆盖能力保留为缺口；绑定 Skill 内容默认进入执行上下文，消费来源区分 context 送达与显式加载，送达不证明行为效果；Tool 成功执行才记录消费。新根合同仅保存人类目标，候选模板指导独立进入执行上下文，同时送达既有验收命令、可读参考目录与测量模块入口。完整版本必须包含审核与改进模板，加载、分解和发布不临时补建 Revision。唯一发布指针只影响新 Run，已有 Run 与重试继续使用各自固定版本。
+TaskContract = goal / artifact / inputs / criteria / optional template；一次性责任可选择 skills / capabilities，模板责任只使用固定模板的选择；criteria 仅有稳定 ID 与效果。测量实现仍单独固定 verifier ref、version、implementation digest。一次性契约直接调度，子任务关联父标准，精确重复的祖先契约和输入拒绝；模板来源不参与重复规避。
 
-TaskTemplate 的 applicability 与 decomposition.children 表达可复用领域职责及直接孩子关系，和 Skill/Tool 共用一个 Revision。agent 在实质候选探索或连续实验批次前建立职责，孩子承担剩余工作，父节点复用封存结果完成集成及独立验收，保留全部编程能力。agent 可通过 useTemplateDecomposition 选择该 Run 绑定的定义，也可声明当前分解；只展开选定的直接孩子，相同声明幂等，实例 key 冲突拒绝。系统 prompt 每次按 Run 固定的 purpose 选择求解、审核或改进职责，共用工具能力和合同协议；领域探索的分解触发条件不送达审核节点。审核优先在当前职责内形成有界检查与判决，避免自由合同准入递归，读取范围包含明确冻结的候选和 basis，不扩展到无关资产。改进输入优先提供由原生事实导出的职责、关系、判决、封存产物、消费和会话位置摘要，完整冻结轨迹按需读取。RSI 仍比较完整方法，costSummary 拆分执行、提案与资产审核，仅作投影，25% 总成本合同不变。
-审核和求解等待返回同 Task 当前有效的结算 Run；witness、产物与评测来源跟随该 Run，恢复复用已验证结果。评测保留 evaluation/opened 的冻结计划，实际重试结果须匹配同 Task、冻结输入和执行上下文。
-标准 `session/event` 的 `turn/end error/aborted/max-tokens` 关联准确责任 session 的 working Run；本 session 的 flush 等待失败事实持久化，外层在屏障后读取 committed 状态。卸载等待持久化，主动卸载先撤销监听。
+Run 直接固定方法版本，Bubble 冻结输入附件、模型、工具、工作区和作用域。提交以路径封存实际字节，`working → submitted` 为唯一提交路径；独立审核绑定准确产物和标准，执行者不能自判。审核的 fail 是完成判断，运行失败另记。取证子 Task 各自独立审核，ReviewRun 不触发审核审核者。
 
-### 18.4 W1/W2 检查点与证据边界
+执行、审核、RSI 各有小接口面。默认只送当前职责、相关方法摘要和依赖引用；产物正文不进入任务历史，按 UTF-8 字节分页读取（默认 16384，最大 32768）；轨迹按事件分页（默认 20，最大 100）。模板索引按需分页返回名称与目标（默认 20，最大 100），按 ID 读取定义，不扩大 Skill / Tool 授权。完整方法归 RSI 或独立审核按引用读取。候选格式仅随 RSI 按需读取返回。子任务继承方法，普通执行节点不能创建或切换候选。
 
-W1/W2 已完成端口回归及四类私有 DSH 真实浏览器出口：
+执行提示要求任何工具前先规划责任、交付与依赖；非原子任务的第一个工具必须为分解，未知范围由调查 Task 解决，不以摸底延迟分解。仅有一个有界结果、没有独立未决责任时可说明原子性后直接执行，一个最终文件不足以证明原子性。候选机制、正确性调查或测量异常形成独立可判断的证据时必须成为 Task；本地小实验仅限当前原子责任内部。父节点等待已审核子证据，保留证据如何影响选择和集成。RSI 学习这套 TaskTemplate 工作流及其绑定的 Skill、Tool，作为完整方法版本测评并切换同一指针；不增加计划协议或分解配额。
 
-| 出口 | 脱敏证据 |
-|---|---|
-| 完整求解、独立验证、实际三工具与磁盘摘要来源 | `/tmp/singularity-w1-live.json`、同名 png |
-| 成功 propose 后在飞 SIGKILL，同 session/Task/Run/工作区恢复，仅一个 Run 最终 verified | `/tmp/singularity-w2-working-fixed.json`、同名 png |
-| durable submitted 后 SIGKILL，同封存 submission/source 恢复，后续只读 status，不重新执行程序 | `/tmp/singularity-w2-submitted-final.json`、同名 png |
-| 原生 Stop 的 turn/end aborted/user 形成准确 Run failed，另一 session 的 working Task 不变 | `/tmp/singularity-w2-aborted.json`、同名 png |
+### 18.4 终局、异步推进与恢复
 
-当前检查点通过 core build、assembly 独立 typecheck、完整测试、assembly build、静态门禁自检和 diff 检查。
-定向变异已核验同 Task 活动 Run、请求身份摘要、receipt 终态 cutoff/连续序号及随重构迁移的现行目标。
-W3 真实链验收替换旧 G2 产品探针；W4/W5 的 G2 主链与完整面板验收已通过，入口见 [实跑测试](e2e-testing.md)。
-真实 provider `stream_read_error` 在接线修复前已观察；修复后标准错误端口有 Session/driver spec，但没有再次遭遇真实 provider 故障。
-探针缺陷造成的失败保留在 `/tmp/singularity-w2-working.json` 与 `/tmp/singularity-w2-submitted.json`，不计成功产品证据。
+Run 失败不立即等于 Task 关闭：根 agent 可在当前回合重试；静默且没有新的 working Run 时才关闭根。成功、失败和预算终止都可进入后续分析，evaluation 根不触发 RSI。审核尚未委派取证任务时没有计划通知；冷恢复已提交的孩子仅恢复原会话与独立验收，不给执行者重发求解指令，验收完成后从新 fold 推进依赖。
+
+业务结果返回后，后台等待相关原生会话静默并 flush，封存完整轨迹和费用，再启动独立分析。RSI 提交持久化 round 请求立即返回；宿主从现有 measure / strategy / release 事实继续，复用 trial、审核、决定和唯一发布指针。通知使用现有带身份的原生消息恢复，不另建工作流或状态文件。未执行 RSI 必须说明原因。
 
 ### 18.5 不要重建的基础
 
-保留单一信封/控制 store/提交队列、闭合成员和版本边界；已验证值的缓存可复用，不重复重放/声明。
-ControlSessionStore 拥有独立 DSH 控制 session/write lease/flush 屏障；读 cut 没有写权限，屏障失败不能返回成功。
-根 Web Agent 借用宿主句柄，child 独占句柄及 disposer 归创建 owner；恢复准确 session，不能再次 resume live writer。
-任务节点继承准确父的实际 preset scope；审核节点创建与恢复明确挂载 `singularity-review`，不继承任务节点的编程身份、目标规划或方法创作工具。所有节点保留文件、命令、编程和 Skill 能力。审核仅暴露提交、重试、状态与范围内历史；Run 职责也拒绝审核发起领域分解和方法执行或修改。准入合同只判安全性与可用性，未验证的收益声明独立记录，不能要求审核通过候选搜索补齐；验收与发布继续检查各自的完整证据。
-RRSI 只移植决定/正则化约束，见 [ADR0001](adr/0001-rrsi-port-boundary.md)；已接受分歧见 [divergence-ledger](divergence-ledger.md)，不顺手改回上游算法。
-开发和验收只用 [私有 DSH](standalone-dsh.md)，旧 harness 只读参考。W9 目前仅受控演示通过，真实领域 RSI 与改善效果待验收。
+保留单一信封、ControlSessionStore、append 队列、fold、闭合 schema、版本门、身份检查、不可变附件与证据绑定。内存仅管理资源，不代表业务进度；前端读取同一 committed projection。Web 根借用宿主会话，自建会话 disposer 归创建者，卸载可中断后台等待。
 
-核心采用 Task v9：同一 Task 只保留一个未结算 Run，阶段为 `working → submitting → submitted`。
-`run/submitting` 先绑定可信请求身份与内容摘要并关闭新写，`run/submitted` 再封存程序/产物/输入摘要及 session/transcript 来源；
-独立判决绑定封存产物。底层直接 verifier 路径保留，进入判决后不能再开始提交。
-定向反例入口：`mutate:core-w1-single-active-run`、`mutate:core-w1-reserved-request-digest`。
-W2 receipt 来源入口：`mutate:core-w2-receipt-terminal-cutoff`、`mutate:core-w2-receipt-every-sequence`。
+部署 seed 直接初始化当前方法。候选只做结构、绑定、工具样例和受保护边界检查；任务审核与最终发布审核独立保留。发布要求 committed 决定、独立见证、实际方法消费、成本上限及匹配 expected pointer。
+
+方法绑定贯穿上下文、原生 Skill provider、singularity_run_method 和 Bubble 工具挂载。执行不从整个方法库授权：Skill 来自当前 Task 的固定选择；Tool 只有绑定文件可挂载，Bubble 记录同一方法版本和实现摘要。未覆盖 capability 明确列为 gap，不扩大方法授权。
+
+定向反例包括 `mutate:core-w1-single-active-run`、`mutate:core-w1-sealed-request-digest`、`mutate:core-w2-receipt-terminal-cutoff`、`mutate:core-w2-receipt-every-sequence`。变异细节由现有 baseline 持有。
 
 ### 18.6 现有证据入口
 
@@ -87,3 +63,17 @@ W2 receipt 来源入口：`mutate:core-w2-receipt-terminal-cutoff`、`mutate:cor
 | 协议成员与读者 | `mutate:protocol-copied-rule-refused`, `mutate:protocol-nested-reader-widened`, `mutate:protocol-post-declare-push`, `mutate:protocol-nested-workspace-reader-widened`, `mutate:protocol-nested-metric-reader-widened`, `mutate:protocol-nested-weights-reader-widened`, `mutate:protocol-nested-run-reader-widened`, `mutate:protocol-nested-outcome-reader-widened`, `mutate:protocol-nested-verdict-reader-widened` |
 
 完整历史原文用 `git show 35b0c7c:docs/context.md` 查证。当前合同/状态不追加逐轮解释，关闭问题从本页移除并留在提交历史。
+
+
+### 18.7 旧协作能力的逐项去向
+
+| 旧能力与源码入口 | Core 处理 | 当前接线及理由 |
+|---|---|---|
+| Task 契约、依赖 DAG、冻结输入与验收（task / task-runtime） | 保留并加强 | Task / Run / Bubble / Review 单一控制日志；子支持不替代父验收，负面调查仍可独立通过。 |
+| 结构化 handoff（task-runtime/src/handoff.ts） | 替代 | 委派事实仅保存 context 与已验证 evidence 引用；父目标、标准、supports、同级责任和准确父 Run 从同一 fold 装配。决策、范围排除、假设及未决问题由 context 交接，不复制父会话或再存一份 handoff 索引。 |
+| 有范围的任务与历史读取（context/src/reads/guards.ts、context/src/session） | 简化保留 | 自身分支、祖先、直接关系、交接及回答引用；增加直接同级责任可见性以复用证据，同级后代仍受边界限制。正文/轨迹分页，审核读取冻结前缀，跨根拒绝。 |
+| 持久化父子问答（task-runtime/src/service/questions.ts） | 简化保留 | question / answer 绑定双方准确 Run，requestKey 幂等；阻塞问题关闭执行与提交，现有原生 inbox 恢复投递，不新增问答文件、第二消息队列或状态索引。 |
+| Task→Skill/Tool capability manifest（task-runtime/src/capability.ts） | 替代 | 固定方法内按模板或一次性契约选择；上下文、provider、调用授权和文件挂载一致。部署原生基础工具仍由 DSH 提供；旧动态 preset / permission / MCP 准入链未恢复，领域部署与 Bubble 约束替代，不把未实现 capability 当已授权。 |
+| Run waiting_children 与 batch settlement（task-runtime/src/orchestration/batch.ts、settlement.ts） | 替代 | 等待从子事实、问题和 round 推导，命令与原生执行共用一个判定；不重复存协调 phase。委派期间父不继续执行或开新分解，运行失败停止未完后代，不自动接管。 |
+| 子证据回交与原 Run 恢复（task-runtime/src/orchestration/observe.ts、replay.ts） | 保留并简化 | 同批责任全部终止后交回成果引用与审核证据，通知绑定父 Run；同一事实去重，重试父 Run 有独立通知身份。已提交孩子冷恢复只继续验收，不重启求解。父审核收到贡献、封存轨迹及审核引用以判断证据如何参与集成。 |
+| 独立审核、轨迹与 RSI 发布（verifier / evolution / environment） | 保留与替代 | 任务和发布审核独立；真实 Task 责任、问答、资产消费、成本和轨迹用于 RSI。单一方法指针替代独立资产准入链；旧版源码存在机制不作为整体可靠性证据。 |

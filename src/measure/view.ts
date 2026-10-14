@@ -30,7 +30,7 @@
  */
 
 import { digestOf } from '../protocol/envelope.ts'
-import type { AcceptanceCriterion } from '../task/contract.ts'
+import type { VerifierCriterion } from '../task/contract.ts'
 import type { EvaluationMetric, EvaluationState, EvaluationWeights, TrialRecord } from './protocol.ts'
 
 /** One planned slot that produced no number, with the reason it produced none. */
@@ -93,16 +93,16 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
 
   const missing: MissingSlot[] = []
   for (let slot = 0; slot < denominator; slot += 1) {
-    if (observed.some(entry => entry.slot === slot)) continue
-    const declared = state.missed.find(entry => entry.slot === slot)
+    if (observed.some((entry) => entry.slot === slot)) continue
+    const declared = state.missed.find((entry) => entry.slot === slot)
     missing.push({
       slot,
       reason: declared?.reason ?? 'neither an observation nor a declared miss was recorded for this planned slot',
     })
   }
 
-  const constraints: ConstraintView[] = judgement.map(criterion => {
-    const checked = state.checks.find(entry => entry.criterionId === criterion.criterionId)
+  const constraints: ConstraintView[] = judgement.map((criterion) => {
+    const checked = state.checks.find((entry) => entry.criterionId === criterion.criterionId)
     return { criterionId: criterion.criterionId, met: checked === undefined ? null : checked.met }
   })
 
@@ -114,7 +114,7 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
   }
   if (missing.length > 0)
     reasons.push(
-      `${missing.length} of ${denominator} planned trial slots have no observation: ${missing.map(entry => `slot ${entry.slot} (${entry.reason})`).join('; ')}`,
+      `${missing.length} of ${denominator} planned trial slots have no observation: ${missing.map((entry) => `slot ${entry.slot} (${entry.reason})`).join('; ')}`,
     )
 
   return {
@@ -147,7 +147,7 @@ export interface Caliber {
   readonly metric: EvaluationMetric
   readonly weights: EvaluationWeights
   readonly trials: number
-  readonly judgement: readonly AcceptanceCriterion[]
+  readonly judgement: readonly VerifierCriterion[]
 }
 
 /**

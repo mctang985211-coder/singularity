@@ -18,8 +18,6 @@
         }
       },
       "workspace": {
-        "submission": "source",
-        "file": "rtl/sha256_w_mem.v",
         "artifact": "rtl/sha256_w_mem.v",
         "initial": "seed/sha256_w_mem.v"
       },
@@ -65,8 +63,6 @@
         }
       },
       "workspace": {
-        "submission": "source",
-        "file": "rtl/sha256_w_mem.v",
         "artifact": "rtl/sha256_w_mem.v",
         "initial": "seed/sha256_w_mem.v"
       },
@@ -87,8 +83,6 @@
         }
       },
       "workspace": {
-        "submission": "source",
-        "file": "rtl/sha256_w_mem.v",
         "artifact": "rtl/sha256_w_mem.v",
         "initial": "seed/sha256_w_mem.v"
       },

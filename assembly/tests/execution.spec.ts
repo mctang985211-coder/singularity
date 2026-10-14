@@ -203,9 +203,9 @@ describe('the DSH execution port', () => {
     h.register('submit', async exec => {
       h.execution.assertCaller(exec)
       submitStarted.resolve()
-      await h.execution.drain(exec)
-      submitDrained.resolve()
-      return 'submit'
+      const release = await h.execution.drain(exec)
+      try { submitDrained.resolve(); return 'submit' }
+      finally { release() }
     })
     h.register('transport', async exec => {
       const extra = { parent: exec.token, rootCallId: exec.rootCallId }
@@ -215,8 +215,10 @@ describe('the DSH execution port', () => {
       await submitStarted.promise
       const raced = await Promise.race([submitDrained.promise.then(() => 'drained'), Promise.resolve('still writing')])
       expect(raced).toBe('still writing')
+      expect((await h.tools.execute(h.input('write', 'late-writer', extra))).isError).toBe(true)
       releaseSibling.resolve()
       await Promise.all([sibling, submit])
+      expect((await h.tools.execute(h.input('write', 'after-seal', extra))).isError).toBe(false)
       return 'transport'
     })
     expect((await h.tools.execute(h.input('transport', 'transport'))).isError).toBe(false)

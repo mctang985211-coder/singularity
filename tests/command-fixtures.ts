@@ -24,6 +24,13 @@ import {
   declareAgentProtocol,
   declareEnvironmentProtocol,
   declareTaskProtocol,
+  declareReviewProtocol,
+  REVIEW_ROLE,
+  createReviewCommands,
+  TASK_PROTOCOL,
+  TASK_VERSION,
+  type TaskState,
+  type TaskCommands,
   ENVIRONMENT_PROTOCOL,
   ENVIRONMENT_ROLE,
   ENVIRONMENT_VERSION,
@@ -33,7 +40,10 @@ import {
   type EnvironmentState,
 } from '../src/index.ts'
 import { ControlSessionStore } from '../src/control/session-store.ts'
-import { contract as parentContract, INTEGRATION_VERIFIER, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER } from './task-fixtures.ts'
+import { contract as parentContract, INTEGRATION_VERIFIER, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER,
+  BUBBLE_MODEL,
+  fileAttachment,
+} from './task-fixtures.ts'
 
 export const PARENT = 'task-parent'
 export const CHILD = 'task-child'
@@ -45,6 +55,8 @@ export const MANIFEST = { skills: ['count'] }
 
 const SUBJECTS: Readonly<Record<string, string>> = {
   scheduler: SCHEDULER,
+  [REVIEW_ROLE]: 'review-service',
+  reviewer: 'reviewer-identity',
   [ENVIRONMENT_ROLE]: 'environment-service',
   [AGENT_ROLE]: 'runtime-service',
   [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'unit-verifier-service',
@@ -54,6 +66,7 @@ const SUBJECTS: Readonly<Record<string, string>> = {
 export function registry(): ProtocolRegistry {
   const made = new Registry()
   declareTaskProtocol(made)
+  declareReviewProtocol(made)
   declareEnvironmentProtocol(made)
   declareAgentProtocol(made)
   return made
@@ -128,7 +141,8 @@ export function revisionDigest(live: Deployment): string {
   return digest
 }
 
-export const pin = (live: Deployment, overrides: Partial<{ environmentId: string; revisionId: string; digest: string }> = {}) => ({
+export const pin = (live: Deployment, overrides: Partial<{ environmentId: string; revisionId: string; digest: string }> = {},
+) => ({
   environmentId: ENVIRONMENT,
   revisionId: REVISION,
   digest: revisionDigest(live),
@@ -143,10 +157,11 @@ export async function planned(live: Deployment, maxRuns = 1) {
     commandId: 'admit-child',
     taskId: CHILD,
     contract: {
+      artifact: 'artifact.json',
       goal: 'do the counting part',
-      template: parentContract().template,
+      ...(parentContract().template === undefined ? {} : { template: parentContract().template! }),
       inputs: parentContract().inputs,
-      criteria: [{ criterionId: 'part', statement: 'the part counts', verifierRef: UNIT_VERIFIER, verifierVersion: '1', implementationDigest: UNIT_IMPLEMENTATION }],
+      criteria: [{ criterionId: 'part', statement: 'the part counts' }],
     },
   })
   // The holder plans: `task/decomposed` requires the actor to be the task's responsible agent, so
@@ -161,3 +176,74 @@ export async function planned(live: Deployment, maxRuns = 1) {
   return commands
 }
 
+/** A real independent review fact for command-boundary fixtures; no model execution is claimed. */
+export async function reviewedVerdict(
+  live: Deployment,
+  commands: TaskCommands,
+  input: Parameters<TaskCommands['recordVerdict']>[0],
+) {
+  const task = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, input.taskId)!
+  const run = task.runs[input.verdict.runId]
+  if (run?.status === 'running' && run.bubble !== undefined && run.stage === 'working') {
+    const submission = {
+      requestId: `fixture:${input.taskId}/${run.runId}`,
+      requestDigest: '1'.repeat(64),
+      artifactDigest: input.verdict.artifactDigest,
+      inputDigests: run.bubble.inputs,
+      files: {
+        artifact: fileAttachment(input.verdict.artifactDigest, 'artifact.json'),
+        inputs: run.bubble.inputs.map((i) => ({ name: i.name, attachment: fileAttachment(i.digest, i.name) })),
+      },
+      source: { sessionId: 'fixture-source', eventCount: 0, digest: '2'.repeat(64) },
+    }
+    await commands.submitRun({
+      commandId: 'seal:' + submission.requestId,
+      taskId: input.taskId,
+      runId: run.runId,
+      submission,
+    })
+  }
+  if (run === undefined || run.status !== 'running' || run.bubble === undefined) return commands.recordVerdict(input)
+  const reviewId = `fixture-review:${input.commandId}`
+  live.store.declareSubject('agent:reviewer', 'reviewer-identity')
+  await createAgentNodeCommands({ store: live.store, registry: live.registry }).open({
+    commandId: 'fixture-reviewer',
+    agentId: 'reviewer',
+    sessionId: 'reviewer-session',
+    role: 'review',
+  })
+  const bytes = Buffer.from(JSON.stringify({ taskId: input.taskId, runId: run.runId })),
+    subjectDigest = (await import('../src/protocol/envelope.ts')).digestOf(bytes.toString())
+  const reviews = createReviewCommands(live.store)
+  await reviews.start('start:' + reviewId, reviewId, {
+    target: {
+      kind: 'acceptance',
+      taskId: input.taskId,
+      runId: run.runId,
+      contractDigest: task.contractDigest!,
+      artifactDigest: input.verdict.artifactDigest,
+    },
+    subject: fileAttachment(subjectDigest, 'subject.json'),
+    subjectDigest,
+    criteria: task.contract!.criteria,
+    agentId: 'reviewer',
+    identity: 'reviewer-identity',
+    sessionId: 'reviewer-session',
+    workspace: '/fixture-review',
+    model: BUBBLE_MODEL,
+    method: run.revision,
+  })
+  await reviews.complete(
+    'complete:' + reviewId,
+    reviewId,
+    task.contract!.criteria.map((c) => ({
+      criterionId: c.criterionId,
+      verdict: c.criterionId === input.verdict.criterionId ? input.verdict.verdict : 'pass',
+      detail: input.verdict.detail ?? 'fixture judgment',
+      evidence: ['fixture-artifact'],
+    })),
+    fileAttachment('4'.repeat(64), 'review.json'),
+    'agent:reviewer',
+  )
+  return commands.recordVerdict({ ...input, verdict: { ...input.verdict, reviewId } })
+}

@@ -12,15 +12,11 @@
 # lives there, so a profile that pointed somewhere else would run a different criterion.
 - id: singularity-assembly
   config:
-    controlId: singularity-autonomous-v9
+    controlId: singularity-autonomous-v10
     domainDir: '@@CHECKOUT@@/deployment/domain/sha256'
     workspaceRoot: '@@DSH_HOME@@/workspaces/singularity'
     budget:
       nativeTokens: 300000000
-      unknownUsageReservations:
-        - sessionId: singularity:agent:trial-9e0b0c66bf29336201178677
-          seq: 602
-          tokens: 1131072
 
 # The deployment's model route, because the base layer mounts `llm-pi-ai` with no providers and
 # defaults every agent to `deepseek-official`, for which this machine holds no credential: a profile

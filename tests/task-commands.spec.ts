@@ -1,3 +1,4 @@
+import { reviewedVerdict } from './command-fixtures.ts'
 /**
  * The command boundary: cross-entity preconditions checked inside the serial region.
  */
@@ -57,23 +58,35 @@ describe('a run starts only when every cross-entity condition holds', () => {
     // are refused the same way: neither can be resolved to content.
     const placeholder = 'a'.repeat(64)
     const absent = await asyncRefusalOf(() =>
-      commands.startRun({ commandId: 'r-absent', taskId: PARENT, runId: RUN, revision: { environmentId: ENVIRONMENT, revisionId: 'r-nope', digest: placeholder } }),
+      commands.startRun({
+        purpose: 'solve',
+        commandId: 'r-absent', taskId: PARENT, runId: RUN, revision: { environmentId: ENVIRONMENT, revisionId: 'r-nope', digest: placeholder },
+      }),
     )
     expect(absent.code).toBe<RefusalCode>('unknown-revision')
 
     const unrecordedEnvironment = await asyncRefusalOf(() =>
-      commands.startRun({ commandId: 'r-env', taskId: PARENT, runId: RUN, revision: { environmentId: 'library-nope', revisionId: REVISION, digest: placeholder } }),
+      commands.startRun({
+        purpose: 'solve',
+        commandId: 'r-env', taskId: PARENT, runId: RUN, revision: { environmentId: 'library-nope', revisionId: REVISION, digest: placeholder },
+      }),
     )
     expect(unrecordedEnvironment.code).toBe<RefusalCode>('unknown-revision')
 
     await createRevision(live)
     const wrongContent = await asyncRefusalOf(() =>
-      commands.startRun({ commandId: 'r-digest', taskId: PARENT, runId: RUN, revision: pin(live, { digest: 'a'.repeat(64) }) }),
+      commands.startRun({
+        purpose: 'solve',
+        commandId: 'r-digest', taskId: PARENT, runId: RUN, revision: pin(live, { digest: 'a'.repeat(64) }),
+      }),
     )
     expect(wrongContent.code).toBe<RefusalCode>('unknown-revision')
 
     // The pin the log can honour is accepted.
-    const started = await commands.startRun({ commandId: 'r-ok', taskId: PARENT, runId: RUN, revision: pin(live) })
+    const started = await commands.startRun({
+      purpose: 'solve',
+      commandId: 'r-ok', taskId: PARENT, runId: RUN, revision: pin(live),
+    })
     expect(started.kind).toBe(TASK_KINDS.runStarted)
   })
 
@@ -84,7 +97,8 @@ describe('a run starts only when every cross-entity condition holds', () => {
     const commands = commandsFor(live)
     await commands.admit({ commandId: 'admit-parent', taskId: PARENT, contract: parentContract() })
 
-    const unassigned = await asyncRefusalOf(() => commands.startRun({ commandId: 's-none', taskId: PARENT, runId: RUN, revision: pin(live) }))
+    const unassigned = await asyncRefusalOf(() => commands.startRun({ purpose: 'solve', commandId: 's-none', taskId: PARENT, runId: RUN, revision: pin(live) }),
+    )
     expect(unassigned.code).toBe<RefusalCode>('not-responsible')
 
     // Held by the deployment but never opened: no session backs it, so it cannot be worked by.
@@ -98,8 +112,10 @@ describe('a run starts only when every cross-entity condition holds', () => {
     )
     expect(notOpened).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining('no opened node') })
 
-    const notHeld = await asyncRefusalOf(() => commands.assign({ commandId: 'a-unknown', taskId: PARENT, agentId: 'agent-nobody-holds' }))
-    expect(notHeld).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining('not one this deployment holds') })
+    const notHeld = await asyncRefusalOf(() => commands.assign({ commandId: 'a-unknown', taskId: PARENT, agentId: 'agent-nobody-holds' }),
+    )
+    expect(notHeld).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining('not one this deployment holds'),
+    })
   })
 
   it('fills the responsible identity from the deployment, not from the caller', async () => {
@@ -122,19 +138,25 @@ describe('a run starts only when every cross-entity condition holds', () => {
     await commands.admit({
       commandId: 'admit-blocked',
       taskId: CHILD,
-      contract: { goal: 'g', template: { id: 'empty', digest: '1'.repeat(64) }, inputs: [], criteria: [{ criterionId: 'p', statement: 's', verifierRef: UNIT_VERIFIER, verifierVersion: '1', implementationDigest: UNIT_IMPLEMENTATION }] },
+      contract: {
+        artifact: 'artifact.json',
+        goal: 'g', template: { id: 'empty', digest: '1'.repeat(64) }, inputs: [], criteria: [{ criterionId: 'p', statement: 's' }],
+      },
     })
     await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
     // The child waits on a sibling the plan declares but nobody admitted.
     await commands.decompose({
       commandId: 'plan',
       parentTaskId: PARENT,
-      children: [{ taskId: CHILD, dependsOn: ['task-sibling'], supports: ['correctness'], maxRuns: 1 }, { taskId: 'task-sibling', dependsOn: [], supports: ['limits'], maxRuns: 1 }],
+      children: [{ taskId: CHILD, dependsOn: ['task-sibling'], supports: ['correctness'], maxRuns: 1 }, { taskId: 'task-sibling', dependsOn: [], supports: ['limits'], maxRuns: 1 },
+      ],
     })
     await commands.assign({ commandId: 'assign-child', taskId: CHILD, agentId: AGENT })
 
-    const blocked = await asyncRefusalOf(() => commands.startRun({ commandId: 'r-blocked', taskId: CHILD, runId: RUN, revision: pin(live) }))
-    expect(blocked).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/task-sibling.*only a verified dependency/) })
+    const blocked = await asyncRefusalOf(() => commands.startRun({ purpose: 'solve', commandId: 'r-blocked', taskId: CHILD, runId: RUN, revision: pin(live) }),
+    )
+    expect(blocked).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/task-sibling.*only a verified dependency/),
+    })
   })
 
   it('refuses the parent while a sub-task of its own plan is running', async () => {
@@ -142,12 +164,17 @@ describe('a run starts only when every cross-entity condition holds', () => {
     await createRevision(live)
     await openAgent(live)
     const commands = await planned(live)
-    await commands.startRun({ commandId: 'r-child', taskId: CHILD, runId: 'run-child', revision: pin(live) })
+    await commands.startRun({
+      purpose: 'solve',
+      commandId: 'r-child', taskId: CHILD, runId: 'run-child', revision: pin(live),
+    })
 
     // The child holds the acceptance its plan delegated to it, so the parent may not work on the same
     // acceptance at the same time. The refusal names the sub-task, so an operator knows what to wait for.
-    const waiting = await asyncRefusalOf(() => commands.startRun({ commandId: 'r-parent', taskId: PARENT, runId: RUN, revision: pin(live) }))
-    expect(waiting).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(new RegExp(`"${CHILD}" is running`)) })
+    const waiting = await asyncRefusalOf(() => commands.startRun({ purpose: 'solve', commandId: 'r-parent', taskId: PARENT, runId: RUN, revision: pin(live) }),
+    )
+    expect(waiting).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('delegated responsibilities are pending'),
+    })
   })
 
   it('lets the parent run once its sub-task has settled', async () => {
@@ -155,49 +182,64 @@ describe('a run starts only when every cross-entity condition holds', () => {
     await createRevision(live)
     await openAgent(live)
     const commands = await planned(live)
-    await commands.startRun({ commandId: 'r-child', taskId: CHILD, runId: 'run-child', revision: pin(live) })
+    await commands.startRun({
+      purpose: 'solve',
+      commandId: 'r-child', taskId: CHILD, runId: 'run-child', revision: pin(live),
+    })
     await commands.failRun({ commandId: 'f-child', taskId: CHILD, runId: 'run-child', reason: 'the attempt failed' })
 
     // The gate is "a sub-task is running", not "the plan is unfinished": a parent running its own
     // baseline before its children start, and again once they settle, is the ordinary shape of a campaign.
-    const reached = await commands.startRun({ commandId: 'r-parent', taskId: PARENT, runId: RUN, revision: pin(live) })
+    const reached = await commands.startRun({
+      purpose: 'solve',
+      commandId: 'r-parent', taskId: PARENT, runId: RUN, revision: pin(live),
+    })
     expect(reached.kind).toBe(TASK_KINDS.runStarted)
   })
 
-  it('binds each agent surface to its own identity, so one agent cannot work another\'s task', async () => {
+  it("binds each agent surface to its own identity, so one agent cannot work another's task", async () => {
     const live = await deployment()
     await createRevision(live)
     await openAgent(live)
     const other = 'agent-2'
-    await live.store.emit({ commandId: 'open-other', protocol: AGENT_PROTOCOL, version: AGENT_VERSION, kind: AGENT_KINDS.opened, subject: other, payload: { agentId: other, role: 'worker', sessionId: `singularity:agent:${other}` } })
+    await live.store.emit({ commandId: 'open-other', protocol: AGENT_PROTOCOL, version: AGENT_VERSION, kind: AGENT_KINDS.opened, subject: other, payload: { agentId: other, role: 'worker', sessionId: `singularity:agent:${other}` },
+    })
     // Two executors, two bindings: the log tells them apart by what their acts stamp, and the
     // responsibility check compares the caller against the holder instead of against itself.
     const commands = createTaskCommands({
       store: live.store, registry: live.registry,
-      agents: new Map([[AGENT, { as: 'scheduler' }], [other, { as: AGENT_ROLE }]]),
+      agents: new Map([[AGENT, { as: 'scheduler' }], [other, { as: AGENT_ROLE }],
+      ]),
       implementations: [{ ref: UNIT_VERIFIER, version: '1', implementationDigest: UNIT_IMPLEMENTATION }],
     })
     await commands.admit({ commandId: 'admit-parent', taskId: PARENT, contract: parentContract() })
     await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
 
-    const stranger = await asyncRefusalOf(() => commands.forAgent(other).startRun({ commandId: 'r-stranger', taskId: PARENT, runId: RUN, revision: pin(live) }))
+    const stranger = await asyncRefusalOf(() => commands.forAgent(other).startRun({ purpose: 'solve', commandId: 'r-stranger', taskId: PARENT, runId: RUN, revision: pin(live) }),
+    )
     expect(stranger).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining(AGENT) })
-    const own = await commands.forAgent(AGENT).startRun({ commandId: 'r-own', taskId: PARENT, runId: RUN, revision: pin(live) })
+    const own = await commands.forAgent(AGENT).startRun({ purpose: 'solve', commandId: 'r-own', taskId: PARENT, runId: RUN, revision: pin(live) })
     expect(own.actor).toBe(SCHEDULER)
-    const strangerFail = await asyncRefusalOf(() => commands.forAgent(other).failRun({ commandId: 'f-stranger', taskId: PARENT, runId: RUN, reason: 'not mine' }))
+    const strangerFail = await asyncRefusalOf(() => commands.forAgent(other).failRun({ commandId: 'f-stranger', taskId: PARENT, runId: RUN, reason: 'not mine' }),
+    )
     expect(strangerFail.code).toBe<RefusalCode>('not-responsible')
     await commands.forAgent(AGENT).failRun({ commandId: 'f-own', taskId: PARENT, runId: RUN, reason: 'settled for the transfer' })
 
     // The holder hands the task over through its own bound surface; the previous holder cannot
     // continue the work it just gave away, and the new holder can.
     await commands.forAgent(AGENT).reassign({ commandId: 'hand-over', taskId: PARENT, from: AGENT, agentId: other })
-    const previous = await asyncRefusalOf(() => commands.forAgent(AGENT).startRun({ commandId: 'r-after', taskId: PARENT, runId: 'run-2', revision: pin(live) }))
+    const previous = await asyncRefusalOf(() => commands.forAgent(AGENT).startRun({ purpose: 'solve', commandId: 'r-after', taskId: PARENT, runId: 'run-2', revision: pin(live) }),
+    )
     expect(previous).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining(other) })
-    const taken = await commands.forAgent(other).startRun({ commandId: 'r-new-holder', taskId: PARENT, runId: 'run-2', revision: pin(live) })
+    const taken = await commands.forAgent(other).startRun({ purpose: 'solve', commandId: 'r-new-holder', taskId: PARENT, runId: 'run-2', revision: pin(live) })
     expect(taken.actor).toBe(live.store.identityOf(AGENT_ROLE))
 
     // And the deployment cannot declare two executors it could never tell apart.
-    const doubled = refusalOf(() => createTaskCommands({ store: live.store, registry: live.registry, agents: new Map([[AGENT, { as: 'one' }], [other, { as: 'one' }]]), implementations: [] }))
+    const doubled = refusalOf(() => createTaskCommands({ store: live.store, registry: live.registry, agents: new Map([[AGENT, { as: 'one' }], [other, { as: 'one' }],
+        ]),
+        implementations: [],
+      }),
+    )
     expect(doubled.code).toBe<RefusalCode>('malformed-declaration')
   })
 
@@ -211,11 +253,14 @@ describe('a run starts only when every cross-entity condition holds', () => {
     // step, so the second sees the first's committed run and is refused. Checking before queueing
     // would let both through and start two runs nobody budgeted for.
     const outcomes = await Promise.allSettled([
-      commands.startRun({ commandId: 'r-first', taskId: CHILD, runId: 'run-a', revision: pin(live) }),
-      commands.startRun({ commandId: 'r-second', taskId: CHILD, runId: 'run-b', revision: pin(live) }),
+      commands.startRun({ purpose: 'solve', commandId: 'r-first', taskId: CHILD, runId: 'run-a', revision: pin(live) }),
+      commands.startRun({
+        purpose: 'solve',
+        commandId: 'r-second', taskId: CHILD, runId: 'run-b', revision: pin(live),
+      }),
     ])
-    const fulfilled = outcomes.filter(outcome => outcome.status === 'fulfilled')
-    expect(outcomes.map(outcome => outcome.status).sort()).toEqual(['fulfilled', 'rejected'])
+    const fulfilled = outcomes.filter((outcome) => outcome.status === 'fulfilled')
+    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(['fulfilled', 'rejected'])
 
     const state = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CHILD)
     expect(Object.keys(state?.runs ?? {})).toHaveLength(1)
@@ -223,13 +268,22 @@ describe('a run starts only when every cross-entity condition holds', () => {
     const settled = fulfilled[0] as PromiseFulfilledResult<{ payload: { runId: string } }>
     const runId = settled.value.payload.runId
     await commands.openBubble({ commandId: 'b1', taskId: CHILD, runId, inputs: BUBBLE_INPUTS,
-      workspace: { kind: 'dir', ref: '/counter' }, model: BUBBLE_MODEL, tools: [], conditions: [] })
-    await commands.recordVerdict({ commandId: 'v1', taskId: CHILD, verdict: { runId, criterionId: 'part',
-      verdict: 'fail', implementationDigest: UNIT_IMPLEMENTATION, artifactDigest: 'b'.repeat(64), inputDigests: BUBBLE_INPUTS } })
+      workspace: { kind: 'dir', ref: '/counter' }, model: BUBBLE_MODEL, tools: [], conditions: [],
+    })
+    await reviewedVerdict(live, commands, { commandId: 'v1', taskId: CHILD, verdict: {
+        reviewId: 'review-1',
+        verifierRef: UNIT_VERIFIER,
+        verifierVersion: '1',
+        runId, criterionId: 'part',
+      verdict: 'fail', implementationDigest: UNIT_IMPLEMENTATION, artifactDigest: 'b'.repeat(64), inputDigests: BUBBLE_INPUTS,
+      },
+    })
     await commands.settle({ commandId: 'f1', taskId: CHILD, runId })
 
-    const spent = await asyncRefusalOf(() => commands.startRun({ commandId: 'r-third', taskId: CHILD, runId: 'run-c', revision: pin(live) }))
-    expect(spent).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/budget exhausted.*1 of 1/) })
+    const spent = await asyncRefusalOf(() => commands.startRun({ purpose: 'solve', commandId: 'r-third', taskId: CHILD, runId: 'run-c', revision: pin(live) }),
+    )
+    expect(spent).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/budget exhausted.*1 of 1/),
+    })
   })
 })
 
@@ -242,7 +296,14 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
 
     // The exact surface, `recordVerdict` included in its absence: the boundary is a method the agent
     // view does not have, not a rule it is asked to respect.
-    expect(Object.keys(asAgent).sort()).toEqual(['admit', 'assign', 'beginSubmission', 'decompose', 'failRun', 'openBubble', 'reassign', 'startRun', 'submitRun'])
+    expect(Object.keys(asAgent).sort()).toEqual(['admit', 'assign',
+      'decompose',
+      'failRun',
+      'openBubble',
+      'reassign',
+      'startRun',
+      'submitRun',
+    ])
     expect(() => commands.forAgent('agent-nobody-holds')).toThrowError(/not one this deployment holds/)
   })
 
@@ -251,7 +312,7 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
     await openAgent(live)
     await createRevision(live)
     const commands = await planned(live)
-    await commands.startRun({ commandId: 'r1', taskId: CHILD, runId: RUN, revision: pin(live) })
+    await commands.startRun({ purpose: 'solve', commandId: 'r1', taskId: CHILD, runId: RUN, revision: pin(live) })
     await commands.openBubble({
       commandId: 'b1',
       taskId: CHILD,
@@ -264,21 +325,32 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
     })
 
     const fromElsewhere = await asyncRefusalOf(() =>
-      commands.recordVerdict({
+      reviewedVerdict(live, commands, {
         commandId: 'v-wrong',
         taskId: CHILD,
-        verdict: { runId: RUN, criterionId: 'part', verdict: 'pass', implementationDigest: 'e'.repeat(64), artifactDigest: 'b'.repeat(64), inputDigests: BUBBLE_INPUTS },
+        verdict: {
+          reviewId: 'review-1',
+          verifierRef: UNIT_VERIFIER,
+          verifierVersion: '1',
+          runId: RUN, criterionId: 'part', verdict: 'pass', implementationDigest: 'e'.repeat(64), artifactDigest: 'b'.repeat(64), inputDigests: BUBBLE_INPUTS,
+        },
       }),
     )
-    expect(fromElsewhere.code).toBe<RefusalCode>('wrong-verifier')
+    expect(fromElsewhere.code).toBe<RefusalCode>('unregistered-verifier')
 
-    const recorded = await commands.recordVerdict({
+    const recorded = await reviewedVerdict(live, commands, {
       commandId: 'v-ok',
       taskId: CHILD,
-      verdict: { runId: RUN, criterionId: 'part', verdict: 'pass', implementationDigest: UNIT_IMPLEMENTATION, artifactDigest: 'b'.repeat(64), inputDigests: BUBBLE_INPUTS },
+      verdict: {
+        reviewId: 'review-1',
+        verifierRef: UNIT_VERIFIER,
+        verifierVersion: '1',
+        runId: RUN, criterionId: 'part', verdict: 'pass', implementationDigest: UNIT_IMPLEMENTATION, artifactDigest: 'b'.repeat(64), inputDigests: BUBBLE_INPUTS,
+      },
     })
     const evidence = recorded.payload as { verifierRef: string; verifierVersion: string; inputDigests: unknown }
-    expect([evidence.verifierRef, evidence.verifierVersion, evidence.inputDigests]).toEqual([UNIT_VERIFIER, '1', BUBBLE_INPUTS])
+    expect([evidence.verifierRef, evidence.verifierVersion, evidence.inputDigests]).toEqual([UNIT_VERIFIER, '1', BUBBLE_INPUTS,
+    ])
 
     // A measurement cites this verdict through the reader's own lookup: the same evidence answers
     // the same digest, and a run nobody started or a criterion nobody recorded is refused by name —
@@ -286,9 +358,12 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
     const state = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CHILD)
     if (state === undefined) throw new Error('expected the admitted child to fold')
     const citation = { runId: RUN, criterionId: 'part', artifactDigest: 'b'.repeat(64) }
-    expect(recordedVerdictDigest(state, 'the citation', citation)).toBe(recordedVerdictDigest(state, 'the citation', citation))
-    expect(refusalOf(() => recordedVerdictDigest(state, 'the citation', { ...citation, runId: 'run-ghost' })).code).toBe<RefusalCode>('unknown-run')
-    expect(refusalOf(() => recordedVerdictDigest(state, 'the citation', { ...citation, criterionId: 'nothing' })).detail).toContain('record the verdict before citing it')
+    expect(recordedVerdictDigest(state, 'the citation', citation)).toBe(recordedVerdictDigest(state, 'the citation', citation),
+    )
+    expect(refusalOf(() => recordedVerdictDigest(state, 'the citation', { ...citation, runId: 'run-ghost' })).code,
+    ).toBe<RefusalCode>('unknown-run')
+    expect(refusalOf(() => recordedVerdictDigest(state, 'the citation', { ...citation, criterionId: 'nothing' })).detail,
+    ).toContain('record the verdict before citing it')
   })
 })
 
@@ -297,13 +372,16 @@ describe('the command boundary against a store that refuses', () => {
     const live = await deployment()
     await createRevision(live)
     const commands = commandsFor(live)
-    const refusal = await asyncRefusalOf(() => commands.startRun({ commandId: 'r', taskId: 'task-ghost', runId: RUN, revision: pin(live) }))
-    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('no admitted contract') })
+    const refusal = await asyncRefusalOf(() => commands.startRun({ purpose: 'solve', commandId: 'r', taskId: 'task-ghost', runId: RUN, revision: pin(live) }),
+    )
+    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('no admitted contract'),
+    })
   })
 
   it('reports a malformed command as a refusal rather than throwing a bare error', () => {
     // The environment role must exist, or the command boundary's own facts cannot be produced.
-    expect(refusalOf(() => registry().ruleFor(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, 'revision/nope')).code).toBe<RefusalCode>('unknown-kind')
+    expect(refusalOf(() => registry().ruleFor(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, 'revision/nope')).code,
+    ).toBe<RefusalCode>('unknown-kind')
     expect(() => refuse('malformed-payload', 'checked')).toThrowError(/malformed-payload/)
   })
 })

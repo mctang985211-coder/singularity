@@ -33,8 +33,8 @@
         {
           "name": "revision/created",
           "members": [
-            "manifest",
-            "revisionId"
+            "revisionId",
+            "manifest"
           ]
         }
       ],
@@ -49,14 +49,14 @@
         {
           "name": "constraint/checked",
           "members": [
-            "artifactDigest",
             "criterionId",
-            "detail",
-            "implementationDigest",
             "met",
-            "verdict",
+            "artifactDigest",
             "verifierRef",
-            "verifierVersion"
+            "verifierVersion",
+            "implementationDigest",
+            "verdict",
+            "detail"
           ]
         },
         {
@@ -64,19 +64,19 @@
           "members": [
             "baseline",
             "candidate",
-            "context",
-            "judgement",
-            "metric",
             "run",
+            "context",
+            "metric",
+            "weights",
             "trials",
-            "weights"
+            "judgement"
           ]
         },
         {
           "name": "trial/missed",
           "members": [
-            "reason",
             "slot",
+            "reason",
             "verifierRef",
             "verifierVersion"
           ]
@@ -84,15 +84,15 @@
         {
           "name": "trial/recorded",
           "members": [
-            "artifactDigest",
-            "cost",
-            "detail",
-            "implementationDigest",
-            "inputDigests",
-            "quality",
             "slot",
+            "quality",
+            "cost",
+            "artifactDigest",
+            "inputDigests",
             "verifierRef",
-            "verifierVersion"
+            "verifierVersion",
+            "implementationDigest",
+            "detail"
           ]
         }
       ],
@@ -107,25 +107,68 @@
         {
           "name": "release/approved",
           "members": [
-            "approvalId",
-            "approvedBy",
-            "draftDigest",
             "revisionId",
+            "draftDigest",
+            "approvedBy",
+            "approvalId",
             "review"
           ]
         },
         {
           "name": "release/drafted",
           "members": [
-            "basis",
+            "revisionId",
             "contentDigest",
             "draftDigest",
-            "revisionId"
+            "basis"
           ]
         }
       ],
       "producedBy": "src/release/commands.ts createReleaseCommands (bootstrap draft or committed-winner draftFromDecision, and approveReview with exact independent review evidence)",
       "readBy": "src/release/commands.ts publish (rechecks the complete approved draft, committed decision/report, content and expected head before the one pointer switch)"
+    },
+    {
+      "protocol": "review",
+      "version": 2,
+      "subject": "the independent review id",
+      "kinds": [
+        {
+          "name": "review/completed",
+          "members": [
+            "findings",
+            "result"
+          ]
+        },
+        {
+          "name": "review/decomposed",
+          "members": [
+            "children"
+          ]
+        },
+        {
+          "name": "review/failed",
+          "members": [
+            "reason"
+          ]
+        },
+        {
+          "name": "review/started",
+          "members": [
+            "target",
+            "subject",
+            "subjectDigest",
+            "criteria",
+            "agentId",
+            "identity",
+            "sessionId",
+            "workspace",
+            "model",
+            "method"
+          ]
+        }
+      ],
+      "producedBy": "src/review/commands.ts and assembly reviewer host",
+      "readBy": "Task acceptance, release approval, scheduler and snapshots"
     },
     {
       "protocol": "strategy",
@@ -135,28 +178,28 @@
         {
           "name": "candidate/submitted",
           "members": [
-            "edits",
-            "evaluationId",
+            "slot",
             "revision",
-            "slot"
+            "evaluationId",
+            "edits"
           ]
         },
         {
           "name": "round/decided",
           "members": [
-            "calibration",
+            "winner",
             "outcomes",
-            "winner"
+            "calibration"
           ]
         },
         {
           "name": "round/opened",
           "members": [
-            "caliber",
+            "round",
+            "incumbent",
             "candidates",
             "historyCutoff",
-            "incumbent",
-            "round",
+            "caliber",
             "weights"
           ]
         }
@@ -166,56 +209,86 @@
     },
     {
       "protocol": "task",
-      "version": 9,
+      "version": 12,
       "subject": "the task id",
       "kinds": [
         {
           "name": "bubble/opened",
           "members": [
-            "conditions",
-            "inputs",
-            "model",
             "runId",
+            "inputs",
+            "workspace",
+            "model",
             "tools",
-            "workspace"
+            "conditions"
           ]
         },
         {
           "name": "evidence/produced",
           "members": [
-            "artifactDigest",
-            "criterionId",
-            "detail",
-            "implementationDigest",
-            "inputDigests",
             "runId",
+            "criterionId",
+            "reviewId",
             "verdict",
             "verifierRef",
-            "verifierVersion"
+            "verifierVersion",
+            "implementationDigest",
+            "artifactDigest",
+            "inputDigests",
+            "detail"
           ]
         },
         {
           "name": "method/consumed",
           "members": [
-            "method",
-            "revision",
             "runId",
+            "revision",
+            "method",
             "source"
+          ]
+        },
+        {
+          "name": "rsi/round-requested",
+          "members": [
+            "runId",
+            "roundId",
+            "round",
+            "incumbent",
+            "candidates",
+            "proposal"
+          ]
+        },
+        {
+          "name": "rsi/round-settled",
+          "members": [
+            "roundId",
+            "status",
+            "error"
+          ]
+        },
+        {
+          "name": "rsi/status",
+          "members": [
+            "status",
+            "detail",
+            "trace"
           ]
         },
         {
           "name": "run/failed",
           "members": [
+            "runId",
             "cause",
-            "reason",
-            "runId"
+            "reason"
           ]
         },
         {
           "name": "run/started",
           "members": [
+            "runId",
             "revision",
-            "runId"
+            "purpose",
+            "relatedTo"
           ]
         },
         {
@@ -223,14 +296,6 @@
           "members": [
             "runId",
             "submission"
-          ]
-        },
-        {
-          "name": "run/submitting",
-          "members": [
-            "requestDigest",
-            "requestId",
-            "runId"
           ]
         },
         {
@@ -253,6 +318,13 @@
           ]
         },
         {
+          "name": "task/closed",
+          "members": [
+            "runId",
+            "reason"
+          ]
+        },
+        {
           "name": "task/decomposed",
           "members": [
             "children"
@@ -261,9 +333,32 @@
         {
           "name": "task/reassigned",
           "members": [
+            "from",
             "agentId",
-            "agentIdentity",
-            "from"
+            "agentIdentity"
+          ]
+        },
+        {
+          "name": "task/question-asked",
+          "members": [
+            "questionId",
+            "runId",
+            "parentId",
+            "parentRunId",
+            "parentIdentity",
+            "parentAgentId",
+            "question",
+            "blocking"
+          ]
+        },
+        {
+          "name": "task/question-answered",
+          "members": [
+            "questionId",
+            "answerId",
+            "answer",
+            "resolves",
+            "evidence"
           ]
         }
       ],

@@ -59,7 +59,7 @@ const BOUNDS_SOURCE = [
 ].join('\n')
 
 const failures = []
-const line = value => console.log(`  ${value}`)
+const line = (value) => console.log(`  ${value}`)
 function check(label, condition, detail) {
   if (condition) console.log(`  ok    ${label}`)
   else {
@@ -68,12 +68,12 @@ function check(label, condition, detail) {
   }
 }
 
-const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const TEMPLATE = { id: 'measure-probe', digest: sha256(await readFile(new URL(import.meta.url))) }
 
 /** One process for real, without letting a non-zero exit throw. */
 function runProcess(file, args) {
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     execFile(file, [...args], { encoding: 'utf8' }, (error, stdout, stderr) => {
       resolve({ code: error === null ? 0 : typeof error.code === 'number' ? error.code : 1, stdout, stderr })
     })
@@ -100,11 +100,11 @@ async function markerText(marker) {
 
 /** The real measurement port: spawn the adapter, then report the digest of what actually ran. */
 function realMeasurement(programDigest) {
-  return async execution => {
+  return async (execution) => {
     const request = {
       command: typeof execution.command === 'string' ? execution.command : execution.command.join(' '),
       artifactPath: execution.artifactPath,
-      inputs: execution.inputs.map(entry => ({ name: entry.name, digest: entry.digest, path: entry.path })),
+      inputs: execution.inputs.map((entry) => ({ name: entry.name, digest: entry.digest, path: entry.path })),
     }
     const result = await runProcess(process.execPath, [ADAPTER, JSON.stringify(request)])
     if (result.code !== 0) throw new Error(`the adapter could not measure: ${result.stderr}`)
@@ -121,7 +121,7 @@ function realMeasurement(programDigest) {
 
 /** A meter invocation: a label for the marker, a quality, a cost (`-` = none), and a mode. */
 const meterCommand = (program, input, artifact, marker, label, quality, cost, mode) =>
-  [process.execPath, program, input, artifact, marker, label, quality, cost, mode].map(entry => `"${entry}"`).join(' ')
+  [process.execPath, program, input, artifact, marker, label, quality, cost, mode].map((entry) => `"${entry}"`).join(' ')
 
 async function main() {
   const root = await mkdtemp(join(tmpdir(), 'measure-probe-'))
@@ -154,7 +154,8 @@ async function main() {
     [verifierRoleOf({ verifierRef: METER, verifierVersion: '1' })]: METER_ACTOR,
     [verifierRoleOf({ verifierRef: BOUNDS, verifierVersion: '1' })]: BOUNDS_ACTOR,
   }
-  const store = await ControlSessionStore.open({ persistence: live.persistence, controlId: 'measure-probe', registry, subjects })
+  const store = await ControlSessionStore.open({ persistence: live.persistence, controlId: 'measure-probe', registry, subjects,
+  })
 
   try {
     // The execution context the measurement happens in. These are the task protocol's facts, emitted
@@ -164,15 +165,16 @@ async function main() {
         kind: TASK_KINDS.admitted,
         payload: {
           contract: {
+            artifact: ARTIFACT_NAME,
             goal: 'probe the measurement path',
             template: TEMPLATE,
             inputs: [{ name: INPUT_NAME, source: { kind: 'protected', ref: INPUT_NAME, digest: sha256(INPUT_BYTES) } }],
-            criteria: [{ criterionId: 'counted', statement: 'the count is right', verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest }],
+            criteria: [{ criterionId: 'counted', statement: 'the count is right' }],
           },
         },
       },
       { kind: TASK_KINDS.assigned, payload: { agentId: AGENT, agentIdentity: SCHEDULER } },
-      { kind: TASK_KINDS.runStarted, payload: { runId: RUN, revision: BASELINE } },
+      { kind: TASK_KINDS.runStarted, payload: { runId: RUN, revision: BASELINE, purpose: 'evaluation' } },
       {
         kind: TASK_KINDS.bubbleOpened,
         payload: {
@@ -186,7 +188,8 @@ async function main() {
       },
     ]
     for (const [index, fact] of facts.entries())
-      await store.emit({ commandId: `probe-fixture-${index}`, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: TASK, ...fact })
+      await store.emit({ commandId: `probe-fixture-${index}`, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: TASK, ...fact,
+      })
 
     const measure = createMeasureCommands({
       store,
@@ -198,12 +201,14 @@ async function main() {
       subjects,
     })
     const metric = {
-      measured: { criterionId: 'quality', statement: 'the artifact holds the upper-cased input', verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest },
+      measured: { criterionId: 'quality', statement: 'the artifact holds the upper-cased input', verifierRef: METER, verifierVersion: '1', implementationDigest: meterDigest,
+      },
       unit: 'points',
       direction: 'higher',
     }
     const judgement = [
-      { criterionId: 'limits', statement: 'the artifact stays under 1 MiB', verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: boundsDigest },
+      { criterionId: 'limits', statement: 'the artifact stays under 1 MiB', verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: boundsDigest,
+      },
     ]
     const meterImplementation = {
       ref: METER,
@@ -211,13 +216,16 @@ async function main() {
       implementationDigest: meterDigest,
       selftest: {
         samples: [
-          { name: 'measures a good input', expected: 'pass', input: { subject: goodSample, artifactDigest: sha256('good'), inputs: [] } },
-          { name: 'produces no number for a broken run', expected: 'fail', input: { subject: brokenSample, artifactDigest: sha256('broken'), inputs: [] } },
+          { name: 'measures a good input', expected: 'pass', input: { subject: goodSample, artifactDigest: sha256('good'), inputs: [] },
+          },
+          { name: 'produces no number for a broken run', expected: 'fail', input: { subject: brokenSample, artifactDigest: sha256('broken'), inputs: [] },
+          },
         ],
       },
-      judge: async sample => {
+      judge: async (sample) => {
         const mode = sample.subject === brokenSample ? 'fail' : 'measure'
-        const ran = await runProcess(process.execPath, [meterProgram, sample.subject, join(root, 'sample-artifact.txt'), marker, 'sample', '0.5', '-', mode])
+        const ran = await runProcess(process.execPath, [meterProgram, sample.subject, join(root, 'sample-artifact.txt'), marker, 'sample', '0.5', '-', mode,
+        ])
         return { verdict: ran.code === 0 ? 'pass' : 'fail' }
       },
     }
@@ -248,17 +256,23 @@ async function main() {
     })
     const first = await measureOne('slot-0', '1', '-', 'measure')
     check('the measurement program ran in a real process', (await markerText(marker)).includes('slot-0'))
-    check('the adapter returned a trial rather than a miss', first.kind === 'trial', first.kind === 'missed' ? first.reason : undefined)
-    check('the artifact digest is the digest of the bytes the program left behind', first.trial?.artifactDigest === sha256(INPUT_BYTES.toUpperCase()))
+    check('the adapter returned a trial rather than a miss', first.kind === 'trial', first.kind === 'missed' ? first.reason : undefined,
+    )
+    check('the artifact digest is the digest of the bytes the program left behind', first.trial?.artifactDigest === sha256(INPUT_BYTES.toUpperCase()),
+    )
     check('the program reported no cost', first.trial?.cost === undefined)
-    await measure.recordTrial({ commandId: 'probe-trial-0', evaluationId: EVALUATION, trial: { slot: 0, ...first.trial } })
+    await measure.recordTrial({ commandId: 'probe-trial-0', evaluationId: EVALUATION, trial: { slot: 0, ...first.trial },
+    })
     const committed = store.load().stateOf(MEASURE_PROTOCOL, MEASURE_VERSION, EVALUATION)
-    check('the folded trial names the implementation that produced it, by content digest', committed?.observed[0]?.implementationDigest === meterDigest)
-    check('the folded trial is bound to the run declaration', JSON.stringify(committed?.observed[0]?.inputDigests) === JSON.stringify([{ name: INPUT_NAME, digest: sha256(INPUT_BYTES) }]))
+    check('the folded trial names the implementation that produced it, by content digest', committed?.observed[0]?.implementationDigest === meterDigest,
+    )
+    check('the folded trial is bound to the run declaration', JSON.stringify(committed?.observed[0]?.inputDigests) === JSON.stringify([{ name: INPUT_NAME, digest: sha256(INPUT_BYTES) }]),
+    )
 
     console.log('\n== 2. a slot the plan asked for and the run did not produce')
     const second = await measureOne('slot-1', '0', '-', 'fail')
-    check('a program that produced no number is reported as a miss', second.kind === 'missed', second.kind === 'trial' ? 'it reported a trial' : undefined)
+    check('a program that produced no number is reported as a miss', second.kind === 'missed', second.kind === 'trial' ? 'it reported a trial' : undefined,
+    )
     await measure.missTrial({ commandId: 'probe-miss-1', evaluationId: EVALUATION, slot: 1, reason: second.reason })
 
     console.log('\n== 3. the projection: the denominator is the plan, not the observations')
@@ -273,14 +287,16 @@ async function main() {
       implementationDigest: boundsDigest,
     })
     const view = projectEvaluation(store.load().stateOf(MEASURE_PROTOCOL, MEASURE_VERSION, EVALUATION))
-    check('the denominator is the plan\'s two slots', view.denominator === 2, String(view.denominator))
+    check("the denominator is the plan's two slots", view.denominator === 2, String(view.denominator))
     check('one observation is counted', view.observed === 1, String(view.observed))
     check('the quality is the observed score over the plan denominator', view.quality === 0.5, String(view.quality))
-    check('the empty slot is named', view.missing.length === 1 && view.missing[0].slot === 1, JSON.stringify(view.missing))
+    check('the empty slot is named', view.missing.length === 1 && view.missing[0].slot === 1, JSON.stringify(view.missing),
+    )
     check('the declared miss keeps its own reason', view.missing[0]?.reason === second.reason, view.missing[0]?.reason)
     check('an unobserved cost stays unknown rather than becoming zero', view.cost === null, String(view.cost))
     check('a perfect observed score with an unmet constraint is still inadmissible', view.admissible === false)
-    check('the reason names the constraint that failed', (view.why ?? '').includes('hard constraint "limits"') && (view.why ?? '').includes('not met'), view.why)
+    check('the reason names the constraint that failed', (view.why ?? '').includes('hard constraint "limits"') && (view.why ?? '').includes('not met'), view.why,
+    )
 
     console.log('\n== 4. a rebuilt implementation is not found by its name')
     const rebuilt = { ref: METER, version: '1', implementationDigest: sha256('rebuilt meter bytes') }
@@ -303,8 +319,10 @@ async function main() {
 
     const committedFacts = store.load().entries().length
     console.log('')
-    line(`facts ${committedFacts}; denominator ${view.denominator}; observed ${view.observed}; quality ${view.quality}; cost ${view.cost}`)
-    line(`meter ${meterDigest.slice(0, 16)}…; artifact ${(first.trial?.artifactDigest ?? '').slice(0, 16)}…; marker ${JSON.stringify((await markerText(marker)).trim().split('\n'))}`)
+    line(`facts ${committedFacts}; denominator ${view.denominator}; observed ${view.observed}; quality ${view.quality}; cost ${view.cost}`,
+    )
+    line(`meter ${meterDigest.slice(0, 16)}…; artifact ${(first.trial?.artifactDigest ?? '').slice(0, 16)}…; marker ${JSON.stringify((await markerText(marker)).trim().split('\n'))}`,
+    )
     line(`admissible ${view.admissible}; why ${view.why}`)
   } finally {
     await store.close()

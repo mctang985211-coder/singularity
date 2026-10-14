@@ -1,165 +1,188 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
 import { afterEach, expect, it } from 'vitest'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-
-import { asyncRefusalOf } from '../../tests/fixtures.ts'
-import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
-import { ENVIRONMENT_KINDS, ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION } from '../../src/environment/protocol.ts'
-import { openApparatus, declareCaller } from '../src/apparatus.ts'
-import { startAttempt } from '../src/attempt.ts'
+import { openApparatus, callerOf, taskStateOf } from '../src/apparatus.ts'
 import { loadDomain } from '../src/domain.ts'
-import { contractFor } from '../src/inputs.ts'
-import { createMethod, loadMethod, methodOfRun, seedMethod } from '../src/method.ts'
-import { REVIEW_TEMPLATE, SUBJECT_INPUT } from '../src/review.ts'
-import { sha256 } from '../src/ids.ts'
 import { spawnProcess } from '../src/process.ts'
-import { historyOf, templateDeclaration } from '../src/read.ts'
-import { propose, retry, status } from '../src/surfaces.ts'
+import { propose, decompose } from '../src/surfaces.ts'
+import { startAttempt } from '../src/attempt.ts'
 import { submit } from '../src/submission.ts'
-import { attachmentsAt, agentFor, execFor, fakeExecution, FakePersistence } from './seam.ts'
-
-const letters = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
-const shaDomain = fileURLToPath(new URL('../../deployment/domain/sha256', import.meta.url))
-const counting = "import { readFileSync } from 'node:fs'; process.stdout.write(String((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).length))"
-const extracting = "import { readFileSync } from 'node:fs'; process.stdout.write((readFileSync(process.argv[2], 'utf8').match(/[A-Za-z]/g) ?? []).join(''))"
-const caller = { agentId: 'root', sessionId: 'root-session', model: { provider: 'test', model: 'test' } }
-let cleanup: (() => Promise<void>) | undefined
-afterEach(async () => { await cleanup?.(); cleanup = undefined })
-
-async function fixture(dir = letters) {
-  const root = await mkdtemp(join(tmpdir(), 'singularity-read-'))
-  const persistence = new FakePersistence()
-  const apparatus = await openApparatus('read', root, await loadDomain(dir, spawnProcess), persistence as unknown as SessionPersistence, attachmentsAt(root))
-  cleanup = async () => { await apparatus.store.close(); await rm(root, { recursive: true, force: true }) }
-  return { apparatus, persistence }
+import { historyOf, readArtifact, waitForTask } from '../src/read.ts'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { ChildSession } from '../../src/runtime/child-session.ts'
+import { schedulerMessage } from '../src/scheduler-message.ts'
+import { TASK_PROTOCOL, TASK_VERSION } from '../../src/task/protocol.ts'
+import { fixtureReview } from './review-fixture.ts'
+import { attachmentsAt, FakePersistence, agentFor, execFor, fakeExecution, factsOf } from './seam.ts'
+const roots: string[] = []
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })))
+})
+async function setup() {
+  const root = await mkdtemp(join(tmpdir(), 'free-task-'))
+  roots.push(root)
+  const medium = new FakePersistence(),
+    apparatus = await openApparatus(
+      'free',
+      root,
+      await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
+      medium as never,
+      attachmentsAt(root),
+    ),
+    agent = agentFor('worker', 'worker'),
+    caller = callerOf(agent),
+    proposal = await propose(apparatus, caller, 'root', { goal: 'count' })
+  return { apparatus, agent, caller, proposal, medium }
 }
-
-it('publishes the actual protected input, initial source and reusable template declarations', async () => {
-  const { apparatus } = await fixture(shaDomain)
-  const proposal = await propose(apparatus, caller, 'read-input', { goal: 'implement schedule' })
-  const declared = JSON.parse(await readFile(join(shaDomain, 'task.json'), 'utf8'))
-  expect(proposal.inputContent).toBe(await readFile(join(shaDomain, declared.inputs[0].from), 'utf8'))
-  expect(proposal.initialSource).toBe(await readFile(join(shaDomain, 'seed/sha256_w_mem.v'), 'utf8'))
-  const templates = declared.templates.map((template: { workspace: { initial?: string } }) => {
-    delete template.workspace.initial
-    return template
+it('runs and independently reviews a one-off investigation without minting a method Revision', async () => {
+  const h = await setup(),
+    method = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!.revision
+  const before = factsOf(h.medium).filter((f) => f.kind === 'revision/created').length
+  const plan = await decompose(h.apparatus, { advance: async () => [], close: async () => undefined }, h.caller, {
+    taskId: h.proposal.taskId,
+    children: [
+      {
+        key: 'investigate',
+        contract: {
+          goal: 'test whether punctuation changes the ASCII count',
+          artifact: 'finding.json',
+          inputs: [],
+          criteria: [
+            { criterionId: 'finding', statement: 'a reproducible experiment supports or refutes the hypothesis' },
+          ],
+        },
+        dependsOn: [],
+        supports: ['letters'],
+        maxRuns: 1,
+      },
+    ],
   })
-  expect(proposal.templates.slice(0, templates.length)).toMatchObject(templates)
-  await expect(createMethod(apparatus, { rootTemplate: declared.rootTemplate, templates: proposal.templates, skills: [], tools: [] })).resolves.toMatchObject({ digest: expect.any(String) })
+  const parent = taskStateOf(h.apparatus, plan.taskId),
+    childId = parent.decomposition!.children[0]!.taskId,
+    child = taskStateOf(h.apparatus, childId),
+    id = child.responsibility!.agentId,
+    caller = { ...h.caller, agentId: id, sessionId: id },
+    agent = agentFor(id, id)
+  const run = await startAttempt(h.apparatus, caller, childId, 'investigate', method)
+  await writeFile(
+    join(run.bubble!.workspace.ref, 'finding.json'),
+    JSON.stringify({
+      hypothesis: false,
+      evidence: 'ASCII counting ignores punctuation: a! and a each contain 1 letter',
+    }),
+  )
+  expect(
+    (
+      await submit(
+        h.apparatus, fakeExecution(() => undefined), caller, execFor(agent, 'answer'),
+        { taskId: childId, path: 'finding.json' },
+        new AbortController().signal,
+        fixtureReview(h.apparatus),
+      )
+    ).verdict,
+  ).toBe('pass')
+  expect(child.contract!.template).toBeUndefined()
+  expect(factsOf(h.medium).filter((f) => f.kind === 'revision/created')).toHaveLength(before)
+  const history = await historyOf(h.apparatus, [], h.caller.agentId)
+  expect(history.tasks.find((t) => t.taskId === childId)!.runs[0]!.artifact).toMatchObject({ name: 'finding.json' })
+  expect((await readArtifact(h.apparatus, childId)).text).toContain('hypothesis')
+  const terminal = factsOf(h.medium).findLast((fact) => fact.subject === childId && fact.kind === 'run/verified')!
+  const events: SessionEvent[] = []
+  const message = schedulerMessage({ kind: 'singularity', purpose: 'plan-outcome', controlId: h.apparatus.controlId,
+    parentTaskId: h.proposal.taskId, taskId: childId, runId: run.runId, factSeq: terminal.seq }, 'child evidence settled')
+  let waits = 0
+  const session = { sessionId: h.caller.sessionId, wait: async () => {
+    waits++
+    if (waits === 2) events.push({ seq: SessionSeq(events.length), time: 0, type: 'agent/inbox/spliced',
+      data: { target: 'next-turn', start: 0, inserted: [message] } } as SessionEvent)
+    if (waits === 3) events.push({ seq: SessionSeq(events.length), time: 0, type: 'user/message', data: message } as SessionEvent)
+    if (waits === 4) {
+      await writeFile(join(h.proposal.workspace, h.proposal.artifact), '35')
+      await submit(
+        h.apparatus,
+        fakeExecution(() => undefined),
+        h.caller,
+        execFor(h.agent, 'answer'),
+        { taskId: h.proposal.taskId, path: h.proposal.artifact },
+        new AbortController().signal,
+        fixtureReview(h.apparatus),
+      )
+    }
+  } } as ChildSession
+  const persistence = { open: async () => ({ read: async () => ({ events }), close: async () => undefined }) } as unknown as SessionPersistence
+  expect((await waitForTask({ ...h.apparatus, persistence }, h.proposal.taskId, session, new AbortController().signal)).status)
+    .toBe('verified')
+  expect(waits).toBe(4)
+  await h.apparatus.store.close()
+})
+it('refuses exact ancestor responsibilities even under fresh child keys and template provenance', async () => {
+  const h = await setup(),
+    contract = h.proposal.contract
+  await expect(
+    decompose(h.apparatus, { advance: async () => [], close: async () => undefined }, h.caller, {
+      taskId: h.proposal.taskId,
+      children: [{ key: 'again', contract, dependsOn: [], supports: ['letters'], maxRuns: 1 }],
+    }),
+  ).rejects.toThrow('repeats an ancestor')
+  expect(factsOf(h.medium).filter((f) => f.kind === 'task/admitted')).toHaveLength(1)
+  await h.apparatus.store.close()
+})
+it('waits for a committed round outcome to enter and finish its native turn before diagnosing a missing report', async () => {
+  const h = await setup(),
+    analysis = await propose(h.apparatus, { ...h.caller, agentId: 'analysis', sessionId: 'analysis' }, 'analysis',
+      { goal: 'analyze methods' }, { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } })
+  const fact = (commandId: string, kind: string, payload: unknown, as?: string) => h.apparatus.store.emit({
+    commandId, kind, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: analysis.taskId, payload,
+    ...(as === undefined ? {} : { as }),
+  })
+  const method = taskStateOf(h.apparatus, analysis.taskId).runs[analysis.runId]!.revision
+  await fact('request:notification', 'rsi/round-requested', {
+    runId: analysis.runId, roundId: 'notification', round: 1, incumbent: method, candidates: [method],
+    proposal: { sessionId: 'analysis', tokens: 0, candidates: [method.digest],
+      sessions: [{ sessionId: 'analysis', start: 0, end: 0, tokens: 0 }] },
+  }, 'agent:analysis')
+  const outcome = await fact('round-settled:notification', 'rsi/round-settled',
+    { roundId: 'notification', status: 'failed', error: 'insufficient evidence' })
+  const message = schedulerMessage({ kind: 'singularity', purpose: 'plan-outcome', controlId: h.apparatus.controlId,
+    parentTaskId: analysis.taskId, taskId: analysis.taskId, runId: analysis.runId, factSeq: outcome.seq }, 'outcome')
+  const events: SessionEvent[] = []
+  const persistence = { open: async () => ({ read: async () => ({ events }), close: async () => undefined }) } as unknown as SessionPersistence
+  let waits = 0
+  const session = { sessionId: 'analysis', wait: async () => {
+    waits++
+    if (waits === 2) events.push({ seq: SessionSeq(events.length), time: 0, type: 'agent/inbox/spliced',
+      data: { target: 'next-turn', start: 0, inserted: [message] } } as SessionEvent)
+    if (waits === 3) events.push({ seq: SessionSeq(events.length), time: 0, type: 'user/message', data: message } as SessionEvent)
+    if (waits === 4) events.push({ seq: SessionSeq(events.length), time: 0, type: 'turn/end', data: {} } as SessionEvent)
+  } } as ChildSession
+  await expect(waitForTask({ ...h.apparatus, persistence }, analysis.taskId, session, new AbortController().signal))
+    .rejects.toThrow('stopped without submitting')
+  expect(waits).toBe(4)
+  await h.apparatus.store.close()
 })
 
-it('reads every settled Run and source from sealed attachments after workspace mutation', async () => {
-  const { apparatus, persistence } = await fixture()
-  const first = await propose(apparatus, caller, 'first', { goal: 'count letters' })
-  await submit(apparatus, fakeExecution(() => undefined), caller, execFor(agentFor(caller.agentId, caller.sessionId), 'submit-first'), { taskId: first.taskId, program: counting }, new AbortController().signal)
-  await writeFile(join(first.workspace, 'program.mjs'), 'overwritten source')
-  await writeFile(join(first.workspace, 'report.txt'), 'overwritten artifact')
-  const second = await propose(apparatus, caller, 'second', { goal: 'count letters' })
-  expect(second.taskId).toBe(first.taskId)
-  const before = persistence.events.length
-  const result = await status(apparatus, caller, { taskId: first.taskId })
-  expect(result.task.runs).toHaveLength(2)
-  expect(result.task.runs[0]).toMatchObject({ runId: first.runId, program: counting, artifact: '35', source: { sessionId: caller.sessionId } })
-  expect(result.task.runs[1]).toMatchObject({ runId: second.runId, program: null, artifact: null })
-  expect(persistence.events).toHaveLength(before)
-  const history = await historyOf(apparatus, [])
-  expect(history.tasks).toEqual([result.task])
-  expect(history.decisions).toEqual([])
-})
 
-it('retries the exact failed contract and Revision after the publication pointer changes', async () => {
-  const { apparatus, persistence } = await fixture()
-  const first = await propose(apparatus, caller, 'first', { goal: 'Count letters; preserve the exact protected input and natural-language acceptance.' })
-  const task = apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, first.taskId)!
-  const original = methodOfRun(apparatus, task.runs[first.runId]!)!
-  await apparatus.tasks.forAgent(caller.agentId).failRun({ commandId: 'failed', taskId: first.taskId, runId: first.runId, reason: 'not accepted' })
-  const assets = (await historyOf(apparatus, [])).methods[0]!.assets
-  const changed = structuredClone(assets.templates) as { goal: string }[]
-  changed[0]!.goal = 'Changed published method instructions.'
-  const published = await createMethod(apparatus, { ...assets, templates: changed })
-  await apparatus.store.emit({ commandId: 'changed-head', protocol: ENVIRONMENT_PROTOCOL, version: ENVIRONMENT_VERSION,
-    kind: ENVIRONMENT_KINDS.pointerSwitched, subject: published.environmentId, payload: { expected: '', to: published.revisionId } })
-  const second = await retry(apparatus, caller, 'second', { taskId: first.taskId })
-  const after = (await status(apparatus, caller, { taskId: first.taskId })).task
-  expect(after.contract).toEqual(task.contract)
-  expect(methodOfRun(apparatus, apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, first.taskId)!.runs[second.runId]!)).toEqual(original)
-  expect(second).toMatchObject({ taskId: first.taskId, inputContent: first.inputContent, templates: first.templates })
-  const cutoff = persistence.events.length
-  expect(await retry(apparatus, caller, 'second', { taskId: first.taskId })).toEqual(second)
-  expect(persistence.events).toHaveLength(cutoff)
-  expect(await asyncRefusalOf(() => retry(apparatus, { ...caller, agentId: 'other' }, 'third', { taskId: first.taskId }))).toMatchObject({ code: 'not-responsible' })
-})
-
-it('allows only the exact direct parent to read its child sealed answer', async () => {
-  const { apparatus } = await fixture()
-  const parent = await propose(apparatus, caller, 'parent', { goal: 'count letters' })
-  const child = { agentId: 'child', sessionId: 'child-session', model: caller.model }
-  declareCaller(apparatus, child.agentId)
-  await apparatus.agents.open({ commandId: 'child-agent', agentId: child.agentId, sessionId: child.sessionId, role: 'child' })
-  const template = apparatus.domain.templates.get('extract-letters')!
-  await apparatus.tasks.admit({ commandId: 'child-contract', taskId: 'child-task', contract: contractFor(apparatus.domain, template, template.goal) })
-  await apparatus.tasks.assign({ commandId: 'child-owner', taskId: 'child-task', agentId: child.agentId })
-  await apparatus.tasks.forAgent(caller.agentId).decompose({ commandId: 'parent-plan', parentTaskId: parent.taskId, children: [{ taskId: 'child-task', dependsOn: [], supports: ['letters'], maxRuns: 1 }] })
-  const run = await startAttempt(apparatus, child, 'child-task', 'child-run')
-  const whileWorking = await status(apparatus, caller, { taskId: 'child-task' })
-  expect(whileWorking.task.runs[0]).toMatchObject({ runId: run.runId, artifact: null })
-  await submit(apparatus, fakeExecution(() => undefined), child, execFor(agentFor(child.agentId, child.sessionId), 'child-submit'), { taskId: 'child-task', program: extracting }, new AbortController().signal)
-  const result = await status(apparatus, caller, { taskId: 'child-task' })
-  expect(result.task.runs[0]?.artifact).toBe('Thequickbrownfoxjumpsoverthelazydog')
-  expect((await asyncRefusalOf(() => status(apparatus, { ...caller, agentId: 'unrelated' }, { taskId: 'child-task' }))).code).toBe('not-responsible')
-})
-
-it('publishes complete immutable Method contents in the same history port', async () => {
-  const { apparatus } = await fixture()
-  const assets = { rootTemplate: apparatus.domain.rootTemplate, templates: [...apparatus.domain.templates.values()].map(templateDeclaration), skills: [], tools: [{ name: 'count', source: counting }] }
-  const reference = await createMethod(apparatus, assets)
-  expect((await historyOf(apparatus, [])).methods).toEqual([{ reference, assets }])
-})
-
-it('keeps independent trial history inside its own tree and pinned Revision', async () => {
-  const { apparatus } = await fixture()
-  const original = await propose(apparatus, caller, 'original', { goal: 'count letters' })
-  await submit(apparatus, fakeExecution(() => undefined), caller, execFor(agentFor(caller.agentId, caller.sessionId), 'accepted'),
-    { taskId: original.taskId, program: counting }, new AbortController().signal)
-  const seed = methodOfRun(apparatus, apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, original.taskId)!.runs[original.runId]!)!
-  const assets = (await historyOf(apparatus, [])).methods[0]!.assets
-  const candidate = await createMethod(apparatus, { ...assets, skills: [{ name: 'candidate-answer', description: 'secret', capabilities: [], requiredTools: [], content: 'previous solved answer' }] })
-  const trialCaller = { ...caller, agentId: 'trial', sessionId: 'trial-session' }
-  const trial = await propose(apparatus, trialCaller, 'trial', { goal: 'count letters', method: seed },
-    { purpose: 'evaluation', relatedTo: { taskId: original.taskId, runId: original.runId } })
-  const history = await historyOf(apparatus, [], trialCaller.agentId)
-  expect(history.tasks.map(task => task.taskId)).toEqual([trial.taskId])
-  expect(history.methods.map(method => method.reference)).toEqual([seed])
-  expect(history.methods.some(method => method.reference.digest === candidate.digest)).toBe(false)
-  expect(history.tasks.flatMap(task => task.runs).every(run => run.artifact === null)).toBe(true)
-  expect(history.decisions).toEqual([])
-})
-
-it('exposes an audit frozen basis and candidate without exposing unrelated method assets', async () => {
-  const { apparatus } = await fixture()
-  const owner = await propose(apparatus, caller, 'owner', { goal: 'count letters' })
-  const seed = await seedMethod(apparatus)
-  const { assets, domain } = await loadMethod(apparatus, seed)
-  const withTool = (name: string) => ({ ...assets, tools: [{ name, source: counting }] })
-  const basis = await createMethod(apparatus, withTool('basis'))
-  const revision = await createMethod(apparatus, withTool('candidate'))
-  const unrelated = await createMethod(apparatus, withTool('unrelated'))
-  const bytes = Buffer.from(JSON.stringify({ purpose: 'asset-admission', taskId: owner.taskId, runId: owner.runId, basis, revision }))
-  const auditDomain = { ...domain, inputs: [...domain.inputs.filter(input => input.ref !== SUBJECT_INPUT),
-    { ref: SUBJECT_INPUT, digest: sha256(bytes), bytes, sourcePath: '' }] }
-  const reviewer = { ...caller, agentId: 'reviewer', sessionId: 'reviewer-session' }
-  declareCaller(apparatus, reviewer.agentId)
-  await apparatus.agents.open({ commandId: 'reviewer-agent', agentId: reviewer.agentId, sessionId: reviewer.sessionId, role: 'review' })
-  const template = auditDomain.templates.get(REVIEW_TEMPLATE)!
-  await apparatus.tasks.admit({ commandId: 'review-contract', taskId: 'review-task',
-    contract: { ...contractFor(auditDomain, template, template.goal), assets: seed } })
-  await apparatus.tasks.assign({ commandId: 'review-owner', taskId: 'review-task', agentId: reviewer.agentId })
-  await startAttempt(apparatus, reviewer, 'review-task', 'review-run', seed, { domain: auditDomain, purpose: 'review' })
-  const history = await historyOf(apparatus, [], reviewer.agentId)
-  expect(history.methods.map(method => method.reference)).toEqual([seed, basis, revision])
-  expect(history.tasks.map(task => task.taskId)).toEqual([owner.taskId, 'review-task'])
-  expect(history.methods.some(method => method.reference.digest === unrelated.digest)).toBe(false)
+it('reads large sealed findings in explicit UTF-8 pages without copying them into task history', async () => {
+  const h = await setup()
+  const text = '边界证据'.repeat(10_000)
+  await writeFile(join(h.proposal.workspace, h.proposal.artifact), text)
+  await submit(h.apparatus, fakeExecution(() => undefined), h.caller, execFor(h.agent, 'large-report'),
+    { taskId: h.proposal.taskId, path: h.proposal.artifact }, new AbortController().signal, fixtureReview(h.apparatus))
+  const history = await historyOf(h.apparatus, [], h.caller.agentId)
+  expect(JSON.stringify(history.tasks)).not.toContain(text)
+  let from = 0, read = ''
+  while (from < Buffer.byteLength(text)) {
+    const page = await readArtifact(h.apparatus, h.proposal.taskId, h.proposal.runId, from, 16_384)
+    expect(Buffer.byteLength(page.text)).toBeLessThanOrEqual(16_384)
+    read += page.text; from = page.next
+  }
+  expect(read).toBe(text)
+  await writeFile(join(h.proposal.workspace, h.proposal.artifact), 'changed after submission')
+  expect((await readArtifact(h.apparatus, h.proposal.taskId, h.proposal.runId, 0, 12)).text).toBe('边界证据')
+  await expect(readArtifact(h.apparatus, h.proposal.taskId, undefined, 1, 12)).rejects.toThrow('character boundary')
+  await expect(readArtifact(h.apparatus, h.proposal.taskId, undefined, 0, 32769)).rejects.toThrow('32768')
+  await expect(readArtifact(h.apparatus, h.proposal.taskId, 'foreign-run')).rejects.toThrow('no sealed artifact')
+  await h.apparatus.store.close()
 })

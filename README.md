@@ -1,8 +1,8 @@
 # singularity-core
 
-面向领域任务的 RSI 内核与 DSH 插件。TaskTemplate、Skill、Tool 共用不可变 Revision，经独立审核与真实评估自动发布，供下一次任务消费。
+面向领域任务的 RSI 内核与 DSH 插件。Task 表达冻结责任，独立 ReviewRun 判断交付；根任务终局后异步改进 TaskTemplate、Skill、Tool，经独立测评和发布审核切换唯一方法指针。
 
-复核基线 `35b0c7c`：核心原语已存在，G1/G2 需要修正并重新验收，G3 产品闭环待接。
+当前协议为 Task v10、Review v1，读投影为 v6。工程验证和真实 RSI 证据分别记录于现有 context 与实跑文档。
 
 | 阅读入口 | 用途 |
 |---|---|
@@ -32,4 +32,4 @@ node scripts/deploy.mjs
 dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
 ```
 
-在原生界面提交领域目标与自然语言验收要求。入口接纳根 Task/Run；agent 自主探索、追加分解、逐层独立验收，根通过后独立改进节点读取真实轨迹并评估资产候选。可靠赢家自动切换统一发布指针，后续任务固定使用该版本。Singularity map 与右侧 DSH 会话面板读取同一 committed snapshot。
+在原生界面提交领域目标与自然语言验收要求。入口接纳根 Task/Run；agent 自主探索、直接声明一次性子契约并逐层独立验收。根成功、失败或预算终止后先返回业务结果，再封存轨迹，异步分析和评估方法候选。可靠赢家自动切换统一发布指针，后续任务固定使用该版本。Singularity map 与右侧 DSH 会话面板读取同一 committed snapshot。

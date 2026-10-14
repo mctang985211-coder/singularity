@@ -1,14 +1,16 @@
 import type { ControlReadCut, ControlSessionStore } from '../control/session-store.ts'
 import type { Envelope } from '../protocol/envelope.ts'
-import type { Decision, EmitInput } from '../protocol/memory-log.ts'
+import type { EmitInput } from '../protocol/memory-log.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../agent/protocol.ts'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../environment/protocol.ts'
 import { assertPinnedRevision } from '../environment/binding.ts'
-import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunSubmission, type TaskState } from './protocol.ts'
+import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunSubmission, type TaskState,
+} from './protocol.ts'
 import { unadjudicatedCriteria, unmetCriteria, verdictFor } from './run.ts'
-import { childSettled, projectTree } from './tree.ts'
+import { assertParentage, projectTree, projectPlan, taskWaitingReason } from './tree.ts'
+import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../review/protocol.ts'
 import type { Bubble, BubbleInput, BubbleTool } from './bubble.ts'
 import type { DecompositionChild } from './decomposition.ts'
 
@@ -21,8 +23,11 @@ export interface HeldAgent {
 export interface VerdictInput {
   readonly runId: string
   readonly criterionId: string
+  readonly reviewId: string
   readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown'
   readonly implementationDigest: string
+  readonly verifierRef: string
+  readonly verifierVersion: string
   readonly artifactDigest: string
   readonly inputDigests: readonly BubbleInput[]
   readonly detail?: string
@@ -34,20 +39,32 @@ export interface TaskCommandOptions {
   /** The identities this deployment holds, keyed by agent id. An absent agent is not held. */
   readonly agents: ReadonlyMap<string, HeldAgent>
   /** The verifier implementations this deployment can run, by the digest of their own bytes. */
-  readonly implementations: readonly { readonly ref: string; readonly version: string; readonly implementationDigest: string }[]
+  readonly implementations: readonly { readonly ref: string
+    readonly version: string
+    readonly implementationDigest: string }[]
 }
 
 export interface AgentCommands {
-  admit(input: { readonly commandId: string; readonly taskId: string; readonly contract: unknown }, as?: string): Promise<Envelope>
-  decompose(input: { readonly commandId: string; readonly parentTaskId: string; readonly children: readonly DecompositionChild[] }, as?: string): Promise<Envelope>
-  assign(input: { readonly commandId: string; readonly taskId: string; readonly agentId: string }, as?: string): Promise<Envelope>
-  reassign(input: { readonly commandId: string; readonly taskId: string; readonly from: string; readonly agentId: string }, as?: string): Promise<Envelope>
+  admit(input: { readonly commandId: string; readonly taskId: string; readonly contract: unknown }, as?: string,
+  ): Promise<Envelope>
+  decompose(input: { readonly commandId: string
+      readonly parentTaskId: string
+      readonly children: readonly DecompositionChild[] }, as?: string,
+  ): Promise<Envelope>
+  assign(input: { readonly commandId: string; readonly taskId: string; readonly agentId: string }, as?: string,
+  ): Promise<Envelope>
+  reassign(input: { readonly commandId: string; readonly taskId: string; readonly from: string; readonly agentId: string }, as?: string,
+  ): Promise<Envelope>
   startRun(input: {
     readonly commandId: string
     readonly taskId: string
     readonly runId: string
     readonly revision: RevisionRef
-  }, as?: string): Promise<Envelope>
+      readonly purpose: import('./run.ts').RunState['purpose']
+      readonly relatedTo?: import('./run.ts').RunState['relatedTo']
+    },
+    as?: string,
+  ): Promise<Envelope>
   openBubble(input: {
     readonly commandId: string
     readonly taskId: string
@@ -57,26 +74,22 @@ export interface AgentCommands {
     readonly model: Bubble['model']
     readonly tools: readonly BubbleTool[]
     readonly conditions: readonly string[]
-  }, as?: string): Promise<Envelope>
-  beginSubmission(input: {
-    readonly commandId: string
-    readonly taskId: string
-    readonly runId: string
-    readonly requestId: string
-    readonly requestDigest: string
-  }, as?: string): Promise<Decision>
+  }, as?: string,
+  ): Promise<Envelope>
   submitRun(input: {
     readonly commandId: string
     readonly taskId: string
     readonly runId: string
     readonly submission: RunSubmission
-  }, as?: string): Promise<Envelope>
+  }, as?: string,
+  ): Promise<Envelope>
   failRun(input: {
     readonly commandId: string
     readonly taskId: string
     readonly runId: string
     readonly reason?: string
-  }, as?: string): Promise<Envelope>
+  }, as?: string,
+  ): Promise<Envelope>
 }
 
 export interface TaskCommands extends AgentCommands {
@@ -85,7 +98,9 @@ export interface TaskCommands extends AgentCommands {
     as?: string,
   ): Promise<Envelope>
   /** Not reachable from `forAgent`: producing a verdict is a verifier's act, not an agent's. */
-  recordVerdict(input: { readonly commandId: string; readonly taskId: string; readonly verdict: VerdictInput }): Promise<Envelope>
+  recordVerdict(input: { readonly commandId: string
+    readonly taskId: string
+    readonly verdict: VerdictInput }): Promise<Envelope>
   recordConsumption(input: {
     readonly commandId: string
     readonly taskId: string
@@ -102,6 +117,7 @@ interface Cut {
   readonly agent: (agentId: string) => AgentState | undefined
   readonly tasks: () => ReadonlyMap<string, TaskState>
   readonly environments: () => ReadonlyMap<string, EnvironmentState>
+  readonly reviews: () => ReadonlyMap<string, ReviewRun>
 }
 
 export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
@@ -122,7 +138,18 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
     admit: (input, as) => emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract }, as),
 
     decompose: (input, as) =>
-      emitRaw(options, input.commandId, TASK_KINDS.decomposed, input.parentTaskId, { children: input.children }, as),
+      emitRaw(options, input.commandId, TASK_KINDS.decomposed, input.parentTaskId, { children: input.children }, as, () => {
+        const cut = cutOf(options)
+        const task = cut.task(input.parentTaskId)
+        if (task === undefined) refuse('illegal-transition', 'decomposition requires an admitted parent')
+        const hold = taskWaitingReason(cut.tasks(), input.parentTaskId)
+        if (hold !== undefined) refuse('illegal-transition', hold)
+        const run = Object.values(task.runs).at(-1)
+        if (run !== undefined && (run.status !== 'running' || run.stage !== 'working'))
+          refuse('illegal-transition', 'decomposition requires a working parent Run')
+        assertParentage(input.parentTaskId, input.children, cut.tasks(), [...cut.reviews().values()]
+          .map((review) => ({ parentId: review.reviewId, children: review.children })))
+      }),
 
     assign: (input, as) => {
       // The identity is filled from the deployment's table, so a caller supplies what it did and
@@ -147,11 +174,15 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
     },
 
     startRun: (input, as) =>
-      emitRaw(options, input.commandId, TASK_KINDS.runStarted, input.taskId, { runId: input.runId, revision: input.revision }, as, () => {
+      emitRaw(options, input.commandId, TASK_KINDS.runStarted, input.taskId, { runId: input.runId, revision: input.revision,
+          purpose: input.purpose,
+          ...(input.relatedTo === undefined ? {} : { relatedTo: input.relatedTo }),
+        }, as, () => {
         const cut = cutOf(options)
         const task = cut.task(input.taskId)
         if (task === undefined || task.contract === undefined)
-          refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`)
+          refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`,
+            )
         // Cross-entity 1: the revision must exist, in the named environment, with the content
         // the pin claims. This reuses the environment slice's own check, not a second one.
         assertPinnedRevision(input.revision, cut.environments(), `run "${input.runId}" of task "${input.taskId}"`)
@@ -166,7 +197,8 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         // Cross-entity 3: if a plan declares this task, the plan's gate decides. Readiness
         // already subsumes dependencies, budget and admission, and carries its own reason.
         requirePlanAllows(cut, input.taskId)
-      }),
+      },
+      ),
 
     openBubble: (input, as) =>
       // The whole declared context goes through: rebuilding the payload from three of its members is
@@ -186,31 +218,24 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         for (const declared of task.contract.inputs) {
           if (declared.source.kind !== 'artifact') continue
           const producer = cut.task(declared.source.taskId)
-          const digest = input.inputs.find(bound => bound.name === declared.name)?.digest
-          if (producer === undefined || !Object.values(producer.runs).some(run =>
-            run.status === 'verified' && run.submission !== undefined && run.submission.artifactDigest === digest))
-            refuse('evidence-input-mismatch', `input "${declared.name}" requires the sealed artifact of verified task "${declared.source.taskId}"`)
-        }
-      }),
-
-    beginSubmission: async (input, as) => {
-      let fresh = false
-      const envelope = await emitRaw(options, input.commandId, TASK_KINDS.runSubmitting, input.taskId, {
-        runId: input.runId,
-        requestId: input.requestId,
-        requestDigest: input.requestDigest,
-      }, as, () => {
-        const own = projectTree(cutOf(options).tasks()).find(plan => plan.parentTaskId === input.taskId)
-        const pending = own?.children.filter(child => !childSettled(child)) ?? []
-        if (pending.length > 0)
-          refuse('illegal-transition', `cannot submit task "${input.taskId}" while its sub-task ${pending.map(child => `"${child.taskId}" (${child.status})`).join(', ')} has not settled`)
-        fresh = true
-      })
-      return { envelope, fresh }
-    },
+          const digest = input.inputs.find((bound) => bound.name === declared.name)?.digest
+          if (producer === undefined || !Object.values(producer.runs).some(
+                (run) =>
+            run.status === 'verified' && run.submission !== undefined && run.submission.artifactDigest === digest,
+              ))
+            refuse('evidence-input-mismatch', `input "${declared.name}" requires the sealed artifact of verified task "${declared.source.taskId}"`,
+              )
+          }
+        },
+      ),
 
     submitRun: (input, as) =>
-      emitRaw(options, input.commandId, TASK_KINDS.runSubmitted, input.taskId, { runId: input.runId, submission: input.submission }, as),
+      emitRaw(options, input.commandId, TASK_KINDS.runSubmitted, input.taskId, { runId: input.runId, submission: input.submission }, as,
+        () => {
+          const hold = taskWaitingReason(cutOf(options).tasks(), input.taskId)
+          if (hold !== undefined) refuse('illegal-transition', hold)
+        },
+      ),
 
     failRun: (input, as) =>
       emitRaw(
@@ -227,12 +252,12 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
     // and returns the fact that evidence is.
     settle: (input, as) => options.store.emit(() => settleRequest(options, input, as)) as Promise<Envelope>,
 
-    recordVerdict: input => {
+    recordVerdict: (input) => {
       // Who judged is filled from the criterion rather than passed in. The criterion cannot change
       // after admission - a second `task/admitted` is refused by the reducer, and the record is the
       // reducer's - so this fill cannot disagree with the check handed to the append path below,
       // and that check is what refuses a verdict this deployment cannot have produced.
-      const criterion = requireCriterion(cutOf(options), input.taskId, input.verdict.criterionId)
+      requireCriterion(cutOf(options), input.taskId, input.verdict.criterionId)
       return emitRaw(
         options,
         input.commandId,
@@ -241,9 +266,10 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         {
           runId: input.verdict.runId,
           criterionId: input.verdict.criterionId,
+          reviewId: input.verdict.reviewId,
           verdict: input.verdict.verdict,
-          verifierRef: criterion.verifierRef,
-          verifierVersion: criterion.verifierVersion,
+          verifierRef: input.verdict.verifierRef,
+          verifierVersion: input.verdict.verifierVersion,
           implementationDigest: input.verdict.implementationDigest,
           artifactDigest: input.verdict.artifactDigest,
           inputDigests: input.verdict.inputDigests,
@@ -251,22 +277,37 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         },
         undefined,
         () => {
-          const now = requireCriterion(cutOf(options), input.taskId, input.verdict.criterionId)
-          if (input.verdict.implementationDigest !== now.implementationDigest)
-            refuse(
-              'wrong-verifier',
-              `criterion "${input.verdict.criterionId}" names the implementation ${now.implementationDigest.slice(0, 12)}…, but the verdict came from ${input.verdict.implementationDigest.slice(0, 12)}…`,
+          const review = options.store
+            .load()
+            .stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, input.verdict.reviewId)
+          const task = cutOf(options).task(input.taskId)!
+          const run = task.runs[input.verdict.runId]!
+          const finding = review?.findings?.find((f) => f.criterionId === input.verdict.criterionId)
+          if (
+            review?.status !== 'completed' ||
+            review.target.kind !== 'acceptance' ||
+            review.target.taskId !== input.taskId ||
+            review.target.runId !== input.verdict.runId ||
+            review.target.contractDigest !== task.contractDigest ||
+            review.target.artifactDigest !== input.verdict.artifactDigest ||
+            review.identity === run.actor ||
+            finding?.verdict !== input.verdict.verdict
+          )
+            refuse('self-reported-evidence', 'acceptance requires the exact completed independent ReviewRun')
+          if (
+            !options.implementations.some(
+              (entry) =>
+                entry.ref === input.verdict.verifierRef &&
+                entry.version === input.verdict.verifierVersion &&
+                entry.implementationDigest === input.verdict.implementationDigest,
             )
-          if (!options.implementations.some(entry => entry.implementationDigest === input.verdict.implementationDigest))
-            refuse(
-              'unregistered-verifier',
-              `this deployment holds no implementation with digest ${input.verdict.implementationDigest.slice(0, 12)}…, so it cannot have produced this verdict`,
-            )
+          )
+            refuse('unregistered-verifier', 'the verdict producer is not held by this deployment')
         },
       )
     },
 
-    recordConsumption: input =>
+    recordConsumption: (input) =>
       // The revision stays the caller's claim rather than being filled from the run's pin: a
       // deployment that recorded consumption against a stale revision gets the reducer's refusal
       // named after that revision, instead of the claim being silently rewritten into a true one.
@@ -277,7 +318,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         source: input.source,
       }),
 
-    forAgent: agentId => {
+    forAgent: (agentId) => {
       // The narrow view does not hand back a judging method at all: the boundary is the absence of
       // the method, rather than a rule the agent is trusted to respect. And the surface is bound:
       // every fact it produces stamps this agent's identity, resolved from the deployment's one
@@ -285,15 +326,14 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
       // responsibility check compares the caller against the holder instead of against itself.
       const { as } = requireHeldBinding(options, agentId, `act as agent "${agentId}"`)
       return {
-        admit: input => commands.admit(input, as),
-        decompose: input => commands.decompose(input, as),
-        assign: input => commands.assign(input, as),
-        reassign: input => commands.reassign(input, as),
-        startRun: input => commands.startRun(input, as),
-        openBubble: input => commands.openBubble(input, as),
-        beginSubmission: input => commands.beginSubmission(input, as),
-        submitRun: input => commands.submitRun(input, as),
-        failRun: input => commands.failRun(input, as),
+        admit: (input) => commands.admit(input, as),
+        decompose: (input) => commands.decompose(input, as),
+        assign: (input) => commands.assign(input, as),
+        reassign: (input) => commands.reassign(input, as),
+        startRun: (input) => commands.startRun(input, as),
+        openBubble: (input) => commands.openBubble(input, as),
+        submitRun: (input) => commands.submitRun(input, as),
+        failRun: (input) => commands.failRun(input, as),
       }
     },
   }
@@ -304,15 +344,17 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
 function cutOf(options: TaskCommandOptions): Cut {
   const cut: ControlReadCut = options.store.load()
   return {
-    task: taskId => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
-    agent: agentId => cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, agentId),
+    task: (taskId) => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
+    agent: (agentId) => cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, agentId),
     tasks: () => cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION),
+    reviews: () => cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION),
     environments: () => cut.statesOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION),
   }
 }
 
 /** The binding one held agent's acts stamp, and the identity that binding resolves to. */
-function requireHeldBinding(options: TaskCommandOptions, agentId: string, action: string): { as: string; identity: string } {
+function requireHeldBinding(options: TaskCommandOptions, agentId: string, action: string,
+): { as: string; identity: string } {
   const held = options.agents.get(agentId)
   if (held === undefined)
     refuse(
@@ -338,10 +380,21 @@ function requireOpenedNode(cut: Cut, agentId: string, action: string): void {
 }
 
 function requirePlanAllows(cut: Cut, taskId: string): void {
-  const plans = projectTree(cut.tasks())
+  const plans = [
+    ...projectTree(cut.tasks()),
+    ...[...cut.reviews().values()].map((review) =>
+      projectPlan(review.reviewId, review.criteria, review.children, cut.tasks()),
+    ),
+  ]
   for (const view of plans) {
-    const child = view.children.find(entry => entry.taskId === taskId)
+    const child = view.children.find((entry) => entry.taskId === taskId)
     if (child === undefined) continue
+    const parent = cut.task(view.parentTaskId)
+    const run = parent === undefined ? undefined : Object.values(parent.runs).at(-1)
+    const review = cut.reviews().get(view.parentTaskId)
+    if (review !== undefined ? review.status !== 'running'
+      : run !== undefined && (run.status !== 'running' || run.stage !== 'working'))
+      refuse('illegal-transition', 'the direct parent Run has settled')
     if (child.status === 'ready') continue
     refuse(
       'illegal-transition',
@@ -350,24 +403,21 @@ function requirePlanAllows(cut: Cut, taskId: string): void {
       }`,
     )
   }
-  const own = plans.find(view => view.parentTaskId === taskId)
+  const own = plans.find((view) => view.parentTaskId === taskId)
   if (own === undefined) return
-  const running = own.children.filter(child => child.status === 'running')
-  if (running.length === 0) return
-  refuse(
-    'illegal-transition',
-    `cannot start a run for task "${taskId}": its own sub-task ${running
-      .map(child => `"${child.taskId}"`)
-      .join(', ')} ${running.length === 1 ? 'is' : 'are'} running; wait for delegated work to settle`,
-  )
+  // A first Run may open a previously declared plan; a retry cannot take pending work back.
+  if (Object.keys(cut.task(taskId)!.runs).length === 0 && !own.children.some((child) => child.status === 'running')) return
+  const hold = taskWaitingReason(cut.tasks(), taskId)
+  if (hold !== undefined) refuse('illegal-transition', hold)
 }
 
 /** The criterion a verdict must belong to, or a refusal naming why there is none. */
 function requireCriterion(cut: Cut, taskId: string, criterionId: string) {
   const task = cut.task(taskId)
   if (task === undefined || task.contract === undefined)
-    refuse('illegal-transition', `cannot record a verdict for task "${taskId}": it has no admitted contract to decide against`)
-  const criterion = task.contract.criteria.find(entry => entry.criterionId === criterionId)
+    refuse('illegal-transition', `cannot record a verdict for task "${taskId}": it has no admitted contract to decide against`,
+    )
+  const criterion = task.contract.criteria.find((entry) => entry.criterionId === criterionId)
   if (criterion === undefined) refuse('unknown-criterion', `task "${taskId}" does not declare criterion "${criterionId}", so nothing decides it`)
   return criterion
 }
@@ -380,7 +430,8 @@ function settleRequest(
   const cut = cutOf(options)
   const task = cut.task(input.taskId)
   if (task === undefined || task.contract === undefined)
-    refuse('unknown-run', `cannot settle run "${input.runId}" of task "${input.taskId}": it has no admitted contract, so it never started a run`)
+    refuse('unknown-run', `cannot settle run "${input.runId}" of task "${input.taskId}": it has no admitted contract, so it never started a run`,
+    )
   const run = task.runs[input.runId]
   if (run === undefined) refuse('unknown-run', `cannot settle run "${input.runId}": task "${input.taskId}" never started it`)
 
@@ -389,7 +440,7 @@ function settleRequest(
     refuse(
       'unadjudicated-criterion',
       `cannot settle run "${input.runId}": ${unadjudicated
-        .map(criterion => `"${criterion.criterionId}" has no verdict from ${criterion.verifierRef}@${criterion.verifierVersion}`)
+        .map((criterion) => `"${criterion.criterionId}" has no verdict from independent review`)
         .join('; ')}; a run settles only once every criterion has been decided`,
     )
 
@@ -400,7 +451,7 @@ function settleRequest(
   // Every criterion without a passing verdict holds a failing one — the unadjudicated were refused
   // above — so the settlement carries the first failure's own words rather than a summary of them.
   // A failing verdict with no detail stays without one: the view reports "none recorded".
-  const failing = unmet.map(criterion => verdictFor(run, criterion)).find(evidence => evidence !== undefined)
+  const failing = unmet.map((criterion) => verdictFor(run, criterion)).find((evidence) => evidence !== undefined)
   const reason = failing?.detail
   return {
     ...common,
@@ -419,5 +470,8 @@ async function emitRaw(
   as?: string,
   require?: () => void,
 ): Promise<Envelope> {
-  return options.store.emit({ commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind, subject, payload, ...(as === undefined ? {} : { as }) }, require) as Promise<Envelope>
+  return options.store.emit({ commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind, subject, payload, ...(as === undefined ? {} : { as }),
+    },
+    require,
+  ) as Promise<Envelope>
 }

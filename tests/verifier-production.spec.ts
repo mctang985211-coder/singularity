@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import type { AcceptanceCriterion } from '../src/task/contract.ts'
+import type { VerifierCriterion } from '../src/task/contract.ts'
 import type { VerifierImplementation, VerifierInput, VerifierVerdict } from '../src/verifier/implementation.ts'
 import {
   runProductionVerdict,
@@ -73,7 +73,7 @@ afterEach(async () => {
 
 /** Run one process for real without letting a non-zero exit throw. */
 function runProcess(file: string, args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     execFile(file, [...args], { encoding: 'utf8' }, (error, stdout, stderr) => {
       resolve({ code: error === null ? 0 : typeof error.code === 'number' ? error.code : 1, stdout, stderr })
     })
@@ -102,7 +102,8 @@ function realJudge(): RealJudge {
     const request = {
       command: typeof execution.command === 'string' ? execution.command : execution.command.join(' '),
       artifactPath: execution.artifactPath,
-      inputs: execution.inputs.map((entry: ProductionInput) => ({ name: entry.name, digest: entry.digest, path: entry.path })),
+      inputs: execution.inputs.map((entry: ProductionInput) => ({ name: entry.name, digest: entry.digest, path: entry.path,
+      })),
     }
     const result = await runProcess(process.execPath, [ADAPTER, JSON.stringify(request)])
     if (result.code !== 0) throw new Error(`the adapter could not judge: ${result.stderr}`)
@@ -140,8 +141,10 @@ async function heldImplementation(overrides: Partial<VerifierImplementation> = {
     implementationDigest: await programDigest(),
     selftest: {
       samples: [
-        { name: 'accepts a good input', expected: 'pass', input: { subject: good, artifactDigest: sha256('good'), inputs: [] } },
-        { name: 'rejects a bad input', expected: 'fail', input: { subject: bad, artifactDigest: sha256('bad'), inputs: [] } },
+        { name: 'accepts a good input', expected: 'pass', input: { subject: good, artifactDigest: sha256('good'), inputs: [] },
+        },
+        { name: 'rejects a bad input', expected: 'fail', input: { subject: bad, artifactDigest: sha256('bad'), inputs: [] },
+        },
       ],
     },
     judge: selftestJudge,
@@ -149,7 +152,7 @@ async function heldImplementation(overrides: Partial<VerifierImplementation> = {
   }
 }
 
-async function criterion(overrides: Partial<AcceptanceCriterion> = {}): Promise<AcceptanceCriterion> {
+async function criterion(overrides: Partial<VerifierCriterion> = {}): Promise<VerifierCriterion> {
   return {
     criterionId: 'correctness',
     statement: 'the artifact is the trimmed input',
@@ -219,7 +222,8 @@ describe('the production verdict', () => {
   it('does not find an implementation rebuilt under the same ref@version but different bytes', async () => {
     const rebuilt = await heldImplementation({ implementationDigest: sha256('rebuilt implementation bytes') })
 
-    const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [rebuilt] })))
+    const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [rebuilt] })),
+    )
 
     expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('rebuilt') })
     // Not a single execution: the rebuilt code must not run at all, not merely be reported later.
@@ -236,16 +240,20 @@ describe('the production verdict', () => {
     const lying = await heldImplementation({
       selftest: {
         samples: [
-          { name: 'accepts a good input', expected: 'pass', input: { subject: good, artifactDigest: sha256('good'), inputs: [] } },
-          { name: 'rejects a bad input', expected: 'fail', input: { subject: bad, artifactDigest: sha256('bad'), inputs: [] } },
-          { name: 'rejects the same bad input twice', expected: 'pass', input: { subject: bad, artifactDigest: sha256('bad'), inputs: [] } },
+          { name: 'accepts a good input', expected: 'pass', input: { subject: good, artifactDigest: sha256('good'), inputs: [] },
+          },
+          { name: 'rejects a bad input', expected: 'fail', input: { subject: bad, artifactDigest: sha256('bad'), inputs: [] },
+          },
+          { name: 'rejects the same bad input twice', expected: 'pass', input: { subject: bad, artifactDigest: sha256('bad'), inputs: [] },
+          },
         ],
       },
     })
 
     const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [lying] })))
 
-    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('rejects the same bad input twice') })
+    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('rejects the same bad input twice'),
+    })
     // The selftest itself ran the samples for real; the criterion's run did not.
     expect(await markerLabels()).toContain('sample')
     expect(await markerLabels()).not.toContain('criterion')
@@ -255,12 +263,17 @@ describe('the production verdict', () => {
     const good = join(directory, 'sample-good.txt')
     await writeFile(good, 'GOOD sample', 'utf8')
     const oneSided = await heldImplementation({
-      selftest: { samples: [{ name: 'accepts a good input', expected: 'pass', input: { subject: good, artifactDigest: sha256('good'), inputs: [] } }] },
+      selftest: { samples: [{ name: 'accepts a good input', expected: 'pass', input: { subject: good, artifactDigest: sha256('good'), inputs: [] },
+          },
+        ],
+      },
     })
 
-    const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [oneSided] })))
+    const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [oneSided] })),
+    )
 
-    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('no sample expected to fail') })
+    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('no sample expected to fail'),
+    })
     expect(await markerLabels()).toBe('')
   })
 
@@ -277,7 +290,7 @@ describe('the production verdict', () => {
     expect(await markerLabels()).toBe('')
   })
 
-  it('refuses a verdict from an implementation whose bytes are not the criterion\'s', async () => {
+  it("refuses a verdict from an implementation whose bytes are not the criterion's", async () => {
     const held = await heldImplementation()
     // The criterion is read *before* the rebuild, so it names the bytes that were held then.
     const declaredCriterion = await criterion()
@@ -341,9 +354,11 @@ describe('the production verdict', () => {
     // artifact path, an absolute input name, a repeated input name — are one decision at the shape
     // gate, refused under the payload's own name, and none of them is run.
     const refused = await Promise.all(
-      [badDigest, noJudge, escaping, absolute, duplicated].map(async payload => (await asyncRefusalOf(() => runProductionVerdict(payload))).code),
+      [badDigest, noJudge, escaping, absolute, duplicated].map(async (payload) => (await asyncRefusalOf(() => runProductionVerdict(payload))).code,
+      ),
     )
-    expect(refused).toEqual(['malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload'])
+    expect(refused).toEqual(['malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload',
+    ])
 
     // A criterion's shape is the contract's rule, so the refusal is the contract's own name for
     // it: the production path reads that shape, it does not own a second copy of it.

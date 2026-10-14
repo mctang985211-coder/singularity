@@ -25,7 +25,9 @@ export const Config = z.object({
   workspaceRoot: z.string().required(),
   budget: z.object({ nativeTokens: z.number().required(), unknownUsageReservations: z.array(z.object({
     sessionId: z.string().required(), seq: z.number().required(), tokens: z.number().required(),
-  })) }),
+  }),
+    ),
+  }),
 })
 
 export interface Config {
@@ -73,7 +75,7 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
   })
   const worlds = new WeakMap<import('@deepseek-ai/dsh-agent').Agent, Promise<void>>()
   const ensureWorld = (agent: import('@deepseek-ai/dsh-agent').Agent): Promise<void> => {
-    if (ctx.tools.get('singularity_retry_task', agent) === undefined) return Promise.resolve()
+    if (ctx.tools.get('singularity_read', agent) === undefined) return Promise.resolve()
     let mounting = worlds.get(agent)
     if (mounting === undefined) {
       mounting = (async () => {
@@ -85,22 +87,23 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     }
     return mounting
   }
-  ctx.on('agent/created', async ({ agent }) => { await ensureWorld(agent); return undefined })
+  ctx.on('agent/created', async ({ agent }) => { await ensureWorld(agent)
+    return undefined })
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     await ensureWorld(agent)
     const decision = await next()
-    if (decision.kind === 'reject' || ctx.tools.get('singularity_retry_task', agent) === undefined) return decision
+    if (decision.kind === 'reject' || ctx.tools.get('singularity_read', agent) === undefined) return decision
     signal.throwIfAborted()
     const route = routes.get(agent)
     if (route === undefined) refuse('malformed-declaration', 'native admission requires the assembled model route')
-    if (!await ctx.sessions.flush(agent.session)) refuse('write-not-durable', 'native root session has no durability listener')
+    if (!(await ctx.sessions.flush(agent.session))) refuse('write-not-durable', 'native root session has no durability listener')
     const assignment = await driver.enter(agent, decision.messages, route)
     return assignment === undefined ? decision : { ...decision, messages: [...decision.messages, assignment] }
   })
   ctx.on('agent/request', async ({ agent, signal }, next) => {
     const request = await next()
-    if (ctx.tools.get('singularity_retry_task', agent) === undefined) return request
-    if (!await ctx.sessions.flush(agent.session)) refuse('write-not-durable', 'campaign session has no native durability listener')
+    if (ctx.tools.get('singularity_read', agent) === undefined) return request
+    if (!(await ctx.sessions.flush(agent.session))) refuse('write-not-durable', 'campaign session has no native durability listener')
     const budget = driver.budget
     let resolved = request
     if (budget !== undefined) {

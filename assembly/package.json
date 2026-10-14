@@ -19,15 +19,15 @@
     "cordis.patch.yml",
     "lib",
     "panel.html",
-    "presets",
-    "review.mjs"
+    "presets"
   ],
   "dsh": {
     "bundle": {
       "patch": [
         "./cordis.patch.yml",
         "./presets/singularity-next.patch.yml",
-        "./presets/singularity-review.patch.yml"
+        "./presets/singularity-review.patch.yml",
+        "./presets/singularity-improve.patch.yml"
       ]
     },
     "client": {

@@ -31,6 +31,7 @@ export default defineConfig({
       '@deepseek-ai/dsh-tool-fs': `${DSH_INSTALLED}/dsh-tool-fs/lib/index.js`,
       '@deepseek-ai/dsh-tool-fs-search': `${DSH_INSTALLED}/dsh-tool-fs-search/lib/index.js`,
       '@deepseek-ai/dsh-tool-bash': `${DSH_INSTALLED}/dsh-tool-bash/lib/index.js`,
+      '@deepseek-ai/dsh-scope': `${DSH_INSTALLED}/dsh-scope/lib/index.js`,
       '@deepseek-ai/dsh-skill': `${DSH_INSTALLED}/dsh-skill/lib/index.js`,
       '@deepseek-ai/dsh-agent': `${DSH_INSTALLED}/dsh-agent/lib/index.js`,
       '@deepseek-ai/dsh-llm': `${DSH_INSTALLED}/dsh-llm/lib/index.js`,
@@ -40,7 +41,7 @@ export default defineConfig({
     },
   },
   test: {
-    maxWorkers: 4,
+    maxWorkers: 1,
     include: ['tests/**/*.spec.ts', 'assembly/tests/**/*.spec.ts'],
   },
 })

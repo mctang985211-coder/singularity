@@ -23,7 +23,7 @@ export interface TranscriptSource {
 }
 export interface Execution {
   assertCaller(exec: ToolRunContext): Agent
-  drain(exec: ToolRunContext): Promise<void>
+  drain(exec: ToolRunContext): Promise<() => void>
   sealTranscript(exec: ToolRunContext): Promise<TranscriptSource>
   close(): Promise<void>
 }
@@ -37,6 +37,7 @@ interface ActiveExecution {
 export function createExecution(ctx: Context, admission: Admission, onTurnFailure: TurnFailureHandler): Execution {
   const active = new Map<ToolExecutionToken, ActiveExecution>()
   const borrowed = new WeakSet<Agent>()
+  const sealing = new WeakSet<Agent>()
   const failedTurns = new Map<Agent, { turn: number; done: Promise<void>; failure?: { readonly error: unknown } }>()
   let closed = false
   let closing: Promise<void> | undefined
@@ -56,6 +57,7 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
   }
   const reasonOf = (exec: Readonly<ToolExecution>): string | undefined => {
     if (closed && exec.agent !== undefined && borrowed.has(exec.agent)) return 'the execution port has closed'
+    if (exec.agent !== undefined && sealing.has(exec.agent)) return 'submission owns the execution write barrier'
     return admission(exec)
   }
   const guard = ctx.tools.guard(reasonOf)
@@ -130,13 +132,18 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     assertCaller,
     drain: async exec => {
       const agent = assertCaller(exec)
+      if (sealing.has(agent)) refuse('illegal-transition', 'submission is already sealing this execution')
+      sealing.add(agent)
       const ancestors = new Set<ToolExecutionToken>()
       let token: ToolExecutionToken | undefined = exec.token
       while (token !== undefined) {
         ancestors.add(token)
         token = active.get(token)?.exec.parent
       }
-      await wait([...active.values()].filter(entry => entry.exec.agent === agent && !ancestors.has(entry.exec.token)))
+      try {
+        await wait([...active.values()].filter(entry => entry.exec.agent === agent && !ancestors.has(entry.exec.token)))
+      } catch (error) { sealing.delete(agent); throw error }
+      return () => { sealing.delete(agent) }
     },
     sealTranscript: async exec => {
       const agent = assertCaller(exec)

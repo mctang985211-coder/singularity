@@ -1,3 +1,4 @@
+import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
@@ -9,6 +10,7 @@ import { record, requireContractOf, requireRun, text } from './shape.ts'
 export interface BubbleInput {
   readonly name: string
   readonly digest: string
+  readonly attachment?: FileAttachmentRef
 }
 
 /** The declared execution context of one run. */
@@ -34,7 +36,7 @@ export interface BubbleTool {
 
 export const BUBBLE_MEMBERS = ['runId', 'inputs', 'workspace', 'model', 'tools', 'conditions'] as const
 export const WORKSPACE_MEMBERS = ['kind', 'ref'] as const
-export const BUBBLE_INPUT_MEMBERS = ['name', 'digest'] as const
+export const BUBBLE_INPUT_MEMBERS = ['name', 'digest', 'attachment'] as const
 const MODEL_MEMBERS = ['provider', 'model'] as const
 /** The closed shape of one tool. Not exported: what is exported is the surface the stack uses. */
 const BUBBLE_TOOL_MEMBERS = ['name', 'implementationDigest', 'version'] as const
@@ -53,7 +55,22 @@ export function inputList(raw: unknown, where: string, members: MemberSet): read
     if (!DIGEST.test(digest)) refuse('malformed-payload', `${at}.digest must be a sha256 hex content digest, got ${JSON.stringify(digest)}`)
     if (seen.has(name)) refuse('malformed-payload', `${where} names input ${JSON.stringify(name)} twice; one input has one digest`)
     seen.add(name)
-    return { name, digest }
+    const attachment = source['attachment'] === undefined ? undefined : record(source['attachment'], `${at}.attachment`)
+    if (attachment !== undefined) {
+      assertClosedKeys(attachment, ['attachmentId', 'name', 'bytes'], `${at}.attachment`)
+      if (
+        attachment['attachmentId'] !== `sha256:${digest}` ||
+        !Number.isSafeInteger(attachment['bytes']) ||
+        (attachment['bytes'] as number) < 0
+      )
+        refuse('digest-mismatch', 'input attachment must bind the frozen input bytes')
+      text(attachment, 'name', `${at}.attachment`)
+    }
+    return {
+      name,
+      digest,
+      ...(attachment === undefined ? {} : { attachment: attachment as unknown as FileAttachmentRef }),
+    }
   })
 }
 
@@ -80,7 +97,8 @@ export function assertInputsBound(bubble: Bubble | undefined, declared: readonly
 
 function toolList(raw: unknown, where: string, members: MemberSet): readonly BubbleTool[] {
   if (!Array.isArray(raw))
-    refuse('malformed-payload', `${where} must be an array of the tools the execution could reach, got ${raw === null ? 'null' : typeof raw}`)
+    refuse('malformed-payload', `${where} must be an array of the tools the execution could reach, got ${raw === null ? 'null' : typeof raw}`,
+    )
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const at = `${where}[${index}]`
@@ -91,14 +109,16 @@ function toolList(raw: unknown, where: string, members: MemberSet): readonly Bub
     seen.add(name)
     const implementationDigest = text(source, 'implementationDigest', at)
     if (!DIGEST.test(implementationDigest))
-      refuse('malformed-payload', `${at}.implementationDigest must be a sha256 hex content digest, got ${JSON.stringify(implementationDigest)}`)
+      refuse('malformed-payload', `${at}.implementationDigest must be a sha256 hex content digest, got ${JSON.stringify(implementationDigest)}`,
+      )
     return { name, implementationDigest, version: text(source, 'version', at) }
   })
 }
 
 /** The observable external conditions, each named once. An empty list is a claim, not an omission. */
 function conditionList(raw: unknown, where: string): readonly string[] {
-  if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of named conditions, got ${raw === null ? 'null' : typeof raw}`)
+  if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of named conditions, got ${raw === null ? 'null' : typeof raw}`,
+    )
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const at = `${where}[${index}]`
@@ -114,12 +134,18 @@ function conditionList(raw: unknown, where: string): readonly string[] {
 export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskState> {
   return defineKind<
     TaskState,
-    { runId: string; inputs: readonly BubbleInput[]; workspace: { kind: string; ref: string }; model: Bubble['model']; tools: readonly BubbleTool[]; conditions: readonly string[] },
+    { runId: string
+      inputs: readonly BubbleInput[]
+      workspace: { kind: string; ref: string }
+      model: Bubble['model']
+      tools: readonly BubbleTool[]
+      conditions: readonly string[] },
     { workspace: MemberSet; inputs: MemberSet; tools: MemberSet; model: MemberSet }
   >({
     guarantees: { appended: true },
     members: BUBBLE_MEMBERS,
-    nested: { workspace: WORKSPACE_MEMBERS, inputs: BUBBLE_INPUT_MEMBERS, tools: BUBBLE_TOOL_MEMBERS, model: MODEL_MEMBERS },
+    nested: { workspace: WORKSPACE_MEMBERS, inputs: BUBBLE_INPUT_MEMBERS, tools: BUBBLE_TOOL_MEMBERS, model: MODEL_MEMBERS,
+    },
     emitter,
     parse: (raw, where, nested) => {
       const source = record(raw, where)
@@ -130,7 +156,8 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
       return {
         runId: text(source, 'runId', where),
         inputs: inputList(source['inputs'], `${where}.inputs`, nested.inputs),
-        workspace: { kind: text(workspace, 'kind', `${where}.workspace`), ref: text(workspace, 'ref', `${where}.workspace`) },
+        workspace: { kind: text(workspace, 'kind', `${where}.workspace`), ref: text(workspace, 'ref', `${where}.workspace`),
+        },
         model: { provider: text(model, 'provider', `${where}.model`), model: text(model, 'model', `${where}.model`) },
         tools: toolList(source['tools'], `${where}.tools`, nested.tools),
         conditions: conditionList(source['conditions'], `${where}.conditions`),
@@ -144,7 +171,8 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
       // it: nobody else declares what this run executed against.
       requireResponsible(state, envelope.actor, where)
       if (run.status !== 'running')
-        refuse('illegal-transition', `${where} opens an execution context for run "${payload.runId}", which already settled ${run.status}`)
+        refuse('illegal-transition', `${where} opens an execution context for run "${payload.runId}", which already settled ${run.status}`,
+        )
       if (run.stage !== 'working')
         refuse('illegal-transition', `${where} cannot open a bubble for run "${payload.runId}" in ${run.stage}`)
       if (run.bubble !== undefined)
@@ -153,7 +181,8 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
           `${where} opens a second execution context for run "${payload.runId}" (the first was opened at ${run.bubble.at}); an execution happened in one context`,
         )
       if (payload.inputs.length !== contract.inputs.length)
-        refuse('evidence-input-mismatch', `${where} declares ${payload.inputs.length} inputs, but the Task declares ${contract.inputs.length}`)
+        refuse('evidence-input-mismatch', `${where} declares ${payload.inputs.length} inputs, but the Task declares ${contract.inputs.length}`,
+        )
       for (const [index, input] of contract.inputs.entries()) {
         const bound = payload.inputs[index]!
         if (bound.name !== input.name || (input.source.kind === 'protected' && bound.digest !== input.source.digest))

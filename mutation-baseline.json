@@ -133,7 +133,7 @@
       "edits": [
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "    const modesOf = (taskId, side) => (side === 'published' && taskId === holdoutSet[0] ? ['measure', 'fail'] : ['measure', 'measure'])",
+          "find": "const modesOf = (taskId, side) =>\n      side === 'published' && taskId === holdoutSet[0] ? ['measure', 'fail'] : ['measure', 'measure']",
           "replace": "    const modesOf = () => ['measure', 'measure']"
         }
       ],
@@ -153,7 +153,7 @@
       "edits": [
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "const accounts = claim => claim.observed + claim.missing.length === claim.denominator",
+          "find": "const accounts = (claim) => claim.observed + claim.missing.length === claim.denominator",
           "replace": "const accounts = claim => claim.denominator >= 0"
         }
       ],
@@ -172,7 +172,7 @@
       "edits": [
         {
           "file": "src/measure/view.ts",
-          "find": "missing.map(entry => `slot ${entry.slot} (${entry.reason})`).join('; ')",
+          "find": "missing.map((entry) => `slot ${entry.slot} (${entry.reason})`).join('; ')",
           "replace": "missing.map(entry => `a planned slot (${entry.reason})`).join('; ')"
         }
       ],
@@ -191,7 +191,7 @@
       "edits": [
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "    trials: lines.filter(entry => entry.startsWith('meter:run:')).length,\n",
+          "find": "trials: lines.filter((entry) => entry.startsWith('meter:run:')).length",
           "replace": "    trials: lines.filter(entry => entry.startsWith('meter:run:')).length - 1,\n"
         }
       ],
@@ -416,12 +416,12 @@
       "edits": [
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "solve: value.solve.map(verdict => [verdict.taskId, verdict.gain, verdict.met])",
+          "find": "solve: value.solve.map((verdict) => [verdict.taskId, verdict.gain, verdict.met])",
           "replace": "solve: value.solve.map(verdict => [verdict.taskId, verdict.gain])"
         },
         {
           "file": "scripts/domain-probe.mjs",
-          "find": "holdout: value.holdout.map(verdict => [verdict.taskId, verdict.gain, verdict.met])",
+          "find": "holdout: value.holdout.map((verdict) => [verdict.taskId, verdict.gain, verdict.met])",
           "replace": "holdout: value.holdout.map(verdict => [verdict.taskId, verdict.gain])"
         }
       ],
@@ -497,7 +497,7 @@
       "edits": [
         {
           "file": "src/task/tree.ts",
-          "find": "    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped')",
+          "find": "const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped',\n    )",
           "replace": "    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked')"
         },
         {
@@ -541,7 +541,7 @@
       "edits": [
         {
           "file": "src/task/tree.ts",
-          "find": "    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped')",
+          "find": "const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped',\n    )",
           "replace": "    const dead = dependencies.filter(({ view }) => view.status === 'missing')"
         }
       ],
@@ -1165,7 +1165,7 @@
       "edits": [
         {
           "file": "src/task/commands.ts",
-          "find": "        failRun: input => commands.failRun(input, as),\n      }",
+          "find": "failRun: (input) => commands.failRun(input, as),\n      }",
           "replace": "        failRun: input => commands.failRun(input, as),\n        settle: input => commands.settle(input, as),\n      }"
         }
       ],
@@ -1260,8 +1260,8 @@
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "      await apparatus.tasks.settle({ commandId: 'settle:' + taskId + '/' + run.runId, taskId, runId: run.runId }, key)",
-          "replace": "      if (run.evidence.length === 0) await apparatus.tasks.settle({ commandId: 'settle:' + taskId + '/' + run.runId, taskId, runId: run.runId }, key)"
+          "find": "if (await restoreJudgement(task.taskId, run))\n          await apparatus.tasks.settle(",
+          "replace": "if(run.evidence.length===0 && await restoreJudgement(task.taskId,run)) await apparatus.tasks.settle("
         }
       ],
       "run": {
@@ -1270,17 +1270,17 @@
           "assembly/tests/recovery.spec.ts"
         ]
       },
-      "witness": "settles a sealed submission with a committed verdict without invoking its verifier again"
+      "witness": "resumes after interrupted run/verified"
     },
     {
       "id": "assembly-m7-repair-artifact-gone",
-      "rule": "a run whose frozen artifact is gone is settled failed by name",
+      "rule": "missing sealed artifact bytes refuse recovery before judgment can run",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "return 'unrecoverable-submission: frozen file is missing: ' + file.name",
-          "replace": "continue"
+          "find": "await sealedBytes(apparatus, run.submission!.files.artifact)",
+          "replace": "void 0"
         }
       ],
       "run": {
@@ -1289,7 +1289,7 @@
           "assembly/tests/recovery.spec.ts"
         ]
       },
-      "witness": "fails when the sealed missing-artifact bytes cannot be recovered"
+      "witness": "refuses missing sealed artifacts before replaying independent judgment"
     },
     {
       "id": "assembly-m8-closed-config",
@@ -1318,7 +1318,7 @@
         {
           "file": "assembly/src/agent.ts",
           "find": "for (const dispose of disposers) dispose()",
-          "replace": "for (const dispose of disposers.slice(0, 3)) dispose()"
+          "replace": "for(const dispose of disposers.slice(0,-1))dispose()"
         }
       ],
       "run": {
@@ -1327,17 +1327,17 @@
           "assembly/tests/agent-face.spec.ts"
         ]
       },
-      "witness": "owns every registration through the effect it opened"
+      "witness": "mounts only task operations"
     },
     {
       "id": "assembly-m15-frozen-input-drift",
-      "rule": "a frozen input whose bytes changed settles the run failed by name",
+      "rule": "working input drift refuses recovery instead of inventing a result",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
           "file": "assembly/src/repair.ts",
-          "find": "if (found !== file.digest) return 'unrecoverable-submission: frozen file digest changed: ' + file.name",
-          "replace": "if (false) return 'unrecoverable-submission: frozen file digest changed: ' + file.name"
+          "find": "if (sha256(await readFile(join(run.bubble.workspace.ref, input.name))) !== input.digest)\n            throw new Error('working input changed')",
+          "replace": "if (false) throw new Error('working input changed')"
         }
       ],
       "run": {
@@ -1346,7 +1346,7 @@
           "assembly/tests/recovery.spec.ts"
         ]
       },
-      "witness": "fails when the sealed input bytes cannot be recovered"
+      "witness": "refuses changed working inputs without inventing a recovered outcome"
     },
     {
       "id": "assembly-m16-placeholders-closed",
@@ -1368,23 +1368,23 @@
       "witness": "refuses a command template naming a placeholder this version cannot fill"
     },
     {
-      "id": "assembly-m21-inflight-redelivery-refused",
-      "rule": "a redelivery whose run is still in flight is refused, not re-executed",
+      "id": "assembly-m21-submission-redelivery",
+      "rule": "a committed submission replays its existing result without another review",
       "doc": "docs/assembly-g1.md",
       "edits": [
         {
           "file": "assembly/src/submission.ts",
-          "find": "  if (recorded !== undefined) {\n    if (recorded.request!.digest !== requestDigest) refuse('command-conflict', 'this submission was committed with different content')\n    if (recorded.status !== 'running') return answerOf(state, recorded.runId)\n    refuse('illegal-transition', 'this submission is in flight; do not execute it again')\n  }\n",
+          "find": "  if (recorded !== undefined) {\n    if (recorded.request!.digest !== requestDigest) refuse('command-conflict', 'submission changed its request')\n    if (recorded.status !== 'running') return answerOf(state, recorded.runId)\n    refuse('illegal-transition', 'submission is in flight')\n  }",
           "replace": ""
         }
       ],
       "run": {
         "kind": "vitest",
         "args": [
-          "assembly/tests/recovery.spec.ts"
+          "assembly/tests/execution-integrity.spec.ts"
         ]
       },
-      "witness": "refuses a redelivered submission still in flight without repeating its program"
+      "witness": "judges the actual artifact and reuses its committed answer after workspace deletion"
     },
     {
       "id": "assembly-m23-holder-checked-before-writing",
@@ -1450,8 +1450,8 @@
       "edits": [
         {
           "file": "src/task/commands.ts",
-          "find": "  const running = own.children.filter(child => child.status === 'running')",
-          "replace": "  const running = []"
+          "find": "  const hold = taskWaitingReason(cut.tasks(), taskId)\n  if (hold !== undefined) refuse('illegal-transition', hold)",
+          "replace": "  // Waiting gate omitted."
         }
       ],
       "run": {
@@ -1512,8 +1512,8 @@
       "edits": [
         {
           "file": "assembly/src/inputs.ts",
-          "find": "read: async () => protectedInput.bytes",
-          "replace": "read: async () => readFile(join(apparatus.domain.dir, protectedInput.sourcePath))"
+          "find": "...domain.inputs.map(({ ref, digest, bytes }) => ({ ref, digest, read: async () => bytes })),",
+          "replace": "...domain.inputs.map(({ ref, digest, sourcePath }) => ({ ref, digest, read: async () => readFile(join(apparatus.domain.dir, sourcePath)) })),"
         },
         {
           "file": "assembly/src/inputs.ts",
@@ -1549,14 +1549,14 @@
       "witness": "serializes two starts even when no child plan owns the Task"
     },
     {
-      "id": "core-w1-reserved-request-digest",
-      "rule": "the sealed submission names the content identity reserved before execution",
+      "id": "core-w1-sealed-request-digest",
+      "rule": "atomic submission preserves the trusted request content identity",
       "doc": "docs/context.md",
       "edits": [
         {
           "file": "src/task/run.ts",
-          "find": "run.request.digest !== payload.submission.requestDigest",
-          "replace": "false"
+          "find": "requestDigest: digest(submission, 'requestDigest', at)",
+          "replace": "requestDigest: 'f'.repeat(64)"
         }
       ],
       "run": {
@@ -1565,7 +1565,7 @@
           "tests/task-submission.spec.ts"
         ]
       },
-      "witness": "requires the reserved request and refuses beginning after a verdict"
+      "witness": "records frozen files and transcript in one fact and replays the same receipt after settlement"
     },
     {
       "id": "core-w2-receipt-terminal-cutoff",
@@ -1604,6 +1604,42 @@
         ]
       },
       "witness": "rejects an interior sequence collision even when the last sequence matches the array length"
+    },
+    {
+      "id": "review-executor-independence",
+      "rule": "the executor identity cannot start the review of its own sealed submission",
+      "edits": [
+        {
+          "file": "src/review/commands.ts",
+          "find": "run.actor === input.identity || task!.responsibility!.agentId === input.agentId",
+          "replace": "false"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/review.spec.ts"
+        ]
+      },
+      "witness": "refuses a reviewer with the executor identity"
+    },
+    {
+      "id": "rsi-settled-outcome-replay",
+      "rule": "a settled round whose native notification was lost is delivered on recovery without another evaluation",
+      "edits": [
+        {
+          "file": "assembly/src/driver.ts",
+          "find": "for (const request of task.rounds ?? [])\n        if (task.runs[request.runId]!.status === 'running')",
+          "replace": "for(const request of task.rounds??[])if(task.runs[request.runId]!.status==='running'&&request.status==='pending')"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/async-rsi.spec.ts"
+        ]
+      },
+      "witness": "commits evaluation requests immediately, resumes the same trials and replays a lost outcome notification without another decision"
     }
   ]
 }

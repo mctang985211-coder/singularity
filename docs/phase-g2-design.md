@@ -1,126 +1,79 @@
-# G2 合同：完整求解、真实依赖与读面板
+# G2：任务、审核与运行合同
 
-日期：2026-10-11。复核基线：`35b0c7c`。本文替换 G1 基线上的旧 G2 实施设计。
-**已有接线不等于本合同已实现。** 用户裁定与反例见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)；
-剩余顺序只在 [assembly-blueprint.md §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 维护，本文定义 G2 行为与接口边界。
+日期：2026-10-14。当前协议 Task v10、Review v1、snapshot v6。
+用户裁定见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)；剩余顺序只在 [assembly-blueprint.md §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 维护。
 
 ## 1. 不可降低的行为合同
 
 | 项 | 合同 |
 |---|---|
-| Run | 一次完整求解，投递前开始，submit 后独立验证结算；同一 Task 只有一个未结算 Run，idle/live 不判任务完成 |
-| 会话归属 | 一个 control 可有多个根；计划从父 Task 责任和 Agent session 引用解析准确父，child 不借最近工具调用者的模型/preset |
-| 重试 | 普通 verifier fail 且剩余 maxRuns 时向同一 child 会话投递反馈并开始下一 Run；耗尽/不可推进通知父；运行时异常明确失败 |
-| 子任务 | 领域声明最小模板集合，各自构造可裁定 TaskContract；不同 goal 不再自动复制父输入和同一完整 verifier |
-| 节点能力 | 每个节点拥有完整 DSH standard 预设与 Singularity 工具；child 可工作并继续分解自己负责的 Task，沿用责任、计划、模板与预算校验 |
-| 依赖 | 只有 verified 解锁；上游封存产物按真实摘要进入后序 Run 的输入，顺序控制与产物交付缺一不可 |
-| 父任务 | waiting 时允许读取/协调，拒绝冲突写与 submit；child verified/supports 不生成父 pass；父产物必须独立验收 |
-| 读面 | 工具/API/UI 读同一 committed cut；准确 Task/Run/session/依赖/receipt 来源可查，读取不提交事实、不调度 |
-| 度量 | G2 不保留闲置 metric 配置/类型；真实度量声明与消费者一起移到 G3 |
+| Task | 目标、冻结输入来源、交付物、稳定标准；模板是可选来源 |
+| Run | 一次完整求解；直接固定方法 Revision，Bubble 保存执行快照；同 Task 一个未结算 Run |
+| ReviewRun | 独立身份和 Session；固定审核对象、输入、标准、证据引用和逐条判断 |
+| 失败 | fail 判断完成审核；审核运行失败另记；单次 Run 失败不立即关闭根 Task |
+| 分解 | 一次性契约直接调度；子责任有独立交付和标准，并支持父标准 |
+| 依赖 | 只有 verified 封存产物解锁输入；child 支持不生成父 pass |
+| 会话 | 从持久责任解析准确父，恢复同 Session、Run 和工作区；内存只持有资源 |
+| 读面 | 工具、API、UI 同一 committed cut；读取不执行、不调度 |
 
 ## 2. 最小领域模板与输入产物
 
-沿用 `program`（执行程序并判产物）和 `source`（判提交源码）两种提交装置，不建两套 Task/Run 协议。
-装置固定提交位置、可交付产物、受保护输入、verifier 实现及 selftest；领域字面量不进入通用 driver/scheduler/client。
+TaskContract 只含 `goal / artifact / inputs / criteria / template?`。criterion 只含 `criterionId / statement`；审核节点决定如何取证、执行检查并逐条判断。部署受保护 checker 固定要求及实现；测量另存 verifier ref、version、implementation digest，不能因精简 Task 丢掉可比性。
 
-领域模板提供以下信息，装配接口先按实际领域实例冻结并写 spec，不能只预留一个无人消费的泛化模板框架：
+输入来源为部署冻结引用或明确依赖 Task 的封存产物。上游摘要在其完成前未知；契约固定来源，Run/Bubble 开始前绑定准确附件和摘要。源工作目录之后的变动不改变已授权字节；缺失、摘要不符或错误 producer 明确拒绝。
 
-| 声明 | 装配用途 |
-|---|---|
-| 稳定 template 身份与真实内容摘要 | 模型选择受支持模板，driver 构造固定 TaskContract；模板不能改变父验收 |
-| 可判定目标、criterion、verifier ref/version/implementation digest | child 的独立验收；verifier 必须有真实 pass/fail selftest |
-| 域内输入来源或上游 child 产物来源 | Task 契约固定来源引用；不是让模型自填输入字节/摘要 |
-| 产物名与工作区目标 | submit 封存实际字节；后序按指定产物交付，不读 producer 的可变工作目录 |
-| 允许的 supports 与参数/依赖形状 | 完整计划校验；supports 是工作关系，不是父验收证据 |
-
-上游产物的摘要在上游完成前未知。不得伪造 placeholder digest 或改写已准入 TaskContract；
-任务模板/契约固定来源引用，后序 Run 开始前解析已 verified Run 的封存产物，绑定真实摘要到现有 inputs/Bubble。
-源文件在装载后变化不影响已经摘要并授权的字节；缺失、摘要不符或错误 producer 的产物具名拒绝。
-输入个数和模板个数按真实依赖需要决定，旧“恰好一个输入”限制不能继续锁死依赖交付。
-
-letters 是程序装置回归域；SHA256 是源码/独立判据域。两者不需要相同子模板。
-G2 的依赖正例必须能观察“前序产物被后序实际使用”，不能把两份相同完整任务叫真实分解。
+模板提供可复用 goal、applicability、Skill/Tool 绑定和直接孩子 recipe；其来源摘要可查。一次性调查、报告或取证任务无需模板、方法 Revision 或资产审核。调查可以用证据否定假设；调查完成和优化目标达成分别判断。
 
 ## 3. 计划权限与发布
 
-模型提出批内 key、受支持 template/参数、dependsOn、supports、maxRuns；真实 task/session/agent ID 由 driver 稳定派生。
-caller 来源始终是真实 `exec.agent`。责任、模板、参数、依赖闭合/DAG、supports、预算与输入来源完整校验后，才有副作用。
+模型声明 batch key、可选 template 或一次性 contract、dependsOn、supports、maxRuns；宿主稳定派生真实 Task、Agent、Session ID。当前 Task、Run、角色和 caller 由宿主绑定。
 
-- 非本人计划、未知模板、循环、缺失 key/产物绑定均拒绝；不能先 admit/assign 再以最后 decompose 的失败充当拒绝。
-- 单个 subject 的持有者/形状不变量留在 reducer；跨 Task 的存在/责任/依赖检查在唯一提交队列内，读面由 core 统一投影。
-- 合法批次最后由一个完整 decomposition 事实发布；准备项未发布时不可执行。多个 admit/append 没有跨进程崩溃原子保证。
-- 合法准备崩溃时按稳定操作身份继续或明确停止；不能因第一次半准备就把修正非法提案变成已提交成功。
-- 不额外存第二份计划、调度 JSON 或通用事务状态；必要的模板/来源绑定扩充对应版本化领域事实。
+完整权限、标准关联、输入来源、DAG 和尝试预算先校验，再准备并发布一份完整计划事实。相同输入和契约的祖先责任不得通过新 ID 或模板 provenance 再次生成；不加入自然语言语义进度审核器。责任内的小实验直接执行。
 
-## 4. Run、提交与父写入闸
+合法准备中断后按稳定身份恢复；未发布准备项不可调度。多个 append 不宣称跨进程原子事务，不建第二份计划或工作流存储。子任务继承父 Run 的方法版本，不能由普通执行节点切换方法。
 
-开始求解前检查权限、依赖输入、revision/Bubble、资源与剩余预算，记录 Run 后再投递。
-根任务 Run 跨越分解等待，child 是各自 Task 的 Run；父等待结束继续同一次求解，不能为掩盖等待另造父 Run。
-父写入闸必须覆盖授予的 shell/fs/MCP 和 submit，不能只阻止 `startRun`。
-父 waiting 由已发布计划的未完成委派工作派生，禁止冲突写；失败耗尽进入明确不能推进状态，不自动宣布父成功。
-不授予无法纳入 drain 的后台执行能力。
+## 4. Run、提交与独立审核
 
-submit 使用当前准确 Run，关闭新写准入并 drain（排除当前 submit call），封存请求内容与产物/输入字节，再在队列外独立验证。
-正确输出但非零退出/信号终止/超时不是 pass；异常/取消/持久化失败不返回成功空结果。
-同 Task 并发第二 Run 拒绝；下一尝试不能覆盖前一次封存内容。
-同 callId 同内容重送返回原结果，异内容冲突；终态后无关事实与聊天不能改正式 receipt。
+开始前校验责任、依赖、方法、输入和预算。Bubble 冻结输入附件、模型、工具、工作区及作用域；Run 不再创建一份执行 Environment Revision。
 
-语义改变按 Task/Run 对应协议升版本，明确拒绝旧解释；不复用旧版字段偷偷改语义，不加入兼容路径。
-`projectTree` 的依赖完成与父验收完成必须分开；更新 `complete` 等投影语义及其消费者，不能只改提示词。
+执行者写工作区产物，再以相对路径提交。宿主关闭写准入并 drain，冻结实际字节和原生 transcript 前缀，以 `run/submitted` 原子记录提交，进入 `working → submitted` 的唯一阶段路径。缺失文件、修改输入、持久化失败、取消与执行异常不返回成功空结果；恢复读取相同封存字节和检查。
+
+每次提交创建独立 ReviewRun，执行者不能审自己的产物。ReviewRun 固定精确对象、criterion 和独立会话；review.json 必须逐条给出 judgment 和证据引用。protected fail 不能被覆盖为 pass。审核可分解取证 Task，后者各自独立审核；ReviewRun 本身不创建审核审核者。
+
+审核的 fail / partial / unknown 都是有效完成的判断；运行失败有独立 failed 事实。调查的负结果保留。父节点必须消费已审核子证据并完成自己的集成与验收，不能把 child support 当父结论。
 
 ## 5. 调度与 DSH 固定端口
 
-使用显式运行端口表达 open/resume、投递、drain/等待、读取来源和 close；接口复用 core/DSH 类型。
-controller 从日志重建责任/Run/计划；进程内 handle 只管理 live lease，不充当“是否需要下一 Run”的事实。
+使用公开 create/resume、followup、whenIdle、flush、drain、close。三个角色分别挂载 task / review / improve preset，保留原生编程能力；不合并父角色的治理工具。执行面只给读取、分解、提交、重试和绑定方法执行；审核只给读取、取证分解和判断；RSI 只给读取、候选和测评。
 
-- ready 且无未结算 Run 才可开始尝试；不是“没有会话才 ready”。预算来自核心事实，不靠内存计数。
-- child 第一条指令与失败反馈由契约、冻结输入和判决生成，不含领域硬编码。
-- 模型/preset/parent 来自自己的准确父。即使由 B 的工具调用触发全 control 推进，A 的 child 仍归 A。
-- 投递与等待分开。`followup` 发消息，`whenIdle` 只表示会话静默；decompose 不能等待整个 child 求解才返回。
-- child 验收完成后推进后序并唤醒准确父；fail 有预算时向原 child 反馈；耗尽/blocked/运行时错误向父返回具体原因。
-- 投递的来源/截止使用 DSH transcript 可识别引用，必要关联补入现有 Run；不得新造通知协议或消息账本。
-- create/resume 使用同一 unpublished setup 绑定 preset、prompt、限制/guard；自建 child 不冒充无来源 Web 根。
-- open/deliver/close 失败返回消费者；disposer 归唯一 owner，关闭失败不忽略。
+默认上下文只含当前契约、冻结输入、相关方法摘要和完成依赖引用；完整方法、产物及轨迹按需读取。不可把完整方法目录、轨迹和治理长提示推给每个节点。
 
-正常的计划/结算推进与启动恢复各有明确触发，异常不借 propose 的最近 caller 重扫补偿。
-提交已结算但后续派发失败时，两者分别可观察，不能返回成功空列表或让模型误以为需要再次提交。
+首消息和重试反馈从冻结契约及真实结论生成；decompose 投递即返回。普通验收失败在 maxRuns 内继续同一 child 会话的新 Run；耗尽或依赖阻塞通知准确父。原生会话 idle 不等于 Task 成功；根 agent 在回合内可重试失败 Run，静默后由宿主关闭终局。
 
-私有宿主 `0.2.0-rc.2` 已核实的缝继续复用：完整 standard 配置加 Singularity overlay；create/resume 经 setup 中的 `composeFrom` 挂载准确父的实际 preset scope，未挂载则拒绝创建；模型路由显式传入；
-可选服务经 `ctx.get` 解析；已有 live 写句柄不得再次 resume；父关闭不级联关闭 child；`followup` 用合法消息构造入口。
-任务节点通过公开 `ctx.agents.create/resume` 使用独立主会话；交接消息使用任务协议的准确来源。
+Run 的原生 turn/error 与准确责任会话关联；不可借最近 caller 推进别人的子树。错误传播给消费者，disposer 归创建者；卸载撤销准入、取消/排空并关闭自管会话，Web 根由宿主拥有。
 
 ## 6. 封存、恢复与只读面板
 
-先补 Run 提交内容与实际控制/session/transcript 来源封存合同，receipt 继续从事实派生。
-当前 control cutoff 用于当前状态快照，正式 Run cutoff 用于已完成凭证；两个含义不混用。
-公开 receipt 投影 API 必须检查完整连续合法前缀，不能只核对末尾 seq 与数组长度；可信 store 的校验不能替代公开入口自己的合同。
-Progress 读面使用 snapshot formatVersion 3，同 cut 展示 Task/计划、Method、轮次、发布、消费与日志预算，并提供 Run/判决、parent/child 准确 session 引用、依赖产物摘要和可读 receipt 来源。
-使用原生会话读/打开入口，不复制聊天窗口。工具与 Web route 共用一个 read 端口，client 不解释第二套状态机。
+正式 receipt 固定目标 Run 的控制事实截止、实际 Session/transcript 截止与内容引用；完整连续合法前缀均校验。后续聊天和无关事实不能改变正式凭证。snapshot v6 同 cut 展示 Task、ReviewRun、计划、closure、RSI、round 请求、测评、发布和消费；会话引用直接连接原生面板。
 
-只读路由沿用实际 Web connection 门；非 GET 拒绝；初始化/刷新/重连不写事实，不触发 advance/recover。
-面板载入失败显示具名错误，不降为“没有任务”；宿主注入缺失不能被静默未激活掩盖。
-client/js/css 随构建产物和访问域一起验证，不靠 host TS 的行数门禁代替审阅。
+根关闭后先返回业务结果；后台等待相关会话静默并 flush，再封存完整成功/失败轨迹和成本，启动 RSI。evaluation 根不递归 RSI。预算不足记录 skipped 原因，不加预算、不宣称已完成。
+
+测评工具只提交持久请求并立即返回引用。宿主从已有 measure / strategy / release 事实继续 trials、决定与最终发布审核，通知复用带身份的原生消息；无需模型重发长调用。发布要求准确 independent witness 和 expected head，seed 直接初始化指针。候选不经独立资产准入审核，结构、绑定、工具样例和受保护边界检查后进入隔离测评。
 
 | 崩溃窗口 | 必须证明 |
 |---|---|
-| 合法计划准备中、尚未发布 | 不能派发半计划；同批合法准备可辨认，非法提案未产生可执行项 |
-| child 创建后、绑定前 | 同一稳定 session 关联可辨认，完成合法绑定或释放 orphan handle，不随机再建 |
-| Run 开始后、投递前/后 | 重建同 Run/准确父子关系；确认 DSH 投递来源，未知结果不猜测重送 |
-| submitted/drain/验证途中 | 写闸保持关闭，继续处理同封存提交；恢复不允许改字节 |
-| verdict/终态提交后、答复前 | 重送识别原内容与原结果，receipt 不随当前日志变化 |
-| unload、关闭过程中出错 | 撤销准入、取消/排空、释放 child lease/监听/路由，错误可观察；Web 根归宿主 |
+| 计划准备中、未发布 | 不执行半计划，同一合法准备可辨认 |
+| Run 开始、投递前后 | 同一 Run、Session、冻结工作区与来源 |
+| 提交、审核途中 | 同一封存产物、ReviewRun、检查与逐条结论 |
+| 测评途中 | 复用完成 trial，恢复未完成对象与相同请求 |
+| 决定、发布途中 | 同一决定和审核，唯一指针不重复切换 |
+| 卸载途中 | 后台等待可中断，错误可观察，无遗留写租约 |
 
 ## 7. Spec 顺序与产品证据
 
-按 [spec-policy](spec-policy.md) 先写接口和失败 spec，覆盖执行、隔离、重送、准入、会话/尝试、产物依赖、父验收、封存与错误出口。
-固定 stderr/自动重扫等错误行为的旧 spec 要替换；同次删除其连带注释、失效规则与重复检查。
+协议、装配、投影与必要检查同步修改；反例验证不可自审、负审核完成、取证结束、父消费子产物、祖先重复拒绝、角色工具隔离和持久边界恢复。新协议明确拒绝旧解释，历史记录只读。
 
-真实浏览器出口必须观察完整链：child-1 真求解并 verified → child-2 收到冻结产物并真求解 → 父被唤醒、继续并独立 submit/验收。
-另验 fail→同会话下一 Run→耗尽通知、A/B 根并存、waiting 拒写、运行时错误、在飞 SIGKILL 与 unload。
-“存在一个 child 非 running”“恰好一个 child session”“提案结束后重启”均不足以证明上述出口。
-断言事实/来源关联，不能依赖模型回复字面量或用探针接管产品关键步骤。
-
-具体构建工作包与 G2 出口见装配蓝图 W1—W5；此处不再另列一份施工路线。
+build / tests / gates / mutation 与离线探针证明工程边界，不证明真实模型 RSI。先取得小领域真实“候选→双侧独立测评→决定”；无赢家允许闭环。随后按冻结 SHA256 范围和累计预算运行。只有真实发布且后续 Run 实际消费该版本，才能证明方法更新有效。
 
 ## 8. 原 G2 变异记录的证据边界
 

@@ -66,24 +66,15 @@ export function taskRegistry(): ProtocolRegistry {
 /** A contract whose two criteria are decided by two different verifier implementations. */
 export function contract(): TaskContract {
   return {
+    artifact: 'artifact.json',
     goal: 'implement a word counter',
     template: { id: 'word-counter', digest: '1'.repeat(64) },
     inputs: [{ name: 'fixture/words.txt', source: { kind: 'protected', ref: 'words', digest: 'f'.repeat(64) } }],
     criteria: [
       {
         criterionId: 'correctness',
-        statement: 'counts match the golden file',
-        verifierRef: UNIT_VERIFIER,
-        verifierVersion: '1',
-        implementationDigest: UNIT_IMPLEMENTATION,
-      },
-      {
-        criterionId: 'limits',
-        statement: 'rejects input over 1 MiB',
-        verifierRef: INTEGRATION_VERIFIER,
-        verifierVersion: '1',
-        implementationDigest: INTEGRATION_IMPLEMENTATION,
-      },
+        statement: 'counts match the golden file' },
+      { criterionId: 'limits', statement: 'rejects input over 1 MiB' },
     ],
   }
 }
@@ -106,7 +97,7 @@ export const admitted = (value: TaskContract = contract(), commandId?: string): 
   emit(TASK_KINDS.admitted, { contract: value }, commandId)
 export const assigned = (commandId?: string, agentIdentity: string = SCHEDULER): EmitInput =>
   emit(TASK_KINDS.assigned, { agentId: 'agent-1', agentIdentity }, commandId)
-export const started = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runStarted, { runId, revision: REVISION })
+export const started = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runStarted, { purpose: 'solve', runId, revision: REVISION })
 /**
  * The isolation manifest every bubble in these specs declares. One place, because a spec that named
  * a different tool digest in each bubble would be testing a binding it never established.
@@ -138,6 +129,7 @@ export const judged = (
   } = {},
 ): EmitInput =>
   emit(TASK_KINDS.evidenceProduced, {
+    reviewId: 'review-1',
     runId: options.runId ?? RUN_ID,
     criterionId,
     verdict,

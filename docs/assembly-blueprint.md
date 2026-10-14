@@ -1,9 +1,9 @@
 # 装配层蓝图与交付计划
 
-日期：2026-10-11。复核基线：`35b0c7c`。**本文是剩余产品构建顺序的唯一出处。**
+日期：2026-10-14。实施基线：`f892376`。**本文是剩余产品构建顺序的唯一出处。**
 总目标见 [blueprint.md](blueprint.md)，本轮反例见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)，G2 合同见 [phase-g2-design.md](phase-g2-design.md)。
 
-W9 目前只通过私有 DSH 受控工程演示；真实需求驱动的任务探索、领域 RSI 闭环与改善效果尚未验收。
+小领域原生 RSI 已形成无赢家闭环；复杂任务责任分解、SHA256 效果与发布后消费分别验收。
 当前状态见 [context.md](context.md)，原始证据与工程/领域效果边界见 [e2e-testing.md](e2e-testing.md#证据边界)。
 
 ## 1. 目标与完成边界
@@ -13,7 +13,7 @@ W9 目前只通过私有 DSH 受控工程演示；真实需求驱动的任务探
 
 - G1：真实 Web agent 调工具完成一次领域任务；独立验收、固定来源 receipt、恢复与明确失败出口。
 - G2：各有领域契约的子任务形成实际依赖链，上游产物进入后序输入；准确父子会话、有界重试、父独立验收；读面板展示同源事实。
-- G3：进化 **TaskTemplate / Skill / Tool 求解方法资产**，共用一条 Revision → 独立审核 → 双侧评估 → 决定 → 发布审核 → 自动发布路径；资产按实际需要消费。
+- G3：进化 **TaskTemplate / Skill / Tool 求解方法资产**，共用一条 Revision → 结构检查 → 双侧评估 → 决定 → 发布审核 → 自动发布路径；资产按实际需要消费。
 - RTL 是 Task 的领域产物；正确性/面积可以评测求解方法。直接改一份 RTL 仍是普通 Task/Run，不能冒充方法进化。
 
 工程正确性和领域效果分别验收。工程闭环、恢复、边界及回归必须通过；真实领域质量/成本按事先冻结的标准，
@@ -24,12 +24,12 @@ W9 目前只通过私有 DSH 受控工程演示；真实需求驱动的任务探
 | 所有者 | 责任 |
 |---|---|
 | DSH | Agent/Session、独占写租约、transcript、模型/工具执行、持久化、Web 聊天与公开 create/resume |
-| core | Task/Run/责任、Revision/Bubble、独立判决、冻结评估/决定、发布不变量、同一事实的唯一投影 |
+| core | Task/Run/责任、ReviewRun、Revision/Bubble、独立判决、冻结评估/决定、发布不变量、同一事实的唯一投影 |
 | assembly | 绑定真实 caller；准备输入/产物；调用 create/resume、投递、drain、验证、资产加载、消费记录、发布与恢复；拥有自建 child 的 disposer |
 | 领域部署 | 最小任务模板、独立验收装置、保护输入、产物输入绑定、方法资产与试验口径 |
 | Web client | 展示固定 cut 的读投影；用户交互、局部视图状态；审核和发布状态来自同一 committed snapshot |
 
-保留一个信封、ControlSessionStore、提交队列、fold、版本闸和拒绝合同。Task/Agent/Environment/measure/strategy/release
+保留一个信封、ControlSessionStore、提交队列、fold、版本闸和拒绝合同。Task/Review/Agent/Environment/measure/strategy/release
 各自拥有领域事实，共用机制不要求合成一个巨大 reducer。assembly 不另存 Task/Run/head、调度日志、恢复 JSON 或历史报告。
 
 旧 singularity 仅作只读行为与 UI 代码参考：复用完整 DSH standard 预设接线、严格工具注册、准确会话 setup、提交后 drain、child 同会话恢复、bundle/profile、
@@ -78,7 +78,7 @@ TypeScript 延续 strict、闭合 schema、不可变领域值与显式错误；�
 
 **Run 覆盖一次完整求解**，根任务绑定契约后开始，child 在投递前开始，submit 后验证并结算。
 根 Web Agent 是借用对象，不再取得其第二个写句柄；自建 child 由 assembly 拥有。
-每个节点都有完整 DSH standard 预设与 Singularity 工具，child 可工作并继续分解自己负责的 Task；责任、完整计划、模板与预算校验仍适用。
+执行、审核和 RSI 分别挂载小接口面的角色预设，均保留原生文件、命令、编程与 Skill 能力；child 沿用责任、计划和预算校验。
 
 ```text
 契约绑定 → working（Run 已开始）
@@ -91,8 +91,8 @@ TypeScript 延续 strict、闭合 schema、不可变领域值与显式错误；�
 运行时异常和取消明确失败，不当作普通 verifier fail 自动重试。普通验收 fail 且预算剩余时，
 调度向同一 child 会话反馈并开始下一 Run；耗尽或依赖不能推进时通知准确父会话。idle/live 都不是任务终态。
 
-领域声明最小子任务模板，每个复用 `TaskContract` 并有自己的可判定 verifier。模型选择模板、依赖与预算，
-不只改 goal 然后复制父验收。`supports` 说明子工作与父目标的关系，不能生成父 pass；父最终产物必须经父自己的 verifier。
+领域提供可选最小模板；一次性 `TaskContract` 直接声明目标、输入、交付与标准。模型声明责任、依赖与预算，
+不只改 goal 然后复制父验收。`supports` 说明子工作与父目标的关系，不能生成父 pass；父最终产物必须经独立 ReviewRun。
 模板固定上游输入来源；待上游 verified 后，后序 Run/Bubble 按封存产物摘要绑定真实输入，不能改写已准入 Task 的契约。
 
 完整计划、权限、模板、DAG、supports、输入绑定、预算先校验，合法后再准备/发布。非法提案不留下可执行 child 或 assignment。
@@ -123,26 +123,18 @@ unload 撤销准入、取消/排空工作、关闭自管 child，再关闭控制
 
 ## 7. G3：一条方法进化路径
 
-TaskTemplate/Skill/Tool 统一资产共用一个不可变 Revision 和 measure/strategy/release 路径，产品工具及原生 DSH 求解消费者已接通。
+固定推进链：**根任务关闭 → 封存完整轨迹 → 异步分析 → 冻结候选 → 独立测评 → 决策 → 发布审核 → 唯一指针**。
 
-1. **资产与实际改动**：agent 在本 Run 的 Bubble 内编写完整 Revision JSON，以相对文件路径提交；宿主冻结实际字节，核验真实 diff、保护输入、契约与声明的资源预算，不信 proposer 自填 edits/exploratory。资产准入审核判断安全性、契约和可用绑定；候选效果由随后独立评估与发布审核裁定，准入不要求预先取得评估胜者。
-2. **加载与消费**：每个 Run 钉住完整 Revision；能力绑定从该版本的 Skill 声明和同名 Tool 解析并冻结，缺失项明确报告。绑定 Skill 内容默认进入执行上下文，额外 Skill 按需加载；消费来源区分 context 与显式加载，送达不证明行为效果。模板指导与固定人类目标分开送达。TaskTemplate 的 applicability 和直接孩子 decomposition 同属该版本，模型选择后复用既有分解及调度，相同展开幂等，父独立验收保持不变。Skill 加载和 Tool 执行共用 Run 版本解析，消费来源包含同一资产摘要；Tool 成功执行后才记录消费。审核与改进模板必须随完整 Revision 准入，加载时不补建版本。verifier Tool 样例用 `artifactContent/inputContent` 冻结文件内容，以文件路径作为 `argv[2]/[3]` 执行正反例；失败返回实际执行详情。正式验收仍由独立部署 verifier 裁定。由宿主观察对应使用并调用现有 `recordConsumption`；声明授予或仅注册不算消费。
-3. **真实双侧试验**：基线和候选各自从相同受保护根任务、初始材料和验收要求独立求解，分别独立验收并测量面积与真实 token 成本。两路独立求解/验收链在基线冻结 evaluation 口径后重叠执行，链结束后释放名额；各自 trial 独立落盘，全部结算后按固定 slot 提交候选并决定，发布审核依赖该决定。每个 side/round 使用新的普通会话和 Bubble；历史端口只返回本任务树、固定资产和审核输入中的明确引用，隔离其他试验与全局候选。冻结模型/工具/库/输入、方向、成本与预算，记录逐任务判决及真实资产使用。本批提案成本均摊，各候选计入自身资产审核、求解、验收和最终发布审核；实际总费用按会话去重。
-4. **多候选与历史**：每批候选共用 incumbent，轮次和候选数量由改进 agent 自主决定；复用 strategy 的准入/选择/冻结报告。下一轮 proposer 实际消费上一轮冻结历史；累计 adopted edits 派生自真实发布关联，不另存 history.json。已关闭决定不因新 head、晚到事实或 calibration 变化而改写。
-5. **决定绑定发布**：`draftFromDecision` 只从 committed winner 形成 draft，持久绑定 round/decision cut、evaluation 报告/calibration 引用、目标内容和 expected head；同步更新 release 的版本和调用方。不能由工具另选 revision 或从当前预览发布。
-6. **独立发布审核与新 Run**：编排创建普通主 agent 审核节点，冻结具体差异、质量/成本、硬约束与来源；独立审核的封存 subject、产物和证据形成 approval 身份。审核通过后重检同一决定、内容和 head，经唯一 pointer switch 发布；独立新 Run 必须加载并实际消费该发布 revision。
+1. **终局与分析**：成功、业务失败或预算终止都关闭根 Task，单次 Run 失败仍可在 agent 当前回合重试。业务结果先返回；后台等待相关原生会话静默和 flush，再封存任务关系、判决、失败原因、实际资产消费、费用及完整 transcript 引用。分析默认看摘要，按需读原文；evaluation 根不递归 RSI。
+2. **候选**：只有 RSI 节点能提交工作区中的完整方法 JSON。候选可改领域 TaskTemplate、Skill、Tool；根输入、交付、标准、受保护 checker 和宿主协议固定。结构、绑定及工具正反例检查后冻结并直接测评。部署 seed 初始化当前指针。
+3. **执行与消费**：Run 直接固定方法 Revision，Bubble 记录输入附件及执行快照。按当前责任送达相关指导、绑定 Skill 和 Tool 摘要；其余定义按引用读取。宿主区分模板使用、context 送达、Skill 加载和 Tool 成功执行，只有实际记录能用于发布判断，送达不等于收益。
+4. **独立双侧试验**：相同保护输入、初始材料、模型、工具、验收和测量口径；新普通会话独立求解并独立审核。两条链可重叠，结束后释放名额。trial 独立落盘，依固定 slot 决定；试验间不可读取答案或无关候选。提案成本均摊，候选另计求解、验收及最终发布审核；实际总预算按原生会话去重。
+5. **异步和恢复**：evolve 提交 `rsi/round-requested` 后立即返回持久引用。唯一宿主推进入口从 measure / strategy / release 事实恢复未完成对象，复用完成 trial 和决定。使用现有带身份的原生消息通知结果；不建工作流存储，不要求模型重发长调用。
+6. **决定与发布**：`draftFromDecision` 绑定 committed winner、evaluation/calibration、准确内容与 expected head。独立发布 ReviewRun 冻结差异、硬约束、质量和完整费用证据；批准后重检同一依据并切换唯一指针。只有后续 Run 加载并实际消费新版本，才能宣称方法更新生效。
 
-**不引入 generation。** 原 A04 场景已被用户否决，当前 expected head 使用既有 revision 身份及审核状态机；
-如未来出现新的真实可达并发场景，先给反例并 grill，不照抄过期蓝图。
-无胜者、独立审核拒绝、内容变化、陈旧 head、缺失依据和重送冲突必须有明确出口；无胜者/拒绝不发布，丢答复重送不再次问人。
-发布审核必须绑定真实独立节点的封存判决。bootstrap/rollback 与 RSI 胜者发布的授权入口分清，不给 worker 裸 pointer API。
+无候选、无赢家、证据不足、审核拒绝、陈旧 head 和预算耗尽均有明确出口。不引入 generation，不用 RTL 成品冒充方法，不用重复综合代替独立模型试验。历史只读，新实验不做协议兼容。
 
-工程闭环的正/负例使用真实资产、真实执行与验证，标明受控验收场景；正式领域效果另用冻结真实基线报告。
-重复综合同一 RTL 只能测装置噪声，不能称为独立模型求解 trial。SHA256 测量固定工具、库、文件顺序和模块/统计范围，避免把口径漂移当改进。
-效果实验前必须补齐具体预算和阈值；无法从既有领域合同确认时通过提问工具冻结，缺数不启动实验。
-原生 usage 缺失时停止模型调用。仅经明确授权的 `budget.unknownUsageReservations` 可为准确 session/seq
-预留单请求 token 上界，仍扣在原总预算内；报告分别列出已知费用、上界预留和未处理缺失项。
-预留不改原生日志，不冒充实际 usage，不进入独立候选的成本比较；其他未知费用仍明确停止。
+预算不足记录未执行原因。原生 usage 缺失停止模型调用；准确 session/seq 的保守上界预留扣原累计预算，不改写原生日志，不冒充实际 usage，不进入独立候选的费用比较。
 
 ## 8. 私有 profile 与产品读面
 
@@ -150,7 +142,7 @@ TaskTemplate/Skill/Tool 统一资产共用一个不可变 Revision 和 measure/s
 部署由现有 assembly bundle/patch 与 `singularity-next-web` profile 进入普通 DSH 启动路径；旧 harness 不参与运行。
 产物从 manifest exports 装载，不用测试 loader、手写 Context 探针或绝对开发路径冒充已安装插件。
 
-工具/API/UI 同读一个 committed cut 的 core 投影，返回 formatVersion 5/controlId/cutoff；ReactFlow map 展示 Task/计划、Method、轮次、发布、消费与日志预算，Run/session/依赖/receipt 的来源可查。
+工具/API/UI 同读一个 committed cut 的 core 投影，返回 formatVersion 6/controlId/cutoff；ReactFlow map 展示 Task/计划、Method、轮次、发布、消费与日志预算，Run/session/依赖/receipt 的来源可查。
 GET 不提交事实、不调度，错误具名；请求接实际 Web 访问域。client 不 fold 原始日志、不乐观写 Task 状态，原生聊天/审核不复制。
 ReactFlow map 与右侧 DSH 会话面板复用旧前端，布局由运行时提供；前端不保存另一份任务状态。
 
@@ -163,7 +155,7 @@ ReactFlow map 与右侧 DSH 会话面板复用旧前端，布局由运行时提�
 |---|---|---|
 | **W1：执行完整性（重验 G1）** | 用户裁定已冻结 | 完整求解 Run；单 Task 并发启动拒绝；提交按 Run 冻结；同 call 异内容冲突；正确 stdout + 非零退出不能 verified；submit 后冲突写被拒 |
 | **W2：来源与恢复（G1 出口）** | W1 | 固定 receipt；追加无关事实不变；公开 receipt API 拒绝非连续前缀；真实在飞/提交后 SIGKILL 恢复同 Run/会话/产物；丢答复原结果；创建/投递/drain/flush/close 错误可见；unload 无遗留写租约/监听 |
-| **W3：领域分解与产物合同** | W1/W2 | 最小子模板集合及独立 verifier；先校验后发布计划；非法责任/模板/DAG 拒绝时不新增 child 准入/分配事实；上游输入来源固定，后序绑定已结算产物摘要；父 child 验收不同 |
+| **W3：领域分解与产物合同** | W1/W2 | 一次性契约、可选模板及独立 ReviewRun；先校验后发布计划；非法责任/模板/DAG 拒绝时不新增 child 准入/分配事实；上游输入来源固定，后序绑定已结算产物摘要；父 child 验收不同 |
 | **W4：准确会话与有界调度** | W3 | 同 control 的 A/B 根计划不串父/模型/preset；live 不决定是否启动下一 Run；首 child verified 后后序实际开始并收到产物；fail 在同会话重试，预算耗尽通知准确父；非阻塞投递及父唤醒；删除借 caller 恢复和异常后自动重扫重试；崩溃不重复创建/重复执行 |
 | **W5：读面板（G2 出口）** | W4 | 真实浏览器展示准确 Task/Run/child session/依赖/封存 receipt，工具/API/UI 同 cut 一致；父等待拒写、父独立验收；刷新/重连只读，重启/unload 有来源证据 |
 | **W6：统一方法资产与真实消费** | G2 出口 | 冻结候选/加载接口；实际 diff 与保护输入核验；从准确 Revision 加载 TaskTemplate/Skill/Tool，由宿主记录真实消费；仅必要加载适配，共用发布流程 |
@@ -173,7 +165,7 @@ ReactFlow map 与右侧 DSH 会话面板复用旧前端，布局由运行时提�
 
 **四个检查点：W1/W2 → W3/W4/W5 → W6/W7/W8 → W9。** 受控工程演示不能替代完整领域 RSI 验收。
 真实 SHA256 W 任务范围、有限预算与阈值已冻结，见 [实跑测试](e2e-testing.md#证据边界)。
-2026-10-13 恢复顺序：已完成清理、校验、部署、原 evolve 请求幂等继续说明、读取范围统一及恢复成本实现 → 已恢复原候选执行 → 完成当前单对的真实结算 → 按剩余预算决定后续候选 → 有赢家时独立发布审核与下一真实 Run 消费。基线 trial 已于正式 seq199 补录，无需重新求解或测量；候选 Task `task-2c78b4b37f2e318d` / Run `run-4e811a597dd79f43` 固定 `method-fc46476332460066eaa0e1a8`。19:21 实测改进 seq1440 重发原请求，候选 seq415 收到同 Task/Run continuation，seq418/419 成功执行 bash 工作区核查；确认实际执行后已停止监控。正式候选结果、恢复后完整 costBasis 和无赢家决定仍待真实结算；本对成本下界已超过 25% 上限，不能发布赢家。冻结事实不改写，读取权限与资产消费继续用实际调用核验；单对不证明统计可靠。
+2026-10-14 实施顺序：Task 契约与 ReviewRun → 执行快照及角色接口 → 持久异步 RSI → 删除替代路径。离线工程检查、小领域真实决定、SHA256 真实领域结果和发布后消费分别验收；准确进展只在 context 维护。
 工作量按这些可退出包评估，不以测试数、静态行数或“基础设施完成”推算完成百分比/精确工期。
 
 W9 的构建验收必须补现有门禁盲区：根 typecheck 与 assembly 分开覆盖；检查 `.`/`./agent`/`./web`/`./client` 全部产物；

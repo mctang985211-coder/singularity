@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs'
-import { dirname, sep } from 'node:path'
+import { dirname, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { FileSystem, type FsTarget } from '@deepseek-ai/dsh-fs'
@@ -60,8 +60,10 @@ class BubbleFs extends FileSystem {
   override contains(parent: FsTarget, child: FsTarget) { return this.base.contains(parent, child) }
   override stat(...args: Parameters<FileSystem['stat']>) { this.check(args[0]); return this.base.stat(...args) }
   override async lstat(path: string, options?: { cwd?: string }, signal?: AbortSignal) {
-    await this.resolve(dirname(path), { ...options, ...(signal === undefined ? {} : { signal }) })
-    const cwd = options?.cwd === undefined || options.cwd === this.defaultCwd ? this.current().root : options.cwd
+    const world = this.current()
+    const cwd = options?.cwd === undefined || options.cwd === this.defaultCwd ? world.root : options.cwd
+    const target = world.references.includes(resolve(cwd, path)) ? path : dirname(path)
+    await this.resolve(target, { ...options, ...(signal === undefined ? {} : { signal }) })
     return this.base.lstat(path, { cwd }, signal)
   }
   override readText(...args: Parameters<FileSystem['readText']>) { this.check(args[0]); return this.base.readText(...args) }

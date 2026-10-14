@@ -2,39 +2,29 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { assertContiguous } from '@deepseek-ai/dsh-session-persistence'
 import { digestOf } from '../../src/protocol/envelope.ts'
-import { refuse } from '../../src/protocol/refusal.ts'
+import { ProtocolRefusal, refuse } from '../../src/protocol/refusal.ts'
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { openChildSession, type ChildSessionSeams } from '../../src/runtime/child-session.ts'
-import { declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
+import { callerOf, declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
 import { startAttempt, workspaceOf } from './attempt.ts'
-import { contractFor } from './inputs.ts'
-import { historyOf } from './read.ts'
-import { domainForRun, loadMethod, methodOfRun, publishedMethod } from './method.ts'
+import { historyOf, waitForTask } from './read.ts'
+import { loadMethod } from './method.ts'
 import { sha256 } from './ids.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { schedulerMessage } from './scheduler-message.ts'
-import { IMPROVEMENT_TEMPLATE, SUBJECT_INPUT } from './review.ts'
+import { SUBJECT_INPUT } from './review.ts'
+import { sealedBytes } from './sealed.ts'
 import { taskSessionsOf } from './evaluation-cost.ts'
-import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../../src/environment/protocol.ts'
 import { nativeTokensOf } from './budget.ts'
-const owners = new WeakMap<Apparatus, Map<string, Awaited<ReturnType<typeof openChildSession>>>>()
 export function assertImprovementOwner(apparatus: Apparatus, agentId: string): void {
-  const cut = apparatus.store.load()
-  const tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
-  let task = [...tasks.values()].findLast(task => task.responsibility?.agentId === agentId)
-  const active = task === undefined ? undefined : Object.values(task.runs).at(-1)
-  if (active?.status !== 'running' || active.stage !== 'working') refuse('illegal-transition', 'evaluation requires a working improvement Task/Run')
-  while (task !== undefined) {
-    const run = Object.values(task.runs).at(-1)!
-    const manifest = cut.stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, run.revision.environmentId)!.revisions[run.revision.revisionId]!.manifest as { purpose: string; relatedTo?: { taskId: string; runId: string } }
-    if (manifest.purpose === 'improve') {
-      const root = tasks.get(manifest.relatedTo!.taskId)!
-      if (root.runs[manifest.relatedTo!.runId]!.status !== 'verified') refuse('illegal-transition', 'the protected root has not passed independent acceptance')
-      return
-    }
-    task = [...tasks.values()].find(parent => parent.decomposition?.children.some(child => child.taskId === task!.taskId))
-  }
-  refuse('not-responsible', 'only the accepted root\'s improvement task tree may evaluate and automatically publish candidates')
+  const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()].findLast(
+    (t) => t.responsibility?.agentId === agentId,
+  )
+  const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
+  if (run?.purpose !== 'improve' || run.status !== 'running' || run.stage !== 'working')
+    refuse('not-responsible', 'method candidates and evaluations belong to the working RSI node')
+  if (run.relatedTo === undefined || taskStateOf(apparatus, run.relatedTo.taskId).closure === undefined)
+    refuse('illegal-transition', 'RSI requires a closed business root')
 }
 export async function explorationOf(apparatus: Apparatus, taskId: string, runId: string): Promise<Buffer> {
   const history = await historyOf(apparatus, [], taskStateOf(apparatus, taskId).responsibility!.agentId)
@@ -57,65 +47,99 @@ export async function explorationOf(apparatus: Apparatus, taskId: string, runId:
   const states = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   const summary = {
     root: { taskId, runId },
-    definitions: history.methods.map(({ reference, assets }) => ({ reference,
-      templates: assets.templates.map(raw => {
-        const template = raw as import('./read.ts').TemplateDeclaration
-        return { id: template.id, goal: template.goal, applicability: template.applicability,
-          decomposition: template.decomposition, input: template.input, criterion: template.criterion,
-          skills: template.skills, capabilities: template.capabilities }
-      }) })),
-    tasks: history.tasks.map(task => ({ taskId: task.taskId, template: task.contract.template,
+    methods: history.methods.map(({ reference }) => reference),
+    tasks: history.tasks.map((task) => ({ taskId: task.taskId, template: task.contract.template,
       goal: task.goal, sessionId: task.sessionId, decomposition: task.decomposition,
-      runs: task.runs.map(run => {
+      parentId: task.parent?.id ?? null, inputs: task.contract.inputs, questions: task.questions ?? [],
+      runs: task.runs.map((run) => {
         const state = states.get(task.taskId)!.runs[run.runId]!
-        return { runId: run.runId, method: methodOfRun(apparatus, state), status: run.status,
-          failureCause: run.failureCause, failureReason: run.failureReason, verdicts: run.verdicts,
+        return { runId: run.runId, method: state.revision, status: run.status,
+          cost: sessions
+            .filter((s) => s.sessionId === task.sessionId)
+            .map((s) => ({ sessionId: s.sessionId, tokens: nativeTokensOf(s.events) })),
+          failureCause: run.failureCause, failureReason: run.failureReason,
+          verdicts: state.evidence.map(({ criterionId, verdict, reviewId }) => ({ criterionId, verdict, reviewId })),
           artifact: state.submission === undefined ? null : { digest: state.submission.artifactDigest, ref: state.submission.files.artifact },
-          consumed: state.consumed, source: run.source }
-      }) })),
-    sessions: sessions.map(({ sessionId, eventCount, digest, events }, index) => ({
-      sessionId, eventCount, digest, tokens: nativeTokensOf(events), events: `sessions[${index}].events` })),
+          consumed: state.consumed, source: run.source,
+        }
+      }),
+    })),
+    sessions: sessions.map(({ sessionId, eventCount, digest, events }) => ({
+      sessionId, eventCount, digest, tokens: nativeTokensOf(events), trajectoryRef: sessionId,
+    })),
   }
   return Buffer.from(JSON.stringify({ root: { taskId, runId }, summary, history, sessions }))
 }
 export async function startImprovement(apparatus: Apparatus, seams: ChildSessionSeams, parent: Agent,
-  taskId: string, runId: string, signal: AbortSignal): Promise<void> {
+  taskId: string, runId: string, signal: AbortSignal,
+): Promise<TaskState> {
   const id = `improve-${sha256(`${taskId}/${runId}`).slice(0, 24)}`
-  let improving = owners.get(apparatus)
-  if (improving === undefined) { improving = new Map(); owners.set(apparatus, improving) }
-  if (improving.has(id)) return
   const existing = apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, id)
-  const existingRun = existing === undefined ? undefined : Object.values(existing.runs).at(-1)
-  if (existingRun !== undefined && existingRun.status !== 'running') return
-  const frozen = existingRun === undefined ? undefined : await domainForRun(apparatus, existingRun)
-  const trace = frozen === undefined ? Buffer.from(JSON.stringify({ ...JSON.parse((await explorationOf(apparatus, taskId, runId)).toString('utf8')),
-    incumbent: publishedMethod(apparatus) }))
-    : Buffer.from(frozen.inputs.find(input => input.ref === SUBJECT_INPUT)!.bytes)
+  const previous = existing === undefined ? undefined : Object.values(existing.runs).at(-1)
+  if (previous !== undefined && previous.status !== 'running') return existing!
   const rootRun = taskStateOf(apparatus, taskId).runs[runId]!
-  const method = methodOfRun(apparatus, rootRun)!
+  const method = rootRun.revision
   const loaded = (await loadMethod(apparatus, method)).domain
-  const template = loaded.templates.get(IMPROVEMENT_TEMPLATE)!
+  const trace = await sealedBytes(apparatus, taskStateOf(apparatus, taskId).rsi!.trace!)
   const input = { ref: SUBJECT_INPUT, digest: sha256(trace), bytes: trace, sourcePath: '' }
-  const domain = { ...loaded, inputs: [...loaded.inputs.filter(held => held.ref !== SUBJECT_INPUT), input] }
+  const domain = { ...loaded, inputs: [...loaded.inputs, input] }
   const agentId = String(agentSessionIdOf(id))
   declareCaller(apparatus, agentId)
   await apparatus.agents.open({ commandId: `agent:${agentId}`, agentId, sessionId: agentId, role: 'improve' })
   const commands = apparatus.tasks.forAgent(agentId)
-  await commands.admit({ commandId: `admit:${id}`, taskId: id, contract: { ...contractFor(domain, template, template.goal), assets: method } })
+  if (existing === undefined)
+    await commands.admit({ commandId: `admit:${id}`, taskId: id, contract: {
+        goal: 'Improve reusable domain methods from the frozen successful and failed exploration evidence. Evaluate supported candidates independently and report measured improvement, no winner, no candidate or budget exhaustion truthfully.',
+        artifact: 'report.json',
+        inputs: [{ name: 'subject.json', source: { kind: 'protected', ref: SUBJECT_INPUT, digest: input.digest } }],
+        criteria: [
+          {
+            criterionId: 'improvement-reported',
+            statement:
+              'The report cites actual trajectory evidence, explains reusable mechanism changes and accurately reports independent evaluation decisions or the reason no candidate was evaluated.',
+          },
+        ],
+      },
+    })
   await commands.assign({ commandId: `assign:${id}`, taskId: id, agentId })
-  const run = await startAttempt(apparatus, { agentId, sessionId: agentId, model: rootRun.bubble!.model }, id, id, method, { domain, purpose: 'improve', relatedTo: { taskId, runId } })
+  const run = await startAttempt(apparatus, { agentId, sessionId: agentId, model: callerOf(parent).model }, id, id, method, { domain, purpose: 'improve', relatedTo: { taskId, runId } },
+  )
   const session = await openChildSession(seams, { agentId: id, cwd: workspaceOf(apparatus, id, run.runId), parent,
+    preset: 'singularity-improve',
     model: run.bubble!.model, signal, message: schedulerMessage({ kind: 'singularity', purpose: 'dispatch', controlId: apparatus.controlId,
-      parentTaskId: taskId, taskId: id, runId: run.runId, factSeq: 0 }, JSON.stringify({
-      taskId: id, runId: run.runId, contract: taskStateOf(apparatus, id).contract, revision: method,
+      parentTaskId: taskId, taskId: id, runId: run.runId, factSeq: 0,
+      }, JSON.stringify({
+      taskId: id, runId: run.runId, contract: taskStateOf(apparatus, id).contract,
+        method,
       summary: JSON.parse(trace.toString('utf8')).summary,
-      evidenceReading: 'Start with this structural summary. Read relevant task artifacts and specific sessions[i].events segments from subject.json before proposing a mechanism; the frozen full trace is available on demand.',
-      trace: 'subject.json', output: { subjectDigest: sha256(trace), verdict: 'pass | fail | partial | unknown', detail: 'Actual improvement evidence and result' },
-    })) })
-  improving.set(id, session)
-}
-export async function closeImprovements(apparatus: Apparatus): Promise<void> {
-  const improving = owners.get(apparatus)
-  if (improving === undefined) return
-  for (const [id, session] of improving) { session.stop(); await session.close(); improving.delete(id) }
+        trace: 'subject.json',
+        evidenceReading:
+          'Read relevant frozen trajectory segments by reference. Change reusable methods, preserve the root standard, and await the host evaluation outcome before reporting.',
+      }),
+    ),
+  })
+  const stop = () => session.stop()
+  signal.addEventListener('abort', stop, { once: true })
+  try {
+    await waitForTask(apparatus, id, session, signal)
+    return taskStateOf(apparatus, id)
+  } catch (error) {
+    const current = taskStateOf(apparatus, id).runs[run.runId]!
+    if (
+      !signal.aborted &&
+      !(error instanceof ProtocolRefusal && error.refusal.code === 'write-not-durable') &&
+      current.status === 'running'
+    )
+      await commands.failRun({
+        commandId: `improvement-failed:${id}`,
+        taskId: id,
+        runId: run.runId,
+        reason: String(error),
+      })
+    throw error
+  } finally {
+    signal.removeEventListener('abort', stop)
+    session.stop()
+    await session.close()
+  }
 }

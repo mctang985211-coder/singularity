@@ -12,7 +12,8 @@ export interface ChildSessionSeams {
   readonly sessions?: SessionStore | undefined
   readonly agents?: AgentRegistry | undefined
   readonly agentLoop?: unknown
-  readonly agentPresets?: {
+  readonly agentPresets?:
+    | {
     composeFrom(ctx: unknown, source: unknown): string | undefined
     mount(ctx: unknown, id: string): Promise<unknown>
   } | undefined
@@ -23,16 +24,17 @@ export interface ChildSessionRequest {
   readonly cwd: string
   readonly parent: Agent
   readonly model: { readonly provider: string; readonly model: string }
-  readonly message: UserMessage
+  /** Omitted when restoring a sealed submission's session for independent acceptance only. */
+  readonly message?: UserMessage
   readonly signal: AbortSignal
-  readonly preset?: 'singularity-review'
+  readonly preset?: 'singularity-review' | 'singularity-improve' | 'singularity-next'
 }
 export interface ChildSession {
   readonly agentId: string
   readonly sessionId: string
   readonly resumed: boolean
   readonly agent: Agent | undefined
-  readonly delivery: 'posted' | 'pending' | 'entered'
+  readonly delivery: 'none' | 'posted' | 'pending' | 'entered'
   post(message: UserMessage): Promise<'posted' | 'pending' | 'entered'>
   wait(): Promise<void>
   stop(): void
@@ -54,26 +56,29 @@ export async function openChildSession(seams: ChildSessionSeams, request: ChildS
     agentId: request.agentId, resume: persisted !== undefined, cwd: request.cwd,
     preset: request.preset ?? 'singularity-next',
     agentOptions: { ...request.model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) },
-    setup: async ctx => {
-      if (request.preset !== undefined) await presets.mount(ctx, request.preset)
-      else presets.composeFrom(ctx, request.parent.ctx)
+    setup: async (ctx) => {
+      await presets.mount(ctx, request.preset ?? 'singularity-next')
     },
   })
   const post = (message: UserMessage) => postIdentifiedMessage(seams, opened.agent, message)
   const stop = () => opened.agent.cancel({ kind: 'parent' }, { keepInbox: true })
   try {
     request.signal.throwIfAborted()
-    let delivery = await post(request.message)
-    if (opened.resumed && delivery === 'entered') {
+    let delivery: ChildSession['delivery'] = request.message === undefined ? 'none' : await post(request.message)
+    if (opened.resumed && request.message !== undefined && delivery === 'entered') {
       if (request.message.source.kind !== 'singularity') refuse('malformed-declaration', 'task continuation requires an identified Task source')
       delivery = await post(schedulerMessage({ ...request.message.source, purpose: 'resume', factSeq: Number(opened.agent.session.seq) },
         'Continue this exact Task/Run from its durable session and frozen workspace.\n' +
-        request.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')))
+        request.message.content.filter((block) => block.type === 'text')
+              .map((block) => block.text)
+              .join('\n'),
+        ),
+      )
     }
     return { ...opened, agentId: String(opened.agent.id), delivery, post, stop,
       wait: async () => {
         await opened.agent.whenIdle()
-        if (!await sessions.flush(opened.agent.session)) refuse('write-not-durable', `session ${opened.sessionId} has no durability listener`)
+        if (!(await sessions.flush(opened.agent.session))) refuse('write-not-durable', `session ${opened.sessionId} has no durability listener`)
       },
       close: () => closeAgentSession(request.agentId),
     }

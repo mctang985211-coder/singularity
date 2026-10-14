@@ -3,6 +3,8 @@
  * S6 — the real root/child vertical slice, with a real verifier on a real artifact.
  */
 
+import { declareReviewProtocol } from '../src/review/protocol.ts'
+import { reviewed } from './probe-review.mjs'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -43,12 +45,12 @@ function check(label, condition, detail) {
   }
 }
 
-const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const TEMPLATE = { id: 'root-child-probe', digest: sha256(await readFile(new URL(import.meta.url))) }
 
 /** The adapter executes a shell line, so every path in it is quoted rather than pasted. */
-const shellQuote = value => `'${String(value).replaceAll("'", `'\\''`)}'`
-const shellLine = argv => argv.map(shellQuote).join(' ')
+const shellQuote = (value) => `'${String(value).replaceAll("'", `'\\''`)}'`
+const shellLine = (argv) => argv.map(shellQuote).join(' ')
 
 function refusalOf(run) {
   try {
@@ -127,6 +129,7 @@ async function main() {
     // ---------------------------------------------------------------- the deployment
     const registry = new ProtocolRegistry()
     declareTaskProtocol(registry)
+    declareReviewProtocol(registry)
     declareEnvironmentProtocol(registry)
     declareAgentProtocol(registry)
 
@@ -174,6 +177,7 @@ async function main() {
       implementations: [{ ref: VERIFIER, version: '1', implementationDigest: programDigest }],
     })
 
+    const standard = (criterionId, statement) => ({ criterionId, statement })
     const criterion = (criterionId, statement) => ({
       criterionId,
       statement,
@@ -186,21 +190,31 @@ async function main() {
       commandId: 'admit-parent',
       taskId: PARENT,
       contract: {
+        artifact: 'report.txt',
         goal: 'report the word count of the fixture',
         template: TEMPLATE,
         inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }],
-        criteria: [criterion('counted', 'the artifact holds the fixture\'s word count'), criterion('bounded', 'the artifact rejects an oversized input')],
+        criteria: [
+          standard('counted', "the artifact holds the fixture's word count"),
+          standard('bounded', 'the artifact rejects an oversized input'),
+        ],
       },
     })
     await commands.admit({
       commandId: 'admit-count',
       taskId: CHILD_COUNT,
-      contract: { goal: 'count the words', template: TEMPLATE, inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }], criteria: [criterion('counted', 'the artifact holds the count')] },
+      contract: {
+        artifact: 'count.txt',
+        goal: 'count the words', template: TEMPLATE, inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }], criteria: [standard('counted', 'the artifact holds the count')],
+      },
     })
     await commands.admit({
       commandId: 'admit-limits',
       taskId: CHILD_LIMITS,
-      contract: { goal: 'bound the input size', template: TEMPLATE, inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }], criteria: [criterion('bounded', 'the artifact refuses oversized input')] },
+      contract: {
+        artifact: 'count.txt',
+        goal: 'bound the input size', template: TEMPLATE, inputs: [{ name: 'words.txt', source: { kind: 'protected', ref: 'words', digest: inputDigest } }], criteria: [standard('bounded', 'the artifact refuses oversized input')],
+      },
     })
 
     // A plan: counting first, then the limit check, each supporting one criterion of the parent.
@@ -221,14 +235,24 @@ async function main() {
     const treeOf = () => projectTree(foldSubjects(registry, store.load().entries(), TASK_PROTOCOL, TASK_VERSION))
 
     // ---------------------------------------------------------------- 1. the dependency gates
-    const tooEarly = await asyncRefusalOf(() => commands.startRun({ commandId: 'early', taskId: CHILD_LIMITS, runId: 'run-limits', revision: pin }))
-    check('a sub-task cannot start before the one it depends on has verified', tooEarly.code === 'illegal-transition' && tooEarly.detail.includes(CHILD_COUNT), tooEarly.code)
-    const limitsEarly = treeOf()[0].children.find(child => child.taskId === CHILD_LIMITS)
-    check('the plan reports the dependent as waiting, not ready', limitsEarly?.status === 'waiting', limitsEarly?.status)
-    check('the refusal quotes the plan and names the dependency', (tooEarly.detail ?? '').includes(`"${CHILD_COUNT}"`), tooEarly.detail)
+    const tooEarly = await asyncRefusalOf(() => commands.startRun({
+        purpose: 'solve',
+        commandId: 'early', taskId: CHILD_LIMITS, runId: 'run-limits', revision: pin,
+      }),
+    )
+    check('a sub-task cannot start before the one it depends on has verified', tooEarly.code === 'illegal-transition' && tooEarly.detail.includes(CHILD_COUNT), tooEarly.code,
+    )
+    const limitsEarly = treeOf()[0].children.find((child) => child.taskId === CHILD_LIMITS)
+    check('the plan reports the dependent as waiting, not ready', limitsEarly?.status === 'waiting', limitsEarly?.status,
+    )
+    check('the refusal quotes the plan and names the dependency', (tooEarly.detail ?? '').includes(`"${CHILD_COUNT}"`), tooEarly.detail,
+    )
 
     // ---------------------------------------------------------------- 2. a real run and verdict
-    await commands.startRun({ commandId: 'start-count', taskId: CHILD_COUNT, runId: 'run-count', revision: pin })
+    await commands.startRun({
+      purpose: 'solve',
+      commandId: 'start-count', taskId: CHILD_COUNT, runId: 'run-count', revision: pin,
+    })
     await commands.openBubble({
       commandId: 'bubble-count',
       taskId: CHILD_COUNT,
@@ -246,14 +270,15 @@ async function main() {
     const produced = spawnSync(process.execPath, [producePath, inputPath, artifactPath, '0'], { encoding: 'utf8' })
     check('the attempt produced the artifact by running a program', produced.status === 0, produced.stderr)
 
-    const judge = async execution => {
+    const judge = async (execution) => {
       const judged = runAdapter({
         command: shellLine([process.execPath, verifyPath, inputPath, execution.artifactPath]),
         artifactPath: execution.artifactPath,
-        inputs: execution.inputs.map(entry => ({ name: entry.name, digest: entry.digest, path: entry.path })),
+        inputs: execution.inputs.map((entry) => ({ name: entry.name, digest: entry.digest, path: entry.path })),
       })
       // The digest of the program that actually ran, read from its bytes at judgement time.
-      return { verdict: judged.verdict, implementationDigest: sha256(await readFile(verifyPath)), detail: judged.detail }
+      return { verdict: judged.verdict, implementationDigest: sha256(await readFile(verifyPath)), detail: judged.detail,
+      }
     }
 
     const implementation = {
@@ -262,12 +287,15 @@ async function main() {
       implementationDigest: programDigest,
       selftest: {
         samples: [
-          { name: 'accepts a correct count', expected: 'pass', input: { subject: inputPath, artifactDigest: sha256('4'), inputs: [] } },
-          { name: 'rejects a wrong count', expected: 'fail', input: { subject: inputPath, artifactDigest: sha256('5'), inputs: [] } },
+          { name: 'accepts a correct count', expected: 'pass', input: { subject: inputPath, artifactDigest: sha256('4'), inputs: [] },
+          },
+          { name: 'rejects a wrong count', expected: 'fail', input: { subject: inputPath, artifactDigest: sha256('5'), inputs: [] },
+          },
         ],
       },
-      judge: async sample => {
-        const scratch = join(workspace, `sample-${sha256(sample.subject + String(sample.artifactDigest)).slice(0, 8)}.txt`)
+      judge: async (sample) => {
+        const scratch = join(workspace, `sample-${sha256(sample.subject + String(sample.artifactDigest)).slice(0, 8)}.txt`,
+        )
         const isGood = sample.artifactDigest === sha256('4')
         await writeFile(scratch, isGood ? '4' : '5', 'utf8')
         const judged = runAdapter({
@@ -293,21 +321,31 @@ async function main() {
         runJudge: judge,
       })
 
-    const verdict = await verdictFor()
-    check('the verifier judged by running a program, and passed a correct artifact', verdict.verdict === 'pass', verdict.detail)
-    check('the recorded implementation digest is the digest of the program that ran', verdict.implementationDigest === programDigest)
-    check('the recorded artifact digest is the digest of the bytes on disk', verdict.artifactDigest === sha256(await readFile(artifactPath)))
+    const checked = await verdictFor()
+    const verdict = await reviewed(store, registry, commands, CHILD_COUNT, checked)
+    check('the verifier judged by running a program, and passed a correct artifact', verdict.verdict === 'pass', verdict.detail,
+    )
+    check(
+      'the recorded implementation digest is the digest of the program that ran',
+      verdict.implementationDigest === programDigest,
+    )
+    check('the recorded artifact digest is the digest of the bytes on disk', verdict.artifactDigest === sha256(await readFile(artifactPath)),
+    )
 
-    await commands.recordVerdict({ commandId: 'verdict-count', taskId: CHILD_COUNT, verdict: { ...verdict, criterionId: 'counted' } })
-    await store.emit({ commandId: 'verify-count', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/verified', subject: CHILD_COUNT, payload: { runId: 'run-count' } })
+    await commands.recordVerdict({ commandId: 'verdict-count', taskId: CHILD_COUNT, verdict: { ...verdict, criterionId: 'counted' },
+    })
+    await store.emit({ commandId: 'verify-count', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/verified', subject: CHILD_COUNT, payload: { runId: 'run-count' },
+    })
 
     // ---------------------------------------------------------------- 3. swapping the artifact
     const goodArtifact = await readFile(artifactPath)
     await writeFile(artifactPath, '999', 'utf8')
     const afterSwap = await asyncRefusalOf(() =>
-      commands.recordVerdict({ commandId: 'verdict-swapped', taskId: CHILD_COUNT, verdict: { ...verdict, criterionId: 'counted' } }),
+      commands.recordVerdict({ commandId: 'verdict-swapped', taskId: CHILD_COUNT, verdict: { ...verdict, criterionId: 'counted' },
+      }),
     )
-    check('swapping the artifact after the verdict is refused rather than inherited', afterSwap.code === 'illegal-transition' || afterSwap.code === 'evidence-conflict' || afterSwap.code === 'evidence-input-mismatch', afterSwap.code)
+    check('swapping the artifact after the verdict is refused rather than inherited', afterSwap.code === 'illegal-transition' || afterSwap.code === 'evidence-conflict' || afterSwap.code === 'evidence-input-mismatch', afterSwap.code,
+    )
     await writeFile(artifactPath, goodArtifact)
 
     // ---------------------------------------------------------------- 4. replacing the verifier
@@ -324,16 +362,22 @@ async function main() {
         runJudge: judge,
       }),
     )
-    check('a criterion naming an implementation this deployment does not hold is refused', rebuiltVerdict.code === 'unregistered-verifier', rebuiltVerdict.code)
+    check('a criterion naming an implementation this deployment does not hold is refused', rebuiltVerdict.code === 'unregistered-verifier', rebuiltVerdict.code,
+    )
 
     // ---------------------------------------------------------------- 5. dependency advances
     const afterCount = treeOf()[0]
-    check('verifying the dependency lets the dependent become ready', afterCount.children.find(child => child.taskId === CHILD_LIMITS)?.status === 'ready')
+    check('verifying the dependency lets the dependent become ready', afterCount.children.find((child) => child.taskId === CHILD_LIMITS)?.status === 'ready',
+    )
     check('the parent is not complete while a criterion is unaccepted', afterCount.complete === false)
-    check('the verified child contributes support while the parent awaits its own verdict', afterCount.criteria.find(entry => entry.criterionId === 'counted')?.supportedBy.includes(CHILD_COUNT) && afterCount.criteria.find(entry => entry.criterionId === 'counted')?.satisfiedBy === null)
+    check('the verified child contributes support while the parent awaits its own verdict', afterCount.criteria.find((entry) => entry.criterionId === 'counted')?.supportedBy.includes(CHILD_COUNT) && afterCount.criteria.find((entry) => entry.criterionId === 'counted')?.satisfiedBy === null,
+    )
 
     // ---------------------------------------------------------------- 6. runtime failure stops
-    await commands.startRun({ commandId: 'start-limits', taskId: CHILD_LIMITS, runId: 'run-limits', revision: pin })
+    await commands.startRun({
+      purpose: 'solve',
+      commandId: 'start-limits', taskId: CHILD_LIMITS, runId: 'run-limits', revision: pin,
+    })
     await commands.openBubble({
       commandId: 'bubble-limits',
       taskId: CHILD_LIMITS,
@@ -344,23 +388,34 @@ async function main() {
       tools: [{ name: 'count', implementationDigest: programDigest, version: '1' }],
       conditions: ['no-network'],
     })
-    await commands.failRun({ commandId: 'fail-limits', taskId: CHILD_LIMITS, runId: 'run-limits', reason: 'the limit check could not be run in this environment' })
+    await commands.failRun({ commandId: 'fail-limits', taskId: CHILD_LIMITS, runId: 'run-limits', reason: 'the limit check could not be run in this environment',
+    })
 
-    const spent = await asyncRefusalOf(() => commands.startRun({ commandId: 'start-limits-again', taskId: CHILD_LIMITS, runId: 'run-limits-2', revision: pin }))
-    check('a runtime failure stops the sub-task being started again', spent.code === 'illegal-transition' && spent.detail.includes('runtime failure'), spent.detail)
+    const spent = await asyncRefusalOf(() => commands.startRun({
+        purpose: 'solve',
+        commandId: 'start-limits-again', taskId: CHILD_LIMITS, runId: 'run-limits-2', revision: pin,
+      }),
+    )
+    check('a runtime failure stops the sub-task being started again', spent.code === 'illegal-transition' && spent.detail.includes('runtime failure'), spent.detail,
+    )
 
     const tree = treeOf()[0]
-    const stopped = tree.children.find(child => child.taskId === CHILD_LIMITS)
-    check('the plan reports the sub-task as stopped, in its own words', stopped?.status === 'stopped' && (stopped.reason ?? '').includes('runtime failure'), stopped?.reason)
-    check('the parent is still incomplete, and the unaccepted criterion is named', tree.complete === false && tree.criteria.find(entry => entry.criterionId === 'bounded')?.satisfiedBy === null)
-    check('the stopped sub-task is listed as blocked with a reason', tree.blocked.some(entry => entry.taskId === CHILD_LIMITS))
+    const stopped = tree.children.find((child) => child.taskId === CHILD_LIMITS)
+    check('the plan reports the sub-task as stopped, in its own words', stopped?.status === 'stopped' && (stopped.reason ?? '').includes('runtime failure'), stopped?.reason,
+    )
+    check('the parent is still incomplete, and the unaccepted criterion is named', tree.complete === false && tree.criteria.find((entry) => entry.criterionId === 'bounded')?.satisfiedBy === null,
+    )
+    check(
+      'the stopped sub-task is listed as blocked with a reason',
+      tree.blocked.some((entry) => entry.taskId === CHILD_LIMITS),
+    )
 
     // ---------------------------------------------------------------- 7. the receipt
     const held = store.load().entries()
     const countState = foldSubjects(registry, held, TASK_PROTOCOL, TASK_VERSION).get(CHILD_COUNT)
     const receipt = projectReceipt(registry, held, CHILD_COUNT, 'run-count')
     const named = held.slice(0, receipt.cutoff)
-    const settlement = held.find(entry => entry.kind === TASK_KINDS.runVerified && entry.subject === CHILD_COUNT)
+    const settlement = held.find((entry) => entry.kind === TASK_KINDS.runVerified && entry.subject === CHILD_COUNT)
     check(
       'the receipt stops at its own committed settlement',
       receipt.cutoff === settlement.seq + 1 && named.at(-1).seq === settlement.seq,
@@ -368,7 +423,7 @@ async function main() {
     )
     check(
       'later facts about the other child stay outside the receipt',
-      receipt.cutoff < held.length && held.slice(receipt.cutoff).every(entry => entry.subject === CHILD_LIMITS),
+      receipt.cutoff < held.length && held.slice(receipt.cutoff).every((entry) => entry.subject === CHILD_LIMITS),
       `receipt ${receipt.cutoff}, current log ${held.length}`,
     )
     // Reading two: re-deriving from exactly the prefix the bound names must give this receipt. A
@@ -389,12 +444,16 @@ async function main() {
     // other subjects' facts taken out. They are real facts, at real sequence numbers, so this array
     // is not a prefix and cannot source a receipt - the one thing the projection must not do is
     // re-bound it silently and hand back a receipt whose bound covers what it does not hold.
-    const foreign = held.filter(entry => entry.subject !== CHILD_COUNT)
-    check('the log this reader holds has other subjects in it, so filtering it is a real choice', foreign.length > 0, `${held.length} fact(s), all of "${CHILD_COUNT}"`)
+    const foreign = held.filter((entry) => entry.subject !== CHILD_COUNT)
+    check('the log this reader holds has other subjects in it, so filtering it is a real choice', foreign.length > 0, `${held.length} fact(s), all of "${CHILD_COUNT}"`,
+    )
     let apart = null
     let apartRefusal = null
     try {
-      apart = projectReceipt(registry, held.filter(entry => entry.subject === CHILD_COUNT), CHILD_COUNT, 'run-count')
+      apart = projectReceipt(registry, held.filter((entry) => entry.subject === CHILD_COUNT),
+        CHILD_COUNT,
+        'run-count',
+      )
     } catch (error) {
       if (!(error instanceof ProtocolRefusal)) throw error
       apartRefusal = error.refusal
@@ -402,7 +461,7 @@ async function main() {
     check(
       'a subject-filtered array derives no receipt rather than a different bound',
       apart === null && apartRefusal?.code === 'chain-broken' && (apartRefusal.detail ?? '').includes('prefix'),
-      apart === null ? `${apartRefusal?.code}: ${apartRefusal?.detail}` : `it derived cutoff ${apart.cutoff} over ${held.filter(entry => entry.subject === CHILD_COUNT).length} fact(s)`,
+      apart === null ? `${apartRefusal?.code}: ${apartRefusal?.detail}` : `it derived cutoff ${apart.cutoff} over ${held.filter((entry) => entry.subject === CHILD_COUNT).length} fact(s)`,
     )
     // What the attempt consumed, checked against the facts below that bound rather than against what
     // this probe passed in: the verdict fact for the run that was judged, and the bubble fact for the
@@ -410,7 +469,7 @@ async function main() {
     // verifier hashed from the bytes it read - which is also why the digest in it is hashed again
     // here, from the file on disk.
     const verdictFact = named.find(
-      entry => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.evidenceProduced && entry.subject === CHILD_COUNT,
+      (entry) => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.evidenceProduced && entry.subject === CHILD_COUNT,
     )
     check('the prefix the receipt names holds the verdict fact for the run it accounts for', verdictFact !== undefined)
     check(
@@ -424,7 +483,7 @@ async function main() {
       `the receipt reads ${JSON.stringify(receipt.consumption.inputs)}`,
     )
     const declaredBubble = held.find(
-      entry => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.bubbleOpened && entry.subject === CHILD_LIMITS,
+      (entry) => entry.protocol === TASK_PROTOCOL && entry.version === TASK_VERSION && entry.kind === TASK_KINDS.bubbleOpened && entry.subject === CHILD_LIMITS,
     )
     const limitsReceipt = projectReceipt(registry, held, CHILD_LIMITS, 'run-limits')
     check(
@@ -443,7 +502,8 @@ async function main() {
       loggedArtifact !== null && receipt.criteria[0]?.artifactDigest === loggedArtifact,
       `the receipt reads ${receipt.criteria[0]?.artifactDigest}; the verdict fact reads ${loggedArtifact}`,
     )
-    check('the artifact the verdict fact records is the digest of the bytes on disk', loggedArtifact === sha256(await readFile(artifactPath)), loggedArtifact)
+    check('the artifact the verdict fact records is the digest of the bytes on disk', loggedArtifact === sha256(await readFile(artifactPath)), loggedArtifact,
+    )
     check(
       'removing an unrelated late fact keeps the same frozen receipt',
       receiptDigest(projectReceipt(registry, held.slice(0, held.length - 1), CHILD_COUNT, 'run-count')) === receiptDigest(receipt),
@@ -453,7 +513,8 @@ async function main() {
     // reader mid-run actually holds.
     const noneYet = refusalOf(() => projectReceipt(registry, held.slice(0, 1), CHILD_COUNT, 'run-count'))
     check('a prefix holding none of the run has no receipt to derive', noneYet.code === 'unknown-run', noneYet.code)
-    const beforeSettling = refusalOf(() => projectReceipt(registry, held.slice(0, settlement?.seq ?? 0), CHILD_COUNT, 'run-count'))
+    const beforeSettling = refusalOf(() => projectReceipt(registry, held.slice(0, settlement?.seq ?? 0), CHILD_COUNT, 'run-count'),
+    )
     check(
       'a prefix that stops before the settlement has no receipt to derive',
       beforeSettling.code === 'illegal-transition' && (beforeSettling.detail ?? '').includes('still running'),
@@ -463,11 +524,14 @@ async function main() {
     // ---------------------------------------------------------------- 8. the reader
     const view = projectTask(countState)
     check('the child settled verified', view.phase === 'verified')
-    check('a reader sees the implementation digest that decided it', view.criteria[0]?.implementationDigest === programDigest)
+    check('a reader sees the implementation digest that decided it',
+      countState.runs['run-count'].evidence[0]?.implementationDigest === programDigest,
+    )
 
     console.log('')
     console.log(`  facts ${held.length}; parent complete=${tree.complete}; stopped=${stopped?.status}`)
-    console.log(`  receipt ${receiptDigest(receipt).slice(0, 16)}… (${receipt.status}, ${receipt.cutoff} facts, consumption ${receipt.consumption.basis}, derived — never written)`)
+    console.log(`  receipt ${receiptDigest(receipt).slice(0, 16)}… (${receipt.status}, ${receipt.cutoff} facts, consumption ${receipt.consumption.basis}, derived — never written)`,
+    )
 
     await store.close()
     await live.context.fiber.dispose()

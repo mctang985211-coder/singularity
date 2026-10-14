@@ -1,29 +1,17 @@
-/**
- * The Task contract: what makes a task adjudicable.
- *
- * - **Shape** is pure. It closes the member set, requires a goal, requires at least one criterion,
- *   and refuses a duplicate or empty criterion. A reducer may call it, because it depends on
- *   nothing outside the fact.
- * - **Availability** is a check about *now*. Whether this deployment can currently run the
- *   verifier a criterion names says nothing about a fact recorded last month, so it belongs to
- *   the command that produces a new fact — never to the fold that explains an old one.
- *
- * recorded contract keeps its own content identity; the criterion's verifier ref and version are
- * part of that identity, not a lookup.
- *
- * @module singularity-core/task/contract
- */
+/** Immutable task responsibility and concrete measurement identities. */
 
 import { assertClosedKeys, digestOf } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { MemberSet } from '../protocol/registry.ts'
 
-/** One acceptance criterion, bound to the verifier implementation that decides it. */
+/** A stable acceptance standard; its reviewer chooses the checks. */
 export interface AcceptanceCriterion {
-  /** Stable within the contract; the id every verdict refers to. */
   readonly criterionId: string
-  /** What is being accepted, in one sentence a verifier can decide. */
   readonly statement: string
+}
+
+/** A concrete checker identity, used by measurements rather than task admission. */
+export interface VerifierCriterion extends AcceptanceCriterion {
   /** The verifier implementation that decides it. */
   readonly verifierRef: string
   /** That implementation's version, so re-registering it cannot silently redefine this criterion. */
@@ -54,16 +42,20 @@ interface TaskInput {
 /** Fixed at admission; a later contract is a different task. */
 export interface TaskContract {
   readonly goal: string
-  readonly assets?: { readonly environmentId: string; readonly revisionId: string; readonly digest: string }
-  readonly template: TaskTemplateRef
+  readonly artifact: string
+  readonly template?: TaskTemplateRef
+  /** One-off responsibilities may select assets from their Run's method without a template. */
+  readonly skills?: readonly string[]
+  readonly capabilities?: readonly string[]
   /** Fixed sources; an upstream artifact's bytes are bound when a Run opens its Bubble. */
   readonly inputs: readonly TaskInput[]
-  /** At least one criterion, each bound to a verifier implementation. */
+  /** At least one independently judgeable standard. */
   readonly criteria: readonly AcceptanceCriterion[]
 }
 
-export const CONTRACT_MEMBERS = ['goal', 'template', 'inputs', 'criteria', 'assets'] as const
-export const CRITERION_MEMBERS = ['criterionId', 'statement', 'verifierRef', 'verifierVersion', 'implementationDigest'] as const
+export const CONTRACT_MEMBERS = ['goal', 'artifact', 'template', 'skills', 'capabilities', 'inputs', 'criteria'] as const
+export const CRITERION_MEMBERS = ['criterionId', 'statement', 'verifierRef', 'verifierVersion', 'implementationDigest',
+] as const
 
 /** A sha256 hex content digest: the only form this stack accepts as a content identity. */
 const DIGEST = /^[0-9a-f]{64}$/
@@ -102,7 +94,8 @@ function requireDigest(value: unknown, field: string): string {
 
 function requireRecord(value: unknown, field: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
-    refuse('malformed-contract', `${field} must be an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`)
+    refuse('malformed-contract', `${field} must be an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`,
+    )
   return value as Record<string, unknown>
 }
 
@@ -114,13 +107,22 @@ function taskInputs(raw: unknown, field: string): readonly TaskInput[] {
     const input = requireRecord(entry, at)
     assertClosedKeys(input, ['name', 'source'], at, 'malformed-contract')
     const name = requireText(input['name'], `${at}.name`)
+    if (
+      name.startsWith('/') ||
+      name.split('/').some((part) => !part || part === '.' || part === '..') ||
+      name.includes('\\') ||
+      name.includes('\0')
+    )
+      refuse('malformed-contract', `${at}.name must be a relative workspace file`)
     if (names.has(name)) refuse('malformed-contract', `${field} names input ${JSON.stringify(name)} twice`)
     names.add(name)
     const source = requireRecord(input['source'], `${at}.source`)
     const kind = requireText(source['kind'], `${at}.source.kind`)
     if (kind === 'protected') {
       assertClosedKeys(source, ['kind', 'ref', 'digest'], `${at}.source`, 'malformed-contract')
-      return { name, source: { kind, ref: requireText(source['ref'], `${at}.source.ref`), digest: requireDigest(source['digest'], `${at}.source.digest`) } }
+      return { name, source: { kind, ref: requireText(source['ref'], `${at}.source.ref`), digest: requireDigest(source['digest'], `${at}.source.digest`),
+        },
+      }
     }
     if (kind === 'artifact') {
       assertClosedKeys(source, ['kind', 'taskId'], `${at}.source`, 'malformed-contract')
@@ -131,7 +133,7 @@ function taskInputs(raw: unknown, field: string): readonly TaskInput[] {
 }
 
 /** Pure shape; the caller supplies the declaring kind's closed member set. */
-export function assertCriterionShape(raw: unknown, field: string, members: MemberSet): AcceptanceCriterion {
+export function assertCriterionShape(raw: unknown, field: string, members: MemberSet): VerifierCriterion {
   const record = requireRecord(raw, field)
   assertClosedKeys(record, members, field, 'malformed-contract')
   return {
@@ -150,12 +152,14 @@ export function assertCriterionShape(raw: unknown, field: string, members: Membe
  * unique, so a repeat is refused rather than merged — two entries under one id are two claims about
  * one criterion, and no reader could tell them apart afterwards.
  */
-export function criterionList(raw: unknown, where: string, members: MemberSet): readonly AcceptanceCriterion[] {
-  if (!Array.isArray(raw)) refuse('malformed-contract', `${where} must be an array of acceptance criteria, got ${raw === null ? 'null' : typeof raw}`)
+export function criterionList(raw: unknown, where: string, members: MemberSet): readonly VerifierCriterion[] {
+  if (!Array.isArray(raw)) refuse('malformed-contract', `${where} must be an array of acceptance criteria, got ${raw === null ? 'null' : typeof raw}`,
+    )
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const criterion = assertCriterionShape(entry, `${where}[${index}]`, members)
-    if (seen.has(criterion.criterionId)) refuse('malformed-contract', `${where} declares "${criterion.criterionId}" twice; a criterion id is stable and unique`)
+    if (seen.has(criterion.criterionId)) refuse('malformed-contract', `${where} declares "${criterion.criterionId}" twice; a criterion id is stable and unique`,
+      )
     seen.add(criterion.criterionId)
     return criterion
   })
@@ -176,41 +180,63 @@ export function assertContractShape(raw: unknown, field: string, members: Member
 
   const goal = requireText(record['goal'], `${field}.goal`)
 
-  const declaredTemplate = requireRecord(record['template'], `${field}.template`)
+  const declaredTemplate =
+    record['template'] === undefined ? undefined : requireRecord(record['template'], `${field}.template`)
+  if (declaredTemplate !== undefined)
   assertClosedKeys(declaredTemplate, ['id', 'digest'], `${field}.template`, 'malformed-contract')
-  const template = { id: requireText(declaredTemplate['id'], `${field}.template.id`), digest: requireDigest(declaredTemplate['digest'], `${field}.template.digest`) }
+  const template =
+    declaredTemplate === undefined
+      ? undefined
+      : { id: requireText(declaredTemplate['id'], `${field}.template.id`), digest: requireDigest(declaredTemplate['digest'], `${field}.template.digest`),
+        }
+  const selection: { skills?: readonly string[]; capabilities?: readonly string[] } = {}
+  for (const key of ['skills', 'capabilities'] as const) {
+    const raw = record[key]
+    if (raw === undefined) continue
+    if (template !== undefined)
+      refuse('malformed-contract', 'template responsibilities use the pinned template asset selection')
+    if (!Array.isArray(raw)) refuse('malformed-contract', `${field}.${key} must be an array of names`)
+    const names = raw.map((value, index) => requireText(value, `${field}.${key}[${index}]`))
+    if (new Set(names).size !== names.length) refuse('malformed-contract', `${field}.${key} repeats a name`)
+    selection[key] = names
+  }
   const inputs = taskInputs(record['inputs'], `${field}.inputs`)
 
   const rawCriteria = record['criteria']
   if (!Array.isArray(rawCriteria) || rawCriteria.length === 0)
-    refuse('malformed-contract', `${field}.criteria must name at least one acceptance criterion; nothing would decide the task`)
+    refuse('malformed-contract', `${field}.criteria must name at least one acceptance criterion; nothing would decide the task`,
+    )
 
-  const criteria = criterionList(rawCriteria, `${field}.criteria`, CRITERION_MEMBERS)
-
-  const held = record['assets'] === undefined ? undefined : requireRecord(record['assets'], `${field}.assets`)
-  if (held !== undefined) assertClosedKeys(held, ['environmentId', 'revisionId', 'digest'], `${field}.assets`, 'malformed-contract')
-  return { goal, template, inputs, criteria, ...(held === undefined ? {} : { assets: {
-    environmentId: requireText(held['environmentId'], `${field}.assets.environmentId`), revisionId: requireText(held['revisionId'], `${field}.assets.revisionId`), digest: requireDigest(held['digest'], `${field}.assets.digest`),
-  } }) }
+  const ids = new Set<string>()
+  const criteria = rawCriteria.map((raw, index) => {
+    const at = `${field}.criteria[${index}]`
+    const criterion = requireRecord(raw, at)
+    assertClosedKeys(criterion, ['criterionId', 'statement'], at, 'malformed-contract')
+    const criterionId = requireText(criterion['criterionId'], `${at}.criterionId`)
+    if (ids.has(criterionId)) refuse('malformed-contract', `${field} repeats criterion ${criterionId}`)
+    ids.add(criterionId)
+    return { criterionId, statement: requireText(criterion['statement'], `${at}.statement`) }
+  })
+  const artifact = requireText(record['artifact'], `${field}.artifact`)
+  if (
+    artifact.includes('\\') ||
+    artifact.includes('\0') ||
+    artifact.startsWith('/') ||
+    artifact.split('/').some((part) => part === '..' || part === '' || part === '.')
+  )
+    refuse('malformed-contract', `${field}.artifact must be a relative workspace file`)
+  if (
+    inputs.some(
+      (input) =>
+        input.name === artifact || artifact.startsWith(input.name + '/') || input.name.startsWith(artifact + '/'),
+    )
+  )
+    refuse('malformed-contract', 'artifact would overwrite a frozen input')
+  return { goal, artifact, inputs, criteria, ...selection, ...(template === undefined ? {} : { template }) }
 }
 
-/**
- * Read one contract that is being **admitted now**: the shape, plus the requirement that every
- * criterion names a verifier this deployment can currently run. A criterion nobody can decide
- * today is not an acceptance condition for a task starting today.
- */
-export function assertContract(raw: unknown, field: string, verifiers: VerifierRegistry): TaskContract {
-  const contract = assertContractShape(raw, field, CONTRACT_MEMBERS)
-  for (const [index, criterion] of contract.criteria.entries()) {
-    if (!verifiers.has(criterion.verifierRef, criterion.verifierVersion, criterion.implementationDigest))
-      refuse(
-        'unregistered-verifier',
-        `${field}.criteria[${index}] names verifier "${criterion.verifierRef}@${criterion.verifierVersion}" implemented by ${
-          criterion.implementationDigest.slice(0, 12)
-        }…, which this deployment cannot currently run`,
-      )
-  }
-  return contract
+export function assertContract(raw: unknown, field: string): TaskContract {
+  return assertContractShape(raw, field, CONTRACT_MEMBERS)
 }
 
 /** The contract's content identity: what a receipt cites so its acceptance cannot be redefined later. */

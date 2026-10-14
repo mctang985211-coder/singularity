@@ -1,3 +1,4 @@
+import { REVIEW_DIGEST } from '../review/protocol.ts'
 /** Shared task projection and execution receipts derived from each run's sealed control prefix. */
 
 import { assertEnvelope, digestOf, type Envelope } from '../protocol/envelope.ts'
@@ -6,7 +7,8 @@ import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 import type { BubbleInput } from './bubble.ts'
 import type { AcceptanceCriterion, TaskContract } from './contract.ts'
-import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunState, type RunStatus, type RunSubmission, type TaskState } from './protocol.ts'
+import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunState, type RunStatus, type RunSubmission, type TaskState,
+} from './protocol.ts'
 
 /** One criterion and the verdict it received, as a reader sees it. */
 export interface CriterionVerdictView {
@@ -99,13 +101,13 @@ function requireContract(state: TaskState): { contract: TaskContract; digest: st
 }
 
 function verdictOf(run: RunState, criterionId: string): RunState['evidence'][number] | undefined {
-  return run.evidence.find(entry => entry.criterionId === criterionId)
+  return run.evidence.find((entry) => entry.criterionId === criterionId)
 }
 
 function phaseOf(runs: readonly RunState[]): TaskView['phase'] {
   if (runs.length === 0) return 'awaiting-run'
-  if (runs.some(run => run.status === 'running')) return 'running'
-  if (runs.some(run => run.status === 'verified')) return 'verified'
+  if (runs.some((run) => run.status === 'running')) return 'running'
+  if (runs.some((run) => run.status === 'verified')) return 'verified'
   return 'failed'
 }
 
@@ -115,7 +117,7 @@ export function projectTask(state: TaskState): TaskView {
   const runStates = Object.values(state.runs).sort((left, right) =>
     left.startedAt < right.startedAt ? -1 : left.startedAt > right.startedAt ? 1 : 0,
   )
-  const runs: RunView[] = runStates.map(run => ({
+  const runs: RunView[] = runStates.map((run) => ({
     runId: run.runId,
     status: run.status,
     emitter: run.emitter,
@@ -125,14 +127,14 @@ export function projectTask(state: TaskState): TaskView {
     finishedAt: run.finishedAt ?? null,
     failureReason: run.failureReason ?? null,
     failureCause: run.failureCause ?? null,
-    verdicts: contract.criteria.map(criterion => {
+    verdicts: contract.criteria.map((criterion) => {
       const judged = verdictOf(run, criterion.criterionId)
       return {
         criterionId: criterion.criterionId,
         statement: criterion.statement,
-        verifierRef: criterion.verifierRef,
-        verifierVersion: criterion.verifierVersion,
-        implementationDigest: criterion.implementationDigest,
+        verifierRef: judged?.verifierRef ?? 'independent-review',
+        verifierVersion: judged?.verifierVersion ?? '1',
+        implementationDigest: judged?.implementationDigest ?? REVIEW_DIGEST,
         verdict: judged?.verdict ?? 'unjudged',
         decidedBy: judged === undefined ? null : `${judged.verifierRef}@${judged.verifierVersion}`,
         artifactDigest: judged?.artifactDigest ?? null,
@@ -166,11 +168,13 @@ export function projectReceipt(
   for (const [index, entry] of entries.entries()) {
     const checked = assertEnvelope(entry)
     if (checked.seq !== index)
-      refuse('chain-broken', `receipt input is not a contiguous log prefix: position ${index} carries seq ${checked.seq}`)
+      refuse('chain-broken', `receipt input is not a contiguous log prefix: position ${index} carries seq ${checked.seq}`,
+      )
     if (checked.prevDigest !== previousDigest)
       refuse('chain-broken', `receipt input fact #${checked.seq} does not link to its predecessor`)
     const rule = registry.ruleFor(checked.protocol, checked.version, checked.kind)
-    const payload = rule.parse(checked.payload, `${checked.protocol}@${checked.version} ${checked.kind} #${checked.seq}`)
+    const payload = rule.parse(checked.payload, `${checked.protocol}@${checked.version} ${checked.kind} #${checked.seq}`,
+    )
     if (
       checked.protocol === TASK_PROTOCOL && checked.version === TASK_VERSION && checked.subject === taskId &&
       (checked.kind === TASK_KINDS.runVerified || checked.kind === TASK_KINDS.runFailed) &&
@@ -181,7 +185,8 @@ export function projectReceipt(
   const state = foldSubject<TaskState>(registry, entries.slice(0, cutoff), TASK_PROTOCOL, TASK_VERSION, taskId)
   const run = state?.runs[runId]
   if (state === undefined || run === undefined)
-    refuse('unknown-run', `the ${entries.length} fact(s) handed in hold no run "${runId}" of task "${taskId}", so there is no receipt to derive`)
+    refuse('unknown-run', `the ${entries.length} fact(s) handed in hold no run "${runId}" of task "${taskId}", so there is no receipt to derive`,
+    )
   const { contract, digest } = requireContract(state)
   if (run.status === 'running')
     refuse(
@@ -189,7 +194,8 @@ export function projectReceipt(
       `run "${runId}" is still running in the ${entries.length} fact(s) handed in; a receipt is what a terminal run leaves behind`,
     )
   if (run.finishedAt === undefined || cutoff === undefined)
-    refuse('illegal-transition', `run "${runId}" settled ${run.status} without a settlement time; the log cannot produce that`)
+    refuse('illegal-transition', `run "${runId}" settled ${run.status} without a settlement time; the log cannot produce that`,
+    )
 
   const judged = run.evidence[0]
   const declared = run.bubble?.inputs ?? []
@@ -203,7 +209,7 @@ export function projectReceipt(
     executor: { emitter: run.emitter, actor: run.actor },
     consumption: {
       basis: judged === undefined ? DECLARED_BASIS : JUDGED_BASIS,
-      inputs: (judged?.inputDigests ?? declared).map(entry => ({ name: entry.name, digest: entry.digest })),
+      inputs: (judged?.inputDigests ?? declared).map((entry) => ({ name: entry.name, digest: entry.digest })),
       workspace: run.bubble === undefined ? null : { kind: run.bubble.workspace.kind, ref: run.bubble.workspace.ref },
     },
     status: run.status,
@@ -211,13 +217,13 @@ export function projectReceipt(
     finishedAt: run.finishedAt,
     submission: run.submission ?? null,
     source: run.submission?.source ?? null,
-    criteria: contract.criteria.map(criterion => {
+    criteria: contract.criteria.map((criterion) => {
       const judged = verdictOf(run, criterion.criterionId)
       return {
         criterionId: criterion.criterionId,
-        verifierRef: criterion.verifierRef,
-        verifierVersion: criterion.verifierVersion,
-        implementationDigest: criterion.implementationDigest,
+        verifierRef: judged?.verifierRef ?? 'independent-review',
+        verifierVersion: judged?.verifierVersion ?? '1',
+        implementationDigest: judged?.implementationDigest ?? REVIEW_DIGEST,
         verdict: judged?.verdict ?? 'unjudged',
         artifactDigest: judged?.artifactDigest ?? null,
         actor: judged?.actor ?? null,
@@ -238,10 +244,7 @@ export function renderTaskForAgent(view: TaskView): string {
     `  goal: ${view.goal}`,
     `  contract ${view.contractDigest.slice(0, 12)}… admitted by ${view.admittedBy} at ${view.admittedAt}`,
     `  criteria (${view.criteria.length}):`,
-    ...view.criteria.map(
-      criterion =>
-        `    - ${criterion.criterionId}: ${criterion.statement} [decided by ${criterion.verifierRef}@${criterion.verifierVersion} implemented by ${criterion.implementationDigest.slice(0, 12)}…]`,
-    ),
+    ...view.criteria.map((criterion) => `    - ${criterion.criterionId}: ${criterion.statement}`),
     `  runs (${view.runs.length}):`,
   ]
 

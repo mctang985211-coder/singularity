@@ -63,6 +63,9 @@
       ],
       "@deepseek-ai/dsh-skill": [
         "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-skill/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-scope": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-scope/lib/types/index.d.ts"
       ]
     }
   },

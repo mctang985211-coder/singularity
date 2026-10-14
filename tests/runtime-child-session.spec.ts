@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { openChildSession, type ChildSessionSeams } from '../src/runtime/child-session.ts'
 import { openAgentSession } from '../src/runtime/agent-session.ts'
 import { schedulerMessage } from '../src/runtime/task-message.ts'
+import { postIdentifiedMessage } from '../src/runtime/identified-message.ts'
 
 vi.mock('../src/runtime/agent-session.ts', () => ({
   openAgentSession: vi.fn(), closeAgentSession: vi.fn(), agentSessionIdOf: (id: string) => `singularity:agent:${id}`,
@@ -32,5 +33,19 @@ it.each([false, true])('mounts the isolated review preset on create/resume (resu
   expect(opened.delivery).toBe('posted')
   expect(mount).toHaveBeenCalledExactlyOnceWith(childCtx, 'singularity-review')
   expect(composeFrom).not.toHaveBeenCalled()
+  await opened.close()
+})
+
+it('restores a sealed executor session without posting a solve or resume instruction', async () => {
+  const parent = { options: {}, session: { requestHeader: () => undefined } } as unknown as Agent
+  const agent = {} as Agent
+  const seams = { sessionPersistence: { stat: async () => ({}) }, sessions: {},
+    agentPresets: { mount: vi.fn() } } as unknown as ChildSessionSeams
+  vi.mocked(openAgentSession).mockResolvedValue({ agentId: 'sealed', sessionId: 'singularity:agent:sealed', resumed: true, agent })
+  const opened = await openChildSession(seams, { agentId: 'sealed', cwd: '/sealed', parent,
+    model: { provider: 'gateway', model: 'same-model' }, signal: new AbortController().signal })
+  expect(opened.delivery).toBe('none')
+  expect(postIdentifiedMessage).not.toHaveBeenCalled()
+  expect(openAgentSession).toHaveBeenCalledWith(seams, expect.objectContaining({ agentId: 'sealed', resume: true }))
   await opened.close()
 })

@@ -43,9 +43,10 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { refuse } from '../protocol/refusal.ts'
 import { BUBBLE_INPUT_MEMBERS, inputList, type BubbleInput } from '../task/bubble.ts'
-import { assertCriterionShape, CRITERION_MEMBERS, type AcceptanceCriterion } from '../task/contract.ts'
+import { assertCriterionShape, CRITERION_MEMBERS, type VerifierCriterion } from '../task/contract.ts'
 import { digest, maybeText, record, text } from '../task/shape.ts'
-import { assertVerifierRunnable, runVerifierSelftest, type SelftestReport, type VerifierImplementation } from '../verifier/implementation.ts'
+import { assertVerifierRunnable, runVerifierSelftest, type SelftestReport, type VerifierImplementation,
+} from '../verifier/implementation.ts'
 import type { ProductionExecution, ProductionInput, VerifierCommand } from '../verifier/production.ts'
 
 /** What a real measurement reported: the number, and the implementation that produced it. */
@@ -89,7 +90,7 @@ export type MeasurementOutcome = { readonly kind: 'trial'; readonly trial: Measu
  * deployment holds, the run's declared inputs, and where the program runs.
  */
 export interface MeasurementRequest {
-  readonly metric: AcceptanceCriterion
+  readonly metric: VerifierCriterion
   readonly implementations: readonly VerifierImplementation[]
   readonly inputs: readonly BubbleInput[]
   readonly workspace: string
@@ -112,7 +113,8 @@ function requireNumber(value: unknown, field: string): number {
 function requireCommand(value: unknown, field: string): VerifierCommand {
   if (typeof value === 'string') return text({ command: value }, 'command', field)
   if (Array.isArray(value) && value.length > 0) return value.map((entry, index) => text({ entry }, 'entry', `${field}[${index}]`))
-  refuse('malformed-payload', `${field} must be a non-empty command line or a non-empty argv array, got ${JSON.stringify(value ?? null)}`)
+  refuse('malformed-payload', `${field} must be a non-empty command line or a non-empty argv array, got ${JSON.stringify(value ?? null)}`,
+  )
 }
 
 /**
@@ -124,26 +126,30 @@ function requireCommand(value: unknown, field: string): VerifierCommand {
  * to paths, exactly as the digest lookup applies it to implementations.
  */
 function workspacePath(workspace: string, name: string, field: string): string {
-  if (isAbsolute(name)) refuse('malformed-payload', `${field} is ${JSON.stringify(name)}, an absolute path; a declared input is named inside the workspace`)
+  if (isAbsolute(name)) refuse('malformed-payload', `${field} is ${JSON.stringify(name)}, an absolute path; a declared input is named inside the workspace`,
+    )
   const root = resolve(workspace)
   const path = resolve(root, name)
   const inside = relative(root, path)
   if (inside === '' || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside))
-    refuse('malformed-payload', `${field} is ${JSON.stringify(name)}, which resolves outside the workspace; a declaration may not name bytes it is not bound to`)
+    refuse('malformed-payload', `${field} is ${JSON.stringify(name)}, which resolves outside the workspace; a declaration may not name bytes it is not bound to`,
+    )
   return path
 }
 
 /** The implementations this deployment holds, read as declarations before any of them is run. */
 function readImplementations(raw: unknown): readonly VerifierImplementation[] {
   if (!Array.isArray(raw))
-    refuse('malformed-payload', `request.implementations must be an array of the implementations this deployment holds, got ${raw === null ? 'null' : typeof raw}`)
+    refuse('malformed-payload', `request.implementations must be an array of the implementations this deployment holds, got ${raw === null ? 'null' : typeof raw}`,
+    )
   return raw.map((entry, index) => {
     const where = `request.implementations[${index}]`
     const held = record(entry, where)
     text(held, 'ref', `${where}.ref`)
     text(held, 'version', `${where}.version`)
     digest(held, 'implementationDigest', `${where}.implementationDigest`)
-    if (typeof held['judge'] !== 'function') refuse('malformed-payload', `${where}.judge must be a function; a declaration with no judge cannot pass its selftest`)
+    if (typeof held['judge'] !== 'function') refuse('malformed-payload', `${where}.judge must be a function; a declaration with no judge cannot pass its selftest`,
+      )
     return entry as VerifierImplementation
   })
 }
@@ -157,7 +163,7 @@ function readInputs(raw: unknown, workspace: string): readonly ProductionInput[]
 }
 
 interface ResolvedRequest {
-  readonly metric: AcceptanceCriterion
+  readonly metric: VerifierCriterion
   readonly implementations: readonly VerifierImplementation[]
   readonly inputs: readonly ProductionInput[]
   readonly workspace: string
@@ -172,7 +178,8 @@ function readRequestShape(request: MeasurementRequest): ResolvedRequest {
   const workspace = text(source, 'workspace', 'request.workspace')
   const measure = source['measure']
   if (typeof measure !== 'function')
-    refuse('malformed-payload', 'request.measure must be a function; execution is a port, and a missing one is not a measurement')
+    refuse('malformed-payload', 'request.measure must be a function; execution is a port, and a missing one is not a measurement',
+    )
   return {
     // The metric's shape is the contract owner's rule, read here by the same function the contract's
     // own admission uses: a second reader of the same shape is a second place for the two to drift.
@@ -180,7 +187,8 @@ function readRequestShape(request: MeasurementRequest): ResolvedRequest {
     implementations: readImplementations(source['implementations']),
     inputs: readInputs(source['inputs'], workspace),
     workspace,
-    artifactPath: workspacePath(workspace, text(source, 'artifactPath', 'request.artifactPath'), 'request.artifactPath'),
+    artifactPath: workspacePath(workspace, text(source, 'artifactPath', 'request.artifactPath'), 'request.artifactPath',
+    ),
     command: requireCommand(source['command'], 'request.command'),
     measure: measure as RealMeasurement,
   }
@@ -191,19 +199,24 @@ function readRequestShape(request: MeasurementRequest): ResolvedRequest {
  *
  * The digest is the key; the name only has to agree once a candidate is found.
  */
-function resolveImplementation(implementations: readonly VerifierImplementation[], metric: AcceptanceCriterion): VerifierImplementation {
+function resolveImplementation(implementations: readonly VerifierImplementation[], metric: VerifierCriterion,
+): VerifierImplementation {
   const named = `${metric.verifierRef}@${metric.verifierVersion}`
-  const byDigest = implementations.filter(entry => entry.implementationDigest === metric.implementationDigest)
-  const resolved = byDigest.find(entry => entry.ref === metric.verifierRef && entry.version === metric.verifierVersion)
+  const byDigest = implementations.filter((entry) => entry.implementationDigest === metric.implementationDigest)
+  const resolved = byDigest.find(
+    (entry) => entry.ref === metric.verifierRef && entry.version === metric.verifierVersion,
+  )
   if (resolved !== undefined) return resolved
 
-  const sameName = implementations.filter(entry => entry.ref === metric.verifierRef && entry.version === metric.verifierVersion)
+  const sameName = implementations.filter(
+    (entry) => entry.ref === metric.verifierRef && entry.version === metric.verifierVersion,
+  )
   const held =
     byDigest.length > 0
-      ? `this deployment holds that digest as ${byDigest.map(entry => `${entry.ref}@${entry.version}`).join(', ')}, not as ${named}`
+      ? `this deployment holds that digest as ${byDigest.map((entry) => `${entry.ref}@${entry.version}`).join(', ')}, not as ${named}`
       : sameName.length === 0
         ? 'this deployment holds no implementation with that digest'
-        : `"${named}" is held only as ${sameName.map(entry => `${entry.implementationDigest.slice(0, 12)}…`).join(', ')}, a different implementation`
+        : `"${named}" is held only as ${sameName.map((entry) => `${entry.implementationDigest.slice(0, 12)}…`).join(', ')}, a different implementation`
   refuse(
     'unregistered-verifier',
     `metric "${metric.criterionId}" names the verifier ${named} implemented by ${metric.implementationDigest.slice(0, 12)}…, but ${held}; a rebuilt implementation is not found by its name`,
@@ -220,7 +233,7 @@ async function assertSelftestHolds(implementation: VerifierImplementation): Prom
     ),
   )
   if (report.failures.length > 0) {
-    const disagreements = report.failures.map(failure => `"${failure.name}" declared ${failure.expected} but produced ${failure.actual}`).join('; ')
+    const disagreements = report.failures.map((failure) => `"${failure.name}" declared ${failure.expected} but produced ${failure.actual}`).join('; ')
     refuse(
       'unregistered-verifier',
       `the selftest of "${implementation.ref}@${implementation.version}" disagreed with its own declaration: ${disagreements}; a measurement program that cannot produce both outcomes is not runnable here`,
@@ -236,7 +249,8 @@ async function readInputDigests(inputs: readonly ProductionInput[]): Promise<rea
     try {
       bytes = await readFile(input.path)
     } catch (error) {
-      refuse('evidence-input-mismatch', `input "${input.name}" could not be read from the workspace (${messageOf(error)}); bytes that cannot be read cannot be shown to be the declared bytes`)
+      refuse('evidence-input-mismatch', `input "${input.name}" could not be read from the workspace (${messageOf(error)}); bytes that cannot be read cannot be shown to be the declared bytes`,
+      )
     }
     const digestOfBytes = createHash('sha256').update(bytes).digest('hex')
     if (digestOfBytes !== input.digest)
@@ -250,7 +264,8 @@ async function readInputDigests(inputs: readonly ProductionInput[]): Promise<rea
 }
 
 /** Step 4: run the real measurement, and accept its report only from the metric's implementation. */
-async function acceptReport(measure: RealMeasurement, execution: ProductionExecution, metric: AcceptanceCriterion): Promise<MeasuredNumber | MissedMeasurement> {
+async function acceptReport(measure: RealMeasurement, execution: ProductionExecution, metric: VerifierCriterion,
+): Promise<MeasuredNumber | MissedMeasurement> {
   const reported = record(await measure(execution), 'the recorded measurement')
   // A miss is a report about the attempt, and it is read first: nothing else it carries is a number.
   if (Object.hasOwn(reported, 'reason')) return { reason: text(reported, 'reason', 'the recorded measurement') }
@@ -264,7 +279,8 @@ async function acceptReport(measure: RealMeasurement, execution: ProductionExecu
       `metric "${metric.criterionId}" names the implementation ${metric.implementationDigest.slice(0, 12)}…, but the number was produced by ${implementationDigest.slice(0, 12)}…; the digest of what ran is what the metric must name`,
     )
   const detail = maybeText(reported, 'detail', 'the recorded measurement')
-  return { quality, ...(cost === undefined ? {} : { cost }), implementationDigest, ...(detail === undefined ? {} : { detail }) }
+  return { quality, ...(cost === undefined ? {} : { cost }), implementationDigest, ...(detail === undefined ? {} : { detail }),
+  }
 }
 
 /**

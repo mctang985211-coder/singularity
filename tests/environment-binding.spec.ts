@@ -71,7 +71,8 @@ describe('resolving one pin', () => {
   it('returns the created revision, whose manifest the caller never supplied', async () => {
     const revision = assertPinnedRevision(pinned, await environments(), WHERE)
 
-    expect([revision.revisionId, revision.contentDigest, revision.manifest]).toEqual([REVISION_ID, digestOf(MANIFEST), MANIFEST])
+    expect([revision.revisionId, revision.contentDigest, revision.manifest]).toEqual([REVISION_ID, digestOf(MANIFEST), MANIFEST,
+    ])
   })
 
   it('returns it at the time its creating fact was stamped with, not merely at some time', async () => {
@@ -84,25 +85,30 @@ describe('resolving one pin', () => {
     const map = await environments()
     const refusal = refusalOf(() => assertPinnedRevision({ ...pinned, environmentId: 'env-ghost' }, map, WHERE))
     // The refusal says what does exist, so a missing creation is visible as a missing fact.
-    expect([refusal.code, refusal.detail.includes('env-ghost'), refusal.detail.includes(ENVIRONMENT_ID)]).toEqual(['unknown-revision', true, true])
+    expect([refusal.code, refusal.detail.includes('env-ghost'), refusal.detail.includes(ENVIRONMENT_ID)]).toEqual(['unknown-revision', true, true,
+    ])
   })
 
   it('refuses a pin on a revision id the environment never created', async () => {
     const map = await environments()
     const refusal = refusalOf(() => assertPinnedRevision({ ...pinned, revisionId: 'r9999' }, map, WHERE))
-    expect([refusal.code, refusal.detail.includes('r9999'), refusal.detail.includes(OTHER_REVISION)]).toEqual(['unknown-revision', true, true])
+    expect([refusal.code, refusal.detail.includes('r9999'), refusal.detail.includes(OTHER_REVISION)]).toEqual(['unknown-revision', true, true,
+    ])
   })
 
   it('refuses a pin whose digest is not the created content, even when the id exists', async () => {
     const map = await environments()
     const refusal = refusalOf(() => assertPinnedRevision({ ...pinned, digest: 'c'.repeat(64) }, map, WHERE))
-    expect([refusal.code, refusal.detail.includes(REVISION_ID), refusal.detail.includes(digestOf(MANIFEST).slice(0, 12))]).toEqual(['unknown-revision', true, true])
+    expect([refusal.code, refusal.detail.includes(REVISION_ID), refusal.detail.includes(digestOf(MANIFEST).slice(0, 12)),
+    ]).toEqual(['unknown-revision', true, true])
   })
 
   it('refuses a pin that names the right revision id in the wrong environment', async () => {
     const map = await environments()
     // Both environments hold an `r0001`, with different content, so the pinned digest cannot resolve.
-    const refusal = refusalOf(() => assertPinnedRevision({ environmentId: OTHER_ENVIRONMENT, revisionId: REVISION_ID, digest: digestOf(MANIFEST) }, map, WHERE))
+    const refusal = refusalOf(() => assertPinnedRevision({ environmentId: OTHER_ENVIRONMENT, revisionId: REVISION_ID, digest: digestOf(MANIFEST) }, map, WHERE,
+      ),
+    )
     expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining(OTHER_ENVIRONMENT) })
   })
 
@@ -117,13 +123,17 @@ describe('projecting many runs', () => {
   it('projects each run onto the content digest that was actually created', async () => {
     const map = await environments()
     const runs = [
-      { runId: 'run-1', revision: pinned },
-      { runId: 'run-2', revision: { environmentId: ENVIRONMENT_ID, revisionId: OTHER_REVISION, digest: digestOf(OTHER_MANIFEST) } },
+      { purpose: 'solve', runId: 'run-1', revision: pinned },
+      {
+        purpose: 'solve',
+        runId: 'run-2', revision: { environmentId: ENVIRONMENT_ID, revisionId: OTHER_REVISION, digest: digestOf(OTHER_MANIFEST) },
+      },
     ]
 
     expect(projectBindings(runs, map)).toEqual([
       { runId: 'run-1', environmentId: ENVIRONMENT_ID, revisionId: REVISION_ID, contentDigest: digestOf(MANIFEST) },
-      { runId: 'run-2', environmentId: ENVIRONMENT_ID, revisionId: OTHER_REVISION, contentDigest: digestOf(OTHER_MANIFEST) },
+      { runId: 'run-2', environmentId: ENVIRONMENT_ID, revisionId: OTHER_REVISION, contentDigest: digestOf(OTHER_MANIFEST),
+      },
     ])
   })
 
@@ -134,9 +144,15 @@ describe('projecting many runs', () => {
   it('refuses the whole projection on the first unbindable run, naming that run', async () => {
     const map = await environments()
     const runs = [
-      { runId: 'run-1', revision: pinned },
-      { runId: 'run-2', revision: { environmentId: ENVIRONMENT_ID, revisionId: 'r9999', digest: 'c'.repeat(64) } },
-      { runId: 'run-3', revision: { environmentId: ENVIRONMENT_ID, revisionId: OTHER_REVISION, digest: digestOf(OTHER_MANIFEST) } },
+      { purpose: 'solve', runId: 'run-1', revision: pinned },
+      {
+        purpose: 'solve',
+        runId: 'run-2', revision: { environmentId: ENVIRONMENT_ID, revisionId: 'r9999', digest: 'c'.repeat(64) },
+      },
+      {
+        purpose: 'solve',
+        runId: 'run-3', revision: { environmentId: ENVIRONMENT_ID, revisionId: OTHER_REVISION, digest: digestOf(OTHER_MANIFEST) },
+      },
     ]
 
     const refusal = refusalOf(() => projectBindings(runs, map))

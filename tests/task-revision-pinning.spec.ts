@@ -31,7 +31,10 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
     const commands = await planned(live)
 
     const firstPin = pin(live)
-    await commands.startRun({ commandId: 'r-old', taskId: PARENT, runId: 'run-old', revision: firstPin })
+    await commands.startRun({
+      purpose: 'solve',
+      commandId: 'r-old', taskId: PARENT, runId: 'run-old', revision: firstPin,
+    })
 
     // A second revision, created through the environment's own protocol.
     await live.store.emit({
@@ -47,17 +50,20 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
     expect(secondDigest).not.toBe(firstPin.digest)
 
     // The run that was already pinned is untouched: its pin records when it started.
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-old']?.revision).toEqual(firstPin)
+    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-old']?.revision,
+    ).toEqual(firstPin)
 
     // A later run may choose the newer revision, explicitly, and is recorded with that choice.
     await commands.failRun({ commandId: 'end-old', taskId: PARENT, runId: 'run-old', reason: 'attempt complete' })
     await commands.startRun({
+      purpose: 'solve',
       commandId: 'r-new',
       taskId: PARENT,
       runId: 'run-new',
       revision: { environmentId: ENVIRONMENT, revisionId: 'r0002', digest: secondDigest },
     })
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-new']?.revision).toEqual({ environmentId: ENVIRONMENT, revisionId: 'r0002', digest: secondDigest })
+    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-new']?.revision,
+    ).toEqual({ environmentId: ENVIRONMENT, revisionId: 'r0002', digest: secondDigest })
 
     // And the same revision id cannot be re-pointed at different content, so "the newer revision"
     // can never be a silent replacement of what an older run was pinned to.

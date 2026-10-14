@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { MemoryLog, projectReceipt, receiptDigest, sealEnvelope, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION } from '../src/index.ts'
+import { MemoryLog, projectReceipt, receiptDigest, sealEnvelope, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION,
+} from '../src/index.ts'
 import { refusalOf } from './fixtures.ts'
 import {
   admitted,
@@ -36,10 +37,11 @@ describe('a run receipt seals its control source', () => {
     await log.emit(failed('timeout', 'another-run'))
 
     expect(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID)).toEqual(receipt)
-    expect(receiptDigest(projectReceipt(registry, log.entries().slice(0, cutoff), TASK_ID, RUN_ID))).toBe(receiptDigest(receipt))
+    expect(receiptDigest(projectReceipt(registry, log.entries().slice(0, cutoff), TASK_ID, RUN_ID))).toBe(receiptDigest(receipt),
+    )
   })
 
-  it.each(['verified', 'failed'] as const)('cites the sealed execution submission of a %s run', async status => {
+  it.each(['verified', 'failed'] as const)('cites the sealed execution submission of a %s run', async (status) => {
     const registry = taskRegistry()
     const log = new MemoryLog(registry, { subjects: SUBJECTS })
     const commands = sliceCommands()
@@ -47,19 +49,15 @@ describe('a run receipt seals its control source', () => {
     const submission = {
       requestId: 'session-1/call-1',
       requestDigest: '1'.repeat(64),
-      programDigest: '2'.repeat(64),
       artifactDigest: ARTIFACT,
       inputDigests: BUBBLE_INPUTS,
       files: {
-        program: fileAttachment('2'.repeat(64), 'program.ts'), artifact: fileAttachment(ARTIFACT, 'artifact.json'),
-        inputs: BUBBLE_INPUTS.map(input => ({ name: input.name, attachment: fileAttachment(input.digest, 'words.txt') })),
+        artifact: fileAttachment(ARTIFACT, 'artifact.json'),
+        inputs: BUBBLE_INPUTS.map((input) => ({ name: input.name, attachment: fileAttachment(input.digest, 'words.txt'),
+        })),
       },
       source: { sessionId: 'session-1', eventCount: 12, digest: '3'.repeat(64) },
     }
-    await log.emit({
-      commandId: 'begin-submission', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runSubmitting, subject: TASK_ID,
-      payload: { runId: RUN_ID, requestId: submission.requestId, requestDigest: submission.requestDigest },
-    })
     await log.emit({
       commandId: 'submit', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runSubmitted, subject: TASK_ID,
       payload: { runId: RUN_ID, submission },
@@ -68,7 +66,7 @@ describe('a run receipt seals its control source', () => {
     else await log.emit(failed('execution failed'))
 
     expect(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID)).toMatchObject({
-      cutoff: status === 'verified' ? 9 : 7,
+      cutoff: status === 'verified' ? 8 : 6,
       status,
       submission,
       source: { sessionId: 'session-1', eventCount: 12, digest: '3'.repeat(64) },
@@ -110,9 +108,10 @@ describe('a run receipt seals its control source', () => {
     const log = new MemoryLog(registry, { subjects: SUBJECTS })
     for (const command of sliceCommands()) await log.emit(command)
     await log.emit({ ...admitted(), subject: 'another-task' })
-    const entries = log.entries().map((entry, index) => index === 7 ? { ...entry, actor: 'tampered-actor' } : entry)
+    const entries = log.entries().map((entry, index) => (index === 7 ? { ...entry, actor: 'tampered-actor' } : entry))
 
-    expect(refusalOf(() => projectReceipt(registry, entries, TASK_ID, RUN_ID))).toMatchObject({ code: 'digest-mismatch' })
+    expect(refusalOf(() => projectReceipt(registry, entries, TASK_ID, RUN_ID))).toMatchObject({ code: 'digest-mismatch',
+    })
   })
 
   it.each([
