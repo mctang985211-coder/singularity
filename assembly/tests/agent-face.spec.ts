@@ -65,6 +65,22 @@ describe('the agent face', () => {
     expect(mounted.tools.map(tool => Object.keys(tool.parameters.properties ?? {}))).toEqual([['taskId'], ['plan'], ['taskId', 'program'], ['taskId'], ['path'], ['taskId', 'tool', 'candidate'], ['round'], []])
   })
 
+  it('isolates the review tool catalog and prompt even when the parent is a solver', () => {
+    const mounted = scope({}, () => 'solve')
+    apply(mounted.ctx, { role: 'review' })
+    expect(mounted.tools.map(tool => tool.name)).toEqual([
+      'singularity_retry_task', 'singularity_submit_program', 'singularity_task_status', 'singularity_method_history',
+    ])
+    const provider = mounted.sections[0]!.text as Exclude<PromptSection['text'], string>
+    const prompt = provider({ agent: agentFor('reviewer', 'reviewer') })
+    expect(prompt).toContain('Independent review guidance:')
+    expect(prompt).toContain('Never invent ablation recipes')
+    expect(prompt).not.toContain('{taskId,useTemplateDecomposition:true}')
+    expect(prompt).not.toContain('Write the complete Revision JSON')
+    mounted.dispose()
+    expect(mounted.disposed).toHaveLength(5)
+  })
+
   it('selects responsibilities from the assembling agent on every request without inheriting parent exploration guidance', () => {
     const purposes = new Map([['root', 'solve'], ['reviewer', 'review'], ['improver', 'improve']])
     const mounted = scope({}, id => purposes.get(id)!)

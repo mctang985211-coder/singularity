@@ -26,6 +26,21 @@ export const SUBJECT_INPUT = 'singularity-subject'
 export const REVIEW_TEMPLATE = 'singularity-review'
 export const IMPROVEMENT_TEMPLATE = 'singularity-improvement'
 
+export function reviewScopeFor(subject: unknown) {
+  const purpose = (subject as { purpose?: string }).purpose
+  if (purpose === 'asset-admission') return {
+    stage: 'asset-admission',
+    goal: 'Decide whether the exact changed assets are safe and usable for exploration under the frozen protected input and acceptance. Review only introduced contract, binding, path and executable defects; record unverified claims without performing domain exploration.',
+    stoppingRule: 'Inspect the frozen changes and supplied evidence. Use declared verifier samples for changed executables and at most one discriminating probe per concrete suspected introduced usability defect. Submit once each admission question has a finding. Missing measurement recipes remain unverified; never invent recipes, reproduce historical area baselines, sweep candidates or search for matching numbers.',
+  }
+  return { stage: purpose === 'publication' ? 'publication' : 'acceptance',
+    goal: purpose === 'publication'
+      ? 'Judge publication of the exact frozen draft using its recorded independent acceptance, asset consumption, evaluation and complete cost evidence.'
+      : 'Judge the exact submitted result against its frozen contract, verifier verdict and evidence; cite concrete counterexamples or missing acceptance evidence.',
+    stoppingRule: 'Resolve the exact assignment from its evidence and justified checks, then submit a decision. Do not solve or optimize a new domain candidate, repair the subject, or launch RSI.',
+  }
+}
+
 export interface ReviewWitness {
   readonly taskId: string
   readonly runId: string
@@ -68,7 +83,7 @@ export async function addReviewVerifier(domain: Domain, workspaceRoot: string): 
   const verifiers = [...domain.verifiers, verifier]
   const templates = new Map(domain.templates)
   for (const [id, goal, artifact, criterionId, statement] of [
-    [REVIEW_TEMPLATE, 'Independently judge the exact subject against its stated immutable requirements. Verify the submitted result and evidence; review contracts, programs, method assets and publication validation. Explain missing evidence and counterexamples.', 'review.json', 'review-approved', 'Independent approval bound to the exact subject'],
+    [REVIEW_TEMPLATE, 'Independently decide the exact frozen review assignment at its stated stage. Apply reviewScope and the immutable contract, distinguish blocking requirements from nonblocking findings, and submit the decision once justified checks resolve the assignment. Do not execute the domain responsibilities described in the reviewed assets.', 'review.json', 'review-approved', 'Independent approval bound to the exact subject'],
     [IMPROVEMENT_TEMPLATE, 'Use actual failed and successful exploration evidence to improve reusable domain TaskTemplate, Skill and Tool mechanisms. Explain each change, evidence, trigger, predicted effects on the protected task, preserved successes and transfer limits. Learn methods rather than store task answers or winner RTL. Compare independent baseline and candidate solves under the unchanged root requirements and distinguish actual asset use from availability. Report measured improvement, no winner or budget exhaustion truthfully.', 'report.json', 'improvement-reported', 'Report the actual improvement result against the exact trace'],
   ] as const) templates.set(id, await readTemplate(domain.dir, { id, goal,
     input: { name: 'subject.json', source: { kind: 'protected', ref: SUBJECT_INPUT } },
@@ -88,12 +103,14 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
     : methodOfRun(apparatus, previous)!
   const loaded = (await loadMethod(apparatus, method)).domain
   const template = loaded.templates.get(REVIEW_TEMPLATE)!
+  const reviewScope = reviewScopeFor(subject)
   const input = { ref: SUBJECT_INPUT, digest: subjectDigest, bytes, sourcePath: '' }
   const domain = { ...loaded, inputs: [...loaded.inputs.filter(held => held.ref !== SUBJECT_INPUT), input] }
   declareCaller(apparatus, agentId)
   await apparatus.agents.open({ commandId: `agent:${agentId}`, agentId, sessionId: agentId, role: 'review' })
   const commands = apparatus.tasks.forAgent(agentId)
-  await commands.admit({ commandId: `admit:${id}`, taskId: id, contract: { ...contractFor(domain, template, template.goal), assets: method } })
+  await commands.admit({ commandId: `admit:${id}`, taskId: id, contract: { ...contractFor(domain, template,
+    existing === undefined ? reviewScope.goal : existing.contract!.goal), assets: method } })
   await commands.assign({ commandId: `assign:${id}`, taskId: id, agentId })
   const route = parent.session.requestHeader()?.config ?? parent.options
   if (route.provider === undefined || route.model === undefined) refuse('malformed-declaration', 'reviewer has no model route')
@@ -120,11 +137,12 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
       evidenceDigest: recordedVerdictDigest(state, 'independent review', { runId: run.runId, criterionId: template.criterion.criterionId, artifactDigest: settled.submission!.artifactDigest }) }
   }
   if (run.status !== 'running') return witness()
-  const session = await openChildSession(seams, { agentId: id, cwd: workspaceOf(apparatus, id, run.runId), parent,
+  const session = await openChildSession(seams, { agentId: id, cwd: workspaceOf(apparatus, id, run.runId), parent, preset: 'singularity-review',
     model: run.bubble!.model, signal, message: schedulerMessage({ kind: 'singularity', purpose: 'dispatch', controlId: apparatus.controlId,
       parentTaskId: String(parent.id), taskId: id, runId: run.runId, factSeq: 0 }, JSON.stringify({
       taskId: id, runId: run.runId, contract: taskStateOf(apparatus, id).contract,
       assignmentPurpose: 'review',
+      reviewScope,
       subjectDigest, subject: 'subject.json', output: { file: template.artifact,
         envelope: { subjectDigest, verdict: 'pass | fail | partial | unknown', detail: 'Findings and evidence for the exact assignment' },
         deliverables: 'Include all additional artifact fields requested by the frozen assignment in subject.json.',

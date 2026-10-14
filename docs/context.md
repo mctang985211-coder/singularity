@@ -64,7 +64,7 @@ W3 真实链验收替换旧 G2 产品探针；W4/W5 的 G2 主链与完整面板
 保留单一信封/控制 store/提交队列、闭合成员和版本边界；已验证值的缓存可复用，不重复重放/声明。
 ControlSessionStore 拥有独立 DSH 控制 session/write lease/flush 屏障；读 cut 没有写权限，屏障失败不能返回成功。
 根 Web Agent 借用宿主句柄，child 独占句柄及 disposer 归创建 owner；恢复准确 session，不能再次 resume live writer。
-每个节点挂载完整 DSH standard 预设与 Singularity 工具；child 创建与恢复继承准确父的实际 preset scope，父未挂载时拒绝创建。
+任务节点继承准确父的实际 preset scope；审核节点创建与恢复明确挂载 `singularity-review`，不继承任务节点的编程身份、目标规划或方法创作工具。所有节点保留文件、命令、编程和 Skill 能力。审核仅暴露提交、重试、状态与范围内历史；Run 职责也拒绝审核发起领域分解和方法执行或修改。准入合同只判安全性与可用性，未验证的收益声明独立记录，不能要求审核通过候选搜索补齐；验收与发布继续检查各自的完整证据。
 RRSI 只移植决定/正则化约束，见 [ADR0001](adr/0001-rrsi-port-boundary.md)；已接受分歧见 [divergence-ledger](divergence-ledger.md)，不顺手改回上游算法。
 开发和验收只用 [私有 DSH](standalone-dsh.md)，旧 harness 只读参考。W9 目前仅受控演示通过，真实领域 RSI 与改善效果待验收。
 

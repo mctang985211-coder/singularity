@@ -60,6 +60,11 @@ it('freezes the actual review responsibility and subject in recursively delegate
     key: 'inspect', template: REVIEW_TEMPLATE, dependsOn: [], supports: ['review-approved'], maxRuns: 1,
   }] })
   const child = taskStateOf(apparatus, result.opened[0]!)
+  expect(runtime.opened[0]!.preset).toBe('singularity-review')
+  const dispatch = runtime.opened[0]!.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
+  expect(dispatch).toContain('reviewScope:')
+  expect(dispatch).not.toContain('decompose your own Task')
+  expect(dispatch).not.toContain('Supported TaskTemplates:')
   const run = Object.values(child.runs)[0]!
   expect((apparatus.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, run.revision.environmentId)!
     .revisions[run.revision.revisionId]!.manifest as { purpose: string }).purpose).toBe('review')

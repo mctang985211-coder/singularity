@@ -14,7 +14,7 @@ import { workspaceOf, startAttempt } from './attempt.ts'
 import { schedulerMessage } from './scheduler-message.ts'
 import { domainForRun, methodOfRun, loadMethod } from './method.ts'
 import { resolveInputs } from './inputs.ts'
-import { REVIEW_TEMPLATE, SUBJECT_INPUT } from './review.ts'
+import { REVIEW_TEMPLATE, SUBJECT_INPUT, reviewScopeFor } from './review.ts'
 import { templateDeclaration } from './read.ts'
 
 export interface Scheduler {
@@ -110,15 +110,17 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       const model = run.bubble.model
       const started = apparatus.store.load().entries().find(fact => fact.subject === taskId && fact.kind === TASK_KINDS.runStarted &&
         (fact.payload as { runId: string }).runId === run.runId)!
+      const inputContent = Buffer.from(await resolveInputs(apparatus, state.contract!, domain)[0]!.read()).toString('utf8')
       const text = [
         `You are responsible for Task ${taskId}, Run ${run.runId}.`,
         'Goal: ' + state.contract!.goal,
-        'Supported TaskTemplates:\n' + JSON.stringify([...domain.templates.values()].map(templateDeclaration)),
+        ...(purpose === 'review' ? ['reviewScope: ' + JSON.stringify(reviewScopeFor(JSON.parse(inputContent)))]
+          : ['Supported TaskTemplates:\n' + JSON.stringify([...domain.templates.values()].map(templateDeclaration))]),
         `Workspace: ${workspace}. Use the standard DSH file, bash and skill tools here for reads, edits and local checks. Local checks do not consume a Task attempt.`,
-        `This Task/Run is already started. Continue this existing Run; decompose your own Task if needed, then solve and submit this exact taskId through singularity_submit_program. Attempt ${Object.keys(taskStateOf(apparatus, taskId).runs).length} of ${maxRuns}.`,
+        `This Task/Run is already started. Continue this existing Run; ${purpose === 'review' ? 'judge the frozen subject' : 'decompose your own Task if needed, then solve'} and submit this exact taskId through singularity_submit_program. Attempt ${Object.keys(taskStateOf(apparatus, taskId).runs).length} of ${maxRuns}.`,
         'Each singularity_submit_program call consumes one attempt and seals this Run. Submit only your final answer; never use submission to probe the interface. Its program argument must contain the complete final source text, not a path or a placeholder.',
         'Input: ' + join(workspace, template.input.name),
-        'Input content:\n' + Buffer.from(await resolveInputs(apparatus, state.contract!, domain)[0]!.read()).toString('utf8'),
+        'Input content:\n' + inputContent,
         ...(template.initial === undefined ? [] : ['Initial source:\n' + Buffer.from(template.initial.bytes).toString('utf8')]),
         template.submission === 'program' ? 'Your Node ES module receives the input path in process.argv[2]; print the artifact to stdout.' : 'Your source is judged as written.',
         'The independent verifier judges artifact ' + join(workspace, template.artifact) + ' against ' + state.contract!.criteria.map(criterion => criterion.criterionId).join(', ') + '.',
@@ -129,7 +131,8 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       const message = schedulerMessage({ kind: 'singularity', purpose: 'dispatch',
         controlId: apparatus.controlId, parentTaskId, taskId, runId: run.runId, factSeq: started.seq }, text)
       if (session === undefined) {
-        session = await open({ agentId: taskId, cwd: workspace, parent, model, message, signal: lifecycle.signal })
+        session = await open({ agentId: taskId, cwd: workspace, parent, model, message, signal: lifecycle.signal,
+          ...(purpose === 'review' ? { preset: 'singularity-review' as const } : {}) })
         live.set(taskId, session)
       } else await session.post(message)
       const actual = session.agent?.session.requestHeader()?.config ?? session.agent?.options

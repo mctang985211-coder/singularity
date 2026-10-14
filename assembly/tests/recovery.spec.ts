@@ -120,6 +120,12 @@ it('restores prompt responsibilities from the exact frozen Run rather than inher
     expect(driver.purpose(CALLER.agentId)).toBe('solve')
     expect(['review', 'improve', 'evaluation'].map(id => driver.purpose(id))).toEqual(['review', 'improve', 'evaluation'])
     expect(driver.purpose('new-human-session')).toBe('solve')
+    const review = driver.forCall(execFor(agentFor('review', 'review'), 'stale-domain-tool'))
+    for (const request of [
+      () => review.decompose({ taskId: 'review', useTemplateDecomposition: true }),
+      () => review.createMethod({ path: 'absent.json' }),
+      () => review.runMethod({ taskId: 'review', tool: 'domain-search' }),
+    ]) await expect(request()).rejects.toMatchObject({ refusal: { code: 'illegal-transition', detail: expect.stringContaining('review Runs judge frozen subjects') } })
   } finally { await driver.close() }
 })
 

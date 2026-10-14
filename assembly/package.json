@@ -26,7 +26,8 @@
     "bundle": {
       "patch": [
         "./cordis.patch.yml",
-        "./presets/singularity-next.patch.yml"
+        "./presets/singularity-next.patch.yml",
+        "./presets/singularity-review.patch.yml"
       ]
     },
     "client": {

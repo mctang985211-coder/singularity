@@ -241,7 +241,15 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       const criterion = apparatus.domain.templates.get(apparatus.domain.rootTemplate)!.criterion
       const measurement = apparatus.domain.measurement
       let proposalCost: ProposalCost | undefined
+      const assertExplorationOwner = () => {
+        const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
+          .findLast(task => task.responsibility?.agentId === caller.agentId)
+        const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
+        if (run !== undefined && purposeOf(run) === 'review')
+          refuse('illegal-transition', 'review Runs judge frozen subjects; domain decomposition and method execution or mutation belong to task Runs')
+      }
       const freezeAssets = async (input: MethodAssets, operationId = String(exec.callId)): Promise<RevisionRef> => {
+        assertExplorationOwner()
         const owner = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
           .findLast(task => task.responsibility?.agentId === caller.agentId)!
         const ownerRun = Object.values(owner.runs).at(-1)!
@@ -251,7 +259,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
         await reviewSubject(apparatus, options.seams, agent, `${operationId}:asset-review`, {
           purpose: 'asset-admission',
           taskId: owner.taskId, runId: ownerRun.runId,
-          requirements: 'Judge whether these exact assets are safe and usable for exploration and independent evaluation: preserve protected inputs and acceptance, review programs and bindings, and assess the proposed method against its evidence. Measurement and publication follow admission; do not require candidate evaluation or a measured winner at this stage.',
+          requirements: 'Decide only whether the exact changes introduce a safety or usability defect in protected input/acceptance, contracts, bindings, declared paths or executables. Inspect supplied evidence; unverified performance claims remain findings, not a request to recreate experiments. Do not optimize RTL, invent ablation recipes, reproduce unchanged area baselines or sweep candidates. Changed verifier programs require their declared samples and bypass checks. An inherited verifier limitation alone is not an introduced defect. Actual functional success, performance gains and complete cost are judged by subsequent independent acceptance, evaluation and publication.',
           revision, basis, changes, assets: input }, signal)
         return revision
       }
@@ -266,6 +274,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       return {
         retry: input => work(() => retry(apparatus, caller, String(exec.callId), input)),
         createMethod: input => work(async () => {
+          assertExplorationOwner()
           const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
             .findLast(task => task.responsibility?.agentId === caller.agentId)
           const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
@@ -275,7 +284,10 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
           await assertRunFile(workspace, input.path)
           return freezeAssets(JSON.parse(await readFile(path, 'utf8')))
         }),
-        runMethod: input => work(() => runMethodTool(apparatus, caller, input.taskId, String(exec.callId), AbortSignal.any([controller.signal, exec.signal]), input.tool, input.candidate)),
+        runMethod: input => work(async () => {
+          assertExplorationOwner()
+          return runMethodTool(apparatus, caller, input.taskId, String(exec.callId), AbortSignal.any([controller.signal, exec.signal]), input.tool, input.candidate)
+        }),
         evolve: input => work(async () => {
           assertImprovementOwner(apparatus, caller.agentId)
           input = readEvolutionRound(input)
@@ -301,6 +313,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
           return history
         }),
         decompose: input => work(async () => {
+          assertExplorationOwner()
           if (input.useTemplateDecomposition !== undefined) return decompose(apparatus, scheduler, caller, input)
           const task = taskStateOf(apparatus, input.taskId)
           if (task.responsibility?.agentId !== caller.agentId) refuse('not-responsible', 'the caller is not responsible for this Task')

@@ -121,6 +121,26 @@ it('returns the independently verified review retry and reuses its sealed decisi
   expect(openChildSession).toHaveBeenCalledTimes(1)
 })
 
+it('scopes admission to usability and seals nonblocking unverified findings without running a domain solve', async () => {
+  const { apparatus } = await fixture()
+  vi.mocked(openChildSession).mockImplementation(async (_seams, request) => session(async () => {
+    expect(request.preset).toBe('singularity-review')
+    const dispatch = JSON.parse(request.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n'))
+    expect(dispatch.reviewScope.stage).toBe('asset-admission')
+    expect(dispatch.contract.goal).toBe(dispatch.reviewScope.goal)
+    expect(dispatch.reviewScope.stoppingRule).toContain('Missing measurement recipes remain unverified')
+    const agentId = String(agentSessionIdOf(request.agentId)), reviewer = { ...caller, agentId, sessionId: agentId }
+    await submit(apparatus, execution, reviewer, execFor(agentFor(agentId, agentId), 'admission-answer'), {
+      taskId: dispatch.taskId, program: JSON.stringify({ subjectDigest: dispatch.subjectDigest, verdict: 'pass',
+        detail: 'Bindings and protected acceptance preserved; the absent measurement recipe is an unverified nonblocking claim.',
+        findings: [{ status: 'unknown', blocking: false, claim: 'historical ablation gain' }] }),
+    }, signal)
+  }))
+  const witness = await reviewSubject(apparatus, {}, parent, 'scoped-admission', { purpose: 'asset-admission' }, signal)
+  expect(witness.verdict).toBe('pass')
+  expect(openChildSession).toHaveBeenCalledTimes(1)
+})
+
 it.each(['fail', 'partial', 'unknown', 'malformed'])('does not approve a %s review result', async verdict => {
   const { apparatus } = await fixture()
   vi.mocked(openChildSession).mockImplementation(async (_seams, request) => session(async () => {

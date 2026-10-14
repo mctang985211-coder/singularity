@@ -12,7 +12,10 @@ export interface ChildSessionSeams {
   readonly sessions?: SessionStore | undefined
   readonly agents?: AgentRegistry | undefined
   readonly agentLoop?: unknown
-  readonly agentPresets?: { composeFrom(ctx: unknown, source: unknown): string | undefined } | undefined
+  readonly agentPresets?: {
+    composeFrom(ctx: unknown, source: unknown): string | undefined
+    mount(ctx: unknown, id: string): Promise<unknown>
+  } | undefined
   get?(name: string): unknown
 }
 export interface ChildSessionRequest {
@@ -22,6 +25,7 @@ export interface ChildSessionRequest {
   readonly model: { readonly provider: string; readonly model: string }
   readonly message: UserMessage
   readonly signal: AbortSignal
+  readonly preset?: 'singularity-review'
 }
 export interface ChildSession {
   readonly agentId: string
@@ -48,9 +52,12 @@ export async function openChildSession(seams: ChildSessionSeams, request: ChildS
   const reasoningEffort = (request.parent.session.requestHeader()?.config ?? request.parent.options).reasoningEffort
   const opened = await openAgentSession(seams, {
     agentId: request.agentId, resume: persisted !== undefined, cwd: request.cwd,
-    preset: 'singularity-next',
+    preset: request.preset ?? 'singularity-next',
     agentOptions: { ...request.model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) },
-    setup: ctx => { presets.composeFrom(ctx, request.parent.ctx) },
+    setup: async ctx => {
+      if (request.preset !== undefined) await presets.mount(ctx, request.preset)
+      else presets.composeFrom(ctx, request.parent.ctx)
+    },
   })
   const post = (message: UserMessage) => postIdentifiedMessage(seams, opened.agent, message)
   const stop = () => opened.agent.cancel({ kind: 'parent' }, { keepInbox: true })
