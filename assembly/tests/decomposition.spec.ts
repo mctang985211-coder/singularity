@@ -1,217 +1,179 @@
-import { seedMethod } from '../src/method.ts'
+import { testProjections } from './seam.ts'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { asyncRefusalOf } from '../../tests/fixtures.ts'
 import { callerOf, openApparatus } from '../src/apparatus.ts'
 import { loadDomain } from '../src/domain.ts'
+import { contractFor } from '../src/inputs.ts'
 import type { PlannedChild } from '../src/driver.ts'
 import { spawnProcess } from '../src/process.ts'
 import { decompose, propose, retry } from '../src/surfaces.ts'
 import { startAttempt } from '../src/attempt.ts'
-import { createMethod, loadMethod } from '../src/method.ts'
-import { templateDeclaration } from '../src/read.ts'
+import { createMethod, loadMethod, seedMethod } from '../src/method.ts'
+import { templateDeclaration, type TemplateChild } from '../src/template.ts'
 import { attachmentsAt, agentFor, factsOf, FakePersistence } from './seam.ts'
 
 const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
-const children: readonly PlannedChild[] = [
-  { key: 'extract', template: 'extract-letters', dependsOn: [], supports: ['letters'], maxRuns: 1 },
-  { key: 'count', template: 'count-letters', dependsOn: ['extract'], supports: ['letters'], maxRuns: 1 },
+const recipe: readonly TemplateChild[] = [
+  { key: 'extract', template: 'extract-letters', dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const },
+  { key: 'count', template: 'count-letters', dependsOn: ['extract'], supports: ['letters'], maxRuns: 1, requirement: 'required' as const },
 ]
-
-async function setup(recipe?: readonly PlannedChild[]) {
-  const root = await mkdtemp(join(tmpdir(), 'assembly-plan-'))
-  roots.push(root)
+async function setup(withRecipe = false) {
+  const root = await mkdtemp(join(tmpdir(), 'assembly-plan-')); roots.push(root)
   const medium = new FakePersistence()
-  const apparatus = await openApparatus('plans', root, await loadDomain(domainDir, spawnProcess), medium as never, attachmentsAt(root),
-  )
-  const agent = agentFor('parent', 'parent-session')
-  const caller = callerOf(agent)
-  const method = recipe === undefined ? undefined : await createMethod(apparatus, { rootTemplate: apparatus.domain.rootTemplate,
+  const apparatus = await openApparatus('plans', root, await loadDomain(domainDir, spawnProcess), medium as never, attachmentsAt(root), testProjections)
+  const caller = callerOf(agentFor('parent', 'parent-session'))
+  const method = withRecipe ? await createMethod(apparatus, { rootTemplate: apparatus.domain.rootTemplate,
     templates: [...apparatus.domain.templates.values()].map((template) => ({ ...templateDeclaration(template),
-      ...(template.id === apparatus.domain.rootTemplate ? { applicability: 'independent extraction and counting', decomposition: { children: recipe } } : {}),
-          })),
-    skills: [], tools: [],
-        })
-  const parent = await propose(apparatus, caller, 'propose', { goal: 'count letters', ...(method === undefined ? {} : { method }),
-  })
+      ...(template.id === apparatus.domain.rootTemplate ? { decomposition: { children: recipe } } : {}),
+    })), skills: [], tools: [],
+  }) : undefined
+  const parent = await propose(apparatus, caller, 'propose', { goal: 'count letters', ...(method === undefined ? {} : { method }) })
   const dispatched: string[] = []
-  const scheduler = { advance: async () => { dispatched.push('dispatch')
-      return [] }, close: async () => undefined,
-  }
-  return { apparatus, medium, agent, caller, parent, scheduler, dispatched }
+  const scheduler = { advance: async () => { dispatched.push('dispatch'); return [] }, close: async () => undefined }
+  const children: readonly PlannedChild[] = recipe.map(({ template, ...edge }) => ({ ...edge,
+    contract: contractFor(apparatus.domain, apparatus.domain.templates.get(template)!,
+      apparatus.domain.templates.get(template)!.goal, new Map([['extract-letters', 'extract']])),
+  }))
+  return { apparatus, medium, caller, parent, scheduler, dispatched, children }
 }
 
-describe('a fully checked domain decomposition', () => {
-  it('selects only direct children of the pinned definition and replays without duplicate instances or facts', async () => {
-    const h = await setup(children)
-    expect(h.parent.methodContext).toMatchObject({ applicability: 'independent extraction and counting', decomposition: { children },
-    })
-    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, useTemplateDecomposition: true })
+describe('one complete task declaration', () => {
+  it('admits explicit declarations and replays without duplicate instances or facts', async () => {
+    const h = await setup(true)
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: h.children })
     const before = factsOf(h.medium)
-    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, useTemplateDecomposition: true })
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: h.children })
     expect(factsOf(h.medium)).toEqual(before)
     expect(before.filter((fact) => fact.kind === 'task/decomposed')).toHaveLength(1)
     expect(before.filter((fact) => fact.kind === 'task/admitted')).toHaveLength(3)
-    expect(before.some(
-        (fact) => fact.kind === 'method/consumed' && (fact.payload as { method: string }).method.startsWith('decomposition:'),
-      ),
-    ).toBe(true)
+    expect(before.some((fact) => fact.kind === 'method/consumed' &&
+      (fact.payload as { method: string }).method.startsWith('decomposition:'))).toBe(false)
   })
 
-  it('rejects conflicting declarations under a committed instance key', async () => {
+  it('freezes concrete additional acceptance criteria inside the contract', async () => {
     const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })
+    const child = h.children[0]!
+    const contract = { ...child.contract, goal: 'extract a bounded result', criteria: [...child.contract.criteria,
+      { criterionId: 'bounded', statement: 'The delivered result has at most 100 bytes.' }] }
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: [{ ...child, contract }] })
+    const id = h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).get(h.parent.taskId)!.decomposition!.children[0]!.taskId
+    expect(h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).get(id)!.contract).toEqual(contract)
+  })
+
+  it('rejects changed declarations under a committed key', async () => {
+    const h = await setup()
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: h.children })
     const before = factsOf(h.medium)
     await expect(decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId,
-      children: [{ ...children[0]!, maxRuns: 2 }],
-      }),
-    ).rejects.toMatchObject({ refusal: { code: 'command-conflict' } })
+      children: [{ ...h.children[0]!, maxRuns: 2 }] })).rejects.toMatchObject({ refusal: { code: 'command-conflict' } })
     expect(factsOf(h.medium)).toEqual(before)
   })
 
-  it('allows multiple instances of the same reusable definition', async () => {
-    const h = await setup([{ ...children[0]!, key: 'first' }, { ...children[0]!, key: 'second' },
-    ])
-    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, useTemplateDecomposition: true })
-    const instances = [...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
-      .filter(
-      (task) => task.contract?.template?.id === 'extract-letters',
-    )
-    expect(instances).toHaveLength(2)
-    expect(instances[0]!.taskId).not.toBe(instances[1]!.taskId)
+  it('allows two instances and an explicit choice of their artifact producer', async () => {
+    const h = await setup()
+    const extract = h.children[0]!, count = h.children[1]!
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: [
+      { ...extract, key: 'first' }, { ...extract, key: 'second' },
+      { ...count, dependsOn: ['first', 'second'], contract: { ...count.contract,
+        inputs: [{ ...count.contract.inputs[0]!, source: { kind: 'artifact', taskId: 'second' } }] } },
+    ] })
+    const states = [...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
+    const copies = states.filter((task) => task.contract?.template?.id === 'extract-letters')
+    expect(copies).toHaveLength(2)
+    expect(states.find((task) => task.contract?.template?.id === 'count-letters')!.contract!.inputs[0]!.source)
+      .toEqual({ kind: 'artifact', taskId: copies[1]!.taskId })
   })
 
-  it('rejects missing, empty and mixed selection before admission', async () => {
+  it('rejects template shortcuts and missing contracts before admission', async () => {
     const h = await setup()
     const before = factsOf(h.medium)
     for (const input of [{ taskId: h.parent.taskId, useTemplateDecomposition: true },
-      { taskId: h.parent.taskId, children: [] }, { taskId: h.parent.taskId, children, useTemplateDecomposition: true },
-    ])
-      await expect(decompose(h.apparatus, h.scheduler, h.caller, input as never)).rejects.toThrow()
+      { taskId: h.parent.taskId, children: [] },
+      { taskId: h.parent.taskId, children: recipe },
+      { taskId: h.parent.taskId, children: [{ ...h.children[0]!, template: 'extract-letters' }] },
+    ]) await expect(decompose(h.apparatus, h.scheduler, h.caller, input as never)).rejects.toThrow()
     expect(factsOf(h.medium)).toEqual(before)
   })
 
-  it('refuses handoff evidence citing an unverified Task and names the offending id', async () => {
+  it('keeps hypotheses separate from verified evidence and names invalid citations', async () => {
     const h = await setup()
     const before = factsOf(h.medium)
-    const refusal = await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, h.caller,
-      { taskId: h.parent.taskId, children: [
-        { ...children[0]!, key: 'cite', handoff: { context: 'carry prior work', evidence: [h.parent.taskId] } },
-      ] }))
-    expect(refusal).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining(h.parent.taskId) })
+    const handoff = { decisions: [], hypotheses: ['Punctuation changes the count.'], exclusions: [], evidence: [h.parent.taskId] }
+    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId,
+      children: [{ ...h.children[0]!, handoff }] }))).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining(h.parent.taskId) })
+    expect(factsOf(h.medium)).toEqual(before)
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId,
+      children: [{ ...h.children[0]!, handoff: { ...handoff, evidence: [] } }] })
+    expect(h.dispatched).toEqual(['dispatch'])
+  })
+
+  it.each(['missing-dependency', 'cycle', 'unknown-support', 'duplicate-key', 'invalid-budget',
+    'wrong-template-digest', 'removed-standard', 'wrong-producer'] as const)('refuses %s before creating children', async (kind) => {
+    const h = await setup(), first = h.children[0]!, second = h.children[1]!
+    let children: readonly PlannedChild[] = h.children
+    switch (kind) {
+      case 'missing-dependency': children = [first, { ...second, dependsOn: [] }]; break
+      case 'cycle': children = [{ ...first, dependsOn: ['count'] }, second]; break
+      case 'unknown-support': children = [{ ...first, supports: ['missing'] }]; break
+      case 'duplicate-key': children = [first, first]; break
+      case 'invalid-budget': children = [{ ...first, maxRuns: 0, requirement: 'required' as const }]; break
+      case 'wrong-template-digest': children = [{ ...first, contract: { ...first.contract,
+        template: { id: 'extract-letters', digest: '0'.repeat(64) } } }]; break
+      case 'removed-standard': children = [{ ...first, contract: { ...first.contract,
+        criteria: [{ criterionId: 'different', statement: 'A different standard.' }] } }]; break
+      case 'wrong-producer': children = [{ ...first, contract: contractFor(h.apparatus.domain,
+        h.apparatus.domain.templates.get('count-source')!, 'count source') }, second]; break
+    }
+    const before = factsOf(h.medium)
+    await expect(decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })).rejects.toThrow()
     expect(factsOf(h.medium)).toEqual(before)
     expect(h.dispatched).toEqual([])
   })
 
-  it('accepts a handoff that cites no evidence', async () => {
-    const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller,
-      { taskId: h.parent.taskId, children: [
-        { ...children[0]!, key: 'fresh', handoff: { context: 'fresh investigation, nothing to reuse', evidence: [] } },
-      ] })
-    expect(factsOf(h.medium).some((fact) => fact.kind === 'task/decomposed')).toBe(true)
-    expect(h.dispatched).toEqual(['dispatch'])
-  })
-
-  it.each([
-    ['unknown-template', [{ ...children[0]!, template: 'missing' }]],
-    ['missing-producer', [{ ...children[1]!, dependsOn: [] }]],
-    ['cycle', [{ ...children[0]!, dependsOn: ['count'] }, children[1]!]],
-    ['unknown-support', [{ ...children[0]!, supports: ['missing'] }]],
-    ['duplicate-key', [children[0]!, children[0]!]],
-    ['wrong-producer', [{ ...children[0]!, template: 'count-source' }, children[1]!]],
-  ] as const)('refuses reusable %s during Revision admission', async (_case, recipe) => {
-    const h = await setup()
-    const reference = h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).get(h.parent.taskId)!.runs[h.parent.runId]!.revision
-    const { assets } = await loadMethod(h.apparatus, reference)
+  it('validates optional reusable decomposition advice when admitting a method', async () => {
+    const h = await setup(), { assets } = await loadMethod(h.apparatus, h.parent.method)
     const before = factsOf(h.medium)
     await expect(createMethod(h.apparatus, { ...assets, templates: assets.templates.map((raw) => {
       const template = raw as { id: string }
-      return template.id === assets.rootTemplate ? { ...template, decomposition: { children: recipe } } : template
-    }),
-      }),
-    ).rejects.toThrow()
+      return template.id === assets.rootTemplate ? { ...template,
+        decomposition: { children: [{ ...recipe[0]!, template: 'missing' }] } } : template
+    }) })).rejects.toThrow()
     expect(factsOf(h.medium)).toEqual(before)
   })
 
-  it.each([
-    ['unknown-template', [{ ...children[0]!, template: 'missing' }]],
-    ['missing-producer', [{ ...children[1]!, dependsOn: [] }]],
-    ['unknown-key', [{ ...children[1]!, dependsOn: ['missing'] }]],
-    ['cycle', [{ ...children[0]!, dependsOn: ['count'] }, children[1]!]],
-    ['unknown-support', [{ ...children[0]!, supports: ['missing'] }]],
-    ['duplicate-key', [children[0]!, children[0]!]],
-    ['invalid-budget', [{ ...children[0]!, maxRuns: 0 }]],
-    ['wrong-producer', [{ ...children[0]!, template: 'count-source' }, children[1]!]],
-    ['ambiguous-producer', [children[0]!, { ...children[0]!, key: 'other' }, { ...children[1]!, dependsOn: ['extract', 'other'] }],
-    ],
-  ] as const)('refuses %s before creating or admitting children', async (_case, proposal) => {
-    const h = await setup()
-    const before = factsOf(h.medium)
-    await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, h.caller,
-      { taskId: h.parent.taskId, children: proposal }),
-    )
-    expect(factsOf(h.medium)).toEqual(before)
-    expect(h.dispatched).toEqual([])
-  })
-
-  it('rejects a stranger before binding the stranger or preparing a child', async () => {
-    const h = await setup()
-    const before = factsOf(h.medium)
-    const stranger = agentFor('stranger', 'stranger-session')
-    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, callerOf(stranger),
-      { taskId: h.parent.taskId, children }),
-      ),
-    ).toMatchObject({ code: 'not-responsible' })
+  it('rejects a stranger without preparing a child', async () => {
+    const h = await setup(), before = factsOf(h.medium)
+    expect(await asyncRefusalOf(() => decompose(h.apparatus, h.scheduler, callerOf(agentFor('stranger', 'stranger-session')),
+      { taskId: h.parent.taskId, children: h.children }))).toMatchObject({ code: 'not-responsible' })
     expect(factsOf(h.medium)).toEqual(before)
   })
 
-  it('keeps an assigned node within its own Task and declared Run budget', async () => {
+  it('keeps the declared attempt budget', async () => {
     const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: h.children })
     const child = [...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
-      .find(
-      (state) => state.contract?.template?.id === 'extract-letters',
-    )!
-    const id = child.responsibility!.agentId
-    const caller = callerOf(agentFor(id, id))
+      .find((state) => state.contract?.template?.id === 'extract-letters')!
+    const caller = callerOf(agentFor(child.responsibility!.agentId, child.responsibility!.agentId))
     const run = await startAttempt(h.apparatus, caller, child.taskId, 'first', await seedMethod(h.apparatus))
-    await h.apparatus.tasks.forAgent(id).failRun({ commandId: 'failed', taskId: child.taskId, runId: run.runId, reason: 'failed exploration' })
+    await h.apparatus.tasks.forAgent(caller.agentId).failRun({ commandId: 'failed', taskId: child.taskId, runId: run.runId, reason: 'failed exploration' })
     const before = factsOf(h.medium)
-    expect(await asyncRefusalOf(() => retry(h.apparatus, caller, 'retry', { taskId: child.taskId }))).toMatchObject({ code: 'illegal-transition',
-      detail: expect.stringContaining('runtime failure'),
-    })
+    expect(await asyncRefusalOf(() => retry(h.apparatus, caller, 'retry', { taskId: child.taskId }))).toMatchObject({ code: 'illegal-transition' })
     expect(factsOf(h.medium)).toEqual(before)
   })
 
-  it('publishes child-specific contracts with the precise producer Task source', async () => {
+  it('retains the execution hold while child responsibilities are pending', async () => {
     const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })
-    const states = [...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
-    const extract = states.find((state) => state.contract?.template?.id === 'extract-letters')!
-    const count = states.find((state) => state.contract?.template?.id === 'count-letters')!
-    expect(extract.contract?.criteria[0]?.criterionId).toBe('extracted')
-    expect(count.contract).toMatchObject({ inputs: [{ name: 'in/letters.txt', source: { kind: 'artifact', taskId: extract.taskId } }],
-      criteria: [{ criterionId: 'counted' }],
-    })
-    expect(factsOf(h.medium).at(-1)?.kind).toBe('task/decomposed')
-    expect(h.dispatched).toEqual(['dispatch'])
-  })
-
-  it('refuses another delegation while retaining pending responsibilities', async () => {
-    const h = await setup()
-    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children })
+    await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: h.children })
     const before = factsOf(h.medium)
-    await expect(decompose(h.apparatus, h.scheduler, h.caller,
-      { taskId: h.parent.taskId, children: [{ ...children[0]!, key: 'additional' }] },
-    )).rejects.toThrow('delegated responsibilities are pending')
+    await expect(decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId,
+      children: [{ ...h.children[0]!, key: 'additional' }] })).rejects.toThrow('delegated responsibilities are pending')
     expect(factsOf(h.medium)).toEqual(before)
   })
 })

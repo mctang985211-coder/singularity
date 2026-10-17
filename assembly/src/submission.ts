@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import { ProtocolRefusal, refuse } from '../../src/protocol/refusal.ts'
@@ -9,13 +9,15 @@ import type { TaskView } from '../../src/task/view.ts'
 import { runVerifierCommand } from '../../src/verifier/command.ts'
 import { runProductionVerdict, type ProductionVerdict } from '../../src/verifier/production.ts'
 import { taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
-import { commandOf } from './domain.ts'
+import { commandOf, templateOf } from './domain.ts'
 import type { Execution } from './execution.ts'
 import { sha256 } from './ids.ts'
 import { spawnProcess } from './process.ts'
 import { sealFiles, withSealedWorkspace, sealedBytes } from './sealed.ts'
 import type { ReviewWitness } from './review.ts'
 import { assertRunFile } from './workspace.ts'
+import { loadMethod } from './method.ts'
+import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 
 export type AcceptanceReview = (taskId: string, run: RunState,
   checks: readonly ProductionVerdict[],
@@ -33,13 +35,17 @@ export interface Submission {
     readonly runId: string | null
     readonly detail: string }
 }
+export type SubmissionInput = { readonly taskId: string } & (
+  { readonly path: string } | { readonly sourceTaskId: string; readonly sourceRunId: string }
+)
 export async function submit(apparatus: Apparatus, execution: Execution, caller: Caller, exec: ToolRunContext,
-  request: { readonly taskId: string; readonly path: string },
+  request: SubmissionInput,
   signal: AbortSignal,
   review: AcceptanceReview,
 ): Promise<Submission> {
   const state = taskStateOf(apparatus, request.taskId)
-  if (request.path !== state.contract!.artifact)
+  const path = 'path' in request ? request.path : state.contract!.artifact
+  if (path !== state.contract!.artifact)
     refuse('malformed-declaration', 'submit the artifact declared in this Task contract')
   const requestId = 'submit-' + sha256(JSON.stringify([apparatus.controlId, caller.sessionId, String(exec.callId)]))
   const requestDigest = sha256(JSON.stringify(request))
@@ -53,13 +59,26 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
     refuse('not-responsible', 'caller does not own this Task')
   const run = Object.values(state.runs).find((run) => run.status === 'running' && run.stage === 'working')
   if (run === undefined) refuse('illegal-transition', 'Task has no working Run')
+  let source: RunState | undefined
+  if ('sourceTaskId' in request) {
+    const agent = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, caller.agentId)
+    if (agent?.role !== 'root' || !state.decomposition?.children.some(child => child.taskId === request.sourceTaskId))
+      refuse('not-responsible', 'root submission requires an artifact from its delegated direct child')
+    source = taskStateOf(apparatus, request.sourceTaskId).runs[request.sourceRunId]
+    if (source?.status !== 'verified') refuse('illegal-transition', 'root submission requires an exact verified child Run')
+  }
   const commands = apparatus.tasks.forAgent(caller.agentId)
   let release: (() => void) | undefined
   try {
     const workspace = run.bubble!.workspace.ref
     release = await execution.drain(exec)
     signal.throwIfAborted()
-    await assertRunFile(workspace, request.path)
+    await assertRunFile(workspace, path)
+    if (source !== undefined) {
+      const target = join(workspace, path)
+      await mkdir(dirname(target), { recursive: true })
+      await writeFile(target, await sealedBytes(apparatus, source.submission!.files.artifact))
+    }
     const inputDigests = await Promise.all(run.bubble!.inputs.map(async (input) => ({ name: input.name, digest: sha256(await readFile(join(workspace, input.name))),
       })),
     )
@@ -71,8 +90,8 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
       refuse('evidence-input-mismatch', 'workspace input differs from the frozen snapshot')
     await commands.submitRun({ commandId: 'seal:' + requestId, taskId: request.taskId, runId: run.runId,
       submission: { requestId, requestDigest,
-        artifactDigest: sha256(await readFile(join(workspace, request.path))), inputDigests,
-        files: await sealFiles(apparatus, run, request.path, workspace),
+        artifactDigest: sha256(await readFile(join(workspace, path))), inputDigests,
+        files: await sealFiles(apparatus, run, path, workspace),
         source: await execution.sealTranscript(exec),
       },
     })
@@ -108,30 +127,24 @@ export async function judgeAndRecord(apparatus: Apparatus, taskId: string, run: 
   )
   const checks: ProductionVerdict[] =
     existing === undefined ? [] : JSON.parse((await sealedBytes(apparatus, existing.subject)).toString('utf8')).checks
-  const template = contract.template === undefined ? undefined : apparatus.domain.templates.get(contract.template.id)
-  if (existing === undefined && template?.check !== undefined) {
-    const checker = template.verifier!
-    const { name, digest } = run.bubble!.inputs[0]!
-  const declared = { name, digest }
-    checks.push(
-      await withSealedWorkspace(apparatus, run, contract.artifact, (workspace) => runProductionVerdict({ runId: run.runId, criterion: template.check!,
-          implementations: apparatus.domain.verifiers,
-    inputs: [declared], workspace, artifactPath: contract.artifact,
+  if (existing === undefined && contract.template !== undefined) {
+    const { domain } = await loadMethod(apparatus, run.revision)
+    const template = templateOf(domain, contract.template)
+    if (template.checks.length > 0) await withSealedWorkspace(apparatus, run, contract.artifact, async (workspace) => {
+      for (const { criterion, verifier: checker, input: inputName } of template.checks) {
+        const { name, digest } = run.bubble!.inputs.find(input => input.name === inputName)!
+        const declared = { name, digest }
+        checks.push(await runProductionVerdict({ runId: run.runId, criterion, implementations: domain.verifiers,
+          inputs: [declared], workspace, artifactPath: contract.artifact,
           command: commandOf(checker, join(workspace, contract.artifact), join(workspace, declared.name)),
-    runJudge: async (execution) => {
+          runJudge: async (execution) => {
             const ran = await runVerifierCommand({ command: execution.command, artifactPath: execution.artifactPath, inputs: execution.inputs },
-              (invocation) => spawnProcess(invocation, signal, workspace, { root: workspace, writable: false, protected: [], references: [apparatus.domain.dir, ...apparatus.domain.references],
-                }),
-            )
-            return {
-              verdict: ran.verdict,
-              implementationDigest: sha256(await readFile(checker.program)),
-              detail: ran.detail,
-            }
+              (invocation) => spawnProcess(invocation, signal, workspace, { root: workspace, writable: false, protected: [], references: [domain.dir, ...domain.references, checker.program] }))
+            return { verdict: ran.verdict, implementationDigest: sha256(await readFile(checker.program)), detail: ran.detail }
           },
-        }),
-      ),
-    )
+        }))
+      }
+    })
   }
   const witness = await review(taskId, run, checks)
   for (const finding of witness.findings) {

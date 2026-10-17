@@ -14,7 +14,7 @@ import { declareStrategyProtocol, STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_VE
 } from '../../src/strategy/protocol.ts'
 import { declareTaskProtocol, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type RevisionRef,
 } from '../../src/task/protocol.ts'
-import { createEvolution, readEvolutionRound, structuralEditsOf, type SolveResult } from '../src/evolution.ts'
+import { createEvolution, structuralEditsOf, type SolveResult } from '../src/evolution.ts'
 import { FakePersistence } from './seam.ts'
 import { structuralEditDetailsOf } from '../../src/strategy/edits.ts'
 
@@ -98,13 +98,23 @@ async function fixture() {
   }
   const metric = { measured: { ...criterion, criterionId: 'correct:quality' }, unit: 'pass', direction: 'higher' as const,
   }
-  const options = { store, registry, criterion, metric, trials: 1, weights: { quality: 1, cost: 0 }, calibration, loadMethod: async (ref: RevisionRef) => methods.get(ref.revisionId)!, solve,
+  const options = { store, registry, criterion, metric, trials: 1, weights: { quality: 1, cost: 0 }, calibration, loadMethod: async (ref: RevisionRef) => methods.get(ref.revisionId)!, baseline: solve, solve,
   }
   const evolution = createEvolution(options)
   return { store, registry, revision, evolution, calls, solve, contexts, options }
 }
 
 describe('method evolution', () => {
+  it('records unknown native costs and completes evaluation without blocking later rounds', async () => {
+    const live = await fixture()
+    const incumbent = await live.revision('initial', initial, 1)
+    const candidate = await live.revision('unknown-cost', { ...initial, templates: [{ ...initial.templates[0]!, goal: 'stream letters' }, initial.templates[1]!] }, 1)
+    const evolution = createEvolution({ ...live.options, solve: async request => ({ ...(await live.solve(request)), cost: null }) })
+    expect((await evolution.runRound({ roundId: 'unknown-cost-1', round: 1, incumbent, candidates: [candidate] })).winner).toBeNull()
+    expect((await evolution.runRound({ roundId: 'unknown-cost-2', round: 2, incumbent, candidates: [candidate] })).winner).toBeNull()
+    expect(evolution.history()).toHaveLength(2)
+  })
+
   it('selects an independently accepted cost-only improvement with positive cost weight', async () => {
     const live = await fixture()
     const incumbent = await live.revision('initial', initial, 1)
@@ -120,14 +130,14 @@ describe('method evolution', () => {
 
   it('projects changed relationships and bindings without creating separate strategy edits per edge', () => {
     const baseline = { ...initial, templates: [{ ...initial.templates[0]!, skills: ['skill'], decomposition: {
-      children: [{ key: 'part', template: 'part', dependsOn: [], supports: ['correct'], maxRuns: 1 }],
+      children: [{ key: 'part', template: 'part', dependsOn: [], supports: ['correct'], maxRuns: 1, requirement: 'required' as const }],
     },
         },
         initial.templates[1]!,
       ],
     }
     const candidate = { ...baseline, templates: [{ ...baseline.templates[0]!, skills: [], decomposition: {
-      children: [{ key: 'part', template: 'part', dependsOn: ['earlier'], supports: ['correct'], maxRuns: 1 }],
+      children: [{ key: 'part', template: 'part', dependsOn: ['earlier'], supports: ['correct'], maxRuns: 1, requirement: 'required' as const }],
     },
         },
         initial.templates[1]!,
@@ -139,15 +149,6 @@ describe('method evolution', () => {
     ])
   })
 
-  it('rejects the malformed evaluation shapes seen in the live improvement session at the boundary', () => {
-    expect(() => readEvolutionRound({ _probe: true })).toThrow('unknown member')
-    const ref = { environmentId: 'methods', revisionId: 'incumbent', digest: 'a'.repeat(64) }
-    expect(() => readEvolutionRound({ roundId: 'probe-r1', round: 1, incumbent: ref, candidates: [{ revision: ref }] }),
-    ).toThrow('unknown member')
-    expect(() => readEvolutionRound({ roundId: 'probe-r1', round: 1, incumbent: ref, candidates: [{ environmentId: 'methods', revisionId: 'candidate' }],
-      }),
-    ).toThrow('digest')
-  })
   it('resumes an interrupted round without repeating committed trials', async () => {
     const live = await fixture()
     const incumbent = await live.revision('initial', initial, 0)
@@ -231,7 +232,7 @@ describe('method evolution', () => {
     await measure.openEvaluation({ commandId: 'late:open', evaluationId: 'late', baseline: good, candidate: good,
       run: { taskId: late.taskId, runId: late.runId }, metric: { measured: { ...criterion, criterionId: 'correct:quality' }, unit: 'pass', direction: 'higher' }, weights: { quality: 1, cost: 0 }, trials: 1, judgement: [criterion],
     })
-    await measure.recordTrial({ commandId: 'late:trial', evaluationId: 'late', trial: { ...late, slot: 0, quality: 0 },
+    await measure.recordTrial({ commandId: 'late:trial', evaluationId: 'late', trial: { ...late, cost: late.cost!, slot: 0, quality: 0 },
     })
     expect(live.evolution.history()).toEqual([first, second])
     const reopened = createEvolution({ ...live.options, calibration: { floor: 999, source: 'declared' }, loadMethod: async () => initial, solve: live.solve,
@@ -283,7 +284,26 @@ describe('method evolution', () => {
     expect(result.winner).toBe(0)
   })
 
-  it('refuses a changed candidate context and propagates solve failure without deciding', async () => {
+  it.each([1, 2])('excludes changed candidate contexts for %i candidates without failing or retrying the round', async (count) => {
+    const live = await fixture()
+    const incumbent = await live.revision('initial', initial, 0)
+    const candidates = []
+    for (let slot = 0; slot < count; slot++) {
+      candidates.push(await live.revision(`changed-${slot}`, { ...initial, tools: [{ name: 'tool', source: `changed ${slot}` }] }, 1))
+      live.contexts.set(`excluded:${slot}:candidate:trial:0`, [`other conditions ${slot}`])
+    }
+    const request = { roundId: 'excluded', round: 1, incumbent, candidates }
+    const result = await live.evolution.runRound(request)
+    expect(result.decided).toBe(true)
+    expect(result.winner).toBeNull()
+    expect(result.outcomes).toHaveLength(count)
+    expect(result.outcomes.every(outcome => !outcome.admitted && outcome.reason.includes('conditions'))).toBe(true)
+    const calls = live.calls.length
+    expect(await live.evolution.runRound(request)).toEqual(result)
+    expect(live.calls).toHaveLength(calls)
+  })
+
+  it('excludes a changed candidate context without losing other candidates, but propagates unexpected solve failures', async () => {
     const live = await fixture()
     const incumbent = await live.revision('initial', initial, 0)
     const good = await live.revision('good', { ...initial, skills: [{ name: 'skill', description: 'method', capabilities: [], requiredTools: [], content: 'correct method' },
@@ -291,15 +311,21 @@ describe('method evolution', () => {
       },
       1,
     )
-    const bad = await live.revision('bad', { ...initial, tools: [{ name: 'tool', source: 'broken method' }] }, 0)
+    const bad = await live.revision('bad', { ...initial, tools: [{ name: 'tool', source: 'another method' }] }, 1)
     live.contexts.set('r1:0:candidate:trial:0', ['changed dataset conditions'])
-    await expect(live.evolution.runRound({ roundId: 'r1', round: 1, incumbent, candidates: [good, bad] }),
-    ).rejects.toThrow(/caliber/)
-    expect(live.evolution.history()).toEqual([])
+    const result = await live.evolution.runRound({ roundId: 'r1', round: 1, incumbent, candidates: [good, bad] })
+    expect(result.winner).toBe(1)
+    expect(result.slots[0]).toMatchObject({ admissible: false, reason: expect.stringContaining('changed dataset conditions') })
+    expect(result.slots[0]!.reason).toContain('conditions')
+    expect(result.slots[1]!.admissible).toBe(true)
+    expect(live.calls.map(call => call.revision.revisionId)).toEqual(['initial', 'good', 'bad'])
+    const count = live.store.load().entries().length
+    expect(await live.evolution.runRound({ roundId: 'r1', round: 1, incumbent, candidates: [good, bad] })).toEqual(result)
+    expect(live.store.load().entries()).toHaveLength(count)
     const failed = createEvolution({ ...live.options, solve: async () => { throw new Error('native agent failed') },
     })
     await expect(failed.runRound({ roundId: 'r2', round: 2, incumbent, candidates: [good, bad] })).rejects.toThrow('native agent failed',
     )
-    expect(live.evolution.history()).toEqual([])
+    expect(live.evolution.history()).toEqual([result])
   })
 })

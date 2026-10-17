@@ -11,25 +11,13 @@
             name: '@deepseek-ai/dsh-persona'
             config:
               suffix: Your RSI workspace is {{cwd}}.
-              prefix: You improve Task workflows and their bound Skills and Tools as one method version, using frozen trajectories and independent evaluation.
-          - id: tool-bash
-            name: '@deepseek-ai/dsh-tool-bash'
-            disabled: !!js process.platform === 'win32'
-          - id: tool-pwsh
-            name: '@deepseek-ai/dsh-tool-pwsh'
-            disabled: !!js process.platform !== 'win32'
+              prefix: You are a Singularity method improvement agent powered by the {{model}} model.
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
           - id: tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:
               sampleOverCapGlobResults: false
-          - id: tool-jobs
-            name: '@deepseek-ai/dsh-tool-jobs'
-          - id: skill-filesystem
-            name: '@deepseek-ai/dsh-skill-filesystem'
-          - id: tool-skill
-            name: '@deepseek-ai/dsh-tool-skill'
           - id: compaction
             name: cordis:group
             group: true
@@ -39,6 +27,8 @@
             config:
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  maxTokens: 32768
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
               - id: tool-result-pruner
@@ -47,12 +37,9 @@
                   thresholdChars: 8192
                   headChars: 4096
                   tailChars: 1024
-          - id: tool-web
-            name: '@deepseek-ai/dsh-tool-web'
-            config:
-              fetch: true
-              searchTimeoutMs: 60000
           - id: singularity-agent
             name: '@dangosys/dsh-singularity-next/agent'
+            isolate:
+              singularityAgentRole: true
             config:
               role: improve

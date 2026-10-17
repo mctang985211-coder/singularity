@@ -4,7 +4,7 @@ import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../task/protocol.ts
 import { refuse } from '../protocol/refusal.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun, type Finding } from './protocol.ts'
 import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { assertParentage, childSettled, projectPlan } from '../task/tree.ts'
+import { assertParentage, childSettled, projectPlan, stoppedExplorationOf } from '../task/tree.ts'
 import type { DecompositionChild } from '../task/decomposition.ts'
 import { assertPinnedRevision } from '../environment/binding.ts'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../environment/protocol.ts'
@@ -33,6 +33,8 @@ export function createReviewCommands(store: ControlSessionStore) {
           if (agent?.sessionId !== input.sessionId || store.identityOf(`agent:${input.agentId}`) !== input.identity)
             refuse('unknown-emitter-role', 'review requires an exact opened agent identity')
           if (input.target.kind === 'acceptance') {
+            if (stoppedExplorationOf(cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), input.target.taskId) !== undefined)
+              refuse('illegal-transition', 'stopped exploration cannot start acceptance review')
             const task = cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, input.target.taskId)
             const run = task?.runs[input.target.runId]
             if (
@@ -52,6 +54,9 @@ export function createReviewCommands(store: ControlSessionStore) {
         kind: 'review/decomposed', subject: reviewId, payload: { children }, as }, () => {
         const cut = store.load(), review = cut.stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!
         const tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
+        if (review.target.kind !== 'acceptance') refuse('not-responsible', 'method reviews cannot delegate evidence Tasks')
+        if (review.target.kind === 'acceptance' && stoppedExplorationOf(tasks, review.target.taskId) !== undefined)
+          refuse('illegal-transition', 'stopped exploration cannot delegate acceptance evidence')
         if (!projectPlan(reviewId, review.criteria, review.children, tasks).children.every(childSettled))
           refuse('illegal-transition', 'delegated review responsibilities are pending')
         assertParentage(reviewId, children, tasks, [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()]
@@ -77,8 +82,12 @@ export function createReviewCommands(store: ControlSessionStore) {
         () => {
           const review = store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!
           const tasks = store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
-          if (!projectPlan(review.reviewId, review.criteria, review.children, tasks).children.every(childSettled))
-            refuse('illegal-transition', 'review evidence tasks have not settled')
+          if (review.target.kind === 'acceptance' && stoppedExplorationOf(tasks, review.target.taskId) !== undefined)
+            refuse('illegal-transition', 'stopped exploration cannot complete acceptance review')
+          const children = projectPlan(review.reviewId, review.criteria, review.children, tasks).children
+          if (!children.every(childSettled)) refuse('illegal-transition', 'review evidence tasks have not settled')
+          if (children.some(child => child.requirement === 'required' && child.status !== 'verified'))
+            refuse('illegal-transition', 'required review evidence tasks have not verified')
         },
       ),
     fail: (commandId: string, reviewId: string, reason: string) =>

@@ -9,7 +9,7 @@ import { assertPinnedRevision } from '../environment/binding.ts'
 import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunSubmission, type TaskState,
 } from './protocol.ts'
 import { unadjudicatedCriteria, unmetCriteria, verdictFor } from './run.ts'
-import { assertParentage, projectTree, projectPlan, taskWaitingReason } from './tree.ts'
+import { assertParentage, projectTree, projectPlan, taskWaitingReason, stoppedExplorationOf } from './tree.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../review/protocol.ts'
 import type { Bubble, BubbleInput, BubbleTool } from './bubble.ts'
 import type { DecompositionChild } from './decomposition.ts'
@@ -51,6 +51,7 @@ export interface AgentCommands {
       readonly parentTaskId: string
       readonly children: readonly DecompositionChild[] }, as?: string,
   ): Promise<Envelope>
+  stopExplorations(input: { readonly commandId: string; readonly parentTaskId: string; readonly taskIds: readonly string[]; readonly reason: string }, as?: string): Promise<Envelope>
   assign(input: { readonly commandId: string; readonly taskId: string; readonly agentId: string }, as?: string,
   ): Promise<Envelope>
   reassign(input: { readonly commandId: string; readonly taskId: string; readonly from: string; readonly agentId: string }, as?: string,
@@ -151,6 +152,19 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
           .map((review) => ({ parentId: review.reviewId, children: review.children })))
       }),
 
+    stopExplorations: (input, as) =>
+      emitRaw(options, input.commandId, TASK_KINDS.explorationsStopped, input.parentTaskId,
+        { taskIds: input.taskIds, reason: input.reason }, as, () => {
+          const tasks = cutOf(options).tasks()
+          const parent = tasks.get(input.parentTaskId)
+          const run = parent === undefined ? undefined : Object.values(parent.runs).at(-1)
+          if (run?.status !== 'running' || run.stage !== 'working' || stoppedExplorationOf(tasks, input.parentTaskId) !== undefined)
+            refuse('illegal-transition', 'only a working parent may stop its exploration branches')
+          for (const taskId of input.taskIds)
+            if (Object.values(tasks.get(taskId)?.runs ?? {}).some(run => run.status === 'verified'))
+              refuse('illegal-transition', `Task ${taskId} already verified; preserve its accepted evidence`)
+        }),
+
     assign: (input, as) => {
       // The identity is filled from the deployment's table, so a caller supplies what it did and
       // never who it is. Holding it is a deployment fact; the node is a log fact.
@@ -183,6 +197,8 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         if (task === undefined || task.contract === undefined)
           refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`,
             )
+        const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
+        if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
         // Cross-entity 1: the revision must exist, in the named environment, with the content
         // the pin claims. This reuses the environment slice's own check, not a second one.
         assertPinnedRevision(input.revision, cut.environments(), `run "${input.runId}" of task "${input.taskId}"`)
@@ -215,15 +231,15 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         const task = cut.task(input.taskId)
         if (task?.contract === undefined)
           refuse('illegal-transition', `cannot open a bubble for task "${input.taskId}": it has no admitted contract`)
+        const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
+        if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
         for (const declared of task.contract.inputs) {
           if (declared.source.kind !== 'artifact') continue
           const producer = cut.task(declared.source.taskId)
-          const digest = input.inputs.find((bound) => bound.name === declared.name)?.digest
-          if (producer === undefined || !Object.values(producer.runs).some(
-                (run) =>
-            run.status === 'verified' && run.submission !== undefined && run.submission.artifactDigest === digest,
-              ))
-            refuse('evidence-input-mismatch', `input "${declared.name}" requires the sealed artifact of verified task "${declared.source.taskId}"`,
+          const bound = input.inputs.find((bound) => bound.name === declared.name)
+          const run = bound?.producerRunId === undefined ? undefined : producer?.runs[bound.producerRunId]
+          if (run?.status !== 'verified' || run.submission === undefined || run.submission.artifactDigest !== bound?.digest)
+            refuse('evidence-input-mismatch', `input "${declared.name}" requires the exact sealed artifact of verified Task "${declared.source.taskId}" Run "${bound?.producerRunId ?? ''}"`,
               )
           }
         },
@@ -282,6 +298,8 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
             .stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, input.verdict.reviewId)
           const task = cutOf(options).task(input.taskId)!
           const run = task.runs[input.verdict.runId]!
+          const stopped = stoppedExplorationOf(cutOf(options).tasks(), input.taskId)
+          if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
           const finding = review?.findings?.find((f) => f.criterionId === input.verdict.criterionId)
           if (
             review?.status !== 'completed' ||
@@ -316,6 +334,9 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         revision: input.revision,
         method: input.method,
         source: input.source,
+      }, undefined, () => {
+        const stopped = stoppedExplorationOf(cutOf(options).tasks(), input.taskId)
+        if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
       }),
 
     forAgent: (agentId) => {
@@ -328,6 +349,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
       return {
         admit: (input) => commands.admit(input, as),
         decompose: (input) => commands.decompose(input, as),
+        stopExplorations: (input) => commands.stopExplorations(input, as),
         assign: (input) => commands.assign(input, as),
         reassign: (input) => commands.reassign(input, as),
         startRun: (input) => commands.startRun(input, as),
@@ -435,6 +457,8 @@ function settleRequest(
   const run = task.runs[input.runId]
   if (run === undefined) refuse('unknown-run', `cannot settle run "${input.runId}": task "${input.taskId}" never started it`)
 
+  const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
+  if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
   const unadjudicated = unadjudicatedCriteria(task.contract, run)
   if (unadjudicated.length > 0)
     refuse(

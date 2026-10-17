@@ -5,7 +5,7 @@ import { postIdentifiedMessage } from '../../src/runtime/identified-message.ts'
 import { openChildSession, type ChildSession, type ChildSessionRequest, type ChildSessionSeams,
 } from '../../src/runtime/child-session.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
-import { projectTree, projectPlan, type TreeView } from '../../src/task/tree.ts'
+import { projectTree, projectPlan, childSettled, stoppedExplorationOf, type TreeView } from '../../src/task/tree.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
@@ -14,10 +14,11 @@ import { schedulerMessage } from './scheduler-message.ts'
 import { loadMethod } from './method.ts'
 import { proposalOf } from './surfaces.ts'
 import { planOutcomeOf } from './read.ts'
-import { deliverQuestions, parentPlan } from './coordination.ts'
+import { deliverQuestions, parentContextOf } from './coordination.ts'
 import { createReviewCommands } from '../../src/review/commands.ts'
 
 export interface Scheduler {
+  stop(): void
   advance(parentTaskId: string): Promise<readonly string[]>
   close(): Promise<void>
 }
@@ -40,6 +41,8 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
 ): Scheduler {
   const live = new Map<string, ChildSession>()
   const advancing = new Map<string, Promise<readonly string[]>>()
+  const retiring = new Set<Promise<void>>()
+  const retirementErrors: unknown[] = []
   let relaying = Promise.resolve()
   let closing: Promise<void> | undefined
   const lifecycle = new AbortController()
@@ -67,12 +70,65 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       live.delete(taskId) } catch (error) { failures.push(error) }
     if (failures.length > 0) throw new AggregateError(failures, 'child close failed')
   }
+  const notifyBranchOutcomes = async (parentTaskId: string, parent: Agent): Promise<void> => {
+    const plan = planOf(parentTaskId)!
+    if (plan.children.every(childSettled)) return
+    const parentRunId = reviewOf(parentTaskId)?.reviewId ?? Object.values(taskStateOf(apparatus, parentTaskId).runs).at(-1)!.runId
+    const ids = new Set(plan.children.map(child => child.taskId))
+    for (const fact of apparatus.store.load().entries()) {
+      if (!ids.has(fact.subject) || (fact.kind !== 'run/verified' && fact.kind !== 'run/failed')) continue
+      const task = taskStateOf(apparatus, fact.subject)
+      const run = task.runs[(fact.payload as { runId: string }).runId]!
+      try { await postIdentifiedMessage(seams, parent, schedulerMessage({ kind: 'singularity', purpose: 'branch-outcome',
+        controlId: apparatus.controlId, parentTaskId, taskId: task.taskId, runId: parentRunId, factSeq: fact.seq,
+      }, JSON.stringify({ taskId: task.taskId, runId: run.runId, status: run.status,
+        artifactDigest: run.submission?.artifactDigest, verdicts: run.evidence.map(({ criterionId, verdict, detail }) => ({ criterionId, verdict, detail })),
+        instruction: 'Assess whether the available evidence is sufficient. You may stop unselected exploration branches, then integrate; required work still must verify. Child acceptance never replaces parent acceptance.' }))) }
+      catch (error) { throw new DispatchError(parentTaskId, parentTaskId, null, error) }
+    }
+  }
+  const terminateBranch = async (taskId: string, reason: string): Promise<void> => {
+    const task = taskStateOf(apparatus, taskId)
+    const registry = (seams.get === undefined ? seams.agents : seams.get('agents')) as AgentRegistry
+    const run = Object.values(task.runs).find(run => run.status === 'running')
+    if (run !== undefined) {
+      declareCaller(apparatus, task.responsibility!.agentId)
+      await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
+        commandId: `branch-stopped:${taskId}/${run.runId}`, taskId, runId: run.runId, reason })
+    }
+    for (const held of apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values())
+        if (held.status === 'running' && held.target.kind === 'acceptance' &&
+          held.target.taskId === taskId) {
+          await createReviewCommands(apparatus.store).fail(`branch-stopped:${held.reviewId}`, held.reviewId, reason)
+          registry.get(SessionId(held.sessionId))?.cancel({ kind: 'parent' })
+          for (const child of held.children) await terminateBranch(child.taskId, reason)
+        }
+    const node = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility!.agentId)!
+    registry.get(SessionId(node.sessionId))?.cancel({ kind: 'parent' })
+    for (const child of task.decomposition?.children ?? []) await terminateBranch(child.taskId, reason)
+    const session = live.get(taskId)
+    if (session !== undefined) {
+      // Closing a child can flush its submit handler, which schedules this parent.
+      // Never await that close while holding the parent's advance queue.
+      live.delete(taskId)
+      const pending = release(taskId, session)
+      retiring.add(pending)
+      void pending.then(() => retiring.delete(pending), error => {
+        retiring.delete(pending)
+        retirementErrors.push(error)
+      })
+    }
+  }
   const notify = async (parentTaskId: string, parent: Agent): Promise<void> => {
     const plan = planOf(parentTaskId)!
     const terminal = planOutcomeOf(apparatus, plan)
     if (terminal === undefined) return
     const runId = reviewOf(parentTaskId)?.reviewId ?? Object.values(taskStateOf(apparatus, parentTaskId).runs).at(-1)!.runId
-    const text = `Delegated work for Task ${parentTaskId} settled. Continue your existing parent Run and independently validate your final artifact. Use singularity_read kind=artifact ref=taskId for sealed text pages; reuse the evidence before doing new work. Child support is not a parent verdict.\n` +
+    const unmet = plan.children.filter(child => child.requirement === 'required' && child.status !== 'verified')
+    const instruction = unmet.length === 0
+      ? 'Continue your existing parent Run, integrate accepted work and independently validate your final artifact.'
+      : 'Required work ended without verification. This parent Run fails; report the recorded failure.'
+    const text = `Delegated work for Task ${parentTaskId} settled. Required children must verify before final submission. ${instruction} Use singularity_read kind=artifact ref=taskId for sealed text pages; reuse the evidence before doing new work. Child support is not a parent verdict.\n` +
       JSON.stringify(plan.children.map((child) => {
         const state = taskStateOf(apparatus, child.taskId),
           run = Object.values(state.runs).findLast((r) => r.status === 'verified') ?? Object.values(state.runs).at(-1)
@@ -80,6 +136,18 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
           artifactDigest: run?.submission?.artifactDigest,
           verdicts: run?.evidence.map((e) => ({ criterionId: e.criterionId, verdict: e.verdict, reviewId: e.reviewId, detail: e.detail })) ?? [] }
       }))
+    if (unmet.length > 0) {
+      // Publish terminal authority before the notification can wake the parent's next step.
+      const reason = 'required delegated responsibilities ended without verification: ' + unmet.map(child => `${child.taskId} (${child.status})`).join(', ')
+      const review = reviewOf(parentTaskId)
+      if (review !== undefined) await createReviewCommands(apparatus.store).fail(`required-work-failed:${parentTaskId}`, parentTaskId, reason)
+      else {
+        const task = taskStateOf(apparatus, parentTaskId)
+        declareCaller(apparatus, task.responsibility!.agentId)
+        await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
+          commandId: `required-work-failed:${parentTaskId}/${runId}`, taskId: parentTaskId, runId, reason })
+      }
+    }
     try {
       await postIdentifiedMessage(seams, parent, schedulerMessage({ kind: 'singularity', purpose: 'plan-outcome',
         controlId: apparatus.controlId, parentTaskId, taskId: terminal.subject, runId, factSeq: terminal.seq,
@@ -89,6 +157,14 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       )
     }
     catch (error) { throw new DispatchError(parentTaskId, parentTaskId, null, error) }
+    if (unmet.length > 0) {
+      const cut = apparatus.store.load()
+      const ancestor = [...cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
+        .find(task => task.decomposition?.children.some(child => child.taskId === parentTaskId))?.taskId ??
+        [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()]
+          .find(held => held.children.some(child => child.taskId === parentTaskId))?.reviewId
+      if (ancestor !== undefined) await advanceOne(ancestor)
+    }
   }
   const dispatch = async (parentTaskId: string, parent: Agent, taskId: string, maxRuns: number): Promise<void> => {
     const state = taskStateOf(apparatus, taskId)
@@ -121,14 +197,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
         },
         JSON.stringify({
           assigned: await proposalOf(apparatus, state, run),
-          handoff: (() => {
-            const parent = parentPlan(apparatus, taskId)!, entry = parent.children.find((c) => c.taskId === taskId)!
-            return { parentId: parent.id, parentRunId: review?.reviewId ?? parentRun!.runId,
-              parentObjective: parent.goal, parentCriteria: parent.criteria, supports: entry.supports,
-              ...entry.handoff, peers: parent.children.map((c) => ({ taskId: c.taskId,
-                goal: taskStateOf(apparatus, c.taskId).contract!.goal, dependsOn: c.dependsOn })),
-              instruction: 'Read related Tasks and their evidence by reference; ask the direct parent when scope is undecidable. Do not repeat their responsibilities.' }
-          })(),
+          ...parentContextOf(apparatus, taskId),
           previous:
             previous === undefined
               ? undefined
@@ -155,6 +224,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       if (actual !== undefined && (actual.provider !== model.provider || actual.model !== model.model))
         refuse('illegal-transition', 'the child model route differs from its frozen Run bubble')
     } catch (error) {
+      if (lifecycle.signal.aborted) throw error
       const failures: unknown[] = [error]
       const run = attempt ?? Object.values(taskStateOf(apparatus, taskId).runs).at(-1)
       if (run !== undefined && taskStateOf(apparatus, taskId).runs[run.runId]!.status === 'running') {
@@ -170,6 +240,20 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
     }
   }
   const advanceOne = async (parentTaskId: string): Promise<readonly string[]> => {
+    const cut = apparatus.store.load()
+    const tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
+    const heldReview = reviewOf(parentTaskId)
+    const stoppedTarget = heldReview?.target.kind === 'acceptance' ? stoppedExplorationOf(tasks, heldReview.target.taskId) : undefined
+    if (heldReview?.status === 'running' && stoppedTarget !== undefined) {
+      await createReviewCommands(apparatus.store).fail(`branch-stopped:${heldReview.reviewId}`, heldReview.reviewId,
+        `exploration stopped by ${stoppedTarget.parentTaskId}: ${stoppedTarget.reason}`)
+      const registry = (seams.get === undefined ? seams.agents : seams.get('agents')) as AgentRegistry
+      registry.get(SessionId(heldReview.sessionId))?.cancel({ kind: 'parent' })
+    }
+    for (const child of planOf(parentTaskId)?.children ?? []) {
+      const stopped = stoppedExplorationOf(tasks, child.taskId)
+      if (stopped !== undefined) await terminateBranch(child.taskId, `exploration stopped by ${stopped.parentTaskId}: ${stopped.reason}`)
+    }
     const delivery = relaying.then(() => deliverQuestions(apparatus, seams), () => deliverQuestions(apparatus, seams))
     relaying = delivery
     await delivery
@@ -183,30 +267,8 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
         : review.status === 'running'
     if (plan === undefined) return []
     if (!working) {
-      const registry = (seams.get === undefined ? seams.agents : seams.get('agents')) as AgentRegistry
-      for (const child of plan.children) {
-        const task = taskStateOf(apparatus, child.taskId)
-        const run = Object.values(task.runs).find((run) => run.status === 'running')
-        if (run !== undefined) {
-          declareCaller(apparatus, task.responsibility!.agentId)
-          await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
-            commandId: `parent-stopped:${parentTaskId}/${child.taskId}/${run.runId}`,
-            taskId: child.taskId, runId: run.runId, reason: 'direct parent Run settled before delegated work completed' })
-          for (const held of apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values())
-            if (held.status === 'running' && held.target.kind === 'acceptance' &&
-              held.target.taskId === child.taskId && held.target.runId === run.runId) {
-              await createReviewCommands(apparatus.store).fail(`parent-stopped:${held.reviewId}`, held.reviewId,
-                'direct parent responsibility settled during acceptance')
-              registry.get(SessionId(held.sessionId))?.cancel({ kind: 'parent' }, { keepInbox: true })
-              await advanceOne(held.reviewId)
-            }
-          const node = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility!.agentId)!
-          registry.get(SessionId(node.sessionId))?.cancel({ kind: 'parent' }, { keepInbox: true })
-        }
-        await advanceOne(child.taskId)
-        const session = live.get(child.taskId)
-        if (session !== undefined) await release(child.taskId, session)
-      }
+      for (const child of plan.children)
+        await terminateBranch(child.taskId, 'direct parent Run settled before delegated work completed')
       return []
     }
     if (plan.children.some((c) => c.status === 'missing'))
@@ -221,11 +283,15 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       opened.push(child.taskId)
       plan = planOf(parentTaskId)!
     }
+    await notifyBranchOutcomes(parentTaskId, parent)
     await notify(parentTaskId, parent)
     return opened
   }
   return {
+    stop: () => { lifecycle.abort() },
     advance: (parentTaskId) => {
+      lifecycle.signal.throwIfAborted()
+      if (retirementErrors.length) throw new AggregateError(retirementErrors, 'child close failed')
       if (closing !== undefined) refuse('illegal-transition', 'the scheduler is closing')
       const previous = advancing.get(parentTaskId)
       const pending = previous === undefined ? advanceOne(parentTaskId) : previous.then(() => advanceOne(parentTaskId), () => advanceOne(parentTaskId),
@@ -237,9 +303,11 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
     },
     close: () =>
       (closing ??= (async () => {
+      const stopped = lifecycle.signal.aborted
       lifecycle.abort()
       const pending = await Promise.allSettled([...advancing.values()])
-      const failures = pending.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []))
+      await Promise.allSettled([...retiring])
+      const failures = [...retirementErrors, ...pending.flatMap((result) => (result.status === 'rejected' && !stopped ? [result.reason] : []))]
       for (const [taskId, session] of live) try { await release(taskId, session) } catch (error) { failures.push(error) }
       if (failures.length > 0) throw new AggregateError(failures, 'child unload failed')
     })()),

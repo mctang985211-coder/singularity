@@ -6,6 +6,14 @@ import type { TaskState } from './protocol.ts'
 import { requireResponsible } from './responsibility.ts'
 import { record, requireContractOf, text } from './shape.ts'
 
+/** Scoped working context; evidence identities remain separate from unverified claims. */
+export interface TaskHandoff {
+  readonly decisions: readonly string[]
+  readonly hypotheses: readonly string[]
+  readonly exclusions: readonly string[]
+  readonly evidence: readonly string[]
+}
+
 /** One declared sub-task: dependencies, parent contributions and its fixed attempt budget. */
 export interface DecompositionChild {
   readonly taskId: string
@@ -15,18 +23,27 @@ export interface DecompositionChild {
   readonly supports: readonly string[]
   /** How many runs this sub-task may start. The budget is fixed here and nothing can raise it. */
   readonly maxRuns: number
-  /** Parent's decisions, scope and evidence to reuse; never inherited conversation. */
-  readonly handoff?: { readonly context: string; readonly evidence: readonly string[] }
+  /** Required work must verify; exploration may be explicitly stopped by its parent. */
+  readonly requirement: 'required' | 'exploration'
+  readonly handoff?: TaskHandoff
 }
 
 /** A task's fixed decomposition, as declared. */
 export interface Decomposition {
   readonly children: readonly DecompositionChild[]
   readonly at: string
+  readonly stopped?: readonly StoppedExploration[]
+}
+
+export interface StoppedExploration {
+  readonly taskId: string
+  readonly reason: string
+  readonly at: string
+  readonly seq: number
 }
 
 export const DECOMPOSITION_MEMBERS = ['children'] as const
-export const DECOMPOSITION_CHILD_MEMBERS = ['taskId', 'dependsOn', 'supports', 'maxRuns', 'handoff'] as const
+export const DECOMPOSITION_CHILD_MEMBERS = ['taskId', 'dependsOn', 'supports', 'maxRuns', 'requirement', 'handoff'] as const
 
 /** A bare name in a list. `text` reads a member of a record; these entries are values. */
 function name(raw: unknown, where: string): string {
@@ -59,15 +76,23 @@ function child(raw: unknown, where: string, members: MemberSet): DecompositionCh
   const maxRuns = source['maxRuns']
   if (typeof maxRuns !== 'number' || !Number.isInteger(maxRuns) || maxRuns < 1)
     refuse('malformed-payload', `${where}.maxRuns must be an integer >= 1, got ${JSON.stringify(maxRuns ?? null)}`)
+  const requirement = source['requirement']
+  if (requirement !== 'required' && requirement !== 'exploration')
+    refuse('malformed-payload', `${where}.requirement must be required or exploration`)
   const handoff = source['handoff'] === undefined ? undefined : record(source['handoff'], `${where}.handoff`)
-  if (handoff !== undefined) assertClosedKeys(handoff, ['context', 'evidence'], `${where}.handoff`)
+  if (handoff !== undefined) assertClosedKeys(handoff, ['decisions', 'hypotheses', 'exclusions', 'evidence'], `${where}.handoff`)
   return {
     taskId: text(source, 'taskId', where),
     dependsOn: nameList(source['dependsOn'], `${where}.dependsOn`),
     supports: nameList(source['supports'], `${where}.supports`),
     maxRuns,
-    ...(handoff === undefined ? {} : { handoff: { context: text(handoff, 'context', `${where}.handoff`),
-      evidence: nameList(handoff['evidence'], `${where}.handoff.evidence`) } }),
+    requirement,
+    ...(handoff === undefined ? {} : { handoff: {
+      decisions: nameList(handoff['decisions'], `${where}.handoff.decisions`),
+      hypotheses: nameList(handoff['hypotheses'], `${where}.handoff.hypotheses`),
+      exclusions: nameList(handoff['exclusions'], `${where}.handoff.exclusions`),
+      evidence: nameList(handoff['evidence'], `${where}.handoff.evidence`),
+    } }),
   }
 }
 
@@ -170,8 +195,41 @@ export function decomposedKind(kind: string, emitter: string): KindRule<TaskStat
       if (existing.some((child) => added.has(child.taskId)))
         refuse('illegal-transition', `${where} repeats an existing child`)
       const children = assertDecomposition([...existing, ...payload.children], contract, envelope.subject)
-      return { ...state, decomposition: { children, at: envelope.at } }
+      return { ...state, decomposition: { ...state.decomposition, children, at: envelope.at } }
 
+    },
+  })
+}
+
+/** Stopping an unselected exploration never supplies a verdict or satisfies a dependency. */
+export function explorationsStoppedKind(kind: string, emitter: string): KindRule<TaskState> {
+  return defineKind<TaskState, { taskIds: readonly string[]; reason: string }, {}>({
+    guarantees: { appended: true, atomicFact: true },
+    members: ['taskIds', 'reason'], nested: {}, emitter,
+    parse: (raw, where) => {
+      const source = record(raw, where)
+      const taskIds = nameList(source['taskIds'], `${where}.taskIds`)
+      if (taskIds.length === 0) refuse('malformed-payload', 'stopping exploration requires at least one branch')
+      return { taskIds, reason: text(source, 'reason', where) }
+    },
+    reduce: (state, envelope, payload) => {
+      const where = `${kind} #${envelope.seq}`
+      requireResponsible(state, envelope.actor, where)
+      const plan = state.decomposition
+      if (plan === undefined) refuse('illegal-transition', 'stopping exploration requires a decomposition')
+      const stopped = new Set(plan.stopped?.map(entry => entry.taskId))
+      for (const taskId of payload.taskIds) {
+        const entry = plan.children.find(child => child.taskId === taskId)
+        if (entry?.requirement !== 'exploration')
+          refuse('illegal-transition', `Task ${taskId} is not a stoppable exploration of this parent`)
+        if (stopped.has(taskId)) refuse('illegal-transition', `Task ${taskId} was already stopped`)
+        stopped.add(taskId)
+      }
+      for (const entry of plan.children)
+        if (!stopped.has(entry.taskId) && entry.dependsOn.some(id => stopped.has(id)))
+          refuse('illegal-transition', `Task ${entry.taskId} still depends on a stopped exploration; stop its exploration dependents together`)
+      return { ...state, decomposition: { ...plan, stopped: [...(plan.stopped ?? []),
+        ...payload.taskIds.map(taskId => ({ taskId, reason: payload.reason, at: envelope.at, seq: Number(envelope.seq) }))] } }
     },
   })
 }

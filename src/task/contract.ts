@@ -44,7 +44,7 @@ export interface TaskContract {
   readonly goal: string
   readonly artifact: string
   readonly template?: TaskTemplateRef
-  /** One-off responsibilities may select assets from their Run's method without a template. */
+  /** Assets selected from the immutable method revision pinned by the Run. */
   readonly skills?: readonly string[]
   readonly capabilities?: readonly string[]
   /** Fixed sources; an upstream artifact's bytes are bound when a Run opens its Bubble. */
@@ -193,8 +193,6 @@ export function assertContractShape(raw: unknown, field: string, members: Member
   for (const key of ['skills', 'capabilities'] as const) {
     const raw = record[key]
     if (raw === undefined) continue
-    if (template !== undefined)
-      refuse('malformed-contract', 'template responsibilities use the pinned template asset selection')
     if (!Array.isArray(raw)) refuse('malformed-contract', `${field}.${key} must be an array of names`)
     const names = raw.map((value, index) => requireText(value, `${field}.${key}[${index}]`))
     if (new Set(names).size !== names.length) refuse('malformed-contract', `${field}.${key} repeats a name`)

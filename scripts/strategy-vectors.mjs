@@ -12,119 +12,6 @@ const { noveltyOf, select } = await import(pathToFileURL(join(ROOT, 'src/strateg
 
 const corpus = JSON.parse(readFileSync(join(ROOT, 'tests/vectors/strategy-decision-vectors.json'), 'utf8'))
 const ledger = readFileSync(join(ROOT, 'docs/divergence-ledger.md'), 'utf8')
-const VOCABULARY = Object.fromEntries(Object.entries(corpus.vocabulary).filter(([key]) => key !== 'note'))
-
-// ---------------------------------------------------------------------------------------------
-// The upstream side: a transcription, never a call.
-// ---------------------------------------------------------------------------------------------
-
-const UPSTREAM_K = ['prompt', 'control_flow', 'config', 'output_plumbing', 'context_mgmt', 'client_tool', 'skill', 'memory', 'subagent']
-const UPSTREAM_K_STR = ['client_tool', 'skill', 'memory', 'subagent']
-const UPSTREAM_CFG = { beta0: 0.10, beta1: 40, w_s: 100, w_c: 15, w_n: 0.5 }
-
-/** rrsi/schedule.py:43-50. `t` is 0-based and the denominator is `T`, not `T - 1`. */
-function upstreamEditBudget(t, rounds, minimum, first) {
-  if (rounds <= 0) return first
-  const step = Math.max(0, Math.min(Math.trunc(t), Math.trunc(rounds)))
-  const value = minimum + (first - minimum) * 0.5 * (1 + Math.cos((Math.PI * step) / rounds))
-  return Math.ceil(Number(value.toFixed(9)))
-}
-
-/** rrsi/components.py:103-108. `set()` deduplicates, and only K_STR classes count. */
-function upstreamNovelty(components, counts) {
-  return [...new Set(components)].filter((component) => UPSTREAM_K_STR.includes(component) && (counts[component] ?? 0) === 0).length
-}
-
-const UPSTREAM_SIGNALS = [
-  ['memory', [/\bMemory\(/, /\.remember\(/, /\.recall\(/, /_STATE_DIR/]],
-  ['skill', [/skills\//, /SkillRegistry/, /skill_use/, /skill_catalog/, /upload_skills/]],
-  ['client_tool', [/ToolRegistry/, /register_tool/, /tool_spec/, /CLIENT_TOOLS/]],
-  ['subagent', [/\bsubcall\(/, /sub_agent/, /subagent/]],
-]
-const UPSTREAM_STRING_LINE = /^[+-]\s*(?:[frb]?["']|""")/
-
-/** rrsi/components.py:61-69. */
-function upstreamTextOnly(diff) {
-  const changed = diff.split('\n').filter((line) =>
-    (line.startsWith('+') || line.startsWith('-')) && !line.startsWith('+++') && !line.startsWith('---') && line.slice(1).trim())
-  if (changed.length === 0) return false
-  return changed.every((line) => UPSTREAM_STRING_LINE.test(line) || line.slice(1).trimStart().startsWith('#'))
-}
-
-/** rrsi/components.py:72-79. */
-function upstreamClassifyDiff(diff) {
-  if (upstreamTextOnly(diff)) return 'prompt'
-  for (const [component, patterns] of UPSTREAM_SIGNALS) if (patterns.some((pattern) => pattern.test(diff))) return component
-  return 'prompt'
-}
-
-/** rrsi/components.py:82-100: a declared tag survives only with diff evidence, else the diff decides. */
-function upstreamNormalize(declared, diff) {
-  const tag = (declared ?? '').trim().toLowerCase()
-  const evidence = UPSTREAM_SIGNALS.some(([component, patterns]) => component === tag && patterns.some((pattern) => pattern.test(diff)))
-  return UPSTREAM_K.includes(tag) && evidence ? tag : upstreamClassifyDiff(diff)
-}
-
-/** rrsi/evaluate.py:131-135: 0.0 whenever either side has no token count. */
-function upstreamRelativeCostChange(candidateCost, incumbentCost) {
-  if (!candidateCost || !incumbentCost) return 0.0
-  return (candidateCost - incumbentCost) / incumbentCost
-}
-
-/** rrsi/selection.py:81-94. */
-function upstreamCostRule(deltaS, deltaC, novelty, delta, cfg) {
-  if (deltaS > delta) return deltaC <= cfg.beta0 + cfg.beta1 * deltaS
-  return cfg.w_s * deltaS - cfg.w_c * deltaC + cfg.w_n * novelty > 0
-}
-
-/**
- * rrsi/selection.py:97-121 (`judge`: gate failure, then the S* floor, then the cost rule, then the
- */
-function upstreamSelect(plan) {
-  const cfg = { ...UPSTREAM_CFG, w_s: plan.weights.quality, w_c: plan.weights.cost }
-  const decisions = plan.candidates.map((candidate) => {
-    const delta = plan.history.deltas.find((entry) => entry.slot === candidate.slot)
-    if (candidate.inadmissible !== null) return { slot: candidate.slot, admissible: false, quality: null }
-    if (candidate.measurement === null || delta === undefined) return { slot: candidate.slot, admissible: false, quality: null }
-    const quality = plan.upstream.incumbentQuality + delta.deltaQuality
-    const cost = delta.deltaCost === null ? null : plan.upstream.incumbentCost * (1 + delta.deltaCost)
-    const novelty = upstreamNovelty(upstreamComponentsOf(candidate, plan), plan.upstream.acceptedCounts)
-    const relative = upstreamRelativeCostChange(cost, plan.upstream.incumbentCost)
-    let admissible = quality >= plan.upstream.sStar - plan.upstream.delta
-    if (admissible) admissible = upstreamCostRule(delta.deltaQuality, relative, novelty, plan.upstream.delta, cfg)
-    if (admissible) admissible = candidate.constraintsMet
-    return { slot: candidate.slot, admissible, quality }
-  })
-  let winner = null
-  let best = Number.NEGATIVE_INFINITY
-  for (const decision of decisions) {
-    if (!decision.admissible || decision.quality === null) continue
-    if (decision.quality > best) {
-      best = decision.quality
-      winner = decision.slot
-    }
-  }
-  return { winner, admitted: decisions.map((decision) => decision.admissible) }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Shared scenario building: both sides read the same synthetic numbers.
-// ---------------------------------------------------------------------------------------------
-
-function upstreamComponentsOf(candidate, plan) {
-  const override = plan.upstream.components?.[String(candidate.slot)]
-  if (override !== undefined) return override
-  return (candidate.assets ?? []).map((asset) => VOCABULARY[asset] ?? asset)
-}
-
-function countsOf(acceptedAssets) {
-  const counts = {}
-  for (const asset of acceptedAssets ?? []) {
-    const component = VOCABULARY[asset] ?? asset
-    counts[component] = (counts[component] ?? 0) + 1
-  }
-  return counts
-}
 
 function scenarioOf(vector) {
   const defaults = corpus.defaults
@@ -171,15 +58,15 @@ function expectationOf(expected) {
   return { winner: expected.winner, admitted: expected.admitted }
 }
 
+const references = Object.fromEntries(corpus.vectors.map(vector => {
+  if (vector.upstream?.value === undefined) throw new Error('Missing frozen upstream outcome: ' + vector.id)
+  return [vector.id, vector.upstream.value]
+}))
+
 function compareNovelty(vector) {
-  const input = vector.input
-  const history = { acceptedAssets: input.acceptedAssets ?? [], deltas: [] }
-  const components = input.upstreamNormalize === undefined
-    ? (input.assets ?? []).map((asset) => VOCABULARY[asset] ?? asset)
-    : [upstreamNormalize(input.upstreamNormalize.declared, input.upstreamNormalize.diff)]
   return {
-    actual: noveltyOf(input.assets ?? [], history),
-    reference: upstreamNovelty(components, countsOf(input.acceptedAssets)),
+    actual: noveltyOf(vector.input.assets ?? [], { acceptedAssets: vector.input.acceptedAssets ?? [], deltas: [] }),
+    reference: references[vector.id],
   }
 }
 
@@ -204,7 +91,7 @@ function compareSelect(vector) {
   }
   return {
     actual: shapeOf(selection, outcomes),
-    reference: upstreamSelect(plan),
+    reference: references[vector.id],
     reasons,
   }
 }
@@ -219,7 +106,6 @@ const tagCounts = {}
 const functionCounts = {}
 let agreements = 0
 let divergences = 0
-let transcribed = 0
 
 for (const vector of corpus.vectors) {
   const compare = COMPARISONS[vector.function]
@@ -240,13 +126,6 @@ for (const vector of corpus.vectors) {
       fail(vector.id, `slot ${slot} reason does not contain "${needle}": ${reason ?? '(no reason)'}`)
     }
   }
-  if (vector.upstream?.value !== undefined) {
-    transcribed += 1
-    if (canonical(reference) !== canonical(vector.upstream.value)) {
-      fail(vector.id, `the upstream transcription answered ${canonical(reference)}, upstream measured ${canonical(vector.upstream.value)} (${vector.upstream.call})`)
-    }
-  }
-
   const agreed = canonical(actual) === canonical(reference)
   if (agreed) agreements += 1
   else divergences += 1
@@ -264,8 +143,8 @@ const unexplained = divergences - corpus.vectors.filter((vector) => vector.kind 
 if (unexplained > 0) fail('corpus', `${unexplained} divergence(s) come from vectors that are not tagged port-adapted`)
 notes.push(`functions: ${Object.entries(functionCounts).map(([name, count]) => `${count} ${name}`).join(', ')}`)
 notes.push(`tags: ${Object.entries(tagCounts).map(([tag, count]) => `${count} ${tag}`).join(', ')}`)
-notes.push(`agreement with the upstream transcription: ${agreements} agree, ${divergences} diverge`)
-notes.push(`upstream transcription reproduced the measured python value on ${transcribed} vector(s)`)
+notes.push(`agreement with frozen RRSI outcomes: ${agreements} agree, ${divergences} diverge`)
+notes.push(`frozen reference coverage: ${Object.keys(references).length} vector(s)`)
 
 if (failures.length > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

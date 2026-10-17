@@ -5,7 +5,7 @@
     "license": "Apache-2.0",
     "subject": "src/strategy/decision.ts",
     "harness": "scripts/strategy-vectors.mjs",
-    "how": "Each vector pins one case of src/strategy/decision.ts against the upstream rule it ports or deliberately departs from. `deterministic` = the port and upstream answer the same on the same synthetic numbers; `port-adapted` = they differ on purpose and the reason is a row in docs/divergence-ledger.md; `upstream-native` = the case is one upstream's own tests or defaults define, and the port happens to agree. Every `upstream.value` below was computed by running google-research/rrsi @ be50316 under python3 at extraction time; the harness recomputes the same value from a transcription of the upstream source, so a transcribed rule that drifts from the measured one fails without python3 being a runtime dependency.",
+    "how": "Each vector pins one case of src/strategy/decision.ts against the upstream rule it ports or deliberately departs from. `deterministic` = the port and upstream answer the same on the same synthetic numbers; `port-adapted` = they differ on purpose and the reason is a row in docs/divergence-ledger.md; `upstream-native` = the case is one upstream's own tests or defaults define, and the port happens to agree. Every `upstream.value` below was computed by running google-research/rrsi @ be50316 under python3 at extraction time. The harness compares the TypeScript implementation with these frozen reference outcomes; it does not execute or transcribe Python source.",
     "extracted": "2026-10-10"
   },
   "tags": {

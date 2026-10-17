@@ -29,9 +29,10 @@ async function sourceDomain(): Promise<string> {
     JSON.stringify({
       rootTemplate: 'edit',
       inputs: [{ ref: 'protected', from: 'input.txt' }],
-      templates: [{ id: 'edit', goal: 'edit source', input: { name: 'in/protected.txt', source: { kind: 'protected', ref: 'protected' } },
-        workspace: { artifact: 'rtl/edited.v', initial: 'seed.v' },
-        criterion: { criterionId: 'built', statement: 'it builds', verifier: 'built' },
+      templates: [{ id: 'edit', goal: 'edit source', inputs: [{ name: 'in/protected.txt', source: { kind: 'protected', ref: 'protected' } }],
+        artifact: 'rtl/edited.v', initial: { from: 'seed.v' },
+        criteria: [{ criterionId: 'built', statement: 'it builds' }],
+        checks: [{ criterionId: 'built', verifier: 'built', input: 'in/protected.txt' }],
         },
       ],
       verifiers: [

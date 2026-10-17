@@ -41,8 +41,8 @@ export async function loadDomain(dir: string, runProcess: (invocation: VerifierI
   const declared = record(parsed, 'task.json')
   assertClosedKeys(declared, ['rootTemplate', 'inputs', 'templates', 'verifiers', 'measurement', 'references'], 'task.json', 'malformed-declaration')
   const references = declared['references'] === undefined ? [] : list(declared['references'], 'task.json.references').map(value => {
-    if (typeof value !== 'string' || !value.startsWith('/')) refuse('malformed-declaration', 'references must be absolute paths')
-    return value
+    if (typeof value !== 'string' || value.length === 0) refuse('malformed-declaration', 'references must be nonempty paths')
+    return value === '.' ? dir : value.startsWith('/') ? value : inside(dir, value, 'task.json.references')
   })
   const inputs: DomainInput[] = []
   for (const [index, entry] of list(declared['inputs'], 'task.json.inputs').entries()) {
@@ -70,7 +70,6 @@ export async function loadDomain(dir: string, runProcess: (invocation: VerifierI
   const rootTemplate = text(declared, 'rootTemplate', 'task.json')
   const root = templates.get(rootTemplate)
   if (root === undefined) refuse('malformed-declaration', `task.json.rootTemplate names absent template ${JSON.stringify(rootTemplate)}`)
-  if (root.input.source.kind !== 'protected') refuse('malformed-declaration', 'the root template must read a protected source')
   const measurement = declared['measurement'] === undefined ? undefined
     : await loadMeasurement(inside(dir, text(declared, 'measurement', 'task.json'), 'task.json.measurement'))
   const domain = { references, dir, rootTemplate, inputs, templates, verifiers, ...(measurement === undefined ? {} : { measurement }) }
@@ -81,35 +80,37 @@ export function assertTemplateSources(domain: Domain): void {
   const { templates, inputs, rootTemplate } = domain
   const root = templates.get(rootTemplate)
   if (root === undefined) refuse('malformed-declaration', 'the root template is absent')
-  if (root.input.source.kind !== 'protected') refuse('malformed-declaration', 'the root template must read a protected source')
+  if (root.inputs.length === 0 || root.inputs.some(input => input.source.kind !== 'protected'))
+    refuse('malformed-declaration', 'the root template must read protected sources')
   for (const template of templates.values()) {
     if (template.decomposition !== undefined) {
       const children = template.decomposition.children
       assertDecomposition(children.map(child => ({ taskId: `child:${child.key}`,
-        dependsOn: child.dependsOn.map(key => `child:${key}`), supports: child.supports, maxRuns: child.maxRuns })),
-      { criteria: [template.criterion] }, `parent:${template.id}`)
+        dependsOn: child.dependsOn.map(key => `child:${key}`), supports: child.supports, maxRuns: child.maxRuns, requirement: child.requirement })),
+      { criteria: template.criteria }, `parent:${template.id}`)
       const byKey = new Map(children.map(child => [child.key, child]))
       for (const child of children) {
         const selected = templates.get(child.template)
         if (selected === undefined) refuse('malformed-declaration', `template ${template.id} decomposes into absent template ${child.template}`)
-        const source = selected.input.source
-        if (source.kind === 'artifact' && child.dependsOn.filter(key => byKey.get(key)!.template === source.template).length !== 1)
-          refuse('malformed-declaration', `template ${template.id} child ${child.key} requires exactly one producer with template ${source.template}`)
+        for (const { source } of selected.inputs)
+          if (source.kind === 'artifact' && child.dependsOn.filter(key => byKey.get(key)!.template === source.template).length !== 1)
+            refuse('malformed-declaration', `template ${template.id} child ${child.key} requires exactly one producer with template ${source.template}`)
       }
     }
-    const source = template.input.source
-    if (source.kind === 'protected' ? !inputs.some(input => input.ref === source.ref) : !templates.has(source.template))
-      refuse('malformed-declaration', `template ${JSON.stringify(template.id)} names absent ${source.kind} source ${JSON.stringify(source.kind === 'protected' ? source.ref : source.template)}`)
+    for (const { source } of template.inputs)
+      if (source.kind === 'protected' ? !inputs.some(input => input.ref === source.ref) : !templates.has(source.template))
+        refuse('malformed-declaration', `template ${JSON.stringify(template.id)} names absent ${source.kind} source ${JSON.stringify(source.kind === 'protected' ? source.ref : source.template)}`)
   }
-  for (const template of templates.values()) {
-    const seen = new Set<string>()
-    let current = template
-    while (current.input.source.kind === 'artifact') {
-      if (seen.has(current.id)) refuse('malformed-declaration', `template artifact sources contain a cycle through ${JSON.stringify(current.id)}`)
-      seen.add(current.id)
-      current = templates.get(current.input.source.template)!
-    }
+  const visited = new Set<string>(), path = new Set<string>()
+  const visit = (template: TaskTemplate): void => {
+    if (path.has(template.id)) refuse('malformed-declaration', `template artifact sources contain a cycle through ${JSON.stringify(template.id)}`)
+    if (visited.has(template.id)) return
+    path.add(template.id)
+    for (const { source } of template.inputs) if (source.kind === 'artifact') visit(templates.get(source.template)!)
+    path.delete(template.id)
+    visited.add(template.id)
   }
+  for (const template of templates.values()) visit(template)
 }
 export function templateOf(domain: Domain, reference: TaskTemplateRef): TaskTemplate {
   const template = domain.templates.get(reference.id)

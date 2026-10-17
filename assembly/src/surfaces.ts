@@ -1,4 +1,4 @@
-import { digestOf } from '../../src/protocol/envelope.ts'
+import { assertClosedKeys, digestOf } from '../../src/protocol/envelope.ts'
 import { assertContract, type TaskContract } from '../../src/task/contract.ts'
 import { assertDecomposition } from '../../src/task/decomposition.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
@@ -8,11 +8,10 @@ import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { bindCaller, declareCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import type { DecomposeInput, PlanRecord, Proposal } from './driver.ts'
 import { taskIdOf, runIdOf } from './ids.ts'
-import { contractFor } from './inputs.ts'
+import { assertTemplateContract, contractFor } from './inputs.ts'
 import type { Scheduler } from './scheduler.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
 import { bindingsForContract, seedMethod, loadMethod, publishedMethod } from './method.ts'
-import { consumeMethod, methodContext } from './method-run.ts'
 import { reviewOf } from './review.ts'
 import { assertActive, readScopeOf } from './coordination.ts'
 
@@ -20,10 +19,11 @@ const responsibilityDigest = ({ template: _template, ...responsibility }: TaskCo
   digestOf(responsibility)
 export async function decompose(
   apparatus: Apparatus,
-  scheduler: Scheduler,
+  scheduler: Pick<Scheduler, 'advance'>,
   caller: Caller,
   input: DecomposeInput,
 ): Promise<PlanRecord> {
+  assertClosedKeys({ ...input }, ['taskId', 'children'], 'decomposition', 'malformed-declaration')
   const review = reviewOf(apparatus, caller.agentId)
   const parent = review === undefined ? taskStateOf(apparatus, input.taskId) : undefined
   const parentId = review?.reviewId ?? input.taskId
@@ -41,13 +41,10 @@ export async function decompose(
   const { domain, assets } = await loadMethod(apparatus, revision)
   const existing = review?.children ?? parent!.decomposition?.children ?? []
   const standards = review?.criteria ?? parent!.contract!.criteria
-  const template =
-    parent?.contract?.template === undefined ? undefined : domain.templates.get(parent.contract.template.id)
-  const recipe = input.useTemplateDecomposition === true ? template?.decomposition : undefined
-  if (input.useTemplateDecomposition && recipe === undefined)
-    refuse('malformed-declaration', 'no pinned decomposition recipe')
-  const children: readonly import('./driver.ts').PlannedChild[] | undefined = recipe?.children ?? input.children
+  const children = input.children
   if (children === undefined || children.length === 0) refuse('malformed-declaration', 'decomposition needs children')
+  if (review !== undefined && children.some(child => child.requirement !== 'required'))
+    refuse('malformed-declaration', 'independent review evidence tasks must be required')
   const { visible } = await readScopeOf(apparatus, caller.agentId)
   const verified = (id: string) => visible!.has(id) && Object.values(taskStateIf(apparatus, id)?.runs ?? {})
     .some((r) => r.status === 'verified')
@@ -57,50 +54,22 @@ export async function decompose(
     ids.set(child.key, taskIdOf(apparatus.controlId, parentId, child.key))
   }
   const prepared = children.map((child) => {
-    if ((child.template === undefined) === (child.contract === undefined))
-      refuse('malformed-declaration', 'declare exactly one of template or contract for each child')
+    assertClosedKeys({ ...child }, ['key', 'contract', 'dependsOn', 'supports', 'maxRuns', 'requirement', 'handoff'], 'child declaration', 'malformed-declaration')
     const dependsOn = child.dependsOn.map((key) => {
       const id = ids.get(key)
       if (id === undefined) refuse('malformed-declaration', 'unknown dependency ' + key)
       return id
     })
-    let contract: TaskContract
-    if (child.contract !== undefined)
-      contract = assertContract(
-        {
-          ...child.contract,
-          inputs: child.contract.inputs.map((input) => ({
-            ...input,
-            source:
-              input.source.kind === 'artifact'
-                ? { ...input.source, taskId: ids.get(input.source.taskId) ?? input.source.taskId }
-                : input.source,
-          })),
-        },
-        'child contract',
-      )
-    else {
-      const selected = domain.templates.get(child.template!)
-      if (selected === undefined) refuse('malformed-declaration', 'unknown template ' + child.template)
-      let producer: string | undefined
-      if (selected.input.source.kind === 'artifact') {
-        const sourceTemplate = selected.input.source.template
-        const matches = new Set(
-          children
-            .filter((other) => other.template === sourceTemplate && child.dependsOn.includes(other.key))
-            .map((other) => ids.get(other.key)!),
-        )
-        for (const id of dependsOn)
-          if (taskStateIf(apparatus, id)?.contract?.template?.id === sourceTemplate) matches.add(id)
-        if (matches.size !== 1) refuse('malformed-declaration', 'template input needs exactly one declared producer')
-        producer = [...matches][0]
-      }
-      contract = contractFor(domain, selected, selected.goal, producer)
-    }
+    const declared = assertContract(child.contract, 'child contract')
+    const contract: TaskContract = { ...declared, inputs: declared.inputs.map((input) => ({
+      ...input, source: input.source.kind === 'artifact'
+        ? { ...input.source, taskId: ids.get(input.source.taskId) ?? input.source.taskId } : input.source,
+    })) }
+    assertTemplateContract(domain, contract)
     for (const input of contract.inputs)
       if (input.source.kind === 'artifact' && !dependsOn.includes(input.source.taskId) && !verified(input.source.taskId))
         refuse('malformed-declaration', 'artifact producers must be declared dependencies or verified visible evidence')
-    bindingsForContract(contract, domain, assets)
+    bindingsForContract(contract, assets)
     if (child.handoff !== undefined) {
       const unverified = child.handoff.evidence.filter((id) => !verified(id))
       if (unverified.length > 0)
@@ -120,10 +89,24 @@ export async function decompose(
     return {
       taskId: ids.get(child.key)!,
       contract,
-      plan: { taskId: ids.get(child.key)!, dependsOn, supports: child.supports, maxRuns: child.maxRuns,
+      plan: { taskId: ids.get(child.key)!, dependsOn, supports: child.supports, maxRuns: child.maxRuns, requirement: child.requirement,
         ...(child.handoff === undefined ? {} : { handoff: child.handoff }) },
     }
   })
+  for (const entry of prepared) {
+    if (entry.contract.template === undefined) continue
+    const selected = domain.templates.get(entry.contract.template.id)!
+    for (const input of entry.contract.inputs) {
+      const expected = selected.inputs.find((other) => other.name === input.name)!.source
+      if (input.source.kind === 'artifact' && expected.kind === 'artifact') {
+        const taskId = input.source.taskId
+        const producer = prepared.find((other) => other.taskId === taskId)?.contract
+          ?? taskStateIf(apparatus, taskId)?.contract
+        if (producer?.template?.id !== expected.template)
+          refuse('evidence-input-mismatch', 'artifact producer differs from the pinned declaration')
+      }
+    }
+  }
   const fresh = prepared.filter((entry) => {
     const old = existing.find((c) => c.taskId === entry.taskId)
     if (old === undefined) return true
@@ -156,14 +139,6 @@ export async function decompose(
       await createReviewCommands(apparatus.store).decompose(`decompose:${parentId}:${digestOf(plans)}`,
         parentId, plans, `agent:${caller.agentId}`)
   }
-  if (recipe !== undefined)
-    await consumeMethod(
-      apparatus,
-      parentId,
-      run!,
-      `decomposition:${template!.id}`,
-      `decomposition:${template!.id}:${digestOf(recipe)}`,
-    )
   return { taskId: parentId, opened: await scheduler.advance(parentId) }
 }
 function taskStateIf(apparatus: Apparatus, taskId: string): TaskState | undefined {
@@ -175,7 +150,6 @@ export async function propose(apparatus: Apparatus, caller: Caller, callId: stri
 ): Promise<Proposal> {
   const method = input.method ?? publishedMethod(apparatus) ?? (await seedMethod(apparatus))
   const domain = (await loadMethod(apparatus, method)).domain
-  apparatus.budget?.beforeRequest()
   const taskId = taskIdOf(apparatus.controlId, caller.agentId, callId)
   await bindCaller(apparatus, caller)
   const template = domain.templates.get(domain.rootTemplate)!
@@ -205,22 +179,8 @@ export async function retry(apparatus: Apparatus, caller: Caller, callId: string
   })
   return proposalOf(apparatus, task, run)
 }
-export async function proposalOf(apparatus: Apparatus, task: TaskState, run: RunState): Promise<Proposal> {
-  const domain = (await loadMethod(apparatus, run.revision)).domain
+export function proposalOf(apparatus: Apparatus, task: TaskState, run: RunState): Proposal {
   return { taskId: task.taskId, runId: run.runId, workspace: workspaceOf(apparatus, task.taskId, run.runId),
-    contract: task.contract!,
-    phase: run.status,
-    artifact: task.contract!.artifact,
-    templates: (task.contract!.template === undefined
-      ? []
-      : (domain.templates.get(task.contract!.template.id)!.decomposition?.children ?? [])
-    )
-      .map((child) => domain.templates.get(child.template)!)
-      .map((t) => ({
-        id: t.id,
-        goal: t.goal,
-        ...(t.applicability === undefined ? {} : { applicability: t.applicability }),
-      })),
-    methodContext: await methodContext(apparatus, task.taskId, run),
+    contract: task.contract!, phase: run.status, method: run.revision,
   }
 }

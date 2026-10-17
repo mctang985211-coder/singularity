@@ -19,14 +19,12 @@ import {
 import type { Apparatus } from './apparatus.ts'
 import { assertTemplateSources, type Domain } from './domain.ts'
 import { list, record, text } from './shape.ts'
-import { readTemplate, type TaskTemplate } from './template.ts'
-import { templateDeclaration } from './read.ts'
+import { readTemplate, templateDeclaration, type TaskTemplate } from './template.ts'
 import { verifierOf } from './verifiers.ts'
 import { spawnProcess } from './process.ts'
 import { sha256 } from './ids.ts'
 import { assertVerifierRunnable, runVerifierSelftest } from '../../src/verifier/implementation.ts'
 import type { TaskContract } from '../../src/task/contract.ts'
-import { templateOf } from './domain.ts'
 
 export interface MethodSkill {
   readonly name: string
@@ -49,24 +47,26 @@ export interface MethodAssets {
   readonly skills: readonly MethodSkill[]
   readonly tools: readonly MethodTool[]
 }
-export const METHOD_FORMAT = `A method is a TaskTemplate workflow with task-bound Skills and Tools, evaluated and published together through one method pointer.
-Candidate file: {rootTemplate:string, templates:Template[], skills:Skill[], tools:Tool[]}.
+export const METHOD_FORMAT = `Candidate JSON: {rootTemplate:string, templates:Template[], skills:Skill[], tools:Tool[]}.
 Skill: {name:kebab-case, description:string, capabilities:string[], requiredTools:string[], content:string}.
 Tool: {name:kebab-case, source:string, verifier?:{samples:{name:string, artifactContent:string, inputContent:string, expected:'pass'|'fail'}[]}}.
-Tool source is a Node ESM program: argv[2] is the first frozen input path, argv[3] is an optional candidate path; stdout is the returned artifact text. singularity_run_method takes {tool,candidatePath?}, with candidatePath naming an existing workspace file. A verifier Tool receives artifact and input paths instead, exiting 0 for pass or 1 for fail, with both positive and negative samples required.
-Templates use the declarations in assets.templates, with optional applicability:string, skills:string[], capabilities:string[] and decomposition:{children:{key:string,template:string,dependsOn:string[],supports:string[],maxRuns:number}[]}.
-Bind Skills by template.skills or matching capabilities; bind Tools by capability name or a Skill's requiredTools. Root input, artifact, criterion, protected checkers and initial source remain frozen.`
+Tool source is a Node ESM program: frozen input paths appear in contract order starting at argv[2], followed by the candidate path when supplied; stdout is the returned artifact text. singularity_run_method takes {tool,candidatePath?}, with candidatePath naming an existing workspace file. A verifier Tool receives the candidate path at argv[2] followed by frozen input paths, exiting 0 for pass or 1 for fail. Verifier samples and template checks each bind one named input, with both positive and negative samples required.
+Template: {id:string, goal:string, artifact:string, inputs:{name:string,source:{kind:'protected',ref:string}|{kind:'artifact',template:string}}[], criteria:{criterionId:string,statement:string}[], skills:string[], capabilities:string[], guidance?:string, applicability?:string, decomposition?:{children:{key:string,template:string,dependsOn:string[],supports:string[],maxRuns:number,requirement:'required'|'exploration'}[]}, checks:{criterionId:string,verifier:string,input:string}[], initial?:{content:string}}.
+goal defines responsibility; guidance gives optional procedure. Template reads return prefilled contracts with concrete input identities; decomposition submits that contract shape with optional template:{id,digest} provenance.
+contract.skills and matching capabilities select Skills; capability names and selected Skills' requiredTools bind Tools. Binding happens at Run admission, even if no tool is called.
+Each comparison freezes a caliber: model, bound tool names/versions/content digests, conditions and inputs, plus metric, weights, trials and judgement. Adding, removing or editing a root-bound tool changes caliber and excludes that candidate; unchanged tools retain their identity across method revisions. Keep root bindings unchanged for this comparison; helpers may be bound to delegated Tasks. A rejected candidate does not fail the round or replace the incumbent. Retrying it unchanged cannot help.
+Root inputs, artifact, criteria, protected checks and initial source remain frozen.`
 export interface MethodBindings {
   readonly skills: readonly { readonly name: string; readonly digest: string }[]
   readonly tools: readonly { readonly name: string; readonly digest: string }[]
   readonly gaps: readonly string[]
 }
-export function bindAssets(template: Pick<TaskTemplate, 'skills' | 'capabilities'>, assets: MethodAssets): MethodBindings {
-  for (const name of template.skills)
+export function bindAssets(selection: { readonly skills: readonly string[]; readonly capabilities: readonly string[] }, assets: MethodAssets): MethodBindings {
+  for (const name of selection.skills)
     if (!assets.skills.some((skill) => skill.name === name))
       refuse('malformed-declaration', `responsibility requires missing Skill ${name}`)
-  const skills = assets.skills.filter((skill) => template.skills.includes(skill.name))
-  const requested = new Set(template.capabilities)
+  const skills = assets.skills.filter((skill) => selection.skills.includes(skill.name))
+  const requested = new Set(selection.capabilities)
   for (const skill of skills) for (const capability of skill.capabilities) requested.delete(capability)
   for (const skill of assets.skills) {
     if (!skill.capabilities.some((capability) => requested.has(capability))) continue
@@ -74,17 +74,15 @@ export function bindAssets(template: Pick<TaskTemplate, 'skills' | 'capabilities
     for (const capability of skill.capabilities) requested.delete(capability)
   }
   const tools = assets.tools.filter(
-    (tool) => template.capabilities.includes(tool.name) || skills.some((skill) => skill.requiredTools.includes(tool.name)),
+    (tool) => selection.capabilities.includes(tool.name) || skills.some((skill) => skill.requiredTools.includes(tool.name)),
   )
   for (const tool of tools) requested.delete(tool.name)
   return { skills: skills.map((skill) => ({ name: skill.name, digest: digestOf(skill) })),
     tools: tools.map((tool) => ({ name: tool.name, digest: digestOf(tool) })), gaps: [...requested],
   }
 }
-export function bindingsForContract(contract: TaskContract, domain: Domain, assets: MethodAssets): MethodBindings {
-  return bindAssets(contract.template === undefined
-    ? { skills: contract.skills ?? [], capabilities: contract.capabilities ?? [] }
-    : templateOf(domain, contract.template), assets)
+export function bindingsForContract(contract: TaskContract, assets: MethodAssets): MethodBindings {
+  return bindAssets({ skills: contract.skills ?? [], capabilities: contract.capabilities ?? [] }, assets)
 }
 export function methodToolReferences(apparatus: Apparatus, run: RunState): readonly string[] {
   return (run.bubble?.tools ?? []).filter((tool) => tool.name.startsWith('method:'))
@@ -165,7 +163,7 @@ export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: stri
       verifiers.push(await verifierOf(assetRoot, { ref: tool.name, version: sha256(tool.source), program: `${tool.name}.mjs`, args: ['{artifact}', '{input}'], selftest,
           },
           'generated verifier',
-          (invocation) => spawnProcess(invocation, undefined, assetRoot, { root: assetRoot, writable: false, protected: [], references: [domain.dir, ...domain.references],
+          (invocation) => spawnProcess(invocation, undefined, assetRoot, { root: assetRoot, writable: false, protected: [], references: domain.references,
             }),
         ),
       )
@@ -174,15 +172,15 @@ export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: stri
   const templates = new Map<string, TaskTemplate>()
   for (const rawTemplate of assets.templates) {
     const declared = record(rawTemplate, 'Revision template')
-    const workspace = record(declared['workspace'], 'template workspace')
-    if (workspace['initial'] !== undefined) refuse('malformed-declaration', 'Revision initial source must be frozen as initialContent')
+    if (declared['initial'] !== undefined && record(declared['initial'], 'template initial')['from'] !== undefined)
+      refuse('malformed-declaration', 'Revision initial source must be frozen as initial.content')
     const template = await readTemplate(domain.dir, rawTemplate, verifiers, 'Revision template')
     if (templates.has(template.id)) refuse('malformed-declaration', 'Revision repeats template ' + template.id)
     const original = domain.templates.get(template.id)
     if (
       template.id === domain.rootTemplate && original !== undefined &&
-      (digestOf(original.input) !== digestOf(template.input) || digestOf(original.criterion) !== digestOf(template.criterion) ||
-        digestOf(original.check ?? null) !== digestOf(template.check ?? null) ||
+      (digestOf(original.inputs) !== digestOf(template.inputs) || digestOf(original.criteria) !== digestOf(template.criteria) ||
+        digestOf(original.checks.map(({ criterion, input }) => ({ criterion, input }))) !== digestOf(template.checks.map(({ criterion, input }) => ({ criterion, input }))) ||
         original.artifact !== template.artifact))
       refuse('malformed-declaration', 'Revision cannot change protected input or acceptance')
     if (template.id === domain.rootTemplate && (template.initial === undefined ? null : sha256(template.initial.bytes)) !==
@@ -221,8 +219,10 @@ export async function createMethod(apparatus: Apparatus, raw: unknown): Promise<
   }
   return { environmentId, revisionId, digest: digestOf(loaded.assets) }
 }
-export async function seedMethod(apparatus: Apparatus): Promise<RevisionRef> {
-  const seed = await createMethod(apparatus, { rootTemplate: apparatus.domain.rootTemplate,
+export async function seedMethod(apparatus: Apparatus, initial?: unknown): Promise<RevisionRef> {
+  const published = publishedMethod(apparatus)
+  if (published !== undefined) return published
+  const seed = await createMethod(apparatus, initial ?? { rootTemplate: apparatus.domain.rootTemplate,
     templates: [...apparatus.domain.templates.values()].map(templateDeclaration), skills: [], tools: [],
   })
   if (publishedMethod(apparatus) === undefined)
@@ -274,6 +274,6 @@ export async function methodForRun(apparatus: Apparatus, run: RunState,
     reference: run.revision,
     assets,
     domain,
-    bindings: bindingsForContract(task.contract!, domain, assets),
+    bindings: bindingsForContract(task.contract!, assets),
   }
 }

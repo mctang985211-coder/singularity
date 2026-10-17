@@ -111,19 +111,14 @@ describe('the deployable build', () => {
     // config, so a template without them composes a row the host refuses to activate — and that
     // refusal is invisible to every check that only reads this checkout.
     for (const key of ['controlId', 'domainDir', 'workspaceRoot']) expect(patch).toContain(key + ':')
-    for (const key of ['nativeTokens']) expect(patch).toContain(key + ':')
+    expect(patch).not.toContain('nativeTokens:')
   }, 30_000)
 
-  it('declares the gateway retry policy the measured transport failure needs', async () => {
-    const patch = await readFile(join(checkout, 'deployment/profile/cordis.patch.yml'), 'utf8')
-    // `stream_read_error` is this gateway's text for a dropped upstream stream, and the pi-ai
-    // classifier falls through to `PI_AI_ERROR` for it — a code outside the host's default
-    // retryable set, which made one dropped stream terminal for a whole Run. The route therefore has
-    // to name the policy itself; deleting this block restores the measured defect.
-    const policy = patch.slice(patch.indexOf('retryPolicy:'))
-    expect(policy).toContain('mode: normal')
-    expect(policy).toContain('maxRetries: 5')
-    expect(policy).toContain('PI_AI_ERROR')
-    for (const code of ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT']) expect(policy).toContain(code)
+  it('deploys one retry executor without a gateway error-code policy', async () => {
+    const deployment = await readFile(join(checkout, 'deployment/profile/cordis.patch.yml'), 'utf8')
+    const bundle = await readFile(join(checkout, 'assembly/cordis.patch.yml'), 'utf8')
+    expect(deployment).not.toContain('retryPolicy:')
+    expect(deployment).not.toContain('retryableCodes:')
+    expect(bundle).toMatch(/id: llm-retry\s+disabled: true/)
   })
 })

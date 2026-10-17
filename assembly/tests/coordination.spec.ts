@@ -1,3 +1,4 @@
+import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,7 +7,9 @@ import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/prot
 import { openApparatus, callerOf, declareCaller, taskStateOf } from '../src/apparatus.ts'
 import { askParent, answerChild, assertActive, coordinationOf, waitingReason, readScopeOf } from '../src/coordination.ts'
 import { loadDomain } from '../src/domain.ts'
+import { contractFor } from '../src/inputs.ts'
 import { openDriver } from '../src/driver.ts'
+import { snapshotOf } from '../src/snapshot.ts'
 import { readArtifact, readTask, readTrajectory } from '../src/read.ts'
 import { spawnProcess } from '../src/process.ts'
 import { createScheduler } from '../src/scheduler.ts'
@@ -23,16 +26,18 @@ async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'task-coordination-')); roots.push(root)
   const persistence = new FakePersistence(), runtime = nativeRuntime()
   const domain = await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess)
-  const apparatus = await openApparatus('coordination', root, domain, persistence as never, attachmentsAt(root))
+  const apparatus = await openApparatus('coordination', root, domain, persistence as never, attachmentsAt(root), testProjections)
   const parent = runtime.agent('parent'), caller = callerOf(parent)
   const proposal = await propose(apparatus, caller, 'root', { goal: 'count letters' })
   const scheduler = createScheduler(apparatus, runtime.seams, runtime.open)
   await decompose(apparatus, scheduler, caller, { taskId: proposal.taskId, children: [
     { key: 'investigation', contract: { goal: 'resolve one uncertainty', artifact: 'finding.txt', inputs: [],
       criteria: [{ criterionId: 'finding', statement: 'support or refute the hypothesis with evidence' }] },
-      supports: ['letters'], dependsOn: [], maxRuns: 1,
-      handoff: { context: 'Counting semantics are fixed; investigate punctuation only, do not rebuild measurement.', evidence: [] } },
-    { key: 'peer', template: 'extract-letters', supports: ['letters'], dependsOn: [], maxRuns: 1 },
+      supports: ['letters'], dependsOn: [], maxRuns: 1, requirement: 'required' as const,
+      handoff: { decisions: ['Counting semantics are fixed'], hypotheses: ['Punctuation may affect the count'],
+        exclusions: ['Do not rebuild measurement'], evidence: [] } },
+    { key: 'peer', contract: contractFor(domain, domain.templates.get('extract-letters')!, 'extract ASCII letters'),
+      supports: ['letters'], dependsOn: [], maxRuns: 1, requirement: 'required' as const },
   ] })
   const children = taskStateOf(apparatus, proposal.taskId).decomposition!.children
   const child = taskStateOf(apparatus, children[0]!.taskId), peer = taskStateOf(apparatus, children[1]!.taskId)
@@ -41,13 +46,25 @@ async function setup() {
   return { root, apparatus, domain, persistence, runtime, scheduler, parent, caller, proposal, child, peer, agent, childCaller, run }
 }
 
-it('hands off parent standards, exclusions and peer references without copying conversation', async () => {
+it('dispatches one contract with scoped handoff and leaves parent responsibilities available on demand', async () => {
   const h = await setup()
   const text = h.runtime.delivered.find((d) => d.sessionId === h.childCaller.sessionId)!.message.content[0]!
-  expect(text.type === 'text' && JSON.parse(text.text)).toMatchObject({ handoff: {
-    parentId: h.proposal.taskId, parentRunId: h.proposal.runId, supports: ['letters'],
-    context: expect.stringContaining('do not rebuild'), peers: [{ taskId: h.child.taskId }, { taskId: h.peer.taskId }],
+  const dispatch = text.type === 'text' && JSON.parse(text.text)
+  expect(dispatch).toMatchObject({ assigned: { contract: h.child.contract },
+    parent: { id: h.proposal.taskId, runId: h.proposal.runId, supports: ['letters'], dependsOn: [] }, handoff: {
+    decisions: ['Counting semantics are fixed'], hypotheses: ['Punctuation may affect the count'],
+    exclusions: ['Do not rebuild measurement'], evidence: [],
   } })
+  expect(dispatch.assigned).not.toHaveProperty('artifact')
+  expect(dispatch.assigned).not.toHaveProperty('methodContext')
+  expect(dispatch.assigned).not.toHaveProperty('templates')
+  expect(Object.keys(dispatch.parent).sort()).toEqual(['dependsOn', 'id', 'requirement', 'runId', 'supports'])
+  expect(Object.keys(dispatch.handoff).sort()).toEqual(['decisions', 'evidence', 'exclusions', 'hypotheses'])
+  const task = await readTask(h.apparatus, h.child)
+  expect(task.parent).toEqual(dispatch.parent)
+  const parent = await readTask(h.apparatus, taskStateOf(h.apparatus, task.parent!.id))
+  expect(parent.contract.goal).toBe(h.proposal.contract.goal)
+  expect(parent.decomposition!.children.map((child) => child.taskId)).toEqual([h.child.taskId, h.peer.taskId])
   const { visible } = await readScopeOf(h.apparatus, h.childCaller.agentId)
   expect(visible).toEqual(new Set([h.child.taskId, h.peer.taskId, h.proposal.taskId]))
   const unrelated = await propose(h.apparatus, callerOf(h.runtime.agent('unrelated')), 'other', { goal: 'other root' })
@@ -66,7 +83,21 @@ it('pins questions to the direct parent, blocks execution, and rejects self/peer
   const q = await askParent(h.apparatus, h.childCaller, h.child.taskId, ask)
   expect(q).toMatchObject({ runId: h.run.runId, parentRunId: h.proposal.runId, blocking: true })
   expect(() => assertActive(h.apparatus, h.child.taskId)).toThrow('waiting for parent answers')
-  expect(coordinationOf(h.apparatus, h.proposal.taskId).questionsToAnswer).toHaveLength(1)
+  const parentCoordination = coordinationOf(h.apparatus, h.proposal.taskId)
+  expect(parentCoordination.questionsToAnswer).toHaveLength(1)
+  expect(parentCoordination.responsibility).toMatchObject({
+    authority: { kind: 'task', taskId: h.proposal.taskId, runId: h.proposal.runId },
+    criteriaToAccept: ['letters'], requiredUnverified: [h.child.taskId, h.peer.taskId],
+    executionMode: 'coordinate', canExecute: false, canSubmit: false,
+  })
+  expect(parentCoordination.responsibility.delegated).toMatchObject([
+    { taskId: h.child.taskId, goal: h.child.contract!.goal, requirement: 'required', supports: ['letters'] },
+    { taskId: h.peer.taskId, goal: h.peer.contract!.goal, requirement: 'required', supports: ['letters'] },
+  ])
+  expect(coordinationOf(h.apparatus, h.child.taskId).responsibility).toMatchObject({
+    authority: { kind: 'task', taskId: h.child.taskId, runId: h.run.runId },
+    delegated: [], canExecute: false, canSubmit: false,
+  })
   const answer = { questionId: q.questionId, requestKey: 'scope-answer', answer: 'Use the frozen ASCII definition.', resolves: true }
   for (const caller of [h.childCaller, callerOf(h.runtime.agents.get(h.peer.responsibility!.agentId)!),
     callerOf(h.runtime.agent('foreign'))])
@@ -80,8 +111,34 @@ it('pins questions to the direct parent, blocks execution, and rejects self/peer
   await expect(answerChild(h.apparatus, h.caller, answer)).rejects.toThrow('command-conflict')
   await answerChild(h.apparatus, h.caller, { ...answer, requestKey: 'resolved' })
   expect(waitingReason(h.apparatus, h.child.taskId)).toBeUndefined()
+  expect(coordinationOf(h.apparatus, h.child.taskId).responsibility).toMatchObject({
+    canExecute: true, canSubmit: true, remaining: { integrateOrReuseArtifact: true },
+  })
   expect(waitingReason(h.apparatus, h.proposal.taskId)).toContain('delegated')
   await expect(askParent(h.apparatus, h.caller, h.proposal.taskId, ask)).rejects.toThrow('no parent')
+  await h.scheduler.close(); await h.apparatus.store.close()
+})
+
+it('keeps monitoring at its committed cut when a question is answered during projection', async () => {
+  const h = await setup()
+  const question = await askParent(h.apparatus, h.childCaller, h.child.taskId,
+    { requestKey: 'scope', question: 'Which definition should I use?' })
+  const cut = h.apparatus.store.load()
+  const before = coordinationOf(h.apparatus, h.child.taskId, cut)
+  const projecting = snapshotOf(h.apparatus)
+  await answerChild(h.apparatus, h.caller, { questionId: question.questionId, requestKey: 'answer',
+    answer: 'Use the frozen ASCII definition.', resolves: true })
+  expect(coordinationOf(h.apparatus, h.child.taskId, cut)).toEqual(before)
+  expect(before.waiting).toContain(question.questionId)
+  expect(before.responsibility.canExecute).toBe(false)
+  expect(coordinationOf(h.apparatus, h.child.taskId)).toMatchObject({
+    waiting: null, responsibility: { canExecute: true },
+  })
+  expect(coordinationOf(h.apparatus, h.proposal.taskId, cut).questionsToAnswer).toHaveLength(1)
+  expect(coordinationOf(h.apparatus, h.proposal.taskId).questionsToAnswer).toHaveLength(0)
+  const snapshot = await projecting
+  expect(snapshot.cutoff).toBe(cut.entries().length)
+  expect(snapshot.tasks.find(task => task.taskId === h.child.taskId)!.coordination).toEqual(before)
   await h.scheduler.close(); await h.apparatus.store.close()
 })
 
@@ -90,7 +147,7 @@ it('recovers the same question and answer after process loss without repeated fa
   const q = await askParent(h.apparatus, h.childCaller, h.child.taskId, ask)
   // Lose the tool response after the fact; next scheduler reconstructs delivery.
   await h.scheduler.close(); await h.apparatus.store.close()
-  const recovered = await openApparatus('coordination', h.root, h.domain, h.persistence as never, attachmentsAt(h.root))
+  const recovered = await openApparatus('coordination', h.root, h.domain, h.persistence as never, attachmentsAt(h.root), testProjections)
   declareCaller(recovered, h.caller.agentId)
   const scheduler = createScheduler(recovered, h.runtime.seams, h.runtime.open)
   await Promise.all([scheduler.advance(h.proposal.taskId), scheduler.advance(h.child.taskId)])
@@ -98,7 +155,7 @@ it('recovers the same question and answer after process loss without repeated fa
   const answer = { questionId: q.questionId, requestKey: 'resolved', answer: 'Reuse the cited verified report; retain its digest.', resolves: true }
   await answerChild(recovered, h.caller, answer)
   await scheduler.close(); await recovered.store.close()
-  const again = await openApparatus('coordination', h.root, h.domain, h.persistence as never, attachmentsAt(h.root))
+  const again = await openApparatus('coordination', h.root, h.domain, h.persistence as never, attachmentsAt(h.root), testProjections)
   declareCaller(again, h.caller.agentId)
   const resumed = createScheduler(again, h.runtime.seams, h.runtime.open)
   await Promise.all([resumed.advance(h.proposal.taskId), resumed.advance(h.child.taskId)])
@@ -122,8 +179,8 @@ it('reuses a verified report as frozen input across responsibility branches and 
     contract: { goal: 'integrate prior findings', artifact: 'report.txt',
       inputs: [{ name: 'prior.txt', source: { kind: 'artifact', taskId: h.child.taskId } }],
       criteria: [{ criterionId: 'integrated', statement: 'the conclusion cites and uses the prior report' }] },
-    handoff: { context: 'Reuse the verified negative result.', evidence: [h.child.taskId] },
-    dependsOn: [], supports: ['extracted'], maxRuns: 1 }] })
+    handoff: { decisions: ['Reuse the verified negative result'], hypotheses: [], exclusions: [], evidence: [h.child.taskId] },
+    dependsOn: [], supports: ['extracted'], maxRuns: 1, requirement: 'required' as const }] })
   const descendant = [...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
     .find((t) => t.contract?.goal === 'integrate prior findings')!
   const run = Object.values(descendant.runs).at(-1)!
@@ -142,7 +199,7 @@ it('enforces the delegation hold on native tools, workspace, method calls and su
   const h = await setup()
   await h.scheduler.close(); await h.apparatus.store.close()
   let admission!: Parameters<typeof fakeExecution>[0]
-  const driver = await openDriver({ controlId: 'coordination', workspaceRoot: h.root, domain: h.domain,
+  const driver = await openDriver({ projections: testProjections, controlId: 'coordination', workspaceRoot: h.root, domain: h.domain,
     persistence: h.persistence as never, attachments: attachmentsAt(h.root), seams: h.runtime.seams,
     execution: (guard) => { admission = guard; return fakeExecution(guard) } })
   const call = driver.forCall(execFor(h.parent, 'waiting'))
@@ -188,9 +245,9 @@ it('converges through persistent questions, reviewed child evidence and integrat
   expect(outcomes[0]!.message.source).toMatchObject({ parentTaskId: h.proposal.taskId, runId: h.proposal.runId })
   expect(waitingReason(h.apparatus, h.proposal.taskId)).toBeUndefined()
   const accepted = await readArtifact(h.apparatus, h.peer.taskId)
-  await writeFile(join(h.proposal.workspace, h.proposal.artifact), String(accepted.text.length))
+  await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), String(accepted.text.length))
   const result = await submit(h.apparatus, fakeExecution(() => undefined), h.caller, execFor(h.parent, 'integrated'),
-    { taskId: h.proposal.taskId, path: h.proposal.artifact }, new AbortController().signal, fixtureReview(h.apparatus))
+    { taskId: h.proposal.taskId, path: h.proposal.contract.artifact }, new AbortController().signal, fixtureReview(h.apparatus))
   expect(result.verdict).toBe('pass')
   const parent = taskStateOf(h.apparatus, h.proposal.taskId)
   expect(Object.keys(parent.runs)).toEqual([h.proposal.runId])
@@ -205,17 +262,17 @@ it('converges through persistent questions, reviewed child evidence and integrat
 it('rejects decomposition, submission and retries at the command boundary while responsibilities are pending', async () => {
   const h = await setup(), commands = h.apparatus.tasks.forAgent(h.caller.agentId)
   await expect(commands.decompose({ commandId: 'overlap', parentTaskId: h.proposal.taskId, children: [
-    { taskId: 'overlapping', dependsOn: [], supports: ['letters'], maxRuns: 1 }] }))
+    { taskId: 'overlapping', dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const }] }))
     .rejects.toThrow('delegated responsibilities')
   await h.apparatus.tasks.forAgent(h.caller.agentId).failRun({ commandId: 'parent-failed',
     taskId: h.proposal.taskId, runId: h.proposal.runId, reason: 'parent interrupted' })
   await expect(commands.startRun({ commandId: 'take-back', taskId: h.proposal.taskId, runId: 'take-back',
-    revision: h.proposal.methodContext.method, purpose: 'solve' })).rejects.toThrow('delegated responsibilities')
+    revision: h.proposal.method, purpose: 'solve' })).rejects.toThrow('delegated responsibilities')
   await h.scheduler.advance(h.proposal.taskId)
   for (const id of [h.child.taskId, h.peer.taskId]) {
     expect(Object.values(taskStateOf(h.apparatus, id).runs).at(-1)).toMatchObject({ status: 'failed', failureCause: 'runtime' })
   }
-  expect(waitingReason(h.apparatus, h.proposal.taskId)).toBeUndefined()
+  expect(waitingReason(h.apparatus, h.proposal.taskId)).toContain('required delegated responsibilities have not verified')
   await expect(h.apparatus.tasks.forAgent(h.childCaller.agentId).startRun({ commandId: 'orphan', taskId: h.child.taskId,
     runId: 'orphan', revision: h.run.revision, purpose: 'solve' })).rejects.toThrow('parent Run has settled')
   await h.scheduler.close(); await h.apparatus.store.close()
@@ -227,7 +284,7 @@ it('rejects a second parent and ancestor delegation through the protocol command
   for (const [taskId, expected] of [[h.peer.taskId, 'already has a direct parent'],
     [h.proposal.taskId, 'ancestor responsibility']] as const) {
     await expect(commands.decompose({ commandId: `invalid-edge:${taskId}`, parentTaskId: h.child.taskId,
-      children: [{ taskId, dependsOn: [], supports: ['finding'], maxRuns: 1 }] })).rejects.toThrow(expected)
+      children: [{ taskId, dependsOn: [], supports: ['finding'], maxRuns: 1, requirement: 'required' as const }] })).rejects.toThrow(expected)
   }
   expect(taskStateOf(h.apparatus, h.child.taskId).decomposition).toBeUndefined()
   await h.scheduler.close(); await h.apparatus.store.close()

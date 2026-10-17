@@ -17,7 +17,8 @@ import type { RevisionRef } from '../../src/task/protocol.ts'
 import { coordinationOf } from './coordination.ts'
 
 export interface ControlSnapshot {
-  readonly formatVersion: 7
+  readonly providerStopped: boolean
+  readonly formatVersion: 9
   readonly geometry: Readonly<Record<string, { x: number; y: number; width: number; height: number }>>
   readonly controlId: string
   readonly cutoff: number
@@ -43,6 +44,7 @@ export interface ControlSnapshot {
         readonly name: string
         readonly digest: string
         readonly source: TaskInputSource
+        readonly producerRunId?: string
       }[]
       readonly receipt: ReceiptView | null
     }[]
@@ -100,14 +102,14 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
         method = await loadMethod(apparatus, run.revision)
         loadedMethods.set(run.revision.digest, method)
       }
-      bindings = bindingsForContract(state.contract, method.domain, method.assets)
+      bindings = bindingsForContract(state.contract, method.assets)
     }
     tasks.push({
       closure: state.closure ?? null,
       rsi: state.rsi ?? null,
       requests: state.rounds ?? [],
       taskId, goal: state.contract.goal, phase: view.phase,
-      coordination: coordinationOf(apparatus, taskId),
+      coordination: coordinationOf(apparatus, taskId, committed),
       sessionId: agent?.sessionId ?? null, template: state.contract.template ?? null,
       relatedTo: run?.relatedTo ?? null, purpose: run?.purpose ?? 'solve',
       bindings,
@@ -118,6 +120,7 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
             name: input.name,
             digest: input.digest,
             source: state.contract!.inputs.find((declared) => declared.name === input.name)!.source,
+            ...(input.producerRunId === undefined ? {} : { producerRunId: input.producerRunId }),
           })) ?? []
         return { runId: run.runId, status: run.status, model: execution.bubble?.model ?? null, inputSources,
           detail: run.failureReason ?? run.verdicts.find((entry) => entry.criterionId === state.contract!.criteria[0]!.criterionId)?.detail ?? null,
@@ -184,7 +187,7 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
     rows.set(column, row + 1)
     geometry[task] = { x: column * 330, y: row * 145, width: 260, height: 105 }
   }
-  return { formatVersion: 7,
+  return { formatVersion: 9, providerStopped: false,
     reviews, geometry, controlId: apparatus.controlId, cutoff: entries.length, tasks: ordered, plans, methods, rounds, releases, consumption, budget,
   }
 }

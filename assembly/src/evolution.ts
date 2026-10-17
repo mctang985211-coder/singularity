@@ -5,7 +5,7 @@ import { contextDigestOf, MEASURE_KINDS, MEASURE_PROTOCOL, MEASURE_VERSION, type
 import { caliberDigestOf, projectEvaluation } from '../../src/measure/view.ts'
 import { assertClosedKeys, type Envelope } from '../../src/protocol/envelope.ts'
 import { foldSubject, foldSubjects } from '../../src/protocol/fold.ts'
-import { refuse } from '../../src/protocol/refusal.ts'
+import { ProtocolRefusal, refuse } from '../../src/protocol/refusal.ts'
 import type { ProtocolRegistry } from '../../src/protocol/registry.ts'
 import { createStrategyCommands } from '../../src/strategy/commands.ts'
 import { type Calibration } from '../../src/strategy/decision.ts'
@@ -13,13 +13,13 @@ import { structuralEditsOf as contentEditsOf } from '../../src/strategy/edits.ts
 import { STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_VERSION, type RoundState, type StructuralEdit,
 } from '../../src/strategy/protocol.ts'
 import { projectRound, type MeasureSlice, type RoundDecision } from '../../src/strategy/view.ts'
-import type { BubbleInput } from '../../src/task/bubble.ts'
+import type { Bubble, BubbleInput } from '../../src/task/bubble.ts'
 import type { VerifierCriterion } from '../../src/task/contract.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from '../../src/task/protocol.ts'
-import { revisionRef, REVISION_MEMBERS, sameRevision } from '../../src/task/shape.ts'
+import { sameRevision } from '../../src/task/shape.ts'
 import type { MethodAssets } from './method.ts'
-import type { EvaluationCostBasis, EvaluationCostSummary } from './evaluation-cost.ts'
-import { list, record, text } from './shape.ts'
+import type { EvaluationCostBasis } from './evaluation-cost.ts'
+import { digestOf } from '../../src/protocol/envelope.ts'
 
 export interface SolveResult {
   readonly trajectory?: import('@deepseek-ai/dsh-attachment').FileAttachmentRef
@@ -27,9 +27,8 @@ export interface SolveResult {
   readonly runId: string
   readonly quality: number
   readonly met: boolean
-  readonly cost: number
+  readonly cost: number | null
   readonly costBasis?: EvaluationCostBasis
-  readonly costSummary?: EvaluationCostSummary
   readonly artifactDigest: string
   readonly inputDigests: readonly BubbleInput[]
   readonly implementationDigest: string
@@ -46,6 +45,7 @@ export interface EvolutionOptions {
   readonly weights: EvaluationWeights
   readonly trials: number
   readonly loadMethod: (revision: RevisionRef) => Promise<MethodAssets>
+  readonly baseline: EvolutionOptions['solve']
   readonly solve: (input: { readonly revision: RevisionRef
     readonly operationId: string
     readonly started: (run: { readonly taskId: string; readonly runId: string }) => Promise<void> }) => Promise<SolveResult>
@@ -56,22 +56,6 @@ export interface EvolutionRound {
   readonly round: number
   readonly incumbent: RevisionRef
   readonly candidates: readonly RevisionRef[]
-}
-
-export function readEvolutionRound(raw: unknown): EvolutionRound {
-  const input = record(raw, 'evaluation request')
-  assertClosedKeys(input, ['roundId', 'round', 'incumbent', 'candidates'], 'evaluation request', 'malformed-declaration',
-  )
-  const round = input['round']
-  if (typeof round !== 'number' || !Number.isSafeInteger(round) || round < 1)
-    refuse('malformed-declaration', 'evaluation request.round must be a positive integer')
-  const candidates = list(input['candidates'], 'evaluation request.candidates')
-  if (candidates.length === 0) refuse('malformed-declaration', 'evaluation requires at least one candidate')
-  return { roundId: text(input, 'roundId', 'evaluation request'), round,
-    incumbent: revisionRef(input['incumbent'], 'evaluation request.incumbent', REVISION_MEMBERS),
-    candidates: candidates.map((value, index) => revisionRef(value, `evaluation request.candidates[${index}]`, REVISION_MEMBERS),
-    ),
-  }
 }
 
 export interface Evolution {
@@ -133,49 +117,59 @@ export function createEvolution(options: EvolutionOptions): Evolution {
       })
   }
 
+  function checkContext(expected: EvaluationState, actual: Bubble, where: string): void {
+    if (contextDigestOf(actual) === expected.context) return
+    const frozen = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, expected.run!.taskId)!.runs[expected.run!.runId]!.bubble!
+    const differences = Object.fromEntries((['model', 'tools', 'conditions', 'inputs'] as const)
+      .filter(field => digestOf(frozen[field]) !== digestOf(actual[field]))
+      .map(field => [field, { expected: frozen[field], actual: actual[field] }]))
+    refuse('caliber-mismatch', `${where} changed the frozen execution context: ${JSON.stringify(differences)}. This candidate is excluded; keep the incumbent and root-bound tool identities unchanged for comparison.`)
+  }
+
   async function evaluate(incumbent: RevisionRef, revision: RevisionRef, operationId: string, ordering: {
-    readonly expectedCaliber?: string
-    readonly opened?: (caliber: string) => void
-  } = {},
+    readonly expected?: EvaluationState
+    readonly solve: EvolutionOptions['solve']
+  },
   ): Promise<string> {
     const evaluationId = `${operationId}:evaluation`
+    if (store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)?.missed.length) return evaluationId
     const results: SolveResult[] = []
     for (let slot = 0; slot < trials; slot++) {
       const recorded = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)?.observed.find((trial) => trial.slot === slot)
       if (recorded !== undefined) {
-        const detail = JSON.parse(recorded.detail!) as Pick<SolveResult, 'taskId' | 'runId' | 'met' | 'verdict' | 'costBasis' | 'costSummary' | 'trajectory'
+        const detail = JSON.parse(recorded.detail!) as Pick<SolveResult, 'taskId' | 'runId' | 'met' | 'verdict' | 'costBasis' | 'trajectory'
         >
-        results.push({ ...detail, quality: recorded.quality, cost: recorded.cost!, artifactDigest: recorded.artifactDigest,
+        results.push({ ...detail, quality: recorded.quality, cost: recorded.cost ?? null, artifactDigest: recorded.artifactDigest,
           inputDigests: recorded.inputDigests, implementationDigest: recorded.implementationDigest, acceptanceDigest: criterion.implementationDigest,
         })
         continue
       }
-      const result = await options.solve({ revision, operationId: `${operationId}:trial:${slot}`, started: async (run) => {
+      const result = await ordering.solve({ revision, operationId: `${operationId}:trial:${slot}`, started: async (run) => {
         if (slot === 0) {
           await measure.openEvaluation({ commandId: `${operationId}:open-evaluation`, evaluationId, baseline: incumbent, candidate: revision,
             run, metric, weights, trials, judgement: [criterion],
             })
-          const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
-          const caliber = caliberDigestOf(plan)!
-          if (ordering.expectedCaliber !== undefined && caliber !== ordering.expectedCaliber)
-            refuse('caliber-mismatch', `${operationId} changed the round's frozen caliber`)
-          ordering.opened?.(caliber)
+          if (ordering.expected !== undefined) {
+            const actual = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, run.taskId)!.runs[run.runId]!
+            checkContext(ordering.expected, actual.bubble!, operationId)
+          }
         } else {
           const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
           const actual = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, run.taskId)!.runs[run.runId]!
-          if (contextDigestOf(actual.bubble!) !== plan.context) refuse('caliber-mismatch', `${operationId} trial ${slot} changed its frozen context`)
+          checkContext(plan, actual.bubble!, `${operationId} trial ${slot}`)
         }
       },
       })
       const actual = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, result.taskId)!.runs[result.runId]!
       const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
-      if ((slot === 0 && plan.run!.taskId !== result.taskId) || contextDigestOf(actual.bubble!) !== plan.context)
-        refuse('caliber-mismatch', `${operationId} trial ${slot} result changed its frozen Task or execution context`)
+      if (slot === 0 && plan.run!.taskId !== result.taskId)
+        refuse('evidence-input-mismatch', `${operationId} trial ${slot} result names a different Task`)
+      checkContext(plan, actual.bubble!, `${operationId} trial ${slot} result`)
       results.push(result)
       await measure.recordTrial({ commandId: `${operationId}:trial:${slot}`, evaluationId, trial: {
-        slot, quality: result.quality, cost: result.cost, artifactDigest: result.artifactDigest,
+        slot, quality: result.quality, ...(result.cost === null ? {} : { cost: result.cost }), artifactDigest: result.artifactDigest,
         inputDigests: result.inputDigests, implementationDigest: result.implementationDigest,
-        detail: JSON.stringify({ taskId: result.taskId, runId: result.runId, met: result.met, verdict: result.verdict, costBasis: result.costBasis, costSummary: result.costSummary,
+        detail: JSON.stringify({ taskId: result.taskId, runId: result.runId, met: result.met, verdict: result.verdict, costBasis: result.costBasis,
             trajectory: result.trajectory,
           }),
         },
@@ -213,32 +207,30 @@ export function createEvolution(options: EvolutionOptions): Evolution {
           refuse('malformed-declaration', `candidate ${revision.revisionId} repeats a method revision in this round`)
         candidates.push({ revision, edits })
       }
-      let opened!: (caliber: string) => void
-      const planned = new Promise<string>((resolve) => { opened = resolve })
-      const bootstrap = evaluate(input.incumbent, input.incumbent, `${input.roundId}:bootstrap`, { opened }).then(async (evaluationId) => {
-        const state = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
-        const caliber = caliberDigestOf(state)!
-        if (prior?.plan === undefined) await strategy.openRound({ commandId: `${input.roundId}:open`, roundId: input.roundId, round: input.round,
-          incumbent: input.incumbent, candidates: candidates.length, historyCutoff: store.load().entries().length, caliber, weights,
-            })
-          return caliber
-        },
-      )
-      const ready = Promise.race([planned, bootstrap])
-      let nextSlot = 0
+      // RRSI loop.py: reuse the incumbent evaluation, then evaluate screened variants.
+      // One owner, explicit awaits; no unresolved bootstrap race or competing workers.
+      const baselineId = await evaluate(input.incumbent, input.incumbent, `${input.roundId}:bootstrap`, { solve: options.baseline })
+      const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, baselineId)!
+      if (prior?.plan === undefined) await strategy.openRound({ commandId: `${input.roundId}:open`, roundId: input.roundId, round: input.round,
+        incumbent: input.incumbent, candidates: candidates.length, historyCutoff: store.load().entries().length,
+        caliber: caliberDigestOf(plan)!, weights,
+      })
       const evaluations: string[] = []
-      const evaluateCandidates = async (): Promise<void> => {
-        const caliber = await ready
-        while (nextSlot < candidates.length) {
-          const slot = nextSlot++, candidate = candidates[slot]!
-          evaluations[slot] = await evaluate(input.incumbent, candidate.revision, `${input.roundId}:${slot}:candidate`, { expectedCaliber: caliber },
-          )
+      for (const [slot, candidate] of candidates.entries()) {
+        const operationId = `${input.roundId}:${slot}:candidate`
+        const evaluationId = `${operationId}:evaluation`
+        try {
+          evaluations[slot] = await evaluate(input.incumbent, candidate.revision, operationId, { expected: plan, solve: options.solve })
+        } catch (error) {
+          if (!(error instanceof ProtocolRefusal) || error.refusal.code !== 'caliber-mismatch') throw error
+          const state = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
+          for (let trial = 0; trial < trials; trial++) {
+            if (state.observed.some(entry => entry.slot === trial) || state.missed.some(entry => entry.slot === trial)) continue
+            await measure.missTrial({ commandId: `${operationId}:excluded:${trial}`, evaluationId, slot: trial, reason: error.refusal.detail })
+          }
+          evaluations[slot] = evaluationId
         }
       }
-      const settled = await Promise.allSettled([bootstrap.then(evaluateCandidates), evaluateCandidates()])
-      const failures = [...new Set(settled.flatMap((result) => (result.status === 'rejected' ? [result.reason] : [])))]
-      if (failures.length === 1) throw failures[0]
-      if (failures.length > 1) throw new AggregateError(failures, failures.map(String).join('; '))
       for (const [slot, candidate] of candidates.entries()) await strategy.submitCandidate({
         commandId: `${input.roundId}:${slot}:submit`, roundId: input.roundId, slot,
         revision: candidate.revision, evaluationId: evaluations[slot]!, edits: candidate.edits,

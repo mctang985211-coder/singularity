@@ -4,6 +4,9 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "paths": {
+      "@deepseek-ai/dsh-agent-preset-registry": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-agent-preset-registry/lib/types/index.d.ts"
+      ],
       "@deepseek-ai/dsh-attachment": [
         "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-attachment/lib/types/index.d.ts"
       ],
@@ -15,6 +18,24 @@
       ],
       "@deepseek-ai/dsh-agent": [
         "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-agent/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-agent-loop": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-compaction": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-compaction/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-compaction-basic": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-token-meter": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-token-meter/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-system-prompt": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-system-prompt/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-session-projection": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-session-projection/lib/types/index.d.ts"
       ],
       "@deepseek-ai/dsh-llm": [
         "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-llm/lib/types/index.d.ts"
@@ -66,6 +87,12 @@
       ],
       "@deepseek-ai/dsh-scope": [
         "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-scope/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-token-meter/client": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-token-meter/lib/types/client.d.ts"
+      ],
+      "@deepseek-ai/dsh-llm-retry": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-llm-retry/lib/types/index.d.ts"
       ]
     }
   },

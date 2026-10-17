@@ -1,5 +1,5 @@
 {
-  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim. No row carries one today: `mutate:fw-direction-sign-ignored` was this ledger's one recorded miss, and it is a claim now that the probe checks its readout against the direction the views carry - the reproduction and the fix are in docs/f-evidence.md §5.2, and scripts/mutate.mjs prints the verdict rather than this file. What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
+  "why": "Every claim in this repository that a mutation is caught, with the edits that produce it and the command that judges it, so the claim is runnable from inside the tree instead of resting on a script that lived in /tmp. Rounds three and four both recorded that defect and both declined to verify the claims; a count of caught mutations names no script, and a claim that names no script is a claim nobody can run. Each row is applied to a *copy* of the tree by scripts/mutate.mjs - nothing under the repository is opened for writing - and the gate `mutation-claims` checks on every commit that each row still applies (its anchor text occurs exactly once) and that every result claim in docs/context.md and docs/f-evidence.md names a row here. A row may carry `expect: \"missed\"`: that is a rule the mutation did NOT catch, kept as a recorded limitation with its reproduction instead of a claim. No row carries one today: `mutate:fw-direction-sign-ignored` was this ledger's one recorded miss, and it is a claim now that the probe checks its readout against the direction the views carry - the reproduction and the fix are in docs/f-evidence.md \u00a75.2, and scripts/mutate.mjs prints the verdict rather than this file. What no row can establish is that its mutation moves a computed value rather than the shape of an assertion; that is why each row states the rule it attacks, and why scripts/mutate.mjs prints that rule beside the verdict.",
   "commitClaim": "protocol-copied-rule-refused",
   "claims": [
     {
@@ -497,7 +497,7 @@
       "edits": [
         {
           "file": "src/task/tree.ts",
-          "find": "const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped',\n    )",
+          "find": "const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped' || view.status === 'cancelled',\n    )",
           "replace": "    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked')"
         },
         {
@@ -513,7 +513,7 @@
         ]
       },
       "witness": "blocks a dependent on a dependency that ended without verifying, naming it",
-      "note": "two edits, because the stopped case is caught by the `dead` filter first: flipping only the second filter leaves every spec green, which is itself worth recording — the two filters are not redundant, and the first one is what makes \"any terminal satisfies\" unreachable for `stopped`"
+      "note": "two edits, because the stopped case is caught by the `dead` filter first: flipping only the second filter leaves every spec green, which is itself worth recording \u2014 the two filters are not redundant, and the first one is what makes \"any terminal satisfies\" unreachable for `stopped`"
     },
     {
       "id": "task-unverified-child-accepts",
@@ -541,7 +541,7 @@
       "edits": [
         {
           "file": "src/task/tree.ts",
-          "find": "const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped',\n    )",
+          "find": "const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped' || view.status === 'cancelled',\n    )",
           "replace": "    const dead = dependencies.filter(({ view }) => view.status === 'missing')"
         }
       ],
@@ -614,7 +614,7 @@
         ]
       },
       "witness": "cannot start a run for sub-task",
-      "note": "the probe dies on the refusal the reorder produces instead of reporting a failed check, which is what \"以那句拒绝失败\" means: the recovery path is gone, and the store says so by name"
+      "note": "the probe dies on the refusal the reorder produces instead of reporting a failed check, which is what \"\u4ee5\u90a3\u53e5\u62d2\u7edd\u5931\u8d25\" means: the recovery path is gone, and the store says so by name"
     },
     {
       "id": "protocol-copied-rule-refused",
@@ -1412,8 +1412,8 @@
       "edits": [
         {
           "file": "src/task/decomposition.ts",
-          "find": "      requireResponsible(state, envelope.actor, where)\n",
-          "replace": ""
+          "find": "      requireResponsible(state, envelope.actor, where)\n      const existing = state.decomposition?.children ?? []",
+          "replace": "      const existing = state.decomposition?.children ?? []"
         }
       ],
       "run": {
@@ -1487,13 +1487,13 @@
       "witness": "refuses to prepare an existing Run workspace and preserves its frozen files"
     },
     {
-      "id": "assembly-m28-one-input",
-      "rule": "each template binds one input through the closed name/source shape; undeclared additional input members are refused",
+      "id": "assembly-m28-closed-template-input",
+      "rule": "every template input uses the closed name/source shape; undeclared additional input members are refused",
       "doc": "docs/phase-g2-design.md",
       "edits": [
         {
           "file": "assembly/src/template.ts",
-          "find": "  assertClosedKeys(input, ['name', 'source'], `${at}.input`, 'malformed-declaration')\n",
+          "find": "    assertClosedKeys(input, ['name', 'source'], where, 'malformed-declaration')\n",
           "replace": ""
         }
       ],
@@ -1640,6 +1640,44 @@
         ]
       },
       "witness": "commits evaluation requests immediately, resumes the same trials and replays a lost outcome notification without another decision"
+    },
+    {
+      "id": "task-exact-input-producer-run",
+      "rule": "artifact inputs bind the declared verified producer Run; matching bytes from another Run cannot substitute for it",
+      "edits": [
+        {
+          "file": "src/task/commands.ts",
+          "find": "const run = bound?.producerRunId === undefined ? undefined : producer?.runs[bound.producerRunId]",
+          "replace": "const run = Object.values(producer?.runs ?? {}).findLast(run => run.status === 'verified')"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "tests/task-inputs.spec.ts"
+        ]
+      },
+      "witness": "refuses producer Run \"unknown-run\" even when another verified Run has matching bytes"
+    },
+    {
+      "id": "assembly-memory-verified-run-scope",
+      "rule": "structured memory cannot promote an unrelated or unverified Run into an evidence reference",
+      "doc": "docs/context.md",
+      "edits": [
+        {
+          "file": "assembly/src/memory.ts",
+          "find": "if (allowed === undefined)",
+          "replace": "if (false)"
+        }
+      ],
+      "run": {
+        "kind": "vitest",
+        "args": [
+          "assembly/tests/memory.spec.ts",
+          "assembly/tests/memory-native.spec.ts"
+        ]
+      },
+      "witness": "rejects forged evidence while retaining exact model usage"
     }
   ]
 }

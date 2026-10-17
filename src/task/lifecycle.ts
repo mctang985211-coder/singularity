@@ -1,4 +1,5 @@
 import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { isDeepStrictEqual } from 'node:util'
 import { defineKind, type KindRule } from '../protocol/registry.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { assertClosedKeys } from '../protocol/envelope.ts'
@@ -11,26 +12,15 @@ export interface RoundRequest {
   readonly round: number
   readonly incumbent: RevisionRef
   readonly candidates: readonly RevisionRef[]
-  readonly proposal: {
-    readonly sessionId: string
-    readonly tokens: number
-    readonly candidates: readonly string[]
-    readonly sessions: readonly {
-      readonly sessionId: string
-      readonly start: number
-      readonly end: number
-      readonly tokens: number
-    }[]
-  }
   readonly status: 'pending' | 'completed' | 'failed'
   readonly error?: string
 }
 export interface TaskClosure {
   readonly runId: string
-  readonly reason: 'accepted' | 'failed' | 'budget-exhausted'
+  readonly reason: 'accepted' | 'failed'
 }
 export interface RSIStatus {
-  readonly status: 'pending' | 'running' | 'completed' | 'skipped' | 'failed'
+  readonly status: 'pending' | 'running' | 'completed' | 'failed'
   readonly detail: string
   readonly trace?: FileAttachmentRef
 }
@@ -44,7 +34,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       parse: (raw) => {
         const row = record(raw, 'task closure'),
           reason = text(row, 'reason', 'task closure')
-        if (!['accepted', 'failed', 'budget-exhausted'].includes(reason))
+        if (!['accepted', 'failed'].includes(reason))
           refuse('malformed-payload', 'unknown task closure')
         return { runId: text(row, 'runId', 'task closure'), reason: reason as TaskClosure['reason'] }
       },
@@ -69,7 +59,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       parse: (raw) => {
         const row = record(raw, 'RSI status'),
           status = text(row, 'status', 'RSI status')
-        if (!['pending', 'running', 'completed', 'skipped', 'failed'].includes(status))
+        if (!['pending', 'running', 'completed', 'failed'].includes(status))
           refuse('malformed-payload', 'unknown RSI status')
         const trace = row['trace'] === undefined ? undefined : record(row['trace'], 'sealed trajectory')
         if (trace !== undefined) {
@@ -96,9 +86,11 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
           state.rsi === undefined
             ? ['pending']
             : state.rsi.status === 'pending'
-              ? ['running', 'skipped', 'failed']
+              ? ['running', 'failed']
               : state.rsi.status === 'running'
                 ? ['completed', 'failed']
+                : state.rsi.status === 'failed' && state.rsi.trace !== undefined && isDeepStrictEqual(payload.trace, state.rsi.trace)
+                  ? ['running']
                 : []
         if (!allowed.includes(payload.status)) refuse('illegal-transition', 'invalid RSI transition')
         return { ...state, rsi: { ...state.rsi, ...payload } }
@@ -107,7 +99,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
     'rsi/round-requested': defineKind<TaskState, Omit<RoundRequest, 'status' | 'error'>, {}>({
       guarantees: { appended: true },
       emitter: 'scheduler',
-      members: ['runId', 'roundId', 'round', 'incumbent', 'candidates', 'proposal'],
+      members: ['runId', 'roundId', 'round', 'incumbent', 'candidates'],
       nested: {},
       parse: (raw) => {
         const row = record(raw, 'round request')
@@ -116,40 +108,14 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
         if (!Array.isArray(row['candidates']) || row['candidates'].length === 0)
           refuse('malformed-payload', 'round needs candidates')
         const candidates = row['candidates'].map((ref) => revisionRef(ref, 'candidate', REVISION_MEMBERS))
-        const proposal = record(row['proposal'], 'proposal cost')
-        assertClosedKeys(proposal, ['sessionId', 'tokens', 'candidates', 'sessions'], 'proposal cost')
-        text(proposal, 'sessionId', 'proposal cost')
-        if (
-          !Number.isSafeInteger(proposal['tokens']) ||
-          (proposal['tokens'] as number) < 0 ||
-          !Array.isArray(proposal['sessions']) ||
-          !Array.isArray(proposal['candidates'])
-        )
-          refuse('malformed-payload', 'invalid frozen proposal cost')
-        for (const raw of proposal['sessions']) {
-          const held = record(raw, 'proposal session')
-          assertClosedKeys(held, ['sessionId', 'start', 'end', 'tokens'], 'proposal session')
-          text(held, 'sessionId', 'proposal session')
-          if (
-            ['start', 'end', 'tokens'].some((key) => !Number.isSafeInteger(held[key]) || (held[key] as number) < 0) ||
-            (held['start'] as number) > (held['end'] as number)
-          )
-            refuse('malformed-payload', 'invalid proposal cutoff')
-        }
-        const costs = proposal['sessions'] as RoundRequest['proposal']['sessions']
-        if (new Set(candidates.map((ref) => ref.digest)).size !== candidates.length ||
-          JSON.stringify(proposal['candidates']) !== JSON.stringify(candidates.map((ref) => ref.digest)) ||
-          new Set(costs.map((held) => held.sessionId)).size !== costs.length ||
-          !costs.some((held) => held.sessionId === proposal['sessionId']) ||
-          costs.reduce((sum, held) => sum + held.tokens, 0) !== proposal['tokens'])
-          refuse('malformed-payload', 'proposal cost must bind the exact candidates and unique session totals')
+        if (new Set(candidates.map(ref => ref.digest)).size !== candidates.length)
+          refuse('malformed-payload', 'round candidates must be unique revisions')
         return {
           runId: text(row, 'runId', 'round request'),
           roundId: text(row, 'roundId', 'round request'),
           round: round as number,
           incumbent: revisionRef(row['incumbent'], 'incumbent', REVISION_MEMBERS),
           candidates,
-          proposal: proposal as unknown as RoundRequest['proposal'],
         }
       },
       reduce: (state, envelope, payload) => {
@@ -159,7 +125,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
           run.purpose !== 'improve' ||
           run.status !== 'running' ||
           run.stage !== 'working' ||
-          state.rounds?.some((r) => r.roundId === payload.roundId)
+          state.rounds?.some((r) => r.roundId === payload.roundId || r.status === 'pending')
         )
           refuse('illegal-transition', 'evaluation requires a unique working RSI request')
         return { ...state, rounds: [...(state.rounds ?? []), { ...payload, status: 'pending' }] }

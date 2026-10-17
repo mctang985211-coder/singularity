@@ -10,59 +10,89 @@
     {
       "id": "count-source",
       "goal": "count the ASCII letters in the protected source",
-      "input": {
-        "name": "in/source.txt",
-        "source": {
-          "kind": "protected",
-          "ref": "letters-original"
+      "artifact": "report.txt",
+      "inputs": [
+        {
+          "name": "in/source.txt",
+          "source": {
+            "kind": "protected",
+            "ref": "letters-original"
+          }
         }
-      },
-      "workspace": {
-        "artifact": "report.txt"
-      },
-      "criterion": {
-        "criterionId": "letters",
-        "statement": "the report is the number of ASCII letters in the input",
-        "verifier": "letters"
-      }
+      ],
+      "criteria": [
+        {
+          "criterionId": "letters",
+          "statement": "the report is the number of ASCII letters in the input"
+        }
+      ],
+      "skills": [],
+      "capabilities": [],
+      "checks": [
+        {
+          "criterionId": "letters",
+          "verifier": "letters",
+          "input": "in/source.txt"
+        }
+      ]
     },
     {
       "id": "extract-letters",
       "goal": "extract every ASCII letter in source order, with no other bytes",
-      "input": {
-        "name": "in/source.txt",
-        "source": {
-          "kind": "protected",
-          "ref": "letters-original"
+      "artifact": "letters.txt",
+      "inputs": [
+        {
+          "name": "in/source.txt",
+          "source": {
+            "kind": "protected",
+            "ref": "letters-original"
+          }
         }
-      },
-      "workspace": {
-        "artifact": "letters.txt"
-      },
-      "criterion": {
-        "criterionId": "extracted",
-        "statement": "the artifact contains exactly the source ASCII letters in their original order, without a trailing newline",
-        "verifier": "extract-letters"
-      }
+      ],
+      "criteria": [
+        {
+          "criterionId": "extracted",
+          "statement": "the artifact contains exactly the source ASCII letters in their original order, without a trailing newline"
+        }
+      ],
+      "skills": [],
+      "capabilities": [],
+      "checks": [
+        {
+          "criterionId": "extracted",
+          "verifier": "extract-letters",
+          "input": "in/source.txt"
+        }
+      ]
     },
     {
       "id": "count-letters",
       "goal": "count the letters in the verified extraction",
-      "input": {
-        "name": "in/letters.txt",
-        "source": {
-          "kind": "artifact",
-          "template": "extract-letters"
+      "artifact": "report.txt",
+      "inputs": [
+        {
+          "name": "in/letters.txt",
+          "source": {
+            "kind": "artifact",
+            "template": "extract-letters"
+          }
         }
-      },
-      "workspace": {
-        "artifact": "report.txt"
-      },
-      "criterion": {
-        "criterionId": "counted",
-        "statement": "the report is the decimal length of an input containing only ASCII letters",
-        "verifier": "count-letters"
-      }
+      ],
+      "criteria": [
+        {
+          "criterionId": "counted",
+          "statement": "the report is the decimal length of an input containing only ASCII letters"
+        }
+      ],
+      "skills": [],
+      "capabilities": [],
+      "checks": [
+        {
+          "criterionId": "counted",
+          "verifier": "count-letters",
+          "input": "in/letters.txt"
+        }
+      ]
     }
   ],
   "verifiers": [

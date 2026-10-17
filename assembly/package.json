@@ -25,6 +25,7 @@
     "bundle": {
       "patch": [
         "./cordis.patch.yml",
+        "./presets/singularity-root.patch.yml",
         "./presets/singularity-next.patch.yml",
         "./presets/singularity-review.patch.yml",
         "./presets/singularity-improve.patch.yml"
@@ -35,6 +36,7 @@
     }
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-agent-preset-registry": "0.2.0-rc.2",
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
     "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.2",
@@ -50,9 +52,17 @@
     "@deepseek-ai/dsh-tool-fs": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tool-fs-search": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tool-bash": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-skill": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-skill": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-token-meter": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm-retry": "0.2.0-rc.2"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-agent-preset-registry": {
+      "optional": true
+    },
     "@deepseek-ai/cordis": {
       "optional": true
     },
@@ -99,6 +109,18 @@
       "optional": true
     },
     "@deepseek-ai/dsh-skill": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-compaction-basic": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-compaction": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-token-meter": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session-projection": {
       "optional": true
     }
   }

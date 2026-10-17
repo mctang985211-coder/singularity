@@ -148,7 +148,7 @@ describe('a run starts only when every cross-entity condition holds', () => {
     await commands.decompose({
       commandId: 'plan',
       parentTaskId: PARENT,
-      children: [{ taskId: CHILD, dependsOn: ['task-sibling'], supports: ['correctness'], maxRuns: 1 }, { taskId: 'task-sibling', dependsOn: [], supports: ['limits'], maxRuns: 1 },
+      children: [{ taskId: CHILD, dependsOn: ['task-sibling'], supports: ['correctness'], maxRuns: 1, requirement: 'required' as const }, { taskId: 'task-sibling', dependsOn: [], supports: ['limits'], maxRuns: 1, requirement: 'required' as const },
       ],
     })
     await commands.assign({ commandId: 'assign-child', taskId: CHILD, agentId: AGENT })
@@ -302,6 +302,7 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
       'openBubble',
       'reassign',
       'startRun',
+      'stopExplorations',
       'submitRun',
     ])
     expect(() => commands.forAgent('agent-nobody-holds')).toThrowError(/not one this deployment holds/)

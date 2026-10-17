@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Background, Controls, MiniMap, ReactFlow, ReactFlowProvider } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
@@ -11,6 +11,16 @@ const nodeTypes = { agent: AgentNode }, edgeTypes = { agent: AgentEdge }
 function Canvas() {
   const nodes = useStore(state => state.nodes), edges = useStore(state => state.edges)
   const error = useStore(state => state.error), snapshot = useStore(state => state.snapshot)
+  const [restarting, setRestarting] = useState(false)
+  const restart = async () => {
+    setRestarting(true)
+    try {
+      const response = await fetch('/singularity/restart', { method: 'POST' })
+      if (!response.ok) throw new Error(await response.text())
+      useStore.getState().receive(await response.json())
+    } catch (error) { useStore.setState({ error: String(error) }) }
+    finally { setRestarting(false) }
+  }
   useEffect(() => {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout>
@@ -26,15 +36,18 @@ function Canvas() {
     const receive = (event: MessageEvent) => {
       if (event.origin !== location.origin || event.source !== window.parent) return
       const state = useStore.getState()
-      const selected = state.snapshot?.tasks.find(task => task.taskId === state.selectedId)
-      if (event.data.sessionId !== selected?.sessionId) return
+      const sessionId = state.snapshot?.tasks.find(task => task.taskId === state.selectedId)?.sessionId
+        ?? state.snapshot?.reviews.find(review => review.reviewId === state.selectedId)?.sessionId
+      if (!sessionId || event.data?.sessionId !== sessionId) return
       if (event.data.type === 'singularity:transcript') useStore.setState({ chat: { sessionId: event.data.sessionId, rows: event.data.rows, error: null } })
       if (event.data.type === 'singularity:session-error') useStore.setState(state => ({ chat: { ...state.chat, error: event.data.message } }))
     }
     window.addEventListener('message', receive)
     return () => { controller.abort(); clearTimeout(timer); window.removeEventListener('message', receive) }
   }, [])
-  return <div className="sg-shell"><div className="sg-toolbar">Singularity · {snapshot?.controlId} · committed #{snapshot?.cutoff}{error && <span role="alert">{error}</span>}</div>
+  return <div className="sg-shell"><div className="sg-toolbar">Singularity · {snapshot?.controlId} · committed #{snapshot?.cutoff}
+    {snapshot?.providerStopped && <><span role="alert">provider 不稳定；整张图已结束</span><button disabled={restarting} onClick={() => void restart()}>{restarting ? '正在重启…' : '一键重启'}</button></>}
+    {error && <span role="alert">{error}</span>}</div>
     <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} nodesDraggable={false} nodesConnectable={false}
       deleteKeyCode={null} minZoom={0.04} maxZoom={2} fitView proOptions={{ hideAttribution: true }}
       onNodeClick={(_event, node) => useStore.getState().setSelected(node.id)} onPaneClick={() => useStore.getState().setSelected(null)}>

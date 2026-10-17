@@ -1,20 +1,33 @@
-# Port RRSI's decision layer, never its execution machinery
+# Use the RRSI loop through Harness execution
 
 **Status:** accepted (2026-10-09)
 
 ## Decision
 
 RRSI ([google-research/rrsi](https://github.com/google-research/rrsi) @ `be50316`) enters Singularity as a
-**specification for the decision layer**, not as a service we run and not as a codebase we port wholesale.
+**specification for the method-evolution loop**, not as a service we run and not as a codebase we port wholesale.
 
-We port to TypeScript only its **pure decision and regularization functions** — selection, the component
-vocabulary and novelty, the annealed edit budget, the noise-band calibration, the score aggregation, and the
-history summaries — together with the **mechanical constraints** that give them force. We do **not** port its
-round orchestration (git worktrees, branches, `fast_forward`, its own JSONL state) or its LLM-agent pipeline
-(proposer/critic/analyst/digester agent loops), because Singularity already owns those: a **bubble** is the
-per-round isolated clone that a candidate worktree is, the **environment pointer** is what `fast_forward` is,
-and the **agent runtime** is what the proposer/critic/analyst agents are. The Python checkout stays as an
-**executable specification** and the source of the divergence vectors.
+We port its pure decision functions and the sequence in `rrsi/loop.py`: analyze the incumbent's
+sealed evidence, propose a small reusable change, screen it before evaluation, evaluate isolated trials,
+select from frozen measurements and publish the approved winner. `rrsi/critic.py` supplies the screening
+contract: reject task answers, task-specific state, grader gaming, inert changes and unbounded work;
+return objections to the proposer before spending business execution. `rrsi/propose.py` supplies the
+repair boundary: a rejected proposal returns concrete reasons rather than ending the loop.
+
+The model exposes one proposal operation, `singularity_propose_method({path})`; incumbent and round
+identity are host-bound. The runtime reuses the sealed business root as the incumbent evaluation, then
+executes candidates through Harness Tasks and independent acceptance. No-winner outcomes resume the same
+RSI session for revision; publication has its own independent review. Costs include only the business
+root, its delegated work and acceptance through submission. RSI usage never enters any comparison.
+The analyst initially receives a compact evidence summary, lists sealed event metadata, then pages
+the selected native event by UTF-8 bytes. Its tools read evidence, edit files, propose and submit;
+it has no shell, web, benchmark or delegation executor.
+Proposal and publication reviewers can only read frozen evidence, write their judgment and submit it; they do not
+receive execution, web or delegation tools.
+
+Harness owns sessions, bubbles, the control log and the environment pointer. We do not copy RRSI's git
+worktrees, Python agent executor or JSONL persistence. The implementation and all RSI contracts are TypeScript. Decision regression tests use frozen
+reference outcomes; the Python checkout is read only as a design reference.
 
 ## Why this is the boundary
 
@@ -58,8 +71,8 @@ acceptance criterion.
   asset classes. Upstream's diff-signal fallback classification does not come with it.
 - **Drift is answered mechanically, not by argument.** Pin the upstream commit; keep and extend the vector
   corpus with the previous system's three-way tags (`deterministic` / `port-adapted` / `upstream-native`); run
-  a differential harness that puts upstream's `tests/test_core.py` and our TypeScript on the same synthetic
-  inputs and compares verdicts; and keep a divergence ledger alongside the vectors.
+  a differential harness that compares our TypeScript with frozen upstream outcomes on the same synthetic
+  inputs; and keep a divergence ledger alongside the vectors.
 - **Upstream updates are manual.** This is the accepted cost: on a bump we re-extract vectors and re-diff,
   rather than tracking a moving target at runtime.
 - **Revisit this ADR if** a capability we need exists only in Python, or if upstream starts evolving fast

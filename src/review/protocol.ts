@@ -10,7 +10,7 @@ import type { Bubble } from '../task/bubble.ts'
 import type { RevisionRef } from '../task/protocol.ts'
 
 export const REVIEW_PROTOCOL = 'review'
-export const REVIEW_VERSION = 2
+export const REVIEW_VERSION = 5
 export const REVIEW_ROLE = 'verifier:independent-review@1'
 export const REVIEW_DIGEST = digestOf({ protocol: REVIEW_PROTOCOL, version: REVIEW_VERSION })
 export const reviewCriterion = (criterion: AcceptanceCriterion): VerifierCriterion => ({
@@ -32,6 +32,12 @@ export type ReviewTarget =
       readonly environmentId: string
       readonly revisionId: string
       readonly draftDigest: string
+      readonly assetsDigest: string
+    }
+  | {
+      readonly kind: 'proposal'
+      readonly environmentId: string
+      readonly revisionId: string
       readonly assetsDigest: string
     }
 export interface Finding {
@@ -100,12 +106,13 @@ export function declareReviewProtocol(registry: ProtocolRegistry): void {
           const row = record(raw, where)
           const target = record(row['target'], 'review target')
           const kind = text(target, 'kind', 'review target')
-          if (kind !== 'acceptance' && kind !== 'publication') refuse('malformed-payload', 'unknown review target')
+          if (kind !== 'acceptance' && kind !== 'publication' && kind !== 'proposal') refuse('malformed-payload', 'unknown review target')
           assertClosedKeys(
             target,
             kind === 'acceptance'
               ? ['kind', 'taskId', 'runId', 'contractDigest', 'artifactDigest']
-              : ['kind', 'environmentId', 'revisionId', 'draftDigest', 'assetsDigest'],
+              : kind === 'publication' ? ['kind', 'environmentId', 'revisionId', 'draftDigest', 'assetsDigest']
+              : ['kind', 'environmentId', 'revisionId', 'assetsDigest'],
             'review target',
           )
           for (const key of Object.keys(target))
@@ -165,6 +172,8 @@ export function declareReviewProtocol(registry: ProtocolRegistry): void {
             { criteria: state.criteria },
             state.reviewId,
           )
+          if (children.some(child => child.requirement !== 'required'))
+            refuse('malformed-payload', 'independent review evidence tasks must be required')
           return { ...state, children }
         },
       }),

@@ -15,6 +15,7 @@ export default function FocusPanel() {
     <aside className="sg-focus">
     <header><strong>{task?.purpose ?? 'review'} · {task?.phase ?? review!.status}</strong><button onClick={() => useStore.getState().setSelected(null)}>×</button></header>
     <div className="sg-focus-detail"><p>{task?.goal ?? review!.criteria.map((c) => c.statement).join('; ')}</p>
+      {task?.coordination.waiting && <p role="status">等待：{task.coordination.waiting}</p>}
         <small>
           {id}
           <br />

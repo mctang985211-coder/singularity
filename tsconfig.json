@@ -91,6 +91,12 @@
       ],
       "@deepseek-ai/dsh-skill": [
         "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-skill/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-token-meter/client": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-token-meter/lib/types/client.d.ts"
+      ],
+      "@deepseek-ai/dsh-session-projection": [
+        "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-session-projection/lib/types/index.d.ts"
       ]
     }
   },

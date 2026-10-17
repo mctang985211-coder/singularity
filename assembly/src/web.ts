@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
 import { dirname, extname, resolve, sep } from 'node:path'
+import { ProtocolRefusal } from '../../src/protocol/refusal.ts'
 
 import type { Context } from '@deepseek-ai/cordis'
 // Register the host's service types without adding a runtime dependency.
@@ -12,6 +13,8 @@ export const name = 'singularity-web'
 export const inject = ['singularity', 'webServer']
 
 export const TASKS_PATH = '/singularity/tasks'
+export const RESTART_PATH = '/singularity/restart'
+export const RSI_MEMORY_PATH = '/singularity/rsi-memory'
 
 export const PANEL_PATH = '/singularity/panel'
 
@@ -94,10 +97,10 @@ function servePanel(ctx: Context): () => void {
 
 export function apply(ctx: Context): void {
   ctx.effect(() => servePanel(ctx))
-  ctx.effect(() =>
+  for (const path of [TASKS_PATH, RESTART_PATH, RSI_MEMORY_PATH]) ctx.effect(() =>
     ctx.webServer.register({
       kind: 'exact',
-      path: TASKS_PATH,
+      path,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         const fence = fenceOf(ctx)
         if (fence === undefined) {
@@ -113,10 +116,30 @@ export function apply(ctx: Context): void {
           res.end()
           return
         }
-        if (req.method !== 'GET') {
+        const method = path === TASKS_PATH ? 'GET' : 'POST'
+        if (req.method !== method) {
           res.statusCode = 405
-          res.setHeader('allow', 'GET')
+          res.setHeader('allow', method)
           res.end()
+          return
+        }
+        if (path === RESTART_PATH) {
+          if (!(await ctx.singularity.read()).providerStopped) {
+            sendJson(res, 409, { message: 'Only a graph stopped by an unstable provider can be restarted' })
+            return
+          }
+          await ctx.singularity.restart()
+        }
+        if (path === RSI_MEMORY_PATH) {
+          try {
+            const chunks: Buffer[] = []
+            for await (const chunk of req) chunks.push(Buffer.from(chunk))
+            await ctx.singularity.inheritRsi(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+            sendJson(res, 200, { status: 'linked' })
+          } catch (error) {
+            if (!(error instanceof SyntaxError || error instanceof ProtocolRefusal)) throw error
+            sendJson(res, 400, { message: String(error) })
+          }
           return
         }
         sendJson(res, 200, await ctx.singularity.read())

@@ -1,3 +1,4 @@
+import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile, readFile, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -24,7 +25,7 @@ async function setup() {
       root,
       await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
       medium as never,
-      attachmentsAt(root),
+      attachmentsAt(root), testProjections,
     )
   const agent = agentFor('worker', 'worker'),
     caller = callerOf(agent),
@@ -35,7 +36,7 @@ async function setup() {
       fakeExecution(() => undefined),
       caller,
       execFor(agent, id),
-      { taskId: proposal.taskId, path: proposal.artifact },
+      { taskId: proposal.taskId, path: proposal.contract.artifact },
       new AbortController().signal,
       fixtureReview(apparatus),
     )
@@ -44,13 +45,13 @@ async function setup() {
 describe('sealed file submission', () => {
   it('refuses a second submission during review without failing the already sealed Run', async () => {
     const h = await setup()
-    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '35')
+    await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '35')
     let reviewing!: () => void, finish!: () => void
     const started = new Promise<void>((resolve) => { reviewing = resolve })
     const release = new Promise<void>((resolve) => { finish = resolve })
     const judge = fixtureReview(h.apparatus)
     const pending = submit(h.apparatus, fakeExecution(() => undefined), h.caller, execFor(h.agent, 'first'),
-      { taskId: h.proposal.taskId, path: h.proposal.artifact }, new AbortController().signal,
+      { taskId: h.proposal.taskId, path: h.proposal.contract.artifact }, new AbortController().signal,
       async (...args) => { reviewing(); await release; return judge(...args) })
     await started
     try {
@@ -63,7 +64,7 @@ describe('sealed file submission', () => {
   })
   it('judges the actual artifact and reuses its committed answer after workspace deletion', async () => {
     const h = await setup()
-    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '35')
+    await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '35')
     const answer = await h.send()
     expect(answer.verdict).toBe('pass')
     const run = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!
@@ -80,7 +81,7 @@ describe('sealed file submission', () => {
   })
   it('finishes a negative review and a failed acceptance without failing the reviewer Run', async () => {
     const h = await setup()
-    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '0')
+    await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '0')
     expect((await h.send()).verdict).toBe('fail')
     const reviews = h.apparatus.store
       .load()
@@ -98,7 +99,7 @@ describe('sealed file submission', () => {
   it('refuses changed frozen inputs and symbolic artifact paths', async () => {
     const h = await setup()
     await writeFile(join(h.proposal.workspace, 'in/source.txt'), 'changed')
-    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '35')
+    await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '35')
     await expect(h.send()).rejects.toThrow('evidence-input-mismatch')
     expect(
       h.apparatus.store
@@ -110,7 +111,7 @@ describe('sealed file submission', () => {
     const s = await setup()
     const outside = join(s.proposal.workspace, 'outside')
     await writeFile(outside, '35')
-    await symlink(outside, join(s.proposal.workspace, s.proposal.artifact))
+    await symlink(outside, join(s.proposal.workspace, s.proposal.contract.artifact))
     await expect(s.send()).rejects.toThrow('symbolic link')
     expect(await readFile(outside, 'utf8')).toBe('35')
     await s.apparatus.store.close()

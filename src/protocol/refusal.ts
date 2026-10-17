@@ -78,8 +78,6 @@ export const REFUSAL_CODES = [
   'unadjudicated-criterion',
   /** Two measurements are not comparable: their frozen calibers differ, so pooling their scores would compare different questions. */
   'caliber-mismatch',
-  /** The annealed edit budget for this round is spent; a further structural change is a different round. */
-  'budget-exhausted',
   /** An approval names a draft digest that is no longer the draft's: the content moved after it was approved. */
   'stale-approval',
   /** A pointer would move the head to a revision that exists but nobody approved. */

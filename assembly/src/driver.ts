@@ -1,11 +1,11 @@
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { aborted } from 'node:util'
-import type { UserMessage } from '@deepseek-ai/dsh-llm'
+import type { LlmRuntime, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { postIdentifiedMessage } from '../../src/runtime/identified-message.ts'
 import {
@@ -21,7 +21,7 @@ import type { TaskView } from '../../src/task/view.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, reviewCriterion, type ReviewRun } from '../../src/review/protocol.ts'
 import { createReviewCommands } from '../../src/review/commands.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
-import { ProtocolRefusal, refuse } from '../../src/protocol/refusal.ts'
+import { refuse } from '../../src/protocol/refusal.ts'
 import { callerOf, declareCaller, taskStateOf, openApparatus, type Apparatus } from './apparatus.ts'
 import type { Domain } from './domain.ts'
 import type { BubbleWorld } from './bubble.ts'
@@ -30,69 +30,62 @@ import { repair } from './repair.ts'
 import { createScheduler } from './scheduler.ts'
 import { snapshotOf, type ControlSnapshot } from './snapshot.ts'
 import { decompose, propose, retry } from './surfaces.ts'
-import { submit, judgeAndRecord, type AcceptanceReview, type Submission } from './submission.ts'
-import { createMethod, seedMethod, loadMethod, methodToolReferences, METHOD_FORMAT } from './method.ts'
-import { methodSkill, mountMethodSkills, recordMethodContext, runMethodTool, type MethodContext } from './method-run.ts'
-import { proposalCostOf, taskSessionsOf } from './evaluation-cost.ts'
-import { acceptanceSubject, reviewSubject, reviewOf, submitReview, type ReviewWitness } from './review.ts'
-import { assertImprovementOwner, explorationOf, startImprovement } from './improvement.ts'
-import { createEvolution, readEvolutionRound, type EvolutionRound, type EvolutionOptions } from './evolution.ts'
-import { createNativeSolve } from './native-solve.ts'
+import { submit, judgeAndRecord, type AcceptanceReview, type Submission, type SubmissionInput } from './submission.ts'
+import { seedMethod, loadMethod, methodToolReferences } from './method.ts'
+import { mountMethodSkills, runMethodTool } from './method-run.ts'
+import { taskSessionsOf } from './evaluation-cost.ts'
+import { acceptanceSubject, reviewSubject, reviewOf, submitReview, methodReviewTools, type ReviewWitness } from './review.ts'
+import { explorationOf, startImprovement, improvementTools } from './improvement.ts'
+import { proposeRsiMethod, assertRsiReportReady } from './rsi-proposal.ts'
+import { createEvolution, type EvolutionOptions } from './evolution.ts'
+import { createNativeSolve, observeSolve } from './native-solve.ts'
 import { releaseMethod } from './method-release.ts'
-import { readArtifact, readTask, readTrajectory } from './read.ts'
-import { createCampaignBudget, type CampaignBudget, type CampaignLimits } from './budget.ts'
+import { readForAgent, type ReadInput } from './read.ts'
 import { schedulerMessage } from './scheduler-message.ts'
 import { sha256, taskIdOf } from './ids.ts'
-import { inside } from './shape.ts'
-import { assertRunFile } from './workspace.ts'
-import { sealedBytes } from './sealed.ts'
-import { MEASURE_PROTOCOL, MEASURE_VERSION, type EvaluationState } from '../../src/measure/protocol.ts'
-import { answerChild, askParent, assertActive, coordinationOf, parentPlan, waitingReason, readScopeOf, type AskParent, type AnswerChild } from './coordination.ts'
+import { memoryContextOf, type MemoryContext } from './memory.ts'
+import { parentMemoryRefOf, prepareParentMemory, readParentMemory, type ParentMemoryRef } from './parent-memory.ts'
+import { parentMemorySessionsOf, readMemoryForAgent, type MemoryReadInput } from './memory-view.ts'
+import { linkRsiMemory, rsiMemorySourceOf, type RsiMemoryInput } from './rsi-memory.ts'
+import { answerChild, askParent, assertActive, coordinationOf, parentPlan, waitingReason, type AskParent, type AnswerChild } from './coordination.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { singularity: TaskService }
 }
 export interface TaskService {
+  restart(): Promise<void>
+  inheritRsi(input: RsiMemoryInput): Promise<void>
   forCall(exec: ToolRunContext): AgentTaskSurface
   read(): Promise<ControlSnapshot>
-  skill(agentId: string): Promise<string | undefined>
-  recordContext(agentId: string): Promise<void>
   mountSkills(agent: Agent): Promise<void>
   world(agentId: string): BubbleWorld
-  purpose(agentId: string): string
+  memoryContext(agentId: string): Promise<MemoryContext>
 }
 export interface AgentTaskSurface {
+  memory(input?: MemoryReadInput): Promise<unknown>
+  stopExplorations(input: { readonly taskIds: readonly string[]; readonly reason: string; readonly requestKey: string }): Promise<unknown>
   askParent(input: AskParent): Promise<unknown>
   answer(input: AnswerChild): Promise<unknown>
   retry(input: { readonly taskId: string }): Promise<Proposal>
-  createMethod(input: { readonly path: string }): Promise<RevisionRef>
   runMethod(input: { readonly taskId: string
     readonly tool: string
     readonly candidatePath?: string }): Promise<{ artifact: string }>
-  evolve(input: EvolutionRound): Promise<{ roundId: string; status: string }>
-  history(input?: {
-    readonly kind?: 'summary' | 'task' | 'artifact' | 'template' | 'method' | 'round' | 'trajectory'
-    readonly ref?: string
-    readonly runId?: string
-    readonly from?: number
-    readonly count?: number
-  }): Promise<unknown>
+  proposeMethod(input: { readonly path: string }): Promise<unknown>
+  history(input?: ReadInput): Promise<unknown>
   decompose(input: DecomposeInput): Promise<PlanRecord>
-  submit(input: { readonly taskId: string; readonly path: string }): Promise<Submission | ReviewWitness>
+  submit(input: SubmissionInput): Promise<Submission | ReviewWitness>
   current(): string
 }
 export interface PlannedChild {
   readonly key: string
-  readonly template?: string
-  readonly contract?: TaskContract
+  readonly contract: TaskContract
   readonly dependsOn: readonly string[]
   readonly supports: readonly string[]
   readonly maxRuns: number
+  readonly requirement: 'required' | 'exploration'
   readonly handoff?: import('../../src/task/decomposition.ts').DecompositionChild['handoff']
 }
-export type DecomposeInput =
-  | { readonly taskId: string; readonly children: readonly PlannedChild[]; readonly useTemplateDecomposition?: never }
-  | { readonly taskId: string; readonly useTemplateDecomposition: true; readonly children?: never }
+export interface DecomposeInput { readonly taskId: string; readonly children: readonly PlannedChild[] }
 export interface PlanRecord { readonly taskId: string
   readonly opened: readonly string[] }
 export interface Proposal {
@@ -101,13 +94,12 @@ export interface Proposal {
   readonly workspace: string
   readonly contract: TaskContract
   readonly phase: TaskView['phase']
-  readonly artifact: string
-  readonly templates: readonly { readonly id: string; readonly goal: string; readonly applicability?: string }[]
-  readonly methodContext: MethodContext
+  readonly method: RevisionRef
 }
 export interface DriverOptions {
-  readonly budget?: CampaignLimits
+  readonly initialMethod?: unknown
   readonly attachments: Apparatus['attachments']
+  readonly projections: Apparatus['projections']
   readonly controlId: string
   readonly workspaceRoot: string
   readonly domain: Domain
@@ -115,8 +107,12 @@ export interface DriverOptions {
   readonly seams: ChildSessionSeams
   readonly execution: (admission: Admission, onTurnFailure: TurnFailureHandler) => Execution
 }
-export interface TaskDriver extends TaskService {
-  readonly budget?: CampaignBudget
+export interface TaskDriver extends Omit<TaskService, 'restart'> {
+  stop(): void
+  prepareMemory(agent: Agent): Promise<void>
+  failed(agentId: string): boolean
+  reviewTarget(agentId: string): ReviewRun['target'] | undefined
+  responsibility(agentId: string): ReturnType<typeof coordinationOf> | undefined
   enter(agent: Agent, messages: readonly UserMessage[], model: { provider: string; model: string },
   ): Promise<UserMessage | undefined>
   activate(sessionId: string): Promise<void>
@@ -124,14 +120,10 @@ export interface TaskDriver extends TaskService {
 }
 
 export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
-  const apparatus = await openApparatus(options.controlId, options.workspaceRoot, options.domain, options.persistence, options.attachments,
+  const apparatus = await openApparatus(options.controlId, options.workspaceRoot, options.domain, options.persistence, options.attachments, options.projections,
   )
-  if (options.budget !== undefined) {
-    apparatus.budget = createCampaignBudget(apparatus, options.budget)
-    await apparatus.budget.restore()
-  }
   const measurement = apparatus.domain.measurement
-  const criterion = reviewCriterion(apparatus.domain.templates.get(apparatus.domain.rootTemplate)!.criterion)
+  const criterion = reviewCriterion(apparatus.domain.templates.get(apparatus.domain.rootTemplate)!.criteria[0]!)
   const evaluation: Pick<EvolutionOptions, 'criterion' | 'metric' | 'trials' | 'weights' | 'calibration'> = {
     criterion,
     metric: { measured: measurement?.criterion ?? { ...criterion, criterionId: `${criterion.criterionId}:quality` },
@@ -146,6 +138,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
   const backgroundErrors: unknown[] = []
   let closing: Promise<void> | undefined,
     scheduled = false
+  let providerStopped = false
   const tasks = () => apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
     const registry = () =>
     (options.seams.get === undefined ? options.seams.agents : options.seams.get('agents')) as AgentRegistry
@@ -155,6 +148,24 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     [...apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()].find((r) =>
       r.children.some((c) => c.taskId === id),
     )?.reviewId
+  const nativeEvents = async (sessionId: string): Promise<readonly SessionEvent[]> => {
+    const handle = await apparatus.persistence.open(SessionId(sessionId), 'read')
+    try { return (await handle.read()).events } finally { await handle.close() }
+  }
+  const memoryRef = async (agentId: string): Promise<ParentMemoryRef | undefined> => {
+    const task = owner(agentId)
+    if (task === undefined) return undefined
+    const parent = parentPlan(apparatus, task.taskId)
+    if (parent === undefined) return undefined
+    const cut = apparatus.store.load(), scope = (await memoryContextOf(apparatus, agentId)).scope
+    const found: ParentMemoryRef[] = []
+    for (const sessionId of parentMemorySessionsOf(cut, { ...parent, kind: cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).has(parent.id) ? 'task' : 'review' })) {
+      const ref = parentMemoryRefOf(sessionId, await nativeEvents(sessionId), scope)
+      if (ref !== undefined) found.push(ref)
+    }
+    if (found.length > 1) refuse('evidence-input-mismatch', 'assigned scope has checkpoints in multiple parent sessions')
+    return found[0]
+  }
   const taskFact = (commandId: string, kind: string, taskId: string, payload: unknown, as?: string) =>
     apparatus.store.emit({
       commandId,
@@ -165,10 +176,13 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       payload,
       ...(as === undefined ? {} : { as }),
     })
-  const rsiStatus = (taskId: string, value: RSIStatus) =>
-    taskFact(`rsi:${taskId}:${value.status}`, 'rsi/status', taskId, value)
+  const rsiStatus = (taskId: string, value: RSIStatus) => {
+    const prior = apparatus.store.load().entriesOf(TASK_PROTOCOL, TASK_VERSION).findLast(fact => fact.subject === taskId && fact.kind === 'rsi/status')
+    return taskFact(`rsi:${taskId}:${value.status}:${prior?.seq ?? 0}`, 'rsi/status', taskId, value)
+  }
   const work = <T>(step: () => Promise<T>): Promise<T> => {
     if (closing !== undefined) refuse('illegal-transition', 'driver is closing')
+    controller.signal.throwIfAborted()
     const pending = step()
     active.add(pending)
     void pending.then(() => active.delete(pending), () => active.delete(pending),
@@ -194,7 +208,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
   const closeRoot = async (
     task: TaskState,
     run: RunState,
-    reason: 'accepted' | 'failed' | 'budget-exhausted',
+    reason: 'accepted' | 'failed',
   ): Promise<void> => {
     if (parentOf(task.taskId) !== undefined) return
     if (task.closure === undefined)
@@ -223,17 +237,24 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     }
   }
   const admission: Admission = (exec) => {
-    if (exec.agent === undefined || exec.name.startsWith('singularity_')) return undefined
+    if (providerStopped) return 'provider 不稳定；整张图已结束'
+    if (exec.agent === undefined) return undefined
     const review = reviewOf(apparatus, String(exec.agent.id))
-    if (review !== undefined) return review.status === 'running' ? waitingReason(apparatus, review.reviewId) : 'review Run has settled'
+    if (review !== undefined && review.target.kind !== 'acceptance' && !methodReviewTools.has(exec.name))
+      return 'Method review only reads evidence and writes/submits its judgment; it cannot execute, delegate or browse'
     const task = owner(String(exec.agent.id))
-        const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
+    const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
+    if (run?.purpose === 'improve' && !improvementTools.has(exec.name))
+      return 'RSI only reads evidence, edits candidate/report files, proposes and submits; execution belongs to the runtime'
+    if (exec.name.startsWith('singularity_')) return undefined
+    if (review !== undefined) return review.status === 'running' ? ['read', 'read_image', 'glob', 'grep'].includes(exec.name) ? undefined : waitingReason(apparatus, review.reviewId) : 'review Run has settled'
+    if (['read', 'read_image', 'glob', 'grep'].includes(exec.name)) return undefined
     return run !== undefined && (run.status !== 'running' || run.stage !== 'working')
       ? 'Run has closed write admission'
       : task === undefined ? undefined : waitingReason(apparatus, task.taskId)
   }
   const execution = options.execution(admission, (failure) =>
-    work(async () => {
+    controller.signal.aborted ? Promise.resolve() : work(async () => {
       if (controller.signal.aborted) return
       const review = reviewOf(apparatus, failure.sessionId)
       if (review?.status === 'running')
@@ -261,17 +282,13 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       await closeRoot(
         terminal,
         terminal.runs[run.runId]!,
-        apparatus.budget !== undefined &&
-          (apparatus.budget.report().tokens === null ||
-            apparatus.budget.report().tokens! >= apparatus.budget.limits.nativeTokens)
-          ? 'budget-exhausted'
-          : 'failed',
+        'failed',
       )
       const parent = parentOf(task.taskId)
       if (parent !== undefined) await scheduler.advance(parent)
       schedule()
     }).catch((error) => {
-      backgroundErrors.push(error)
+      if (!controller.signal.aborted) backgroundErrors.push(error)
       throw error
     }),
   )
@@ -283,7 +300,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       () => jobs.delete(key),
       (error) => {
         jobs.delete(key)
-        backgroundErrors.push(error)
+        if (!controller.signal.aborted) backgroundErrors.push(error)
       },
     )
   }
@@ -299,10 +316,23 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
         refuse('write-not-durable', `session ${agent.id} has no durability listener`)
   }
   const advanceRound = async (task: TaskState, request: RoundRequest, parent: Agent): Promise<void> => {
-    const { runId: _runId, status: _status, proposal, error: _error, ...round } = request
+    const { runId: _runId, status: _status, error: _error, ...round } = request
     try {
       const evolution = createEvolution({ store: apparatus.store, registry: apparatus.registry, ...evaluation,
         loadMethod: async (revision) => (await loadMethod(apparatus, revision)).assets,
+        baseline: async ({ revision, started }) => {
+          const ownerRun = task.runs[request.runId]!
+          const source = ownerRun.relatedTo!
+          const incumbent = taskStateOf(apparatus, source.taskId).runs[source.runId]!
+          if (incumbent.revision.digest !== revision.digest)
+            refuse('evidence-input-mismatch', 'incumbent must be the sealed business root method')
+          if (evaluation.trials !== 1)
+            refuse('malformed-declaration', 'one sealed business root provides exactly one incumbent trial')
+          await started(source)
+          return observeSolve(apparatus, source.taskId, source.runId, controller.signal,
+            measurement === undefined ? undefined : { digest: measurement.criterion.implementationDigest,
+              measure: (source, signal) => measurement.measure(source, signal) })
+        },
         solve: createNativeSolve(
           apparatus,
           options.seams,
@@ -310,7 +340,6 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
           controller.signal, measurement === undefined ? undefined
           : { digest: measurement.criterion.implementationDigest, measure: (source, signal) => measurement.measure(source, signal),
               },
-          proposal,
         ),
       })
       const decision = await evolution.runRound(round)
@@ -359,7 +388,8 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
   const advance = (): void => {
     if (controller.signal.aborted) return
     for (const task of tasks().values()) {
-      const parent = registry().get(SessionId(task.responsibility!.agentId))
+      if (task.responsibility === undefined) continue
+      const parent = registry().get(SessionId(task.responsibility.agentId))
       if (parent === undefined) continue
       const last = Object.values(task.runs).at(-1)
       if (task.closure === undefined && last !== undefined && last.status !== 'running' && parentOf(task.taskId) === undefined)
@@ -368,7 +398,8 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
             await idle([parent])
             const state = taskStateOf(apparatus, task.taskId), run = Object.values(state.runs).at(-1)!
             if (state.closure === undefined && run.status !== 'running') {
-              await closeRoot(state, run, run.status === 'verified' ? 'accepted' : 'failed')
+              await closeRoot(state, run, run.status === 'verified' ? 'accepted'
+                : 'failed')
               schedule()
             }
           } catch (error) { if (!controller.signal.aborted) throw error }
@@ -376,7 +407,6 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       if (task.rsi?.status === 'pending' || task.rsi?.status === 'running')
         startJob(`rsi:${task.taskId}`, async () => {
           try {
-            apparatus.budget?.beforeRequest()
             if (taskStateOf(apparatus, task.taskId).rsi!.status === 'pending') {
               const sessions = [...taskSessionsOf(apparatus, task.taskId)]
                 .map((id) => registry().get(SessionId(id)))
@@ -401,20 +431,13 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
               controller.signal,
             )
             const last = Object.values(analysis.runs).at(-1)!
-            await closeRoot(analysis, last, last.status === 'verified' ? 'accepted' : 'failed')
+            await closeRoot(analysis, last, last.status === 'verified' ? 'accepted'
+              : 'failed')
           } catch (error) {
             if (controller.signal.aborted) return
             const state = taskStateOf(apparatus, task.taskId).rsi!
             if (state.status !== 'pending' && state.status !== 'running') throw error
-            await rsiStatus(task.taskId, {
-              status:
-                state.status === 'pending' &&
-                error instanceof ProtocolRefusal &&
-                error.refusal.code === 'budget-exhausted'
-                  ? 'skipped'
-                  : 'failed',
-              detail: String(error),
-            })
+            await rsiStatus(task.taskId, { status: 'failed', detail: String(error) })
           }
         })
       for (const request of task.rounds ?? [])
@@ -434,14 +457,78 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     }
   }
   try {
-    await seedMethod(apparatus)
+    await seedMethod(apparatus, options.initialMethod)
   } catch (error) {
     await execution.close()
     await apparatus.store.close()
     throw error
   }
   return {
-    ...(apparatus.budget === undefined ? {} : { budget: apparatus.budget }),
+    stop: () => { providerStopped = true; controller.abort(new Error('provider 不稳定')); scheduler.stop() },
+    inheritRsi: input => work(() => linkRsiMemory(apparatus,
+      (options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')) as NonNullable<ChildSessionSeams['sessions']>, input)),
+    prepareMemory: (agent) => work(async () => {
+      const task = owner(String(agent.id))
+      // Acceptance reviewers remain independent from the subject's working narrative.
+      if (task === undefined || reviewOf(apparatus, String(agent.id)) !== undefined) return
+      const source = await rsiMemorySourceOf(apparatus, String(agent.id))
+      if (source !== undefined) {
+        const context = await memoryContextOf(apparatus, String(agent.id))
+        const sourceContext = await memoryContextOf(apparatus, source.task.responsibility!.agentId)
+        const ownEvents = await nativeEvents(String(agent.session.id))
+        const ownRef = parentMemoryRefOf(String(agent.session.id), ownEvents, context.scope)
+        if (ownRef !== undefined) { await readParentMemory(apparatus.persistence, ownRef); return }
+        const handle = await apparatus.persistence.open(SessionId(source.sessionId), 'read')
+        try {
+          const stored = await handle.read()
+          const origin = Session.create(handle.id, stored.events, handle.header, handle.inheritedEventCount)
+          const inheritedRef = parentMemoryRefOf(source.sessionId, stored.events, sourceContext.scope)
+          const inherited = inheritedRef === undefined ? undefined : await readParentMemory(apparatus.persistence, inheritedRef)
+          await prepareParentMemory({
+            sessions: (options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')) as NonNullable<ChildSessionSeams['sessions']>,
+            sessionPersistence: apparatus.persistence, llm: options.seams.get?.('llm') as LlmRuntime,
+          }, agent, {
+            memoryId: 'memory-' + sha256(`rsi:${source.task.taskId}/${source.run.runId}/${task.taskId}/${Object.values(task.runs).at(-1)!.runId}`),
+            context: { ...context, evidenceRefs: [...context.evidenceRefs, ...sourceContext.evidenceRefs],
+              excludedTexts: [...context.excludedTexts, ...sourceContext.excludedTexts] },
+            focus: 'Carry forward the previous RSI decisions and their reasons, tested and rejected mechanisms, no-winner or review rejection causes, round/method/measurement/publication references, successful habits and regression risks, and unresolved hypotheses. All RSI usage is excluded from every comparison.',
+            maxTokens: 32768, signal: controller.signal,
+            ...(inherited === undefined ? {} : { inherited }),
+          }, origin)
+        } finally { await handle.close() }
+        return
+      }
+      const parent = parentPlan(apparatus, task.taskId)
+      if (parent === undefined) return
+      const prior = await memoryRef(String(agent.id))
+      if (prior !== undefined) { await readParentMemory(apparatus.persistence, prior); return }
+      const parentNode = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, parent.agentId)!
+      const parentAgent = registry().get(SessionId(parentNode.sessionId))
+      if (parentAgent === undefined) refuse('not-responsible', 'parent memory requires the exact live parent session')
+      const inheritedRef = await memoryRef(parent.agentId)
+      const inherited = inheritedRef === undefined ? undefined : await readParentMemory(apparatus.persistence, inheritedRef)
+      const sessions = (options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')) as NonNullable<ChildSessionSeams['sessions']>
+      const llm = options.seams.get?.('llm') as LlmRuntime
+      const run = Object.values(task.runs).at(-1)!
+      await prepareParentMemory({ sessions, sessionPersistence: apparatus.persistence, llm }, parentAgent, {
+          memoryId: 'memory-' + sha256(`${parent.id}/${parent.runId}/${task.taskId}/${run.runId}`),
+          context: await memoryContextOf(apparatus, String(agent.id)), focus: task.contract!.goal,
+          maxTokens: 32768, signal: controller.signal,
+          ...(inherited === undefined ? {} : { inherited }),
+      })
+    }),
+    failed: (agentId) => {
+      const review = reviewOf(apparatus, agentId)
+      if (review !== undefined) return review.status === 'failed'
+      const task = owner(agentId)
+      const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
+      return run?.status === 'failed' && run.failureCause === 'runtime'
+    },
+    reviewTarget: agentId => reviewOf(apparatus, agentId)?.target,
+    responsibility: (agentId) => {
+      const task = owner(agentId), review = reviewOf(apparatus, agentId)
+      return task === undefined && review === undefined ? undefined : coordinationOf(apparatus, review?.reviewId ?? task!.taskId)
+    },
     enter: (agent, messages, model) =>
       work(async () => {
         const agentId = String(agent.id)
@@ -493,6 +580,12 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
         for (const task of tasks().values())
           if (task.responsibility?.agentId === sessionId) {
             await scheduler.advance(task.taskId)
+            // A failed startup may leave an assigned RSI Run that never entered a turn.
+            // Explicit root activation resumes that same Run and sealed trace.
+            if (task.rsi?.status === 'failed' && task.rsi.trace !== undefined && [...tasks().values()].some(analysis =>
+              analysis.closure === undefined && Object.values(analysis.runs).some(run => run.purpose === 'improve' &&
+                run.relatedTo?.taskId === task.taskId && run.relatedTo.runId === task.closure!.runId && run.status === 'running')))
+              await rsiStatus(task.taskId, { status: 'running', trace: task.rsi.trace, detail: 'resuming the same unfinished RSI Run from its sealed trajectory' })
           }
         schedule()
       }),
@@ -506,6 +599,17 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
         review?.reviewId ?? task?.taskId ?? refuse('not-responsible', 'caller has no assigned responsibility')
       return {
         current,
+        memory: (input) => work(() => readMemoryForAgent(apparatus, caller.agentId, input)),
+        stopExplorations: (input) => work(async () => {
+          if (!input.requestKey) refuse('malformed-declaration', 'stop exploration requires a stable requestKey')
+          if (review !== undefined) refuse('not-responsible', 'independent reviews delegate only required evidence Tasks')
+          const result = await apparatus.tasks.forAgent(caller.agentId).stopExplorations({
+            commandId: 'stop-exploration-' + sha256(`${current()}/${input.requestKey}`),
+            parentTaskId: current(), taskIds: input.taskIds, reason: input.reason,
+          })
+          await scheduler.advance(current())
+          return result
+        }),
         askParent: (input) => work(async () => {
           if (review !== undefined) refuse('not-responsible', 'a review has no parent responsibility')
           const release = await execution.drain(exec)
@@ -525,162 +629,28 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
           await scheduler.advance(input.taskId)
           return result
         }),
-        createMethod: (input) =>
-          work(async () => {
-            assertImprovementOwner(apparatus, caller.agentId)
-            assertActive(apparatus, current())
-            const run = Object.values(owner(caller.agentId)!.runs).at(-1)!,
-              workspace = run.bubble!.workspace.ref
-            await assertRunFile(workspace, input.path)
-            return createMethod(
-              apparatus,
-              JSON.parse(await readFile(inside(workspace, input.path, 'candidate path'), 'utf8')),
-            )
-          }),
         runMethod: (input) =>
           work(async () => {
             assertActive(apparatus, current())
             return runMethodTool(apparatus, caller, input.taskId, String(exec.callId), signal, input.tool, input.candidatePath)
           }),
-        evolve: (input) =>
-          work(async () => {
-            assertImprovementOwner(apparatus, caller.agentId)
-            const round = readEvolutionRound(input),
-              task = owner(caller.agentId)!,
-              run = Object.values(task.runs).at(-1)!
-            for (const revision of [round.incumbent, ...round.candidates]) await loadMethod(apparatus, revision)
-            const previous = task.rounds?.find((r) => r.roundId === round.roundId)
-            if (previous === undefined) {
-              assertActive(apparatus, current())
-              const proposal = await proposalCostOf(
-                apparatus,
-                caller.sessionId,
-                round.candidates.map((r) => r.digest),
-              )
-              await taskFact(
-                `round-request:${round.roundId}`,
-                'rsi/round-requested',
-                task.taskId,
-                { ...round, runId: run.runId, proposal },
-                `agent:${caller.agentId}`,
-              )
-            } else if (
-              JSON.stringify({
-                roundId: previous.roundId,
-                round: previous.round,
-                incumbent: previous.incumbent,
-                candidates: previous.candidates,
-              }) !== JSON.stringify(round)
-            )
-              refuse('command-conflict', 'round request changed')
-            schedule()
-            return { roundId: round.roundId, status: previous?.status ?? 'pending' }
-          }),
-        history: (input) =>
-          work(async () => {
-            if (input?.kind === 'trajectory')
-              return readTrajectory(apparatus, caller.agentId, input.ref!, input.from, input.count)
-            const { visible, audit } = await readScopeOf(apparatus, caller.agentId)
-            if (input?.kind === 'task' || input?.kind === 'artifact') {
-              if (!visible!.has(input.ref!)) refuse('not-responsible', 'Task is outside this evidence scope')
-              if (input.kind === 'artifact') return readArtifact(apparatus, input.ref!, input.runId, input.from, input.count)
-              return readTask(apparatus, taskStateOf(apparatus, input.ref!))
-            }
-            let reference = review?.method ?? Object.values(task!.runs).at(-1)!.revision
-            if (input?.kind === 'method' && input.ref !== undefined &&
-              input.ref !== reference.revisionId && input.ref !== reference.digest) {
-              const allowed = [...tasks().values()].filter((t) => visible!.has(t.taskId)).flatMap((t) => [
-                ...Object.values(t.runs).map((r) => r.revision),
-                ...(t.rounds ?? []).flatMap((r) => [r.incumbent, ...r.candidates]),
-              ])
-              if (review?.target.kind === 'publication') allowed.push({
-                environmentId: review.target.environmentId, revisionId: review.target.revisionId,
-                digest: review.target.assetsDigest,
-              })
-              reference = allowed.find((ref) => input.ref === ref.revisionId || input.ref === ref.digest) ??
-                refuse('unknown-revision', 'method is outside this frozen evidence scope')
-            }
-            const method = await loadMethod(apparatus, reference)
-            if (input?.kind === 'template') {
-              if (input.ref === undefined) {
-                const from = input.from ?? 0, count = input.count ?? 20
-                if (!Number.isSafeInteger(from) || from < 0 || !Number.isSafeInteger(count) || count < 1 || count > 100)
-                  refuse('malformed-declaration', 'template range must use a nonnegative offset and 1 to 100 entries per page')
-                return [...method.domain.templates.values()].slice(from, from + count)
-                  .map((template) => ({ id: template.id, goal: template.goal, applicability: template.applicability }))
-              }
-              const selected = method.assets.templates.find((t) => (t as { id: string }).id === input.ref)
-              if (selected === undefined) refuse('malformed-declaration', 'unknown template')
-              return selected
-            }
-            if (input?.kind === 'method') {
-              if (review === undefined) assertImprovementOwner(apparatus, caller.agentId)
-              return { reference, assets: method.assets, format: METHOD_FORMAT, evaluation,
-                costAccounting: 'Native tokens: baseline solve and acceptance; candidate share of proposal plus solve and acceptance, then publication review. Publication requires total candidate cost at most 125% of baseline. No quality gain funds no cost increase.',
-                budget: apparatus.budget === undefined ? null : { limit: apparatus.budget.limits.nativeTokens, ...apparatus.budget.report() },
-              }
-            }
-            if (input?.kind === 'round') {
-              if (!audit) refuse('not-responsible', 'evaluation results belong to RSI and independent review')
-              const held = [...tasks().values()].filter((t) => visible!.has(t.taskId))
-                .flatMap((t) => t.rounds ?? []).find((r) => r.roundId === input.ref)
-              const publication = review?.target.kind === 'publication'
-                ? JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8'))
-                : undefined
-              if (held === undefined && publication?.draft.basis.roundId !== input.ref)
-                refuse('not-responsible', 'round is outside this frozen evidence scope')
-              return {
-                request: held,
-                snapshot: (await snapshotOf(apparatus)).rounds.find((r) => r.roundId === input.ref),
-                evaluations: [...apparatus.store.load().statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION).values()]
-                  .filter((e) => e.evaluationId === `${input.ref}:bootstrap:evaluation` ||
-                    (e.evaluationId.startsWith(`${input.ref}:`) && /^\d+:candidate:evaluation$/.test(e.evaluationId.slice(input.ref!.length + 1)))),
-              }
-            }
-            return {
-              coordination: coordinationOf(apparatus, current()),
-              tasks: [...tasks().values()]
-                .filter((t) => visible!.has(t.taskId))
-                .map((t) => ({
-                  taskId: t.taskId,
-                  goal: t.contract!.goal,
-                  parentId: parentPlan(apparatus, t.taskId)?.id ?? null,
-                  sessionId: apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, t.responsibility!.agentId)!.sessionId,
-                  decomposition: t.decomposition,
-                  runs: Object.values(t.runs).map((r) => ({
-                    runId: r.runId,
-                    status: r.status,
-                    failureCause: r.failureCause,
-                    failureReason: r.failureReason,
-                    verdicts: r.evidence.map((e) => ({
-                      criterionId: e.criterionId,
-                      verdict: e.verdict,
-                      reviewId: e.reviewId,
-                    })),
-                    artifact: r.submission?.files.artifact,
-                    source: r.submission?.source,
-                  })),
-                })),
-              method: {
-                reference,
-                templates: (task?.contract?.template === undefined
-                  ? []
-                  : (method.domain.templates
-                      .get(task.contract.template.id)!
-                      .decomposition?.children.map((c) => method.domain.templates.get(c.template)!) ?? [])
-                ).map((t) => ({ id: t.id, goal: t.goal, applicability: t.applicability })),
-              },
-            }
-          }),
+        proposeMethod: (input) => work(async () => {
+          const result = await proposeRsiMethod(apparatus, options.seams, agent, caller.agentId, input, signal)
+          schedule()
+          return result
+        }),
+        history: (input) => work(() => readForAgent(apparatus, caller.agentId, input, evaluation)),
         decompose: (input) => work(async () => {
+          if (review !== undefined && review.target.kind !== 'acceptance') refuse('not-responsible', 'method reviews do not delegate or execute evidence Tasks')
           const release = await execution.drain(exec)
           try { return await decompose(apparatus, scheduler, caller, { ...input, taskId: current() }) }
-          finally { release() }
+          finally { release(); schedule() }
         }),
         submit: (input) =>
           work(async () => {
             assertActive(apparatus, current())
             if (review !== undefined) {
+              if (!('path' in input)) refuse('not-responsible', 'reviewers submit their own review.json')
               const release = await execution.drain(exec)
               try { return await submitReview(apparatus, review, input.path) }
               finally { release() }
@@ -688,6 +658,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
             const task = owner(caller.agentId)!
             if (task.rounds?.some((r) => r.status === 'pending'))
               refuse('illegal-transition', 'wait for the committed evaluation outcome before submitting the RSI report')
+            assertRsiReportReady(apparatus, task)
             try {
               return await submit(
                 apparatus,
@@ -714,13 +685,8 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
       if (backgroundErrors.length) throw new AggregateError(backgroundErrors, 'background RSI delivery failed')
       return snapshotOf(apparatus)
     },
-    purpose: (agentId) =>
-      reviewOf(apparatus, agentId) !== undefined
-        ? 'review'
-        : owner(agentId) === undefined
-          ? 'solve'
-          : Object.values(owner(agentId)!.runs).at(-1)!.purpose,
     mountSkills: (agent) => mountMethodSkills(apparatus, agent),
+    memoryContext: (agentId) => memoryContextOf(apparatus, agentId),
     world: (agentId) => {
       const review = reviewOf(apparatus, agentId),
         task = owner(agentId),
@@ -743,19 +709,17 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
                   ? taskStateOf(apparatus, review.target.taskId).contract!.inputs.map((i) => join(root, 'inputs', i.name))
                   : []),
               ],
-        references: [apparatus.domain.dir, ...apparatus.domain.references,
+        references: [...(review !== undefined || run?.purpose === 'improve' ? [apparatus.domain.dir] : []), ...apparatus.domain.references,
           ...(run === undefined ? [] : methodToolReferences(apparatus, run)),
         ],
       }
     },
-    skill: (agentId) => work(() => methodSkill(apparatus, agentId)),
-    recordContext: (agentId) => work(() => recordMethodContext(apparatus, agentId)),
     close: () =>
       (closing ??= (async () => {
       controller.abort(new Error('driver unloading'))
         const results = await Promise.allSettled([execution.close(), scheduler.close(), ...jobs.values(), ...active])
         await apparatus.store.close()
-        const errors = [...backgroundErrors, ...results.flatMap((r) => (r.status === 'rejected' ? [r.reason] : []))]
+        const errors = [...backgroundErrors, ...results.flatMap((r) => (r.status === 'rejected' && !providerStopped ? [r.reason] : []))]
         if (errors.length) throw new AggregateError(errors, 'driver unload failed')
       })()),
   }

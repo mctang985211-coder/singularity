@@ -6,6 +6,7 @@ import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from
 import type { Apparatus } from './apparatus.ts'
 import { declareCaller } from './apparatus.ts'
 import { sealedBytes } from './sealed.ts'
+import { stoppedExplorationOf } from '../../src/task/tree.ts'
 import { sha256 } from './ids.ts'
 
 export async function repair(
@@ -20,6 +21,12 @@ export async function repair(
     declareCaller(apparatus, agentId)
     for (const run of Object.values(task.runs)) {
       if (run.status !== 'running') continue
+      const stopped = stoppedExplorationOf(cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), task.taskId)
+      if (stopped !== undefined) {
+        await apparatus.tasks.forAgent(agentId).failRun({ commandId: `branch-stopped:${task.taskId}/${run.runId}`,
+          taskId: task.taskId, runId: run.runId, reason: `exploration stopped by ${stopped.parentTaskId}: ${stopped.reason}` })
+        continue
+      }
       assertPinnedRevision(
         run.revision,
         cut.statesOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION),

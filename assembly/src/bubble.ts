@@ -96,7 +96,12 @@ class BubbleSubprocess extends SubprocessRuntime {
   }
   override spawnTerminal(_spec: SubprocessTerminalSpawnSpec): never { throw new Error('Bubble uses managed process execution') }
 }
-export async function mountBubbleWorld(agent: Agent, current: () => BubbleWorld): Promise<void> {
+export async function mountBubbleWorld(agent: Agent, current: () => BubbleWorld, readOnly = false): Promise<void> {
+  const original = current, rgPath = await ToolFsSearch.resolveRgPath()
+  current = () => {
+    const world = original()
+    return { ...world, writable: world.writable && !readOnly, references: [...world.references, rgPath] }
+  }
   const baseFs = agent.ctx.get('fs') as FileSystem
   const baseProcess = agent.ctx.get('subprocess') as SubprocessRuntime
   const local = agent.ctx.isolate('fs').isolate('subprocess').isolate('shell').isolate('sandboxPolicy')
@@ -107,9 +112,9 @@ export async function mountBubbleWorld(agent: Agent, current: () => BubbleWorld)
       mode: current().writable ? 'workspace-write' : 'read-only', workspaceRoot: current().root, sessionId: agent.session.id,
     }) })
   } })
-  await local.plugin(LocalBashExecutor, { cwd: current().root, timeoutMs: 60_000, maxTimeoutMs: 900_000,
+  if (!readOnly) await local.plugin(LocalBashExecutor, { cwd: current().root, timeoutMs: 60_000, maxTimeoutMs: 900_000,
     maxOutputBytes: 1024 * 1024, maxSpillBytes: 32 * 1024 * 1024, graceMs: 1000 })
   await local.plugin(ToolFs, {})
   await local.plugin(ToolFsSearch, { sampleOverCapGlobResults: false })
-  await local.plugin(ToolBash, {})
+  if (!readOnly) await local.plugin(ToolBash, {})
 }

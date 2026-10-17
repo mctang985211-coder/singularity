@@ -14,8 +14,9 @@ import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/prot
 import { schedulerMessage } from './scheduler-message.ts'
 import { SUBJECT_INPUT } from './review.ts'
 import { sealedBytes } from './sealed.ts'
-import { taskSessionsOf } from './evaluation-cost.ts'
-import { nativeTokensOf } from './budget.ts'
+import { taskSessionsOf, projectedTokenUsage, billedTokens, executionEvents } from './evaluation-cost.ts'
+export const improvementTools = new Set(['read', 'glob', 'grep', 'write', 'edit',
+  'singularity_read', 'singularity_memory', 'singularity_propose_method', 'singularity_submit'])
 export function assertImprovementOwner(apparatus: Apparatus, agentId: string): void {
   const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()].findLast(
     (t) => t.responsibility?.agentId === agentId,
@@ -28,11 +29,12 @@ export function assertImprovementOwner(apparatus: Apparatus, agentId: string): v
 }
 export async function explorationOf(apparatus: Apparatus, taskId: string, runId: string): Promise<Buffer> {
   const history = await historyOf(apparatus, [], taskStateOf(apparatus, taskId).responsibility!.agentId)
-  const sessions: { sessionId: string; eventCount: number; digest: string; events: readonly SessionEvent[] }[] = []
+  const sessions: { sessionId: string; eventCount: number; digest: string; events: readonly SessionEvent[];
+    tokenUsage: ReturnType<typeof projectedTokenUsage> }[] = []
   for (const sessionId of taskSessionsOf(apparatus, taskId)) {
     const handle = await apparatus.persistence.open(SessionId(sessionId), 'read')
     try {
-      const { events } = await handle.read()
+      const events = executionEvents((await handle.read()).events)
       assertContiguous(handle.id, events, 0)
       for (const task of history.tasks) for (const run of task.runs) {
         const source = run.source
@@ -41,22 +43,24 @@ export async function explorationOf(apparatus: Apparatus, taskId: string, runId:
           refuse('digest-mismatch', 'sealed exploration transcript changed')
       }
       const eventCount = events.length
-      sessions.push({ sessionId, eventCount, digest: digestOf({ sessionId, eventCount, events }), events })
+      sessions.push({ sessionId, eventCount, digest: digestOf({ sessionId, eventCount, events }), events,
+        tokenUsage: projectedTokenUsage(apparatus, handle, events) })
     } finally { await handle.close() }
   }
   const states = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
+  const usage = sessions.map(({ sessionId, eventCount, digest, tokenUsage }) => ({
+    sessionId, eventCount, digest, tokenUsage, tokens: billedTokens(tokenUsage), trajectoryRef: sessionId,
+  }))
   const summary = {
     root: { taskId, runId },
+    usage: { source: 'token-meter/tokenUsage', tokens: usage.reduce((total, session) => total + session.tokens, 0) },
     methods: history.methods.map(({ reference }) => reference),
-    tasks: history.tasks.map((task) => ({ taskId: task.taskId, template: task.contract.template,
-      goal: task.goal, sessionId: task.sessionId, decomposition: task.decomposition,
-      parentId: task.parent?.id ?? null, inputs: task.contract.inputs, questions: task.questions ?? [],
+    tasks: history.tasks.map((task) => ({ taskId: task.taskId, contract: task.contract,
+      sessionId: task.sessionId, decomposition: task.decomposition,
+      parentId: task.parent?.id ?? null, questions: task.questions ?? [],
       runs: task.runs.map((run) => {
         const state = states.get(task.taskId)!.runs[run.runId]!
         return { runId: run.runId, method: state.revision, status: run.status,
-          cost: sessions
-            .filter((s) => s.sessionId === task.sessionId)
-            .map((s) => ({ sessionId: s.sessionId, tokens: nativeTokensOf(s.events) })),
           failureCause: run.failureCause, failureReason: run.failureReason,
           verdicts: state.evidence.map(({ criterionId, verdict, reviewId }) => ({ criterionId, verdict, reviewId })),
           artifact: state.submission === undefined ? null : { digest: state.submission.artifactDigest, ref: state.submission.files.artifact },
@@ -64,11 +68,9 @@ export async function explorationOf(apparatus: Apparatus, taskId: string, runId:
         }
       }),
     })),
-    sessions: sessions.map(({ sessionId, eventCount, digest, events }) => ({
-      sessionId, eventCount, digest, tokens: nativeTokensOf(events), trajectoryRef: sessionId,
-    })),
+    sessions: usage,
   }
-  return Buffer.from(JSON.stringify({ root: { taskId, runId }, summary, history, sessions }))
+  return Buffer.from(JSON.stringify({ root: { taskId, runId }, summary, sessions }))
 }
 export async function startImprovement(apparatus: Apparatus, seams: ChildSessionSeams, parent: Agent,
   taskId: string, runId: string, signal: AbortSignal,
@@ -80,7 +82,9 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
   const rootRun = taskStateOf(apparatus, taskId).runs[runId]!
   const method = rootRun.revision
   const loaded = (await loadMethod(apparatus, method)).domain
-  const trace = await sealedBytes(apparatus, taskStateOf(apparatus, taskId).rsi!.trace!)
+  // RRSI analyst.py/digester.py: keep raw transcripts outside the analyst's initial context.
+  const frozen = JSON.parse((await sealedBytes(apparatus, taskStateOf(apparatus, taskId).rsi!.trace!)).toString('utf8'))
+  const trace = Buffer.from(JSON.stringify({ root: frozen.root, summary: frozen.summary }, null, 2))
   const input = { ref: SUBJECT_INPUT, digest: sha256(trace), bytes: trace, sourcePath: '' }
   const domain = { ...loaded, inputs: [...loaded.inputs, input] }
   const agentId = String(agentSessionIdOf(id))
@@ -89,14 +93,14 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
   const commands = apparatus.tasks.forAgent(agentId)
   if (existing === undefined)
     await commands.admit({ commandId: `admit:${id}`, taskId: id, contract: {
-        goal: 'Improve reusable domain methods from the frozen successful and failed exploration evidence. Evaluate supported candidates independently and report measured improvement, no winner, no candidate or budget exhaustion truthfully.',
+        goal: 'Improve reusable domain methods from frozen exploration evidence using RRSI analysis, an attributable hypothesis, independent screening and isolated evaluation. Revise no-winner attempts until an approved winner is published, then report measured effects and limits truthfully.',
         artifact: 'report.json',
         inputs: [{ name: 'subject.json', source: { kind: 'protected', ref: SUBJECT_INPUT, digest: input.digest } }],
         criteria: [
           {
             criterionId: 'improvement-reported',
             statement:
-              'The report cites actual trajectory evidence, explains reusable mechanism changes and accurately reports independent evaluation decisions or the reason no candidate was evaluated.',
+              'The report cites actual trajectory evidence, explains the analysis and reusable mechanism, preserves evidenced success habits, accurately reports an independently evaluated and approved published winner, distinguishes attribution from sampling noise, and states whether transfer to unfamiliar tasks was tested.',
           },
         ],
       },
@@ -111,10 +115,9 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
       }, JSON.stringify({
       taskId: id, runId: run.runId, contract: taskStateOf(apparatus, id).contract,
         method,
-      summary: JSON.parse(trace.toString('utf8')).summary,
         trace: 'subject.json',
         evidenceReading:
-          'Read relevant frozen trajectory segments by reference. Change reusable methods, preserve the root standard, and await the host evaluation outcome before reporting.',
+          'Read the frozen subject with singularity_read(kind=subject) byte pages. It holds an exploration summary and native token-meter/tokenUsage totals. Trajectory reads list event metadata; select eventSeq and page its bytes. Read the pinned method before editing.',
       }),
     ),
   })

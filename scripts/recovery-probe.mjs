@@ -140,7 +140,7 @@ async function bootstrap({ at, store, commands, programDigest }) {
   await commands.decompose({
     commandId: 'plan',
     parentTaskId: PARENT_TASK,
-    children: [{ taskId: CHILD, dependsOn: [], supports: ['counted'], maxRuns: 2 }],
+    children: [{ taskId: CHILD, dependsOn: [], supports: ['counted'], maxRuns: 2, requirement: 'required'}],
   })
   await commands.assign({ commandId: 'assign-child', taskId: CHILD, agentId: AGENT })
 

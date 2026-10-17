@@ -1,6 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 
 import { createAgentNodeCommands } from '../../src/agent/commands.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, AGENT_ROLE, declareAgentProtocol } from '../../src/agent/protocol.ts'
@@ -18,10 +19,10 @@ import { declareTaskProtocol, SCHEDULER_ROLE, TASK_PROTOCOL, TASK_VERSION, verif
 } from '../../src/task/protocol.ts'
 import type { Domain } from './domain.ts'
 import { declareReviewProtocol, REVIEW_ROLE, REVIEW_DIGEST } from '../../src/review/protocol.ts'
-import type { CampaignBudget } from './budget.ts'
 
 export interface Apparatus {
   readonly persistence: SessionPersistence
+  readonly projections: SessionProjectionRegistry
   readonly attachments: Pick<AttachmentStore, 'saveFile' | 'readFileStream'>
   readonly controlId: string
   readonly workspaceRoot: string
@@ -33,7 +34,6 @@ export interface Apparatus {
   readonly environments: ReturnType<typeof createEnvironmentCommands>
   readonly agents: ReturnType<typeof createAgentNodeCommands>
   readonly held: Map<string, HeldAgent>
-  budget?: CampaignBudget
 }
 function subjectsOf(controlId: string, domain: Domain): Record<string, string> {
   const subjects: Record<string, string> = {
@@ -54,7 +54,7 @@ function subjectsOf(controlId: string, domain: Domain): Record<string, string> {
   return subjects
 }
 export async function openApparatus(controlId: string, workspaceRoot: string, domain: Domain, persistence: SessionPersistence,
-  attachments: Apparatus['attachments'],
+  attachments: Apparatus['attachments'], projections: SessionProjectionRegistry,
 ): Promise<Apparatus> {
   const registry = new ProtocolRegistry()
   declareReviewProtocol(registry)
@@ -73,6 +73,7 @@ export async function openApparatus(controlId: string, workspaceRoot: string, do
   const held = new Map<string, HeldAgent>()
   return {
     persistence,
+    projections,
     attachments,
     controlId,
     workspaceRoot,

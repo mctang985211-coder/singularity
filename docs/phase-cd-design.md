@@ -46,8 +46,8 @@
 
 | 新码 | 何时 | 调用方下一步 |
 |---|---|---|
-| `caliber-mismatch` | 两个口径不可比却要放在一起判定 | 不要池化，重新度量 |
-| `budget-exhausted` | 编辑预算（按 `rounds-1` 退火）已用完 | 等下一轮 |
+| `caliber-mismatch` | 候选口径与本轮冻结口径不同 | 排除该候选并说明差异，其余候选继续；无赢家时保留 incumbent |
+| `illegal-transition` | 编辑预算（按 `rounds-1` 退火）已用完 | 等下一轮 |
 | `stale-approval` | 批准绑定的内容摘要 ≠ 当前草稿的内容摘要 | 重新申请批准 |
 | `unapproved-revision` | 指针要切到一个存在但未被批准的修订 | 先批准 |
 
@@ -209,7 +209,7 @@ missing=[那个槽位]`。旧仓在此返回 `quality=1, incomplete=true`——`
   `historyCutoff >= 0`。`editBudget` **由 `round` 退火**：领域函数 `editBudgetFor(round, first)`，
   最后一轮必须能到 `b_min`（ADR 的收紧 #1：`rounds-1` 而不是 `/T`）。
 - `candidate/submitted`：round 已开盘且**未结案**（否则 `illegal-transition`）；`slot` 在 `[0, candidates)`；
-  该槽位**空着**（否则 `evidence-conflict`）；`edits.length <= editBudget`（否则 `budget-exhausted`）；
+  该槽位**空着**（否则 `evidence-conflict`）；`edits.length <= editBudget`（否则 `illegal-transition`）；
   `edits` 每条 `target` 非空、**`(asset,target)` 不重复**；`exploratory: true` 的提交才允许占用
   `explorationSlots` 保留槽（**机械约束，不是提示**）。
 - `round/decided`：round 已开盘且未结案；`outcomes` 覆盖**每一个已提交的槽位**，且**每个槽位的处置都带理由**；

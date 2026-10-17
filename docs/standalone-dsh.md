@@ -12,9 +12,18 @@ harness 内实例（`harness/.dsh`）**零共享状态**。singularity-core 的�
     node_modules/.bin/dsh        可执行入口（dsh --version 即 0.2.0-rc.2）
     node_modules/@deepseek-ai/   探针 resolve hook 的解析根（DSH_CONTROL_INSTALLED）
   home/                 专用 DSH_HOME：凭据与任何落盘状态只在这里
-    .credentials.yaml            refs 表，现仅 YINGJUN_API_KEY（600 权限）
+    .credentials.yaml            refs 表，现为 DEEPSEEK_API_KEY 与 YINGJUN_API_KEY（600 权限）
   env.sh                唯一的接线点：source 它，之后所有 dsh 相关进程都在这套环境里
+  dsh-source/           隔离 DSH 源码，Session.append 暴露既有 ignorable 日志标记
+  dsh-session-log-only.patch       可审查的 Session 源补丁
+  dsh-session-log-only-install.mjs 编译、测试并安装私有 Session 的重放入口
 ```
+
+父背景 memory 默认在子 Task 执行前生成；`singularity_memory()` 从原生日志分页投影可读分支的统一目录，inherited 标出本节点父背景引用，传 ref 按需读取完整 checkpoint。目录标明适用 Task/Run、来源截止位置和当前状态，不额外调用模型；root 看整树、普通节点沿用任务可见范围且不跨根、独立审核只看自己取证分支。摘要不自动注入子 system prompt。单 Session 超过上下文阈值的压缩由原生 BasicCompaction 决定，assembly 不定制其摘要。父背景与四个 preset 的原生摘要输出上限均为 32768 tokens，轮次结束后统一读取 token-meter 的 tokenUsage 原生投影，与 ui-chat 的 StatsPills 使用同一计费桶总和，不另计辅助调用；缺失 usage 不停止执行。父背景调用及 checkpoint 以原始 stream 写入会话 log-only 事件，供证据回读。
+
+私有 Session 使用上述最小源补丁；`node /home/ROXY/singularity-next/dsh-session-log-only-install.mjs` 可重放编译、定向测试及安装，摘要和命令记录于同目录 dsh-session-log-only-evidence.json。它不更改会话格式版本、模型 surface 或全局安装。裸重装原始 rc.2 后，必须重放此补丁才能使用当前 assembly。
+
+私有 DSH 另用 `node /home/ROXY/singularity-next/dsh-memory-pressure-install.mjs` 重放 TokenMeter 与 BasicCompaction 修复，源补丁、命令和产物摘要位于同目录 dsh-memory-pressure.patch、dsh-memory-pressure-evidence.json。相同请求配置优先采用供应商实际 usage；上下文替换或图片 offload 后清除旧计价基准，重新估算当前内容。自动压力压缩失败终止当前回合，截断保留 `MAX_TOKENS`，不继续执行任务或逐步重试。安装只覆盖这两个私有包，并校验 Session 补丁产物未变。
 
 ## env.sh 导出的变量
 
@@ -39,7 +48,7 @@ node scripts/deploy.mjs
 dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
 ```
 
-从原生界面提交领域任务和自然语言验收要求，节点通过普通 DSH 主 agent 会话自主执行。本轮按用户要求，确认真实执行启动后停止监控，由用户报告断点；收到断点后核对 Task/Run、封存产物、独立判决、资产使用和发布记录。离线回归不能证明领域效果。
+从原生界面提交领域任务和自然语言验收要求，节点通过普通 DSH 主 agent 会话自主执行。root 只协调与受限只读，必须委派实现；子责任显式区分 `required` 与可停止的 `exploration`。断点核对 Task/Run、封存产物、独立判决、资产使用和发布记录。离线回归不能证明领域效果。
 
 部署出来的 profile 在 `home/profiles/singularity-next-web/`（`scripts/deploy.mjs` 整目录重写；linked root
 指向本 checkout 的 `assembly/`）。模型路由与领域目录都写在 `deployment/profile/cordis.patch.yml`，
@@ -51,9 +60,11 @@ dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
   profile 契约零落差）；
 ## 当前验收与完成边界
 
-本轮以 `67c7ffe` 和现有未提交改动为基线，清理后全量回归曾通过（61 个文件、706 项）。本次恢复修复未新增或运行 spec，typecheck、构建、摘要、gates 与 diff 检查通过。新构建已部署并重启私有 DSH，原改进会话已重发同一冻结 evolve 请求，原候选 Run 的 seq418/419 已成功执行工作区核查；基线 trial 未重复。确认候选实际执行后已停止监控。最新检查点和费用见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)。
-21:14 的两路独立求解/验收链构建已就绪，相关 111 项回归及现有检查通过；当前宿主仍执行 19:17 装载的构建，未再次中断单候选。下一次启动装载并行实现；真实两路重叠和吞吐待后续批次验证。
-G1/G2/G3 与最终发布验收按 [assembly-blueprint.md §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 交付，当前没有候选结果或 RSI 赢家发布完成事实。
+当前协议为 Task v17、Review v4、snapshot v9。本轮修复父背景 memory、任务责任投影和可停止探索，精简 SHA256 领域；冻结 Task v15 的 max 思考 SHA256 实跑 `/home/ROXY/singularity-next/sha256-max-20261015-154731/` 已因原生压缩提前触发、四次摘要截断仍继续执行而停止，父背景 checkpoint 成功，尚无任务验收结论。原始事件、停止记录及计价前后复演见该目录 anomaly-diagnosis.json。前一 Task v14 冻结实跑和本轮工程验证状态、费用与效果边界统一见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)，不以旧构建的绿色结果代表新协议通过。
+
+SHA256 领域只保留 `sha256.v`、`yosys.md`、`task.json`。指导提供固定综合命令，未变 RTL 的完整 top 面积已实测为 64858.4544 µm²；没有自动面积 measurement 或预写 checker，独立审核依据实际综合和行为证据验收。RSI 的通用 pass 质量不能冒充面积收益。
+
+G1/G2/G3 与最终发布验收按 [assembly-blueprint.md §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 交付，真实领域改进和发布后消费分别验收。
 
 ## 环境边界
 
@@ -63,4 +74,4 @@ G1/G2/G3 与最终发布验收按 [assembly-blueprint.md §9](assembly-blueprint
   harness 的任何文件；
 - **本次 G1/G2/G3 全部在私有独立 DSH 完成**，不以旧 harness 启动或集成为前置；旧仓只读参考。
 - 最终验收使用隔离测试 home/profile 装载被验证的同一插件产物，保留私有凭据来源；不重写已有用户会话或全局配置。
-- 本轮使用 high 思考与 3 亿原生 tokens 总预算，包含审核成本。发布需独立审核和真实评估通过。
+- 本轮使用 max 思考，没有 campaign token 预算闸门；轮后汇总原生 tokenUsage 投影，与 ui-chat 的 StatsPills 使用同一口径，包含审核会话的投影。发布需独立审核和真实评估通过。

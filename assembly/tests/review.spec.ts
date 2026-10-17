@@ -1,3 +1,4 @@
+import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -20,7 +21,7 @@ import { sha256 } from '../src/ids.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { readTrajectory } from '../src/read.ts'
 import { createScheduler } from '../src/scheduler.ts'
-import { attachmentsAt, FakePersistence, agentFor, execFor, fakeExecution } from './seam.ts'
+import { attachmentsAt, FakePersistence, agentFor, execFor, fakeExecution, nativeRuntime } from './seam.ts'
 const roots: string[] = []
 const child = vi.hoisted(() => ({ open: vi.fn() }))
 vi.mock('../../src/runtime/child-session.ts', async (original) => ({
@@ -38,14 +39,14 @@ async function setup() {
       root,
       await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
       new FakePersistence() as never,
-      attachmentsAt(root),
+      attachmentsAt(root), testProjections,
     ),
     caller = callerOf(agentFor('worker', 'worker')),
     proposal = await propose(apparatus, caller, 'root', { goal: 'count' }),
     commands = apparatus.tasks.forAgent(caller.agentId),
     run = taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!
   const bytes = Buffer.from('0'),
-    artifact = await apparatus.attachments.saveFile({ name: proposal.artifact, data: bytes })
+    artifact = await apparatus.attachments.saveFile({ name: proposal.contract.artifact, data: bytes })
   await commands.submitRun({
     commandId: 'seal',
     taskId: proposal.taskId,
@@ -67,6 +68,8 @@ async function setup() {
           taskStateOf(apparatus, proposal.taskId).runs[run.runId]!,
           [],
         ),
+        null,
+        2,
       ),
     ),
     subjectDigest = sha256(subject)
@@ -116,6 +119,38 @@ it('activates a review with no delegated evidence without fabricating a complete
   const scheduler = createScheduler(h.apparatus, { agents: { get: () => agentFor('reviewer', 'reviewer') } as never })
   expect(await scheduler.advance(review.reviewId)).toEqual([])
   expect(h.apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, review.reviewId)!.status).toBe('running')
+  await scheduler.close(); await h.apparatus.store.close()
+})
+it('fails a review whose required evidence task ended without verification', async () => {
+  const h = await setup(), review = await start(h), runtime = nativeRuntime()
+  runtime.agent('reviewer')
+  const factsBefore = h.apparatus.store.load().entries().length
+  await expect(decompose(h.apparatus, { advance: async () => [] },
+    { agentId: 'reviewer', sessionId: 'reviewer', model: { provider: 'test', model: 'model-under-test' } },
+    { taskId: review.reviewId, children: [{ key: 'optional', dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'exploration',
+      contract: { goal: 'Inspect one optional hypothesis', artifact: 'notes.txt', inputs: [], criteria: [{ criterionId: 'finding', statement: 'State the observation' }] },
+    }] })).rejects.toThrow('evidence tasks must be required')
+  expect(h.apparatus.store.load().entries()).toHaveLength(factsBefore)
+  const taskId = 'required-evidence', agentId = 'evidence-holder'
+  declareCaller(h.apparatus, agentId)
+  await h.apparatus.agents.open({ commandId: 'evidence-agent', agentId, sessionId: agentId, role: 'child' })
+  await h.apparatus.tasks.admit({ commandId: 'evidence-task', taskId, contract: {
+    goal: 'Check arithmetic independently', artifact: 'proof.txt', inputs: [], criteria: [{ criterionId: 'proof', statement: 'Reproduce the arithmetic result' }],
+  } })
+  await h.apparatus.tasks.assign({ commandId: 'evidence-assignment', taskId, agentId })
+  const branch = { taskId, dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const }
+  await expect(h.commands.decompose('optional-evidence', review.reviewId, [{ ...branch, requirement: 'exploration' }], 'agent:reviewer'))
+    .rejects.toThrow('evidence tasks must be required')
+  await h.commands.decompose('evidence-plan', review.reviewId, [branch], 'agent:reviewer')
+  const run = await startAttempt(h.apparatus, { agentId, sessionId: agentId, model: { provider: 'test', model: 'model-under-test' } }, taskId, 'check', h.run.revision)
+  await h.apparatus.tasks.forAgent(agentId).failRun({ commandId: 'evidence-runtime-failed', taskId, runId: run.runId, reason: 'could not reproduce required evidence' })
+  const scheduler = createScheduler(h.apparatus, runtime.seams, runtime.open)
+  await scheduler.advance(review.reviewId)
+  await scheduler.advance(review.reviewId)
+  const terminal = h.apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, review.reviewId)!
+  expect(terminal).toMatchObject({ status: 'failed', failure: expect.stringContaining('required delegated responsibilities ended without verification') })
+  expect(runtime.delivered.filter(entry => entry.sessionId === 'reviewer')).toHaveLength(1)
+  expect(runtime.opened).toEqual([])
   await scheduler.close(); await h.apparatus.store.close()
 })
 it.each(['subject.json', 'submitted-artifact'])('isolates frozen input %s from reviewer host files', async (name) => {
@@ -169,7 +204,7 @@ it('allows evidence Tasks with their own review and completes a negative outer j
     review = await start(h),
     evidenceInputs = reviewInputsOf(review, JSON.parse(h.subject.toString('utf8'))),
     caller = { ...h.caller, agentId: 'reviewer', sessionId: 'reviewer' },
-    scheduler = { advance: async () => [], close: async () => undefined }
+    scheduler = { advance: async () => [] }
   await decompose(h.apparatus, scheduler, caller, {
     taskId: review.reviewId,
     children: [
@@ -183,7 +218,7 @@ it('allows evidence Tasks with their own review and completes a negative outer j
         },
         dependsOn: [],
         supports: ['letters'],
-        maxRuns: 1,
+        maxRuns: 1, requirement: 'required' as const,
       },
     ],
   })
@@ -206,7 +241,7 @@ it('allows evidence Tasks with their own review and completes a negative outer j
     read: async (_from?: number, count?: number) => ({ events: [event].slice(0, count) }),
     close: async () => undefined,
   }) } as never }
-  expect(await readTrajectory(reading, caller.agentId, childCaller.sessionId, 0, 1)).toEqual([event])
+  expect(await readTrajectory(reading, caller.agentId, childCaller.sessionId, 0, 1)).toMatchObject([{ seq: event.seq, type: event.type }])
   expect(await readTrajectory(reading, caller.agentId, h.caller.sessionId, 0, 1)).toEqual([])
   await expect(readTrajectory(reading, caller.agentId, 'foreign')).rejects.toThrow('outside the frozen evidence scope')
   expect(await readFile(join(run.bubble!.workspace.ref, 'submitted-artifact'), 'utf8')).toBe('0')

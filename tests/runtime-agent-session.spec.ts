@@ -239,15 +239,20 @@ describe('creating and resuming', () => {
     expect(refusal).toMatchObject({ code: 'concurrent-writer', detail: expect.stringContaining('singularity:agent:held') })
   })
 
-  it('keeps an unnamed repair failure identifiable, text included', async () => {
+  it('propagates an unnamed repair failure with its original identity', async () => {
     // The measured trap: this refusal is a bare `Error`, so `instanceof` against the exported error
     // classes cannot identify it — the module must still hand back a named refusal with the text.
     const ragged = new Error('append seq mismatch for "singularity:agent:ragged": expected 2 at index 0, got 99')
     expect(ragged).not.toBeInstanceOf(SessionAlreadyOwnedError)
 
     const live = harness({ persisted: true, resumeFails: ragged })
-    const refusal = await asyncRefusalOf(() => openAgentSession(live.context, { agentId: 'ragged', resume: true }))
-    expect(refusal).toMatchObject({ code: 'write-not-durable', detail: expect.stringContaining('append seq mismatch') })
+    await expect(openAgentSession(live.context, { agentId: 'ragged', resume: true })).rejects.toBe(ragged)
+  })
+
+  it('does not label an agent setup or provider failure as a persistence failure', async () => {
+    const error = new Error('provider stream_read_error during setup')
+    const live = harness({ createFails: error })
+    await expect(openAgentSession(live.context, { agentId: 'setup-failed', resume: false })).rejects.toBe(error)
   })
 })
 

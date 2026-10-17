@@ -2,251 +2,53 @@
   "rootTemplate": "sha256-area",
   "inputs": [
     {
-      "ref": "requirements",
-      "from": "protected.json"
+      "ref": "rtl",
+      "from": "sha256.v"
+    },
+    {
+      "ref": "yosys",
+      "from": "yosys.md"
     }
   ],
   "templates": [
     {
       "id": "sha256-area",
-      "goal": "Reduce the complete mapped sha256_core top cell area by editing only sha256_w_mem.v. Preserve the upstream public ports, active-low asynchronous reset, init/next behavior, and every observable cycle in SHA224 and SHA256.",
-      "input": {
-        "name": "protected.json",
-        "source": {
-          "kind": "protected",
-          "ref": "requirements"
-        }
-      },
-      "workspace": {
-        "artifact": "rtl/sha256_w_mem.v",
-        "initial": "seed/sha256_w_mem.v"
-      },
-      "criterion": {
-        "criterionId": "core-preserved",
-        "statement": "Reduce the complete mapped sha256_core top cell area by editing only sha256_w_mem.v. Preserve the upstream public ports, active-low asynchronous reset, init/next behavior, and every observable cycle in SHA224 and SHA256.",
-        "verifier": "core-functional"
-      },
-      "applicability": "SHA224/SHA256 core area optimization through the W schedule. Use independent exploration and integration evidence when candidate mechanisms or correctness obligations can be checked separately.",
-      "decomposition": {
-        "children": [
-          {
-            "key": "schedule",
-            "template": "sha256-schedule",
-            "dependsOn": [],
-            "supports": [
-              "core-preserved"
-            ],
-            "maxRuns": 2
-          },
-          {
-            "key": "integration",
-            "template": "sha256-integration",
-            "dependsOn": [
-              "schedule"
-            ],
-            "supports": [
-              "core-preserved"
-            ],
-            "maxRuns": 2
+      "goal": "Reduce the complete mapped sha256_core cell area by optimizing only the sha256_w_mem module.",
+      "artifact": "rtl/sha256.v",
+      "inputs": [
+        {
+          "name": "inputs/sha256.v",
+          "source": {
+            "kind": "protected",
+            "ref": "rtl"
           }
-        ]
-      }
-    },
-    {
-      "id": "sha256-schedule",
-      "goal": "Optimize only sha256_w_mem.v while preserving its 192-word NIST schedule, public ports, reset, hold and next behavior cycle by cycle.",
-      "input": {
-        "name": "protected.json",
-        "source": {
-          "kind": "protected",
-          "ref": "requirements"
+        },
+        {
+          "name": "inputs/yosys.md",
+          "source": {
+            "kind": "protected",
+            "ref": "yosys"
+          }
         }
-      },
-      "workspace": {
-        "artifact": "rtl/sha256_w_mem.v",
-        "initial": "seed/sha256_w_mem.v"
-      },
-      "criterion": {
-        "criterionId": "w-schedule",
-        "statement": "Optimize only sha256_w_mem.v while preserving its 192-word NIST schedule, public ports, reset, hold and next behavior cycle by cycle.",
-        "verifier": "w-schedule"
-      }
-    },
-    {
-      "id": "sha256-integration",
-      "goal": "Copy the exact verified predecessor sha256_w_mem.v into the artifact and verify it with the sealed upstream core/K, NIST multi-block test and SHA224/SHA256 public-cycle comparison.",
-      "input": {
-        "name": "in/sha256_w_mem.v",
-        "source": {
-          "kind": "artifact",
-          "template": "sha256-schedule"
+      ],
+      "criteria": [
+        {
+          "criterionId": "area",
+          "statement": "The complete mapped sha256_core area is at most 64209.869856 um2, at least 1% below the unchanged input baseline of 64858.4544 um2, using the fixed Yosys flow and library specified in inputs/yosys.md."
+        },
+        {
+          "criterionId": "behavior",
+          "statement": "Only sha256_w_mem may change. The sha256_core and sha256_k_constants module bytes remain identical to inputs/sha256.v. Public ports, active-low asynchronous reset, init/next behavior including simultaneous controls, and every observable cycle of SHA224 and SHA256 remain equivalent to inputs/sha256.v."
         }
-      },
-      "workspace": {
-        "artifact": "rtl/sha256_w_mem.v",
-        "initial": "seed/sha256_w_mem.v"
-      },
-      "criterion": {
-        "criterionId": "core-integrated",
-        "statement": "Copy the exact verified predecessor sha256_w_mem.v into the artifact and verify it with the sealed upstream core/K, NIST multi-block test and SHA224/SHA256 public-cycle comparison.",
-        "verifier": "core-integration"
+      ],
+      "initial": {
+        "from": "sha256.v"
       }
     }
   ],
-  "verifiers": [
-    {
-      "ref": "core-functional",
-      "version": "2",
-      "program": "functional.mjs",
-      "args": [
-        "{artifact}",
-        "{input}"
-      ],
-      "selftest": [
-        {
-          "name": "accepts the preserved upstream core",
-          "expected": "pass",
-          "artifact": "seed/sha256_w_mem.v",
-          "argv": [
-            "seed/sha256_w_mem.v",
-            "protected.json"
-          ]
-        },
-        {
-          "name": "rejects a wrong W schedule in the integrated core",
-          "expected": "fail",
-          "artifact": "samples/fail-w_mem.v",
-          "argv": [
-            "samples/fail-w_mem.v",
-            "protected.json"
-          ]
-        },
-        {
-          "name": "rejects changed reset behavior",
-          "expected": "fail",
-          "artifact": "samples/fail-reset.v",
-          "argv": [
-            "samples/fail-reset.v",
-            "protected.json"
-          ]
-        }
-      ]
-    },
-    {
-      "ref": "w-schedule",
-      "version": "2",
-      "program": "schedule.mjs",
-      "args": [
-        "{artifact}",
-        "{input}"
-      ],
-      "selftest": [
-        {
-          "name": "accepts the upstream W sequence",
-          "expected": "pass",
-          "artifact": "seed/sha256_w_mem.v",
-          "argv": [
-            "seed/sha256_w_mem.v",
-            "protected.json"
-          ]
-        },
-        {
-          "name": "rejects one wrong W word",
-          "expected": "fail",
-          "artifact": "samples/fail-w_mem.v",
-          "argv": [
-            "samples/fail-w_mem.v",
-            "protected.json"
-          ]
-        },
-        {
-          "name": "rejects changed reset behavior",
-          "expected": "fail",
-          "artifact": "samples/fail-reset.v",
-          "argv": [
-            "samples/fail-reset.v",
-            "protected.json"
-          ]
-        },
-        {
-          "name": "rejects advancement while next is low",
-          "expected": "fail",
-          "artifact": "samples/fail-stall.v",
-          "argv": [
-            "samples/fail-stall.v",
-            "protected.json"
-          ]
-        },
-        {
-          "name": "rejects a source that prints a pass line",
-          "expected": "fail",
-          "artifact": "samples/fail-printing-cheat.v",
-          "argv": [
-            "samples/fail-printing-cheat.v",
-            "protected.json"
-          ]
-        },
-        {
-          "name": "rejects a source that ends simulation early",
-          "expected": "fail",
-          "artifact": "samples/fail-early-finish.v",
-          "argv": [
-            "samples/fail-early-finish.v",
-            "protected.json"
-          ]
-        },
-        {
-          "name": "rejects a printed pass followed by early finish",
-          "expected": "fail",
-          "artifact": "samples/fail-print-and-finish.v",
-          "argv": [
-            "samples/fail-print-and-finish.v",
-            "protected.json"
-          ]
-        }
-      ]
-    },
-    {
-      "ref": "core-integration",
-      "version": "1",
-      "program": "integration.mjs",
-      "args": [
-        "{artifact}",
-        "{input}"
-      ],
-      "selftest": [
-        {
-          "name": "accepts the exact sealed upstream predecessor",
-          "expected": "pass",
-          "artifact": "seed/sha256_w_mem.v",
-          "argv": [
-            "seed/sha256_w_mem.v",
-            "seed/sha256_w_mem.v"
-          ]
-        },
-        {
-          "name": "rejects replacing a verified predecessor",
-          "expected": "fail",
-          "artifact": "samples/fail-w_mem.v",
-          "argv": [
-            "samples/fail-w_mem.v",
-            "seed/sha256_w_mem.v"
-          ]
-        },
-        {
-          "name": "rejects an unchanged predecessor with wrong core results",
-          "expected": "fail",
-          "artifact": "samples/fail-printing-cheat.v",
-          "argv": [
-            "samples/fail-printing-cheat.v",
-            "samples/fail-printing-cheat.v"
-          ]
-        }
-      ]
-    }
-  ],
-  "measurement": "measurement.mjs",
+  "verifiers": [],
   "references": [
+    ".",
     "/home/ROXY/singularity-next/labs/sky130hd-lib"
   ]
 }

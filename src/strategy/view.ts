@@ -9,7 +9,7 @@
  *    never against today's head: `review.md` R03 measured B's Δ moving from +0.2 to 0 and A's from 0
  *    to −0.2 when B was published.
  * 2. **Pooling needs one caliber.** Two candidates whose frozen calibers differ answered different
- *    questions, so the projection refuses with `caliber-mismatch` and names the alternative.
+ *    questions, so only candidates matching the round's caliber enter the ranking.
  * 3. **A violated hard constraint is not for sale.** `constraintsMet` and `inadmissible` are filled
  *    here from the measure projection's own `constraints` — `null` (not yet checked) is not `true` —
  *    and they drop a candidate **before** any argmax. An incomplete measurement is inadmissible too,
@@ -36,7 +36,6 @@
 
 import type { EvaluationView } from '../measure/view.ts'
 import type { Envelope } from '../protocol/envelope.ts'
-import { refuse } from '../protocol/refusal.ts'
 import type { RevisionRef } from '../task/protocol.ts'
 import { sameRevision } from '../task/shape.ts'
 import {
@@ -209,7 +208,7 @@ function inadmissibleReason(
   if (!sameRevision(evaluation.candidate, submission.revision))
     return `measured on ${describeRevision(evaluation.candidate)}, but slot ${submission.slot} offers ${describeRevision(submission.revision)}; the observation is about a different candidate — submit the evaluation of the revision this slot offers`
   if (evaluation.caliberDigest !== plan.caliber)
-    return `measured under caliber ${evaluation.caliberDigest.slice(0, 12)}… but round ${plan.round} pools only ${plan.caliber.slice(0, 12)}…; a score from another caliber answers a different question, so it is not this round's to rank — re-measure it under the round's caliber, or open a round that freezes this one`
+    return `measured under caliber ${evaluation.caliberDigest.slice(0, 12)}… but round ${plan.round} pools only ${plan.caliber.slice(0, 12)}…; candidate excluded. ${evaluation.missing.map(entry => entry.reason).join('; ')} Re-measure under the frozen caliber; the incumbent stands unless another admissible candidate wins.`
   // A number whose orientation is unstated is not a reading of anything: the round cannot say which
   // candidate is better, so it refuses rather than defaulting to one of the two directions.
   const direction = directionOf(evaluation)
@@ -342,20 +341,6 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
   const incumbentAggregate = slice.incumbentBelow(plan.incumbent, plan.historyCutoff)
   const acceptedAssets = publishedAssetsBelow(slice.entries, plan.incumbent.environmentId, plan.historyCutoff)
   const submissions = [...state.submissions].sort((left, right) => left.slot - right.slot)
-
-  // Comparability first: two calibers in one pool would be two questions averaged into one ranking.
-  const measured = submissions
-    .map(submission => ({ submission, evaluation: slice.evaluationOf(submission.evaluationId) }))
-    .filter((entry): entry is { submission: CandidateSubmission; evaluation: RoundEvaluation } => entry.evaluation !== undefined)
-  const pooled = [...new Set(measured.map(entry => entry.evaluation.caliberDigest))]
-  const first = measured[0]
-  const clash = measured.find(entry => entry.evaluation.caliberDigest !== first?.evaluation.caliberDigest)
-  if (pooled.length > 1 && first !== undefined && clash !== undefined) {
-    refuse(
-      'caliber-mismatch',
-      `round ${plan.round} pools ${pooled.length} calibers: slot ${first.submission.slot} (evaluation "${first.evaluation.evaluationId}") was measured under ${first.evaluation.caliberDigest.slice(0, 12)}… and slot ${clash.submission.slot} (evaluation "${clash.evaluation.evaluationId}") under ${clash.evaluation.caliberDigest.slice(0, 12)}…; scores from different calibers answer different questions, so they may not be ranked together — re-measure them under one caliber, or decide them in separate rounds`,
-    )
-  }
 
   const planned = submissions.map(submission => plannedOf(submission, slice, plan, incumbentAggregate, calibration))
 

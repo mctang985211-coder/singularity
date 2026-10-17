@@ -3,7 +3,7 @@ import { refuse } from '../../src/protocol/refusal.ts'
 import { type TaskContract, type TaskInputSource } from '../../src/task/contract.ts'
 import type { Apparatus } from './apparatus.ts'
 import { taskStateOf } from './apparatus.ts'
-import { type Domain } from './domain.ts'
+import { templateOf, type Domain } from './domain.ts'
 import { sealedBytes } from './sealed.ts'
 import type { TaskTemplate } from './template.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
@@ -32,44 +32,55 @@ export interface PreparedInput {
   read(): Promise<Uint8Array>
 }
 
-export function contractFor(domain: Domain, template: TaskTemplate, goal: string, producerTaskId?: string,
+export function contractFor(domain: Domain, template: TaskTemplate, goal: string, producers: ReadonlyMap<string, string> = new Map(),
 ): TaskContract {
-  const declared = template.input.source
-  let source: TaskInputSource
-  if (declared.kind === 'protected') {
-    const input = domain.inputs.find((input) => input.ref === declared.ref)!
-    source = { kind: 'protected', ref: input.ref, digest: input.digest }
-  } else {
-    if (producerTaskId === undefined) refuse('malformed-declaration', 'the artifact input requires one matching producer Task')
-    source = { kind: 'artifact', taskId: producerTaskId }
-  }
+  const inputs = template.inputs.map(({ name, source: declared }) => {
+    let source: TaskInputSource
+    if (declared.kind === 'protected') {
+      const input = domain.inputs.find((input) => input.ref === declared.ref)!
+      source = { kind: 'protected', ref: input.ref, digest: input.digest }
+    } else {
+      const taskId = producers.get(declared.template)
+      if (taskId === undefined) refuse('malformed-declaration', `the artifact input requires one matching producer Task for template ${declared.template}`)
+      source = { kind: 'artifact', taskId }
+    }
+    return { name, source }
+  })
   return { template: { id: template.id, digest: template.digest }, goal,
-    artifact: template.artifact,
-    inputs: [{ name: template.input.name, source }], criteria: [template.criterion],
+    artifact: template.artifact, inputs, criteria: template.criteria,
+    skills: template.skills, capabilities: template.capabilities,
   }
+}
+
+export function assertTemplateContract(domain: Domain, contract: TaskContract): TaskTemplate | undefined {
+  const template = contract.template === undefined ? undefined : templateOf(domain, contract.template)
+  if (template !== undefined) {
+    if (
+      contract.artifact !== template.artifact ||
+      template.criteria.some(standard => !contract.criteria.some(criterion => digestOf(criterion) === digestOf(standard))) ||
+      contract.inputs.length !== template.inputs.length
+    )
+      refuse('evidence-input-mismatch', 'contract differs from its pinned template')
+    for (const input of contract.inputs) {
+      const source = input.source, expected = template.inputs.find(entry => entry.name === input.name)?.source
+      if (
+        expected === undefined || source.kind !== expected.kind ||
+        (source.kind === 'protected' && expected.kind === 'protected' &&
+          (source.ref !== expected.ref || source.digest !== domain.inputs.find(entry => entry.ref === expected.ref)!.digest))
+      ) refuse('evidence-input-mismatch', 'contract source differs from its pinned template')
+    }
+  }
+  return template
 }
 
 export async function resolveInputs(apparatus: Apparatus, taskId: string, contract: TaskContract, domain: Domain,
 ): Promise<readonly PreparedInput[]> {
-  const template = contract.template === undefined ? undefined : domain.templates.get(contract.template.id)!
-  if (template !== undefined) {
-    if (
-      contract.artifact !== template.artifact ||
-      digestOf(contract.criteria) !== digestOf([template.criterion]) ||
-      contract.inputs.length !== 1 ||
-      contract.inputs[0]!.name !== template.input.name
-    )
-      refuse('evidence-input-mismatch', 'contract differs from its pinned template')
-    const source = contract.inputs[0]!.source,
-      expected = template.input.source
-    if (
-      source.kind !== expected.kind ||
-      (source.kind === 'protected' && expected.kind === 'protected' && source.ref !== expected.ref) ||
-      (source.kind === 'artifact' &&
-        expected.kind === 'artifact' &&
-        taskStateOf(apparatus, source.taskId).contract!.template?.id !== expected.template)
-    )
-      refuse('evidence-input-mismatch', 'contract source differs from its pinned template')
+  const template = assertTemplateContract(domain, contract)
+  if (template !== undefined) for (const input of contract.inputs) {
+    const expected = template.inputs.find(entry => entry.name === input.name)!.source
+    if (input.source.kind === 'artifact' && expected.kind === 'artifact' &&
+      taskStateOf(apparatus, input.source.taskId).contract!.template?.id !== expected.template)
+      refuse('evidence-input-mismatch', 'contract producer differs from its pinned template')
   }
   const cut = apparatus.store.load(), tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   const reviews = [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()]

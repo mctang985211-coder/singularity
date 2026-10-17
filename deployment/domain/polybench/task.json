@@ -1,0 +1,31 @@
+{
+  "rootTemplate": "polybench-3mm",
+  "inputs": [
+    { "ref": "reference", "from": "reference.c" },
+    { "ref": "benchmark", "from": "benchmark.py" }
+  ],
+  "templates": [
+    {
+      "id": "polybench-3mm",
+      "goal": "Optimize the PolyBench/C 3mm kernel on this CPU using at most four CPU cores and four OpenMP threads.",
+      "artifact": "kernel.c",
+      "inputs": [
+        { "name": "inputs/reference.c", "source": { "kind": "protected", "ref": "reference" } },
+        { "name": "inputs/benchmark.py", "source": { "kind": "protected", "ref": "benchmark" } }
+      ],
+      "criteria": [
+        {
+          "criterionId": "correctness",
+          "statement": "Deliver one standalone C source exporting the same kernel_3mm signature as inputs/reference.c. For runtime dimensions and finite input matrices A/B/C/D, compute the complete double-precision output G=(A*B)*(C*D), preserve A/B/C/D, and treat E/F as scratch. Every G element must match the frozen reference within atol=1e-9 and rtol=1e-9 on all benchmark cases. The source may use the C standard library, libm and OpenMP; it must not use external numerical libraries, cached answers, file/network I/O, or modify the benchmark environment. Validate with /usr/bin/python3 inputs/benchmark.py kernel.c."
+        },
+        {
+          "criterionId": "performance",
+          "statement": "Achieve speedup >=1.20 against the unchanged reference on the benchmark's MEDIUM workload (NI=180,NJ=190,NK=200,NL=210,NM=220), using the fixed compiler flags and median of seven alternating timing trials in inputs/benchmark.py. Both implementations have the same four-core CPU affinity; candidate execution uses at most four threads. Submit a supported sufficient result when both criteria are met; further improvement and exhaustive candidate search are optional."
+        }
+      ],
+      "initial": { "from": "reference.c" }
+    }
+  ],
+  "verifiers": [],
+  "references": ["."]
+}

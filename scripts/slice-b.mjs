@@ -224,8 +224,8 @@ async function main() {
       commandId: 'plan',
       parentTaskId: PARENT,
       children: [
-        { taskId: CHILD_COUNT, dependsOn: [], supports: ['counted'], maxRuns: 1 },
-        { taskId: CHILD_LIMITS, dependsOn: [CHILD_COUNT], supports: ['bounded'], maxRuns: 1 },
+        { taskId: CHILD_COUNT, dependsOn: [], supports: ['counted'], maxRuns: 1, requirement: 'required'},
+        { taskId: CHILD_LIMITS, dependsOn: [CHILD_COUNT], supports: ['bounded'], maxRuns: 1, requirement: 'required'},
       ],
     })
     await commands.assign({ commandId: 'assign-count', taskId: CHILD_COUNT, agentId: AGENT })

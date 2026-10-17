@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry } from '@deepseek-ai/dsh-agent'
 import { SessionStore } from '@deepseek-ai/dsh-session'
+import SessionProjections from '@deepseek-ai/dsh-session-projection'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { asyncRefusalOf } from '../../tests/fixtures.ts'
@@ -35,10 +38,14 @@ describe('the host plugin', () => {
     const ctx = new Context()
     new AgentRegistry(ctx)
     new SessionStore(ctx)
+    await ctx.plugin(SessionProjections)
+    await ctx.plugin(TokenMeter)
     ctx.provide('tools', { guard: () => ctx.effect(() => () => undefined) })
-    ctx.provide('sessionPersistence', new FakePersistence() as never)
-    await apply(ctx, { controlId: 'lib-1', domainDir: REAL, workspaceRoot: await workspaceRoot() })
+    const workspace = await workspaceRoot()
+    await ctx.plugin(JsonlPersistence, { root: join(workspace, 'sessions'), compression: 'none' })
+    await apply(ctx, { controlId: 'lib-1', domainDir: REAL, workspaceRoot: workspace })
     expect(typeof ctx.singularity.forCall).toBe('function')
+    expect(Object.keys(ctx.singularity).sort()).toEqual(['forCall', 'inheritRsi', 'memoryContext', 'mountSkills', 'read', 'restart', 'world'])
     await ctx.fiber.dispose()
   })
 
@@ -54,6 +61,6 @@ describe('the host plugin', () => {
   })
 
   it('declares identity, tool admission and session persistence ports', () => {
-    expect([name, inject]).toEqual(['singularity-assembly', ['agents', 'tools', 'sessions', 'sessionPersistence', 'attachments']])
+    expect([name, inject]).toEqual(['singularity-assembly', ['agents', 'tools', 'sessions', 'sessionPersistence', 'sessionProjections', 'tokenMeter', 'attachments', 'agentPresets', 'llm']])
   })
 })

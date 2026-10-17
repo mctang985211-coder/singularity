@@ -176,7 +176,7 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(admit(PARENT, parentContract()))
     await log.emit(assigned(PARENT))
     // The child supports `counts`; the parent independently judges both criteria.
-    await log.emit(decompose(PARENT, [{ taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1 }]))
+    await log.emit(decompose(PARENT, [{ taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1, requirement: 'required' as const }]))
     await log.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
     await log.emit(assigned(CHILD_A))
     await openRun(log, CHILD_A, 'a1')
@@ -219,7 +219,7 @@ describe('a parent is accepted by verification, never by its children ending', (
     expect(tree(registry, partial).complete).toBe(false)
   })
 
-  it('retains failed and blocked branches after the parent independently passes', async () => {
+  it('retains unmet required branches even after the parent independently passes', async () => {
     const registry = taskRegistry()
     const log = await planned(registry, { maxRunsA: 1 })
     await openRun(log, CHILD_A, 'a1')
@@ -228,7 +228,7 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(judge(PARENT, 'p1', 'counts', UNIT_VERIFIER))
     await log.emit(judge(PARENT, 'p1', 'limits', INTEGRATION_VERIFIER))
     await log.emit(verified(PARENT, 'p1'))
-    expect(tree(registry, log)).toMatchObject({ complete: true, children: [{ status: 'stopped' }, { status: 'blocked' }] })
+    expect(tree(registry, log)).toMatchObject({ complete: false, children: [{ status: 'stopped' }, { status: 'blocked' }] })
   })
 })
 

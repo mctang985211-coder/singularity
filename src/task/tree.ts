@@ -48,7 +48,7 @@ export function assertParentage(parentId: string, children: readonly Decompositi
 }
 
 /** `stopped` means runtime failure or exhausted attempt budget. */
-export type ChildStatus = 'missing' | 'blocked' | 'waiting' | 'ready' | 'running' | 'verified' | 'stopped'
+export type ChildStatus = 'missing' | 'blocked' | 'waiting' | 'ready' | 'running' | 'verified' | 'stopped' | 'cancelled'
 
 /** What a sub-task's own runs have done, whether or not it was allowed to proceed. */
 export type ChildOutcome = 'verified' | 'failed' | 'running' | null
@@ -58,6 +58,7 @@ export interface TreeChildView {
   readonly dependsOn: readonly string[]
   readonly supports: readonly string[]
   readonly maxRuns: number
+  readonly requirement: DecompositionChild['requirement']
   readonly runsUsed: number
   readonly status: ChildStatus
   readonly lastOutcome: ChildOutcome
@@ -84,17 +85,24 @@ export interface TreeView {
 }
 
 export const childSettled = (child: TreeChildView): boolean =>
-  child.status === 'verified' || child.status === 'stopped' || child.status === 'blocked'
+  child.status === 'verified' || child.status === 'stopped' || child.status === 'blocked' || child.status === 'cancelled'
 
 /** One hold, shared by the command boundary and native execution admission. */
 export function taskWaitingReason(tasks: ReadonlyMap<string, TaskState>, taskId: string): string | undefined {
   const task = tasks.get(taskId)!
+  const stopped = stoppedExplorationOf(tasks, taskId)
+  if (stopped !== undefined) return `exploration ${stopped.taskId} was stopped by parent ${stopped.parentTaskId}: ${stopped.reason}`
   const run = Object.values(task.runs).at(-1)
   const questions = run === undefined ? [] : openQuestions(task, run.runId).filter((q) => q.blocking)
   if (questions.length)
     return `waiting for parent answers: ${questions.map((q) => q.questionId).join(', ')}; read or coordinate, then end the turn`
-  if (task.decomposition !== undefined && !projectOne(task, tasks).children.every(childSettled))
-    return 'delegated responsibilities are pending; read evidence or answer children, then end the turn'
+  if (task.decomposition !== undefined) {
+    const children = projectOne(task, tasks).children
+    if (!children.every(childSettled))
+      return 'delegated responsibilities are pending; read evidence, answer children, or stop unselected exploration, then end the turn'
+    const unmet = children.filter(child => child.requirement === 'required' && child.status !== 'verified')
+    if (unmet.length) return `required delegated responsibilities have not verified: ${unmet.map(child => child.taskId).join(', ')}`
+  }
   if (task.rounds?.some((request) => request.status === 'pending'))
     return 'waiting for the committed evaluation outcome; read or coordinate, then end the turn'
   return undefined
@@ -178,9 +186,14 @@ export function projectPlan(
       dependsOn: entry.dependsOn,
       supports: entry.supports,
       maxRuns: entry.maxRuns,
+      requirement: entry.requirement,
       runsUsed,
       lastOutcome: outcomeOf(runs),
     }
+
+    const stopped = stoppedExplorationOf(tasks, entry.taskId)
+    if (stopped !== undefined)
+      return { ...shape, status: 'cancelled', reason: `stopped by parent ${stopped.parentTaskId}: ${stopped.reason}` }
 
     // An unadmitted child cannot run.
     if (childState === undefined || childState.contract === undefined)
@@ -189,7 +202,7 @@ export function projectPlan(
 
     const dependencies = entry.dependsOn.map((dependency) => ({ dependency, view: statusOf(dependency, [...stack, entry.taskId]),
     }))
-    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped',
+    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped' || view.status === 'cancelled',
     )
     if (dead.length > 0)
       return {
@@ -251,6 +264,20 @@ export function projectPlan(
     blocked: children
       .filter((child) => child.reason !== null)
       .map((child) => ({ taskId: child.taskId, reason: child.reason as string })),
-    complete: criteria.every((criterion) => criterion.satisfiedBy !== null) && children.every(childSettled),
+    complete: criteria.every((criterion) => criterion.satisfiedBy !== null) && children.every(childSettled) &&
+      children.every(child => child.requirement !== 'required' || child.status === 'verified'),
+  }
+}
+
+/** A persisted stop covers the selected branch and every delegated descendant. */
+export function stoppedExplorationOf(tasks: ReadonlyMap<string, TaskState>, taskId: string):
+  { readonly parentTaskId: string; readonly taskId: string; readonly reason: string; readonly seq: number } | undefined {
+  let current = taskId
+  for (;;) {
+    const parent = [...tasks.values()].find(task => task.decomposition?.children.some(child => child.taskId === current))
+    if (parent === undefined) return undefined
+    const stopped = parent.decomposition!.stopped?.find(entry => entry.taskId === current)
+    if (stopped !== undefined) return { parentTaskId: parent.taskId, ...stopped }
+    current = parent.taskId
   }
 }

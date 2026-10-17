@@ -72,9 +72,9 @@ export const CHILD_C_CONTRACT = (): TaskContract => childContract('part-c', UNIT
 /** A three-step chain, so a failure has somewhere to propagate *through*. */
 export function chain(): readonly DecompositionChild[] {
   return [
-    { taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1 },
-    { taskId: CHILD_B, dependsOn: [CHILD_A], supports: ['limits'], maxRuns: 1 },
-    { taskId: CHILD_C, dependsOn: [CHILD_B], supports: ['counts'], maxRuns: 1 },
+    { taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1, requirement: 'required' as const },
+    { taskId: CHILD_B, dependsOn: [CHILD_A], supports: ['limits'], maxRuns: 1, requirement: 'required' as const },
+    { taskId: CHILD_C, dependsOn: [CHILD_B], supports: ['counts'], maxRuns: 1, requirement: 'required' as const },
   ]
 }
 
@@ -82,8 +82,8 @@ export function chain(): readonly DecompositionChild[] {
 export function plan(options: { readonly maxRunsA?: number; readonly maxRunsB?: number; readonly aDependsOn?: readonly string[] } = {},
 ): readonly DecompositionChild[] {
   return [
-    { taskId: CHILD_A, dependsOn: options.aDependsOn ?? [], supports: ['counts'], maxRuns: options.maxRunsA ?? 2 },
-    { taskId: CHILD_B, dependsOn: [CHILD_A], supports: ['limits'], maxRuns: options.maxRunsB ?? 1 },
+    { taskId: CHILD_A, dependsOn: options.aDependsOn ?? [], supports: ['counts'], maxRuns: options.maxRunsA ?? 2, requirement: 'required' as const },
+    { taskId: CHILD_B, dependsOn: [CHILD_A], supports: ['limits'], maxRuns: options.maxRunsB ?? 1, requirement: 'required' as const },
   ]
 }
 

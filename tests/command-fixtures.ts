@@ -170,7 +170,7 @@ export async function planned(live: Deployment, maxRuns = 1) {
   await commands.decompose({
     commandId: 'plan',
     parentTaskId: PARENT,
-    children: [{ taskId: CHILD, dependsOn: [], supports: ['correctness'], maxRuns }],
+    children: [{ taskId: CHILD, dependsOn: [], supports: ['correctness'], maxRuns, requirement: 'required' as const }],
   })
   await commands.assign({ commandId: 'assign-child', taskId: CHILD, agentId: AGENT })
   return commands

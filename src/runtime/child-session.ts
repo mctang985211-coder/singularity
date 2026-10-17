@@ -27,7 +27,7 @@ export interface ChildSessionRequest {
   /** Omitted when restoring a sealed submission's session for independent acceptance only. */
   readonly message?: UserMessage
   readonly signal: AbortSignal
-  readonly preset?: 'singularity-review' | 'singularity-improve' | 'singularity-next'
+  readonly preset?: 'singularity-review' | 'singularity-improve' | 'singularity-next' | 'singularity-root'
 }
 export interface ChildSession {
   readonly agentId: string

@@ -317,7 +317,7 @@ describe('the projection decides admissibility before any argmax', async () => {
     expect([winnerOf(await decideThrough(live, nothingAdmissible)), stateOf(live, nothingAdmissible)?.decision?.outcomes[0]?.reason]).toEqual([null, expect.stringContaining('incomplete')])
   })
 
-  it('refuses a measurement taken against another baseline, and refuses to pool two calibers', async () => {
+  it('excludes candidates measured against another baseline or caliber while deciding comparable candidates', async () => {
     const live = await deployment()
     const stale = await twoCandidateRound(live, { e0: { quality: 0.9, baseline: CANDIDATE_B } })
     const decision = project(live, stale)
@@ -326,7 +326,8 @@ describe('the projection decides admissibility before any argmax', async () => {
     expect(winnerOf(await decideThrough(live, stale))).toBe(1)
 
     const mixed = await twoCandidateRound(live, { round: 2, e1: { caliberDigest: '0'.repeat(64) } })
-    await expectRefusal(() => decideThrough(live, mixed), 'caliber-mismatch', 'may not be ranked together')
+    expect(winnerOf(await decideThrough(live, mixed))).toBe(0)
+    expect(project(live, mixed).slots[1]).toMatchObject({ admissible: false, reason: expect.stringContaining('measured under caliber') })
 
     // One submission under another caliber: with no second candidate to differ from, the round's own
     // caliber is the only thing that can catch it.

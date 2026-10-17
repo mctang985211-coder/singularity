@@ -27,13 +27,14 @@ export const useStore = create<State>((set, get) => ({
     )
   },
   receive: (snapshot) => {
-    if (snapshot.formatVersion !== 7) throw new Error('Unsupported Singularity snapshot')
+    if (snapshot.formatVersion !== 9) throw new Error('Unsupported Singularity snapshot')
     const childIds = new Set(snapshot.plans.flatMap((plan) => plan.children.map((child) => child.taskId)))
     const nodes: FlowNode[] = snapshot.tasks.map((task) => {
       const geometry = snapshot.geometry[task.taskId]!
       return { id: task.taskId, type: 'agent', position: { x: geometry.x, y: geometry.y }, selected: task.taskId === get().selectedId,
         data: { name: task.goal, root: task.purpose === 'solve' && !childIds.has(task.taskId), width: geometry.width, height: geometry.height,
-          status: task.phase === 'verified' ? 'done' : task.phase === 'failed' ? 'failed' : task.phase === 'running' ? 'running' : 'idle',
+          status: task.phase === 'verified' ? 'done' : task.phase === 'failed' ? 'failed' : snapshot.providerStopped ? 'idle'
+            : task.coordination.waiting !== null ? 'waiting' : task.phase === 'running' ? 'running' : 'idle',
         },
       }
     })
@@ -49,7 +50,7 @@ export const useStore = create<State>((set, get) => ({
           root: false,
           width: geometry.width,
           height: geometry.height,
-          status: review.status === 'completed' ? 'done' : review.status === 'failed' ? 'failed' : 'running',
+          status: review.status === 'completed' ? 'done' : review.status === 'failed' ? 'failed' : snapshot.providerStopped ? 'idle' : 'running',
         },
       })
     }

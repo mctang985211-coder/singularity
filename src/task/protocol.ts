@@ -6,7 +6,7 @@ import { defineKind, type MemberSet, type ProtocolRegistry } from '../protocol/r
 import { AGENT_ROLE } from '../agent/protocol.ts'
 import { assertContractShape, CONTRACT_MEMBERS, contractDigest, type TaskContract } from './contract.ts'
 import { bubbleOpenedKind, type BubbleInput } from './bubble.ts'
-import { decomposedKind, type Decomposition } from './decomposition.ts'
+import { decomposedKind, explorationsStoppedKind, type Decomposition } from './decomposition.ts'
 import { assignedKind, reassignedKind, type Responsibility } from './responsibility.ts'
 import { record } from './shape.ts'
 import {
@@ -23,7 +23,7 @@ import {
 export type { EvidenceRecord, RunState, RunStatus, RunSubmission } from './run.ts'
 
 export const TASK_PROTOCOL = 'task'
-export const TASK_VERSION = 12
+export const TASK_VERSION = 18
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'
@@ -106,6 +106,7 @@ export interface TaskState {
 export const TASK_KINDS = {
   admitted: 'task/admitted',
   decomposed: 'task/decomposed',
+  explorationsStopped: 'task/explorations-stopped',
   assigned: 'task/assigned',
   reassigned: 'task/reassigned',
   bubbleOpened: 'bubble/opened',
@@ -157,6 +158,7 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
       }),
 
       [TASK_KINDS.decomposed]: decomposedKind(TASK_KINDS.decomposed, SCHEDULER_ROLE),
+      [TASK_KINDS.explorationsStopped]: explorationsStoppedKind(TASK_KINDS.explorationsStopped, SCHEDULER_ROLE),
       [TASK_KINDS.assigned]: assignedKind(TASK_KINDS.assigned, SCHEDULER_ROLE),
       [TASK_KINDS.reassigned]: reassignedKind(TASK_KINDS.reassigned, SCHEDULER_ROLE),
       [TASK_KINDS.bubbleOpened]: bubbleOpenedKind(TASK_KINDS.bubbleOpened, SCHEDULER_ROLE),

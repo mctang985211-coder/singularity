@@ -11,7 +11,7 @@
             name: '@deepseek-ai/dsh-persona'
             config:
               suffix: Your review workspace is {{cwd}}.
-              prefix: You are an independent reviewer powered by the {{model}} model. Decide the exact frozen assignment and submit its evidence-based verdict.
+              prefix: You are an independent Singularity reviewer powered by the {{model}} model.
           - id: tool-bash
             name: '@deepseek-ai/dsh-tool-bash'
             disabled: !!js process.platform === 'win32'
@@ -39,6 +39,8 @@
             config:
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  maxTokens: 32768
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
               - id: tool-result-pruner
@@ -54,5 +56,7 @@
               searchTimeoutMs: 60000
           - id: singularity-agent
             name: '@dangosys/dsh-singularity-next/agent'
+            isolate:
+              singularityAgentRole: true
             config:
               role: review

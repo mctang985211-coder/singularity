@@ -15,59 +15,43 @@
     controlId: singularity-autonomous-v10
     domainDir: '@@CHECKOUT@@/deployment/domain/sha256'
     workspaceRoot: '@@DSH_HOME@@/workspaces/singularity'
-    budget:
-      nativeTokens: 300000000
 
 # The deployment's model route, because the base layer mounts `llm-pi-ai` with no providers and
 # defaults every agent to `deepseek-official`, for which this machine holds no credential: a profile
 # that names no route composes a session in which no model call can happen. The route names an
-# environment variable, never a key — `YINGJUN_API_KEY` resolves per request through
+# environment variable, never a key — `DEEPSEEK_API_KEY` resolves per request through
 # `$DSH_HOME/.credentials.yaml`. `agent-default-model` is restated whole because an id-targeted patch
 # replaces the matched config, so every key it owns has to be here.
 #
-# `retryPolicy` is named here because this gateway's stream drops do not all classify as retryable.
-# A dropped upstream stream arrives as the text `stream_read_error`, which `classifyPiAiError`
-# (`@deepseek-ai/dsh-llm-pi-ai`) matches no transport pattern for, so it falls through to
-# `PI_AI_ERROR` — a code outside the host's default `retryableCodes`, which made one dropped stream
-# terminal for a whole Run. `PI_AI_ERROR` is that classifier's fallback for "the provider reported a
-# failure we cannot name", which is the class of transient an agent turn must retry; a persistent
-# failure still exhausts `maxRetries` and is reported, so the wider set masks nothing.
+# The route is DeepSeek's own Responses endpoint: `api: openai-responses` posts to `<baseURL>/responses`,
+# which `https://api.deepseek.com/` serves directly. Model id, capacities and effort levels are the
+# provider's own `/models` answer (context 1048576, max output 393216, effort low/high/max), so no
+# gateway alias or capacity is restated here.
 - id: llm-pi-ai
   config:
     providers:
-      yingjun:
-        displayName: Yingjun
-        apiKeyEnv: YINGJUN_API_KEY
+      deepseek:
+        displayName: DeepSeek
+        apiKeyEnv: DEEPSEEK_API_KEY
         api: openai-responses
-        baseURL: https://yingjun.xyz/v1
-        retryPolicy:
-          mode: normal
-          maxRetries: 5
-          retryableCodes:
-            - EMPTY_RESPONSE
-            - RATE_LIMIT
-            - SERVER
-            - TIMEOUT
-            - TRANSPORT
-            - PI_AI_ERROR
+        baseURL: https://api.deepseek.com/
         models:
-          - id: deepseek-v4.1-flash
-            name: DeepSeek V4.1 Flash（Yingjun）
-            contextWindow: 1000000
-            maxTokens: 131072
+          - id: deepseek-flash
+            name: DeepSeek-V4.1-Flash
+            contextWindow: 1048576
+            maxTokens: 393216
             reasoningEfforts:
               low: low
-              medium: medium
               high: high
               max: max
 
 - id: agent-default-model
   name: '@deepseek-ai/dsh-agent-default-model'
   config:
-    provider: yingjun
-    model: deepseek-v4.1-flash
-    reasoningEffort: high
+    provider: deepseek
+    model: deepseek-flash
+    reasoningEffort: max
 
 - id: agent-preset-registry
   config:
-    default: singularity-next
+    default: singularity-root

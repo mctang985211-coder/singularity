@@ -22,3 +22,7 @@
     - id: singularity-web
       name: '@dangosys/dsh-singularity-next/web'
       config: {}
+
+# All model calls use the assembly's fixed provider retry policy.
+- id: llm-retry
+  disabled: true

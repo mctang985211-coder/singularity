@@ -1,13 +1,11 @@
 /**
  * The control store: our facts, carried by a DSH session this deployment owns.
  *
- * **Why a session of our own.** The runtime event vocabulary is generated from the DSH repo's own
- * sources, so an out-of-repo plugin's event type is outside it by construction. The one supported
- * compatibility mechanism is the persisted `ignorable` marker, and the live seam (`Session.append`)
- * cannot set it — an unmarked unknown type makes the *whole* log unreadable at the next open.
- * So the control records live in a **separate session with a stable id derived from the control
- * id**, one event per record, and every event is written through our own write handle with
- * `ignorable: true`. No execution agent's transcript carries them.
+ * **Why a session of our own.** Control records live in a separate session with a stable id
+ * derived from the control id, one event per record, written through this store's write handle
+ * with `ignorable: true`. DSH readers retain plugin-owned log-only records through that marker;
+ * an unmarked unknown event makes the log unreadable. Execution transcripts hold conversation
+ * and auxiliary model-call records, while this store owns the ordered business facts.
  *
  * **What each side owns.** DSH carries bytes: the event envelope, membership of the `ignorable`
  * mechanism, deep-frozen materialization, the crash barrier (`flush`) and the cross-process write

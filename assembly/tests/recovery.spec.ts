@@ -1,3 +1,4 @@
+import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -17,18 +18,18 @@ async function setup() {
   roots.push(root)
   const domain = await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
     medium = new FakePersistence(),
-    apparatus = await openApparatus('recovery', root, domain, medium as never, attachmentsAt(root))
+    apparatus = await openApparatus('recovery', root, domain, medium as never, attachmentsAt(root), testProjections)
   const agent = agentFor('worker', 'worker'),
     caller = callerOf(agent),
     proposal = await propose(apparatus, caller, 'root', { goal: 'count' })
-  await writeFile(join(proposal.workspace, proposal.artifact), '35')
+  await writeFile(join(proposal.workspace, proposal.contract.artifact), '35')
   const send = () =>
     submit(
       apparatus,
       fakeExecution(() => undefined),
       caller,
       execFor(agent, 'submit'),
-      { taskId: proposal.taskId, path: proposal.artifact },
+      { taskId: proposal.taskId, path: proposal.contract.artifact },
       new AbortController().signal,
       fixtureReview(apparatus),
     )
@@ -43,8 +44,8 @@ describe('recovery uses the same sealed responsibility and review', () => {
       await expect(h.send()).rejects.toThrow('write-not-durable')
       await h.apparatus.store.close()
       const sealed = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!.submission
-      await writeFile(join(h.proposal.workspace, h.proposal.artifact), '0')
-      const restored = await openApparatus('recovery', h.root, h.domain, h.medium as never, attachmentsAt(h.root))
+      await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '0')
+      const restored = await openApparatus('recovery', h.root, h.domain, h.medium as never, attachmentsAt(h.root), testProjections)
       await repair(restored, async (taskId, run) => {
         await judgeAndRecord(restored, taskId, run, new AbortController().signal, fixtureReview(restored))
         return true
@@ -71,7 +72,7 @@ describe('recovery uses the same sealed responsibility and review', () => {
     h.medium.failAppendOf('run/submitted')
     await expect(h.send()).rejects.toThrow('write-not-durable')
     await h.apparatus.store.close()
-    const restored = await openApparatus('recovery', h.root, h.domain, h.medium as never, attachmentsAt(h.root))
+    const restored = await openApparatus('recovery', h.root, h.domain, h.medium as never, attachmentsAt(h.root), testProjections)
     await repair(restored, async () => false)
     expect(taskStateOf(restored, h.proposal.taskId).runs[h.proposal.runId]!.stage).toBe('working')
     expect(factsOf(h.medium).filter((e) => e.kind === 'run/started')).toHaveLength(1)
@@ -79,11 +80,11 @@ describe('recovery uses the same sealed responsibility and review', () => {
   })
   it('reuses a completed honest fail judgment after settlement interruption', async () => {
     const h = await setup()
-    await writeFile(join(h.proposal.workspace, h.proposal.artifact), '0')
+    await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '0')
     h.medium.failAppendOf('run/failed')
     await expect(h.send()).rejects.toThrow()
     await h.apparatus.store.close()
-    const restored = await openApparatus('recovery', h.root, h.domain, h.medium as never, attachmentsAt(h.root))
+    const restored = await openApparatus('recovery', h.root, h.domain, h.medium as never, attachmentsAt(h.root), testProjections)
     await repair(restored, async (taskId, run) => {
       await judgeAndRecord(restored, taskId, run, new AbortController().signal, fixtureReview(restored))
       return true
@@ -102,7 +103,7 @@ it('refuses missing sealed artifacts before replaying independent judgment', asy
   await h.apparatus.store.close()
   const sealed = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!.submission!
   await rm(attachmentsAt(h.root).fileHostPath(sealed.files.artifact))
-  const restored = await openApparatus('recovery', h.root, h.domain, h.medium as never, attachmentsAt(h.root))
+  const restored = await openApparatus('recovery', h.root, h.domain, h.medium as never, attachmentsAt(h.root), testProjections)
   let restoredJudgment = false
   await expect(
     repair(restored, async () => {

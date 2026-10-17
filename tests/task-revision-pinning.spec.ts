@@ -21,14 +21,17 @@ import {
   type TaskState,
 } from '../src/index.ts'
 import { asyncRefusalOf } from './fixtures.ts'
-import { createRevision, deployment, ENVIRONMENT, openAgent, PARENT, pin, planned } from './command-fixtures.ts'
+import { contract } from './task-fixtures.ts'
+import { createRevision, deployment, ENVIRONMENT, openAgent, PARENT, pin, commandsFor, AGENT } from './command-fixtures.ts'
 
 describe('a revision is chosen when a run starts, and never moved afterwards', () => {
   it('keeps the in-flight run on its own revision and lets a later run choose the newer one', async () => {
     const live = await deployment()
     await openAgent(live)
     await createRevision(live)
-    const commands = await planned(live)
+    const commands = commandsFor(live)
+    await commands.admit({ commandId: 'admit-parent', taskId: PARENT, contract: contract() })
+    await commands.assign({ commandId: 'assign-parent', taskId: PARENT, agentId: AGENT })
 
     const firstPin = pin(live)
     await commands.startRun({

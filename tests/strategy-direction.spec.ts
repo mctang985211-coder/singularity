@@ -148,16 +148,17 @@ describe('the direction a round ranks in is the measurement\'s own', () => {
     expect(winnerOf(await instance.commands.decideRound({ commandId: nextId('decide'), roundId: 'round-1' }))).toBe(0)
   })
 
-  it('refuses to pool a second measurement that declares the other direction', async () => {
-    // The metric is in the caliber, so two directions are two questions: refused, not averaged.
+  it('excludes a measurement with another direction without failing the round', async () => {
     const instance = await deployment()
     await openEvaluation(instance, 'e-lower', CANDIDATE_A, 'lower')
     await recordTrial(instance, 'e-lower', 0.85)
     await openEvaluation(instance, 'e-higher', CANDIDATE_B, 'higher')
     await recordTrial(instance, 'e-higher', 0.95)
     await round(instance, [['e-lower', CANDIDATE_A], ['e-higher', CANDIDATE_B]])
-    const refusal = await asyncRefusalOf(() => instance.commands.decideRound({ commandId: nextId('decide'), roundId: 'round-1' }))
-    expect(refusal.code).toBe('caliber-mismatch')
+    const decision = await instance.commands.decideRound({ commandId: nextId('decide'), roundId: 'round-1' })
+    expect(winnerOf(decision)).toBe(0)
+    expect((decision.payload as { outcomes: { admitted: boolean; reason: string }[] }).outcomes[1])
+      .toMatchObject({ admitted: false, reason: expect.stringContaining('measured under caliber') })
   })
 
   it('has no member for a round to declare a direction of its own in', async () => {

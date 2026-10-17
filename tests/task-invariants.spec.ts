@@ -99,19 +99,13 @@ describe('settlement', () => {
 })
 
 describe('payloads are closed', () => {
-  it('refuses proposal accounting detached from candidate digests or unique session totals', async () => {
+  it('refuses RSI overhead in a round request and duplicate candidate revisions', async () => {
     const log = await running()
-    const proposal = { sessionId: 'analysis', tokens: 7, candidates: [REVISION.digest],
-      sessions: [{ sessionId: 'analysis', start: 0, end: 2, tokens: 7 }] }
-    for (const broken of [
-      { ...proposal, candidates: ['0'.repeat(64)] },
-      { ...proposal, tokens: 6 },
-      { ...proposal, tokens: 14, sessions: [...proposal.sessions, ...proposal.sessions] },
-      { ...proposal, sessionId: 'other' },
-    ]) expect((await asyncRefusalOf(() => log.emit({
-      commandId: 'bad-round', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'rsi/round-requested', subject: TASK_ID,
-      payload: { runId: RUN_ID, roundId: 'round', round: 1, incumbent: REVISION, candidates: [REVISION], proposal: broken },
-    }))).code).toBe('malformed-payload')
+    for (const extra of [{ proposal: { tokens: 7 } }, { candidates: [REVISION, REVISION] }])
+      expect((await asyncRefusalOf(() => log.emit({
+        commandId: 'bad-round', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'rsi/round-requested', subject: TASK_ID,
+        payload: { runId: RUN_ID, roundId: 'round', round: 1, incumbent: REVISION, candidates: [REVISION], ...extra },
+      }))).code).toBe('malformed-payload')
   })
   it('refuses an unknown contract member and a missing explicit member', () => {
     const widened = { ...contract(), extra: 'typo' }
@@ -123,13 +117,14 @@ describe('payloads are closed', () => {
     ).toEqual(['malformed-contract', 'malformed-contract', 'malformed-contract'])
   })
 
-  it('validates one-off asset selections and refuses competing template selections', () => {
+  it('validates task asset selections independently from template provenance', () => {
     const { template: _template, ...oneOff } = contract()
     expect(assertContract({ ...oneOff, skills: ['count'], capabilities: ['probe'] }, 'contract'))
       .toMatchObject({ skills: ['count'], capabilities: ['probe'] })
+    expect(assertContract({ ...contract(), skills: ['count'], capabilities: ['probe'] }, 'contract'))
+      .toMatchObject({ template: contract().template, skills: ['count'], capabilities: ['probe'] })
     for (const selection of [
       { skills: ['count', 'count'] }, { capabilities: [''] }, { skills: 'count' },
-      { template: contract().template, skills: ['count'] },
     ]) expect(refusalOf(() => assertContract({ ...oneOff, ...selection }, 'contract')).code).toBe('malformed-contract')
   })
 

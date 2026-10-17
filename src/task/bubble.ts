@@ -11,6 +11,8 @@ export interface BubbleInput {
   readonly name: string
   readonly digest: string
   readonly attachment?: FileAttachmentRef
+  /** The exact verified Run supplying an artifact input; its Task is fixed by the contract. */
+  readonly producerRunId?: string
 }
 
 /** The declared execution context of one run. */
@@ -36,7 +38,7 @@ export interface BubbleTool {
 
 export const BUBBLE_MEMBERS = ['runId', 'inputs', 'workspace', 'model', 'tools', 'conditions'] as const
 export const WORKSPACE_MEMBERS = ['kind', 'ref'] as const
-export const BUBBLE_INPUT_MEMBERS = ['name', 'digest', 'attachment'] as const
+export const BUBBLE_INPUT_MEMBERS = ['name', 'digest', 'attachment', 'producerRunId'] as const
 const MODEL_MEMBERS = ['provider', 'model'] as const
 /** The closed shape of one tool. Not exported: what is exported is the surface the stack uses. */
 const BUBBLE_TOOL_MEMBERS = ['name', 'implementationDigest', 'version'] as const
@@ -70,6 +72,7 @@ export function inputList(raw: unknown, where: string, members: MemberSet): read
       name,
       digest,
       ...(attachment === undefined ? {} : { attachment: attachment as unknown as FileAttachmentRef }),
+      ...(source['producerRunId'] === undefined ? {} : { producerRunId: text(source, 'producerRunId', at) }),
     }
   })
 }
@@ -87,7 +90,8 @@ export function assertInputsBound(bubble: Bubble | undefined, declared: readonly
     )
   for (const [index, expected] of bubble.inputs.entries()) {
     const actual = declared[index]
-    if (actual === undefined || actual.name !== expected.name || actual.digest !== expected.digest)
+    if (actual === undefined || actual.name !== expected.name || actual.digest !== expected.digest ||
+      (actual.producerRunId !== undefined && actual.producerRunId !== expected.producerRunId))
       refuse(
         'evidence-input-mismatch',
         `${where} declares input ${index} as ${JSON.stringify(actual?.name ?? null)}=${actual?.digest.slice(0, 12) ?? 'null'}…, but the run's bubble declares ${JSON.stringify(expected.name)}=${expected.digest.slice(0, 12)}…`,
@@ -187,6 +191,8 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
         const bound = payload.inputs[index]!
         if (bound.name !== input.name || (input.source.kind === 'protected' && bound.digest !== input.source.digest))
           refuse('evidence-input-mismatch', `${where} does not bind the declared source of input "${input.name}"`)
+        if ((input.source.kind === 'artifact') !== (bound.producerRunId !== undefined))
+          refuse('evidence-input-mismatch', `${where} must bind a producer Run only for artifact input "${input.name}"`)
       }
       return {
         ...state,

@@ -15,19 +15,13 @@ import { sha256 } from './ids.ts'
 import { waitForTask } from './read.ts'
 import { sealedBytes } from './sealed.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
-import { nativeTokensOf } from './budget.ts'
 import {
   taskSessionsOf,
-  evaluationCostSummaryOf,
+  projectedTokenUsage,
+  billedTokens,
+  executionEvents,
   type EvaluationCostBasis,
-  type ProposalCost,
 } from './evaluation-cost.ts'
-
-export function tokensOf(events: readonly SessionEvent[]): number {
-  const messages = events.filter((event) => event.type === 'assistant/message')
-  if (messages.length === 0) refuse('illegal-transition', 'the solve has no native model messages to measure')
-  return nativeTokensOf(events)
-}
 
 export interface SolveMeasurement {
   readonly digest: string
@@ -35,7 +29,7 @@ export interface SolveMeasurement {
 }
 
 export function createNativeSolve(apparatus: Apparatus, seams: ChildSessionSeams, parent: Agent, signal: AbortSignal,
-  measurement?: SolveMeasurement, proposal?: ProposalCost,
+  measurement?: SolveMeasurement,
 ) {
   return async ({
     revision,
@@ -91,62 +85,15 @@ export function createNativeSolve(apparatus: Apparatus, seams: ChildSessionSeams
         }),
       )
       if (run.status === 'running') {
-        child = await openChildSession(seams, { agentId: id, cwd: workspace, parent, model: caller.model, message, signal,
+        child = await openChildSession(seams, { agentId: id, cwd: workspace, parent, model: caller.model, message, signal, preset: 'singularity-root',
         })
         signal.throwIfAborted()
         run = await waitForTask(apparatus, taskId, child, signal)
         runId = run.runId
       }
-      const task = taskStateOf(apparatus, taskId)
       if (run.status === 'running') refuse('illegal-transition', 'the native solve stopped without submitting its working Run')
       if (run.failureCause === 'runtime') refuse('illegal-transition', `the native solve failed at runtime: ${run.failureReason}`)
-      const sessions = taskSessionsOf(apparatus, taskId)
-      let cost = 0
-      const traces: { sessionId: string; eventCount: number; digest: string; events: readonly SessionEvent[] }[] = []
-      const sessionCosts: EvaluationCostBasis['sessions'][number][] = []
-      for (const sessionId of sessions) {
-        const handle = await apparatus.persistence.open(sessionId as Agent['session']['id'], 'read')
-        try {
-          const { events } = await handle.read()
-          const tokens = tokensOf(events)
-          const eventCount = events.length
-          traces.push({ sessionId, eventCount, digest: digestOf({ sessionId, eventCount, events }), events })
-            cost += tokens
-            sessionCosts.push({ sessionId, end: events.length, tokens })
-          } finally { await handle.close()
-        }
-      }
-      let share = 0
-      if (proposal !== undefined) {
-        const slot = proposal.candidates.indexOf(revision.digest)
-        if (slot >= 0) share = Math.floor(proposal.tokens / proposal.candidates.length) + (slot < proposal.tokens % proposal.candidates.length ? 1 : 0)
-      }
-      cost += share
-      const costBasis = proposal === undefined ? undefined : { proposal: { ...proposal, share }, sessions: sessionCosts }
-      const trajectory = await apparatus.attachments.saveFile({
-        name: 'trial-trajectory.json',
-        data: Buffer.from(JSON.stringify({ sessions: traces })),
-      })
-      const criterionId = task.contract!.criteria[0]!.criterionId
-      const artifactDigest = run.submission!.artifactDigest
-      const evidenceDigest = recordedVerdictDigest(task, 'native method solve', { runId, criterionId, artifactDigest })
-      const evidence = run.evidence.find(
-        (entry) => entry.criterionId === criterionId && entry.artifactDigest === artifactDigest,
-      )!
-      const quality =
-        measurement === undefined
-          ? run.status === 'verified'
-            ? 1
-            : 0
-          : await measurement.measure((await sealedBytes(apparatus, run.submission!.files.artifact)).toString('utf8'), signal,
-            )
-      const met = run.status === 'verified' && (measurement === undefined || quality <= 0.99)
-      return { taskId, runId, quality, met, cost,
-        trajectory, ...(costBasis === undefined ? {} : { costBasis, costSummary: await evaluationCostSummaryOf(apparatus, costBasis) }),
-        artifactDigest, inputDigests: run.submission!.inputDigests,
-        implementationDigest: measurement?.digest ?? evidence.implementationDigest, acceptanceDigest: evidence.implementationDigest,
-        verdict: { criterionId, evidenceDigest, artifactDigest },
-      }
+      return observeSolve(apparatus, taskId, runId, signal, measurement)
     } catch (error) {
       if (
         !signal.aborted &&
@@ -159,5 +106,51 @@ export function createNativeSolve(apparatus: Apparatus, seams: ChildSessionSeams
         await child.close()
       }
     }
+  }
+}
+
+/** Measure one sealed business run; the caller's RSI session is never traversed. */
+export async function observeSolve(apparatus: Apparatus, taskId: string, runId: string, signal: AbortSignal,
+  measurement?: SolveMeasurement,
+): Promise<SolveResult> {
+  const task = taskStateOf(apparatus, taskId), run = task.runs[runId]!
+  const sessions = taskSessionsOf(apparatus, taskId)
+  const traces: { sessionId: string; eventCount: number; digest: string; events: readonly SessionEvent[] }[] = []
+  const sessionCosts: EvaluationCostBasis['sessions'][number][] = []
+  for (const sessionId of sessions) {
+    const handle = await apparatus.persistence.open(sessionId as Agent['session']['id'], 'read')
+    try {
+      const events = executionEvents((await handle.read()).events)
+      const tokens = billedTokens(projectedTokenUsage(apparatus, handle, events))
+      const eventCount = events.length
+      traces.push({ sessionId, eventCount, digest: digestOf({ sessionId, eventCount, events }), events })
+      sessionCosts.push({ sessionId, end: eventCount, tokens })
+    } finally { await handle.close() }
+  }
+  const costBasis = { sessions: sessionCosts }
+  const cost = sessionCosts.reduce((total, session) => total + session.tokens, 0)
+  const trajectory = await apparatus.attachments.saveFile({
+    name: 'trial-trajectory.json',
+    data: Buffer.from(JSON.stringify({ sessions: traces })),
+  })
+  const criterionId = task.contract!.criteria[0]!.criterionId
+  const artifactDigest = run.submission!.artifactDigest
+  const evidenceDigest = recordedVerdictDigest(task, 'native method solve', { runId, criterionId, artifactDigest })
+  const evidence = run.evidence.find(
+    (entry) => entry.criterionId === criterionId && entry.artifactDigest === artifactDigest,
+  )!
+  const quality =
+    measurement === undefined
+      ? run.status === 'verified'
+        ? 1
+        : 0
+      : await measurement.measure((await sealedBytes(apparatus, run.submission!.files.artifact)).toString('utf8'), signal,
+        )
+  const met = run.status === 'verified' && (measurement === undefined || quality <= 0.99)
+  return { taskId, runId, quality, met, cost,
+    trajectory, costBasis,
+    artifactDigest, inputDigests: run.submission!.inputDigests,
+    implementationDigest: measurement?.digest ?? evidence.implementationDigest, acceptanceDigest: evidence.implementationDigest,
+    verdict: { criterionId, evidenceDigest, artifactDigest },
   }
 }

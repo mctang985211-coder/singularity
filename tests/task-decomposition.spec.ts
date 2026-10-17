@@ -51,6 +51,7 @@ const child = (taskId: string, extra: Partial<{ dependsOn: readonly string[]; su
   dependsOn: extra.dependsOn ?? [],
   supports: extra.supports ?? ['counts'],
   maxRuns: extra.maxRuns ?? 1,
+  requirement: 'required' as const,
 })
 
 describe('a decomposition is one complete fact', () => {
@@ -115,7 +116,7 @@ describe('a decomposition is one complete fact', () => {
       },
       { label: 'a criterion the parent does not declare', children: [child(CHILD_A, { supports: ['not-a-criterion'] })], code: 'unknown-criterion',
       },
-      { label: 'a zero budget', children: [child(CHILD_A, { maxRuns: 0 })], code: 'malformed-payload' },
+      { label: 'a zero budget', children: [child(CHILD_A, { maxRuns: 0})], code: 'malformed-payload' },
       { label: 'a fractional budget', children: [child(CHILD_A, { maxRuns: 1.5 })], code: 'malformed-payload' },
       { label: 'an unknown member', children: [{ ...child(CHILD_A), note: 'extra' }], code: 'malformed-payload' },
     ]

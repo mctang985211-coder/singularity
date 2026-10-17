@@ -16,6 +16,7 @@ import { childSettled, projectPlan } from '../../src/task/tree.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import type { AcceptanceCriterion } from '../../src/task/contract.ts'
 import type { RevisionRef, RunState } from '../../src/task/protocol.ts'
+import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { ProtocolRefusal, refuse } from '../../src/protocol/refusal.ts'
 import { declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
 import { publishedMethod, seedMethod } from './method.ts'
@@ -28,6 +29,8 @@ import { outcomesAnswered, planOutcomeOf } from './read.ts'
 import { reviewInputsOf } from './inputs.ts'
 
 export const SUBJECT_INPUT = 'singularity-subject'
+// RRSI critic.py reviews intent/content before evaluation; it never solves a task.
+export const methodReviewTools = new Set(['read', 'glob', 'grep', 'write', 'edit', 'singularity_read', 'singularity_submit'])
 export interface ReviewWitness {
   readonly reviewId: string
   readonly subjectDigest: string
@@ -42,18 +45,45 @@ export function reviewOf(apparatus: Apparatus, agentId: string): ReviewRun | und
     (r) => r.agentId === agentId,
   )
 }
+export interface FrozenInputProducer {
+  readonly name: string
+  readonly taskId: string
+  readonly contract: NonNullable<TaskState['contract']>
+  readonly runId: string
+  readonly revision: RevisionRef
+  readonly status: 'verified'
+  readonly artifact: FileAttachmentRef
+  readonly artifactDigest: string
+  readonly source: NonNullable<RunState['submission']>['source']
+  readonly evidence: RunState['evidence']
+}
 export async function acceptanceSubject(apparatus: Apparatus, taskId: string, run: RunState,
   checks: readonly ProductionVerdict[],
 ) {
+  const task = taskStateOf(apparatus, taskId)
+  const inputProducers: FrozenInputProducer[] = task.contract!.inputs.flatMap((input) => {
+    if (input.source.kind !== 'artifact') return []
+    const bound = run.bubble?.inputs.find((bound) => bound.name === input.name)
+    const attachment = run.submission!.files.inputs.find((file) => file.name === input.name)?.attachment
+    const producer = taskStateOf(apparatus, input.source.taskId)
+    const held = bound?.producerRunId === undefined ? undefined : producer.runs[bound.producerRunId]
+    if (held?.status !== 'verified' || held.submission === undefined || attachment === undefined ||
+      attachment.attachmentId !== `sha256:${bound?.digest}` || held.submission.artifactDigest !== bound?.digest)
+      refuse('evidence-input-mismatch', `input "${input.name}" has no exact verified producer Run binding`)
+    return [{ name: input.name, taskId: producer.taskId, contract: producer.contract!, runId: held.runId,
+      revision: held.revision, status: 'verified', artifact: held.submission.files.artifact,
+      artifactDigest: held.submission.artifactDigest, source: held.submission.source, evidence: held.evidence }]
+  })
   return {
     purpose: 'acceptance',
-    taskId, runId: run.runId, contract: taskStateOf(apparatus, taskId).contract,
+    taskId, runId: run.runId, contract: task.contract,
     artifact: run.submission!.files.artifact,
     artifactDigest: run.submission!.artifactDigest,
     checks,
     inputs: run.submission!.files.inputs,
+    inputProducers,
     source: run.submission!.source,
-    contributions: taskStateOf(apparatus, taskId).decomposition?.children.map((child) => {
+    contributions: task.decomposition?.children.map((child) => {
       const state = taskStateOf(apparatus, child.taskId)
       const held = Object.values(state.runs).findLast((run) => run.status === 'verified') ?? Object.values(state.runs).at(-1)
       return { taskId: child.taskId, goal: state.contract!.goal, supports: child.supports,
@@ -113,7 +143,7 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
   criteria?: readonly AcceptanceCriterion[],
   target?: ReviewTarget,
 ): Promise<ReviewWitness> {
-  const bytes = Buffer.from(JSON.stringify(subject))
+  const bytes = Buffer.from(JSON.stringify(subject, null, 2))
   const subjectDigest = sha256(bytes)
   const reviewId = `review-${sha256(`${apparatus.controlId}/${operationId}`).slice(0, 24)}`
   let review = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)
@@ -206,6 +236,8 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
         },
         JSON.stringify({
           reviewId,
+          purpose: review.target.kind,
+          ...(review.target.kind === 'proposal' ? { instruction: 'This is a method proposal screen, NOT artifact acceptance. There is no submitted-artifact. Read the exact before/after method and changes with singularity_read({kind:subject,from:0,count:8192}), then follow next byte offsets until complete. Native file read truncates long JSON string lines. Judge only changed intent/content; do not solve, run commands, fetch URLs, delegate experiments or repair the candidate. Write review.json and submit it.' } : {}),
           assignment: 'subject.json',
           criteria: review.criteria,
           subjectDigest,

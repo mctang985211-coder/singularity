@@ -1,3 +1,4 @@
+import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -29,7 +30,7 @@ async function setup() {
       root,
       await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
       medium as never,
-      attachmentsAt(root),
+      attachmentsAt(root), testProjections,
     ),
     agent = agentFor('worker', 'worker'),
     caller = callerOf(agent),
@@ -40,7 +41,7 @@ it('runs and independently reviews a one-off investigation without minting a met
   const h = await setup(),
     method = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!.revision
   const before = factsOf(h.medium).filter((f) => f.kind === 'revision/created').length
-  const plan = await decompose(h.apparatus, { advance: async () => [], close: async () => undefined }, h.caller, {
+  const plan = await decompose(h.apparatus, { advance: async () => [] }, h.caller, {
     taskId: h.proposal.taskId,
     children: [
       {
@@ -55,7 +56,7 @@ it('runs and independently reviews a one-off investigation without minting a met
         },
         dependsOn: [],
         supports: ['letters'],
-        maxRuns: 1,
+        maxRuns: 1, requirement: 'required' as const,
       },
     ],
   })
@@ -86,6 +87,7 @@ it('runs and independently reviews a one-off investigation without minting a met
   expect(child.contract!.template).toBeUndefined()
   expect(factsOf(h.medium).filter((f) => f.kind === 'revision/created')).toHaveLength(before)
   const history = await historyOf(h.apparatus, [], h.caller.agentId)
+  expect(history.tasks.find((t) => t.taskId === childId)).not.toHaveProperty('goal')
   expect(history.tasks.find((t) => t.taskId === childId)!.runs[0]!.artifact).toMatchObject({ name: 'finding.json' })
   expect((await readArtifact(h.apparatus, childId)).text).toContain('hypothesis')
   const terminal = factsOf(h.medium).findLast((fact) => fact.subject === childId && fact.kind === 'run/verified')!
@@ -99,13 +101,13 @@ it('runs and independently reviews a one-off investigation without minting a met
       data: { target: 'next-turn', start: 0, inserted: [message] } } as SessionEvent)
     if (waits === 3) events.push({ seq: SessionSeq(events.length), time: 0, type: 'user/message', data: message } as SessionEvent)
     if (waits === 4) {
-      await writeFile(join(h.proposal.workspace, h.proposal.artifact), '35')
+      await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '35')
       await submit(
         h.apparatus,
         fakeExecution(() => undefined),
         h.caller,
         execFor(h.agent, 'answer'),
-        { taskId: h.proposal.taskId, path: h.proposal.artifact },
+        { taskId: h.proposal.taskId, path: h.proposal.contract.artifact },
         new AbortController().signal,
         fixtureReview(h.apparatus),
       )
@@ -121,9 +123,9 @@ it('refuses exact ancestor responsibilities even under fresh child keys and temp
   const h = await setup(),
     contract = h.proposal.contract
   await expect(
-    decompose(h.apparatus, { advance: async () => [], close: async () => undefined }, h.caller, {
+    decompose(h.apparatus, { advance: async () => [] }, h.caller, {
       taskId: h.proposal.taskId,
-      children: [{ key: 'again', contract, dependsOn: [], supports: ['letters'], maxRuns: 1 }],
+      children: [{ key: 'again', contract, dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const }],
     }),
   ).rejects.toThrow('repeats an ancestor')
   expect(factsOf(h.medium).filter((f) => f.kind === 'task/admitted')).toHaveLength(1)
@@ -140,8 +142,6 @@ it('waits for a committed round outcome to enter and finish its native turn befo
   const method = taskStateOf(h.apparatus, analysis.taskId).runs[analysis.runId]!.revision
   await fact('request:notification', 'rsi/round-requested', {
     runId: analysis.runId, roundId: 'notification', round: 1, incumbent: method, candidates: [method],
-    proposal: { sessionId: 'analysis', tokens: 0, candidates: [method.digest],
-      sessions: [{ sessionId: 'analysis', start: 0, end: 0, tokens: 0 }] },
   }, 'agent:analysis')
   const outcome = await fact('round-settled:notification', 'rsi/round-settled',
     { roundId: 'notification', status: 'failed', error: 'insufficient evidence' })
@@ -167,9 +167,9 @@ it('waits for a committed round outcome to enter and finish its native turn befo
 it('reads large sealed findings in explicit UTF-8 pages without copying them into task history', async () => {
   const h = await setup()
   const text = '边界证据'.repeat(10_000)
-  await writeFile(join(h.proposal.workspace, h.proposal.artifact), text)
+  await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), text)
   await submit(h.apparatus, fakeExecution(() => undefined), h.caller, execFor(h.agent, 'large-report'),
-    { taskId: h.proposal.taskId, path: h.proposal.artifact }, new AbortController().signal, fixtureReview(h.apparatus))
+    { taskId: h.proposal.taskId, path: h.proposal.contract.artifact }, new AbortController().signal, fixtureReview(h.apparatus))
   const history = await historyOf(h.apparatus, [], h.caller.agentId)
   expect(JSON.stringify(history.tasks)).not.toContain(text)
   let from = 0, read = ''
@@ -179,7 +179,7 @@ it('reads large sealed findings in explicit UTF-8 pages without copying them int
     read += page.text; from = page.next
   }
   expect(read).toBe(text)
-  await writeFile(join(h.proposal.workspace, h.proposal.artifact), 'changed after submission')
+  await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), 'changed after submission')
   expect((await readArtifact(h.apparatus, h.proposal.taskId, h.proposal.runId, 0, 12)).text).toBe('边界证据')
   await expect(readArtifact(h.apparatus, h.proposal.taskId, undefined, 1, 12)).rejects.toThrow('character boundary')
   await expect(readArtifact(h.apparatus, h.proposal.taskId, undefined, 0, 32769)).rejects.toThrow('32768')

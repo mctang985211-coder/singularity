@@ -1,6 +1,9 @@
 /** Driver specs use a persistence and execution port double with real domain commands and projection. */
 
 import { Context } from '@deepseek-ai/cordis'
+import SessionProjections from '@deepseek-ai/dsh-session-projection'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import { afterAll } from 'vitest'
 import { LocalAttachmentStore } from '@deepseek-ai/dsh-attachment-local'
 import { join } from 'node:path'
 import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
@@ -33,6 +36,12 @@ import { submit } from '../src/submission.ts'
 import { loadDomain } from '../src/domain.ts'
 import type { Admission, Execution } from '../src/execution.ts'
 import { spawnProcess } from '../src/process.ts'
+
+const projectionContext = new Context()
+await projectionContext.plugin(SessionProjections)
+await projectionContext.plugin(TokenMeter)
+export const testProjections = projectionContext.sessionProjections
+afterAll(() => projectionContext.fiber.dispose())
 
 /**
  * The medium: every event in memory, with one hook that makes an append die like a killed process. It
@@ -177,7 +186,7 @@ export async function mount(config: Config, medium = new FakePersistence(),
 ): Promise<{ ctx: Context; medium: FakePersistence; apparatus: Apparatus }> {
   const ctx = new Context()
   const apparatus = await openApparatus(config.controlId, config.workspaceRoot, await loadDomain(config.domainDir, spawnProcess),
-    medium as unknown as SessionPersistence, attachmentsAt(config.workspaceRoot),
+    medium as unknown as SessionPersistence, attachmentsAt(config.workspaceRoot), testProjections,
   )
   const execution = fakeExecution(() => undefined)
   const surface = { forCall: (exec: ToolRunContext) => {

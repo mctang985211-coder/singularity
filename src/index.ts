@@ -53,6 +53,7 @@ export {
   DECOMPOSITION_MEMBERS,
   type Decomposition,
   type DecompositionChild,
+  type TaskHandoff,
 } from './task/decomposition.ts'
 export {
   projectTree,

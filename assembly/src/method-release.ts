@@ -1,18 +1,15 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
 import { createReleaseCommands } from '../../src/release/commands.ts'
 import { RELEASE_PROTOCOL, RELEASE_VERSION, type ReleaseState } from '../../src/release/protocol.ts'
-import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import type { Apparatus } from './apparatus.ts'
 import { loadMethod, methodEnvironment, publishedMethod } from './method.ts'
 import { reviewSubject } from './review.ts'
-import { nativeTokensOf } from './budget.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { MEASURE_PROTOCOL, MEASURE_VERSION, type EvaluationState } from '../../src/measure/protocol.ts'
 import { projectEvaluation } from '../../src/measure/view.ts'
-import { taskSessionsOf } from './evaluation-cost.ts'
 import { structuralEditDetailsOf } from '../../src/strategy/edits.ts'
+import { rsiCriticRequirements, rsiDesignReference } from './rsi-policy.ts'
 export type MethodRelease = { readonly roundId: string }
 export async function releaseMethod(apparatus: Apparatus, seams: ChildSessionSeams, agent: Agent,
   callId: string, request: MethodRelease, signal: AbortSignal,
@@ -28,8 +25,6 @@ export async function releaseMethod(apparatus: Apparatus, seams: ChildSessionSea
   }
   if (draft.basis.kind !== 'decision') refuse('illegal-transition', 'method publication requires a measured decision')
   const evaluations = apparatus.store.load().statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION)
-    const candidate = projectEvaluation(evaluations.get(draft.basis.evaluationId)!),
-    baseline = projectEvaluation(evaluations.get(`${request.roundId}:bootstrap:evaluation`)!)
   const assets = (await loadMethod(apparatus, revision)).assets
   const incumbent = publishedMethod(apparatus)!
   const evidence = [
@@ -47,27 +42,16 @@ export async function releaseMethod(apparatus: Apparatus, seams: ChildSessionSea
     `${callId}:review`,
     {
       purpose: 'publication',
+      designReference: rsiDesignReference,
       draft,
       assets,
       changes: structuralEditDetailsOf((await loadMethod(apparatus, incumbent)).assets, assets),
       evidence,
       requirements:
-        'Judge reusable method changes, protected acceptance, independent evaluation, actual consumed assets and complete native costs. Reject answer memorization or cross-trial solution transfer. Frozen Task and session references support detailed evidence reads.',
+        rsiCriticRequirements + '\nJudge protected acceptance, independent evaluation, actually consumed assets and measured root-through-acceptance costs. All RSI usage stays outside comparison. Reusing one template or passing one task does not establish transfer. A prewritten task algorithm without a conditional general mechanism is task specialization even if the baseline already contained it. Separate observed cost changes, reviewer sampling and tested transfer. Do not claim domain generalization without unseen-task evidence. Frozen Task and session references support detailed evidence reads.',
     },
     signal,
   )
-  const review = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, witness.reviewId)!
-  const sessions = new Set([
-    review.sessionId,
-    ...review.children.flatMap((c) => [...taskSessionsOf(apparatus, c.taskId)]),
-  ])
-  let reviewCost = 0
-  for (const sessionId of sessions) {
-      const handle = await apparatus.persistence.open(SessionId(sessionId), 'read')
-      try { reviewCost += nativeTokensOf((await handle.read()).events) } finally { await handle.close() }
-    }
-    if (baseline.cost === null || candidate.cost === null || candidate.cost + reviewCost > baseline.cost * 1.25)
-      refuse('unapproved-revision', 'candidate plus publication review exceeds the 25% native cost ceiling')
   await release.approveReview({
     commandId: `${callId}:approve`, environmentId, revisionId: draft.revisionId, draftDigest: draft.draftDigest, witness,
   })

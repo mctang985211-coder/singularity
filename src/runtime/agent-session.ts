@@ -60,7 +60,7 @@ export async function openAgentSession(ctx: RuntimeSeams, request: AgentSessionR
       } })
   } catch (error) {
     if (error instanceof SessionAlreadyOwnedError) refuse('concurrent-writer', error.message)
-    refuse('write-not-durable', `session ${sessionId}: ${String(error)}`)
+    throw error
   }
   claims.set(sessionId, { handle })
   return { agentId: request.agentId, sessionId, resumed: request.resume, agent: handle.agent }

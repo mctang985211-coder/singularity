@@ -48,7 +48,7 @@ agent 面孔（三个工具 + 一段 prompt，按 preset 子行挂进调用者�
 ### 1.3 部署层：profile、preset、领域、模型路由
 
 `scripts/deploy.mjs` 把 `deployment/profile/` 落成 `$DSH_HOME/profiles/singularity-next-web/`：manifest、
-部署补丁（controlId/domainDir/workspaceRoot，以及 yingjun 的模型路由）、指向本 checkout `assembly/` 的
+部署补丁（controlId/domainDir/workspaceRoot，以及 DeepSeek 官方的模型路由）、指向本 checkout `assembly/` 的
 linked root。离线、不经 pnpm、不碰全局 home。preset `singularity-next` 由 bundle 自带补丁声明。
 
 ### 1.4 门禁

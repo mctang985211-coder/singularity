@@ -1,17 +1,19 @@
 import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
+import type { ControlReadCut } from '../../src/control/session-store.ts'
 import { postIdentifiedMessage } from '../../src/runtime/identified-message.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import type { TaskQuestion } from '../../src/task/questions.ts'
-import { projectPlan, childSettled, taskWaitingReason } from '../../src/task/tree.ts'
+import { projectPlan, childSettled, taskWaitingReason, stoppedExplorationOf } from '../../src/task/tree.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import { sha256 } from './ids.ts'
 import { schedulerMessage } from './scheduler-message.ts'
 import { sealedBytes } from './sealed.ts'
+import type { FrozenInputProducer } from './review.ts'
 
 export interface AskParent { readonly requestKey: string; readonly question: string; readonly blocking?: boolean }
 export interface AnswerChild { readonly questionId: string; readonly requestKey: string; readonly answer: string; readonly resolves: boolean; readonly evidence?: readonly string[] }
@@ -33,18 +35,31 @@ export function parentPlan(apparatus: Apparatus, taskId: string) {
   return undefined
 }
 
+export function parentContextOf(apparatus: Apparatus, taskId: string) {
+  const plan = parentPlan(apparatus, taskId)
+  if (plan === undefined) return undefined
+  const edge = plan.children.find((child) => child.taskId === taskId)!
+  return {
+    parent: { id: plan.id, runId: plan.runId, supports: edge.supports, dependsOn: edge.dependsOn, requirement: edge.requirement },
+    ...(edge.handoff === undefined ? {} : { handoff: edge.handoff }),
+  }
+}
+
 /** Port of the old batch/question write hold, derived from the one control fold. */
-export function waitingReason(apparatus: Apparatus, id: string): string | undefined {
-  const cut = apparatus.store.load()
+export function waitingReason(apparatus: Apparatus, id: string, cut: ControlReadCut = apparatus.store.load()): string | undefined {
   const review = cut.stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, id)
   const task = cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, id)
   if (task !== undefined) {
     return taskWaitingReason(cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), id)
   }
-  const children = review?.children ?? []
-  if (children.length && projectPlan(id, [], children, cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION))
-    .children.some((c) => !childSettled(c)))
+  const states = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
+  const stopped = review?.target.kind === 'acceptance' ? stoppedExplorationOf(states, review.target.taskId) : undefined
+  if (stopped !== undefined) return `review subject belongs to stopped exploration ${stopped.taskId}: ${stopped.reason}`
+  const children = projectPlan(id, [], review?.children ?? [], states).children
+  if (children.some(child => !childSettled(child)))
     return 'delegated responsibilities are pending; read evidence or answer children, then end the turn'
+  const unmet = children.filter(child => child.requirement === 'required' && child.status !== 'verified')
+  if (unmet.length) return `required review evidence tasks have not verified: ${unmet.map(child => child.taskId).join(', ')}`
   return undefined
 }
 
@@ -53,25 +68,68 @@ export function assertActive(apparatus: Apparatus, id: string): void {
   if (reason !== undefined) refuse('illegal-transition', reason)
 }
 
-export function coordinationOf(apparatus: Apparatus, id: string) {
-  const tasks = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
-  return { waiting: waitingReason(apparatus, id) ?? null,
-    questionsToAnswer: tasks.flatMap((t) => (t.questions ?? [])
-      .filter((q) => q.parentId === id && t.runs[q.runId]!.status === 'running' && !q.answers.some((a) => a.resolves))
-      .map((q) => ({ taskId: t.taskId, ...q }))),
-    questionsAsked: tasks.find((t) => t.taskId === id)?.questions ?? [] }
+/** Dynamic responsibility is a projection of frozen contracts and current control facts. */
+export function coordinationOf(apparatus: Apparatus, id: string, cut: ControlReadCut = apparatus.store.load()) {
+  const states = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
+  const task = states.get(id), review = cut.stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, id)
+  const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
+  const rootCoordinator = task?.responsibility !== undefined && run?.purpose !== 'improve'
+    && cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility.agentId)?.role === 'root'
+  const entries = review?.children ?? task?.decomposition?.children ?? []
+  const criteria = review?.criteria ?? task!.contract!.criteria
+  const children = projectPlan(id, criteria, entries, states, task === undefined ? [] : Object.values(task.runs)).children
+  const waiting = waitingReason(apparatus, id, cut) ?? null
+  const working = review === undefined ? run?.status === 'running' && run.stage === 'working' : review.status === 'running'
+  const questionsToAnswer = [...states.values()].flatMap(state => (state.questions ?? [])
+    .filter(question => question.parentId === id && state.runs[question.runId]!.status === 'running'
+      && stoppedExplorationOf(states, state.taskId) === undefined && !question.answers.some(answer => answer.resolves))
+    .map(question => ({ taskId: state.taskId, ...question })))
+  return {
+    responsibility: {
+      authority: review === undefined ? { kind: 'task' as const, taskId: id, runId: run?.runId ?? null,
+        contractDigest: task!.contractDigest!, artifact: task!.contract!.artifact }
+        : { kind: 'review' as const, reviewId: id, subjectDigest: review.subjectDigest },
+      criteriaToAccept: criteria.map(criterion => criterion.criterionId),
+      delegated: children.map(child => ({
+        ...child, contractDigest: states.get(child.taskId)!.contractDigest!,
+        goal: states.get(child.taskId)!.contract!.goal, artifact: states.get(child.taskId)!.contract!.artifact,
+      })),
+      requiredUnverified: children.filter(child => child.requirement === 'required' && child.status !== 'verified').map(child => child.taskId),
+      activeExploration: children.filter(child => child.requirement === 'exploration' && !childSettled(child)).map(child => child.taskId),
+      remaining: {
+        decompose: rootCoordinator && entries.length === 0 && working,
+        coordinate: children.some(child => !childSettled(child)) || questionsToAnswer.length > 0,
+        selectEvidence: children.length > 0 && working,
+        integrateOrReuseArtifact: review === undefined && !rootCoordinator && working,
+        delegateIntegrationIfNeeded: rootCoordinator && working,
+        submitForIndependentAcceptance: review === undefined && working,
+        judgeFrozenSubject: review !== undefined && working,
+      },
+      executionMode: rootCoordinator ? 'coordinate' as const : 'work' as const,
+      canExecute: working && waiting === null && !rootCoordinator,
+      canSubmit: working && waiting === null && (!rootCoordinator || children.some(child => child.status === 'verified')),
+      boundary: 'Delegation assigns the named child result. Supports links do not discharge parent criteria; the parent still owns selection and integration and must submit for independent acceptance.',
+    },
+    waiting,
+    questionsToAnswer,
+    questionsAsked: task?.questions ?? [],
+  }
 }
 
 /** Bodies are recorded in the control log; identities/recipients come only from the bound caller and direct edge. */
 export async function askParent(apparatus: Apparatus, caller: Caller, taskId: string, input: AskParent): Promise<TaskQuestion> {
   if (!input.requestKey) refuse('malformed-declaration', 'question requires a stable requestKey')
   const task = taskStateOf(apparatus, taskId), run = Object.values(task.runs).at(-1)!
+  const stopped = stoppedExplorationOf(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), taskId)
+  if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
   if (task.responsibility?.agentId !== caller.agentId) refuse('not-responsible', 'caller does not own Task')
   const questionId = 'question-' + sha256(`${taskId}/${run.runId}/${input.requestKey}`)
   await apparatus.store.emit(() => {
     const prior = taskStateOf(apparatus, taskId).questions?.find((q) => q.questionId === questionId)
     const parent = parentPlan(apparatus, taskId)
     if (parent === undefined) refuse('not-responsible', 'root Tasks have no parent to ask')
+    if (stoppedExplorationOf(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), taskId) !== undefined)
+      refuse('illegal-transition', 'stopped exploration cannot ask a question')
     if (prior === undefined && !parent.working) refuse('illegal-transition', 'direct parent Run has settled')
     return { commandId: questionId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'task/question-asked',
       subject: taskId, as: `agent:${caller.agentId}`, payload: {
@@ -100,6 +158,8 @@ export async function answerChild(apparatus: Apparatus, caller: Caller, input: A
     const parent = parentPlan(apparatus, task!.taskId)
     if (parent?.agentId !== caller.agentId || parent.runId !== question.parentRunId)
       refuse('not-responsible', 'only the exact direct parent Run may answer')
+    if (stoppedExplorationOf(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), task!.taskId) !== undefined)
+      refuse('illegal-transition', 'stopped exploration cannot receive new answers')
     if (!parent.working && apparatus.store.committedOf(answerId) === undefined)
       refuse('illegal-transition', 'parent Run has settled')
     return { commandId: answerId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'task/question-answered',
@@ -115,7 +175,8 @@ export async function deliverQuestions(apparatus: Apparatus, seams: ChildSession
   for (const task of apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values())
     for (const q of task.questions ?? []) {
       const run = task.runs[q.runId]!
-      if (run.status !== 'running' || run.stage !== 'working') continue
+      if (run.status !== 'running' || run.stage !== 'working' ||
+        stoppedExplorationOf(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), task.taskId) !== undefined) continue
       if (q.blocking && !q.answers.some((a) => a.resolves)) {
         const parent = parentPlan(apparatus, task.taskId)
         if (!parent?.working || parent.runId !== q.parentRunId) {
@@ -148,6 +209,7 @@ export async function readScopeOf(apparatus: Apparatus, agentId?: string, commit
   const states = committed.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   let visible: Set<string> | undefined
   const revisions = new Set<string>()
+  const frozenProducers = new Map<string, readonly FrozenInputProducer[]>()
   let audit = agentId === undefined
   if (agentId !== undefined) {
     const owner = [...states.values()].findLast((task) => task.responsibility?.agentId === agentId)
@@ -168,8 +230,19 @@ export async function readScopeOf(apparatus: Apparatus, agentId?: string, commit
     }
     if (review !== undefined) {
       for (const child of review.children) collect(child.taskId)
-      if (review.target.kind === 'acceptance') collect(review.target.taskId)
-      else {
+      if (review.target.kind === 'acceptance') {
+        collect(review.target.taskId)
+        const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as {
+          inputProducers: readonly FrozenInputProducer[]
+        }
+        for (const producer of subject.inputProducers) {
+          visible.add(producer.taskId)
+          revisions.add(producer.revision.digest)
+          const held = frozenProducers.get(producer.taskId) ?? []
+          if (!held.some((run) => run.runId === producer.runId)) frozenProducers.set(producer.taskId, [...held, producer])
+        }
+      }
+      else if (review.target.kind === 'publication') {
         const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as {
           evidence: readonly { trials: readonly { detail: string }[] }[]
         }
@@ -177,7 +250,7 @@ export async function readScopeOf(apparatus: Apparatus, agentId?: string, commit
           for (const trial of evaluation.trials) collect((JSON.parse(trial.detail) as { taskId: string }).taskId)
       }
       revisions.add(review.method.digest)
-      return { visible, revisions, audit: true }
+      return { visible, revisions, audit: true, frozenProducers }
     }
     collect(owner!.taskId)
     const run = Object.values(owner!.runs).at(-1)
@@ -210,6 +283,6 @@ export async function readScopeOf(apparatus: Apparatus, agentId?: string, commit
     }
     for (const id of visible) for (const held of Object.values(states.get(id)!.runs)) revisions.add(held.revision.digest)
   }
-  return { visible, revisions, audit }
+  return { visible, revisions, audit, frozenProducers }
 }
 
