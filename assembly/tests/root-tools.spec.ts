@@ -19,12 +19,12 @@ const { dshModule, DSH_INSTALLED } = await import(pathToFileURL(join(checkout, '
 const [{ Context }, { Loader, Group }, { entryListSchema }, { default: Presets },
   { default: Llm }, { default: Sessions, SessionId }, { default: Projections },
   { default: SystemPrompt }, { default: Tools, defineTool }, { default: Commands },
-  { default: Agents }, { default: Persistence }, { default: Fs }, { default: Subprocess }, { default: Attachments }, { default: AgentLoop }, { default: Skills }, ShellEnv, { default: TokenMeter }] =
+  { default: Agents }, { default: Persistence }, { default: Fs }, { default: Subprocess }, { default: Attachments }, { default: AgentLoop }, { default: Skills }, ShellEnv, { default: TokenMeter }, LlmRetry] =
   await Promise.all(['@deepseek-ai/cordis', '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include',
     '@deepseek-ai/dsh-agent-preset-registry', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session',
     '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools',
     '@deepseek-ai/dsh-commands', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-session-persistence-jsonl',
-    '@deepseek-ai/dsh-fs-local', '@deepseek-ai/dsh-subprocess-local', '@deepseek-ai/dsh-attachment-local', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-skill', '@deepseek-ai/dsh-shell-env', '@deepseek-ai/dsh-token-meter'].map(dshModule))
+    '@deepseek-ai/dsh-fs-local', '@deepseek-ai/dsh-subprocess-local', '@deepseek-ai/dsh-attachment-local', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-skill', '@deepseek-ai/dsh-shell-env', '@deepseek-ai/dsh-token-meter', '@deepseek-ai/dsh-llm-retry'].map(dshModule))
 const yaml = createRequire(join(DSH_INSTALLED, 'cordis-plugin-include/package.json'))('js-yaml')
 const pkg = createRequire(join(root, 'host.mjs'))
 const host = await import(pathToFileURL(pkg.resolve('@dangosys/dsh-singularity-next')).href)
@@ -47,6 +47,7 @@ try {
   await ctx.plugin(Attachments, { dshHome: root })
   await ctx.plugin(Persistence, { root: join(root, 'sessions'), compression: 'none' })
   await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(LlmRetry)
   const spawns = [], spawn = ctx.subprocess.spawn.bind(ctx.subprocess)
   ctx.subprocess.spawn = spec => { spawns.push(spec); return spawn(spec) }
   await ctx.plugin(Loader, { baseUrl: pathToFileURL(config).href })
@@ -68,12 +69,9 @@ try {
       async *[Symbol.asyncIterator]() { if (payload !== undefined) yield JSON.stringify(payload) } }, response)
     return { statusCode, headers, body }
   }
-  assert.equal((await request('/singularity/restart', 'GET')).statusCode, 405)
-  assert.equal((await request('/singularity/restart', 'POST', false)).statusCode, 401)
-  assert.equal((await request('/singularity/restart', 'POST')).statusCode, 409)
   assert.equal((await request('/singularity/rsi-memory', 'GET')).statusCode, 405)
   assert.equal((await request('/singularity/rsi-memory', 'POST', false)).statusCode, 401)
-  assert.equal(JSON.parse((await request('/singularity/tasks', 'GET')).body).providerStopped, false)
+  assert.equal(JSON.parse((await request('/singularity/tasks', 'GET')).body).formatVersion, 13)
   await ctx.loader.create({ name: '@deepseek-ai/cordis-plugin-include', config: { path: pathToFileURL(config).href } })
   await ctx.loader.await()
   ctx.tools.register(probe('deployment_probe'))
@@ -116,18 +114,28 @@ try {
     agent: child, callId: 'child-write', signal: new AbortController().signal })
   assert(!written.isError, JSON.stringify(written))
   assert.equal(await readFile(join(ctx.singularity.world(String(child.id)).root, 'result.txt'), 'utf8'), 'child implementation')
-  const { LlmAdapter, createUserMessage } = await dshModule('@deepseek-ai/dsh-llm')
+  const { LlmAdapter, createUserMessage, resolveRetryPolicy } = await dshModule('@deepseek-ai/dsh-llm')
   const inheritedDecision = 'Use the producer result because an independent count avoids repeated extraction.'
   const requests = []
+  let providerUnavailable = false
   class MemoryModel extends LlmAdapter {
+    providerRetryPolicy() {
+      return resolveRetryPolicy({ mode: 'normal', maxRetries: 20,
+        backoff: { initialDelayMs: 500, maxDelayMs: 180_000, jitterRatio: 0.1 } }, 'root tools fixture')
+    }
     async resolveModel(provider, model) { return { provider, id: model, name: model } }
     async *stream(options) {
       requests.push(options)
       const summary = options.messages[0]?.content.some(block => block.type === 'text' && block.text.startsWith('Summarize parent conversation data'))
-      if (summary && options.model === 'failed-summary' || !summary && options.model === 'failed-task' && options.sessionId !== 'runtime-failure-parent') {
-        yield { type: 'block-start', index: 0, blockType: 'text' }
-        yield { type: 'text-delta', index: 0, text: '{"decisions":[' }
-        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'PI_AI_ERROR', message: 'upstream_error: stream_read_error' } } }
+      if (options.model === 'partial-transport' && requests.filter(request => request.sessionId === options.sessionId).length === 1 ||
+          !summary && options.model === 'failed-task' && providerUnavailable) {
+        yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+        yield { type: 'reasoning-delta', index: 0, text: 'partial reasoning before disconnect' }
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'terminated' } } }
+        return
+      }
+      if (summary && options.model === 'failed-summary') {
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', message: 'upstream temporarily unavailable before output' } } }
         return
       }
       const text = summary ? JSON.stringify({ decisions: [inheritedDecision], evidenceRefs: [], hypotheses: ['The parent claim is provisional.'], openQuestions: [], exclusions: [] })
@@ -188,12 +196,13 @@ try {
   const responsibility = JSON.parse(pendingPrompt.contexts.find(context => context.name === 'singularity:responsibility').text)
   assert(responsibility.waiting !== null)
   assert(!pendingPrompt.sections.some(section => section.text.includes(parentGoal)), 'Task goals must not enter system instructions')
-  const pendingAllowed = new Set(['read', 'read_image', 'glob', 'grep', 'singularity_read', 'singularity_memory', 'singularity_answer', 'singularity_ask_parent', 'singularity_stop_explorations', 'singularity_retry_task'])
+  const pendingAllowed = new Set(['read', 'read_image', 'glob', 'grep', 'singularity_read', 'singularity_memory', 'singularity_answer', 'singularity_ask_parent', 'singularity_stop_explorations', 'singularity_retry_task', 'singularity_decompose_task'])
   assert(pendingPrompt.tools.every(tool => pendingAllowed.has(tool.name)), JSON.stringify(pendingPrompt.tools.map(tool => tool.name)))
-  assert(!pendingPrompt.tools.some(tool => tool.name === 'singularity_decompose_task' || tool.name === 'singularity_submit'))
+  assert(pendingPrompt.tools.some(tool => tool.name === 'singularity_decompose_task'))
+  assert(!pendingPrompt.tools.some(tool => tool.name === 'singularity_submit'))
   const nativeTimeout = globalThis.setTimeout
   let retryWaits = 0
-  // The assembly's provider policy schedules exponential waits between 450ms and three minutes.
+  // Speed up native retry waits while leaving JSONL persistence timers intact.
   const isRetryWait = delay => typeof delay === 'number' && delay >= 450 && delay <= 180_000
   globalThis.setTimeout = (callback, delay, ...args) => {
     if (isRetryWait(delay)) retryWaits++
@@ -202,56 +211,85 @@ try {
   const { agent: brokenParent } = await ctx.agents.create({ sessionId: SessionId('provider-failure-parent'), meta: { cwd: root },
     agentOptions: { provider: 'memory-probe', model: 'failed-summary', maxTokens: 512 },
     setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-root') } })
-  const originalGoal = 'Count the original source after a provider restart.'
-  brokenParent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: originalGoal }] }))
+  brokenParent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Investigate an unavailable parent background.' }] }))
   await brokenParent.whenIdle()
   const failure = await ctx.tools.execute({ name: 'singularity_decompose_task', agent: brokenParent,
-    callId: 'provider-exhaustion', signal: new AbortController().signal, arguments: { children: [{ key: 'provider-child',
+    callId: 'summary-failure', signal: new AbortController().signal, arguments: { children: [{ key: 'provider-child',
       contract: { goal: 'Investigate provider-child', artifact: 'finding.txt', inputs: [],
         criteria: [{ criterionId: 'finding', statement: 'An honest bounded finding.' }] },
       requirement: 'required', dependsOn: [], supports: ['letters'], maxRuns: 1 }] } })
-  assert(failure.isError, JSON.stringify(failure))
+  assert(!failure.isError, JSON.stringify(failure))
   await Promise.all(ctx.agents.list().map(agent => agent.whenIdle()))
-  const stopped = await ctx.singularity.read()
-  assert.equal(stopped.providerStopped, true)
-  assert.equal(retryWaits, 20)
+  assert.equal(retryWaits, 0)
   assert.equal(requests.filter(request => request.model === 'failed-summary' && request.messages[0]?.content.some(block =>
-    block.type === 'text' && block.text.startsWith('Summarize parent conversation data'))).length, 21)
-  assert(stopped.tasks.every(task => task.phase !== 'failed' && task.rsi === null), JSON.stringify(stopped))
-  const stoppedChild = stopped.tasks.find(task => task.goal === 'Investigate provider-child')
-  assert(!requests.some(request => request.sessionId === stoppedChild.sessionId), 'A child ran after graph cancellation')
-  const callsAtStop = requests.length
-  await new Promise(resolve => nativeTimeout(resolve, 10))
-  assert.equal(requests.length, callsAtStop, 'Stopped graph continued calling models')
-  await hostFiber.dispose()
-  hostFiber = ctx.plugin(host, hostConfig)
-  await hostFiber
-  assert.equal((await ctx.singularity.read()).providerStopped, true, 'Cold restore lost provider stop')
-  assert.equal((await request('/singularity/restart', 'POST', false)).statusCode, 401)
-  assert.equal((await request('/singularity/restart', 'POST')).statusCode, 200)
-  await Promise.all(ctx.agents.list().map(agent => agent.whenIdle()))
-  const restarted = await ctx.singularity.read()
-  assert.equal(restarted.providerStopped, false)
-  assert.notEqual(restarted.controlId, stopped.controlId)
-  assert(restarted.tasks.some(task => task.goal === originalGoal), JSON.stringify(restarted))
-  const oldLog = await ctx.sessionPersistence.open(brokenParent.session.id, 'read')
-  try { assert((await oldLog.read()).events.length > 0, 'Restart deleted original evidence') } finally { await oldLog.close() }
+    block.type === 'text' && block.text.startsWith('Summarize parent conversation data'))).length, 1)
+  const summaryLog = await ctx.sessionPersistence.open(brokenParent.session.id, 'read')
+  try {
+    const events = (await summaryLog.read()).events
+    const settled = events.find(event => event.type === 'singularity/memory-call' && event.data.phase === 'settled')
+    assert(settled?.data.stream.some(record => record.chunk?.type === 'finish' && record.chunk.reason.failure?.code === 'SERVER'),
+      'The failed raw background call must remain visible in native evidence')
+    assert.equal(events.filter(event => event.type === 'singularity/parent-memory-failed').length, 1)
+    assert.equal(events.filter(event => event.type === 'llm/retry').length, 0)
+  } finally { await summaryLog.close() }
+  const beforeProviderFailure = await ctx.singularity.read()
+  assert(beforeProviderFailure.tasks.every(task => task.phase !== 'failed' && task.rsi === null), JSON.stringify(beforeProviderFailure))
+  const backgroundChild = beforeProviderFailure.tasks.find(task => task.goal === 'Investigate provider-child')
+  assert(requests.some(request => request.sessionId === backgroundChild.sessionId), 'An optional summary failure prevented business execution')
+  const failedMemory = await ctx.tools.execute({ name: 'singularity_memory', agent: ctx.agents.get(SessionId(backgroundChild.sessionId)),
+    arguments: {}, callId: 'failed-background-index', signal: new AbortController().signal })
+  assert(!failedMemory.isError, JSON.stringify(failedMemory))
+  const failedDirectory = JSON.parse(failedMemory.value)
+  assert(failedDirectory.entries.some(entry => entry.ref === failedDirectory.inherited && entry.status === 'failed' && entry.error.includes('temporarily unavailable')),
+    JSON.stringify(failedDirectory))
+  const taskRequest = goal => JSON.stringify({ learning: false, contract: {
+    goal, artifact: 'finding.txt', inputs: [], criteria: [{ criterionId: 'finding', statement: 'An honest bounded finding.' }],
+  } })
+  const { agent: recovered } = await ctx.agents.create({ sessionId: SessionId('partial-transport-recovery'), meta: { cwd: root },
+    agentOptions: { provider: 'memory-probe', model: 'partial-transport', maxTokens: 512 },
+    setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-root') } })
+  recovered.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: taskRequest('Recover a partial transport failure.') }] }))
+  await recovered.whenIdle()
+  assert(await ctx.sessions.flush(recovered.session))
+  assert.equal(requests.filter(request => request.sessionId === recovered.session.id).length, 2)
+  assert.equal(retryWaits, 1)
+  const recoveredEvents = recovered.session.snapshotEvents()
+  assert.equal(recoveredEvents.filter(event => event.type === 'assistant/attempt').length, 1)
+  assert.equal(recoveredEvents.filter(event => event.type === 'llm/retry' && event.data.failure.code === 'TRANSPORT').length, 1)
+  assert.equal(recoveredEvents.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
+  assert(!(await ctx.singularity.read()).tasks.find(task => task.sessionId === recovered.session.id).runs.at(-1).detail)
+
+  providerUnavailable = true
   const { agent: brokenMain } = await ctx.agents.create({ sessionId: SessionId('provider-main-failure'), meta: { cwd: root },
     agentOptions: { provider: 'memory-probe', model: 'failed-task', maxTokens: 512 },
     setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-root') } })
-  brokenMain.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'A main-loop provider failure must stop the entire graph.' }] }))
+  brokenMain.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: taskRequest('Keep the native transport failure after retry exhaustion.') }] }))
   await brokenMain.whenIdle()
   assert(await ctx.sessions.flush(brokenMain.session))
-  const stoppedAgain = await ctx.singularity.read()
-  assert.equal(stoppedAgain.providerStopped, true)
-  assert.equal(retryWaits, 40, 'A restarted graph did not receive twenty fresh retries')
-  assert(stoppedAgain.tasks.every(task => task.phase !== 'failed' && task.rsi === null), JSON.stringify(stoppedAgain))
-  const mainLog = await ctx.sessionPersistence.open(brokenMain.session.id, 'read')
-  try {
-    const events = (await mainLog.read()).events
-    assert.equal(events.filter(event => event.type === 'llm/retry').length, 20)
-    assert.equal(events.filter(event => event.type === 'llm/retry-started').length, 20)
-  } finally { await mainLog.close() }
+  const failed = await ctx.singularity.read()
+  const failedTask = failed.tasks.find(task => task.sessionId === brokenMain.session.id)
+  assert.equal(failedTask.phase, 'failed')
+  assert.equal(failedTask.closure.reason, 'failed')
+  assert.equal(JSON.parse(failedTask.runs.at(-1).detail).reason.error.code, 'TRANSPORT')
+  assert.equal(retryWaits, 21)
+  assert.equal(requests.filter(request => request.sessionId === brokenMain.session.id).length, 21)
+  assert.equal(failed.tasks.find(task => task.sessionId === recovered.session.id).phase, 'running')
+  const mainEvents = brokenMain.session.snapshotEvents()
+  assert.equal(mainEvents.filter(event => event.type === 'llm/retry').length, 20)
+  assert.equal(mainEvents.filter(event => event.type === 'llm/retry-started').length, 20)
+  assert.equal(mainEvents.findLast(event => event.type === 'turn/end').data.reason.error.code, 'TRANSPORT')
+  await hostFiber.dispose()
+  hostFiber = ctx.plugin(host, hostConfig)
+  await hostFiber
+  assert.equal((await ctx.singularity.read()).tasks.find(task => task.sessionId === brokenMain.session.id).phase, 'failed')
+  providerUnavailable = false
+  const { agent: healthy } = await ctx.agents.create({ sessionId: SessionId('healthy-after-failure'), meta: { cwd: root },
+    agentOptions: { provider: 'memory-probe', model: 'test', maxTokens: 512 },
+    setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-root') } })
+  healthy.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: taskRequest('Continue independent work after another Task failed.') }] }))
+  await healthy.whenIdle()
+  assert.equal(requests.filter(request => request.sessionId === healthy.session.id).length, 1)
+  assert.equal(healthy.session.snapshotEvents().findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
   globalThis.setTimeout = nativeTimeout
   assert(!('budget' in ctx.singularity), 'The host must not install a campaign budget gate')
   console.log('root confined reads pass; own mutations denied; child execution retained; automatic optional parent memory and pending responsibility pass')

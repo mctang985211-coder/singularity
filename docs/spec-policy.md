@@ -1,6 +1,6 @@
 # 验证规范：以公开行为与来源关联为目标
 
-本文件是当前 TDD、spec 与门禁的唯一规范。具体产品出口在 [assembly-blueprint §9](assembly-blueprint.md#9-剩余构建顺序与检查点)，
+本文件是当前 TDD、spec 与门禁的唯一规范。当前改造的产品出口在 [Task 优先的领域 RSI 计划](task-first-domain-rsi-plan.md)，
 接口检查表在 [tdd-seams](tdd-seams.md)。
 
 ## 1. 先合同，再 red → green

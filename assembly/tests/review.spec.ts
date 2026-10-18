@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -14,7 +15,7 @@ import { submit } from '../src/submission.ts'
 import { acceptanceSubject, submitReview, reviewSubject } from '../src/review.ts'
 import type { ChildSessionRequest } from '../../src/runtime/child-session.ts'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { schedulerMessage } from '../src/scheduler-message.ts'
+import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { reviewInputsOf } from '../src/inputs.ts'
 import { fixtureReview } from './review-fixture.ts'
 import { sha256 } from '../src/ids.ts'
@@ -37,7 +38,7 @@ async function setup() {
   const apparatus = await openApparatus(
       'review',
       root,
-      await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
+      await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
       new FakePersistence() as never,
       attachmentsAt(root), testProjections,
     ),
@@ -270,14 +271,14 @@ it('allows evidence Tasks with their own review and completes a negative outer j
     join(review.workspace, 'review.json'),
     JSON.stringify({
       subjectDigest: review.subjectDigest,
-      findings: [
+      findings: review.criteria.map(({ criterionId }) => (
         {
-          criterionId: 'letters',
+          criterionId,
           verdict: 'fail',
           detail: 'The submitted count is zero, but independent evidence finds 35.',
           evidence: [childId],
-        },
-      ],
+        }
+      )),
     }),
   )
   const events: SessionEvent[] = []

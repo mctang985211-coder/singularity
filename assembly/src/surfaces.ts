@@ -1,3 +1,5 @@
+import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
+import { templateOf } from './domain.ts'
 import { assertClosedKeys, digestOf } from '../../src/protocol/envelope.ts'
 import { assertContract, type TaskContract } from '../../src/task/contract.ts'
 import { assertDecomposition } from '../../src/task/decomposition.ts'
@@ -14,6 +16,7 @@ import { workspaceOf, startAttempt } from './attempt.ts'
 import { bindingsForContract, seedMethod, loadMethod, publishedMethod } from './method.ts'
 import { reviewOf } from './review.ts'
 import { assertActive, readScopeOf } from './coordination.ts'
+import { assertWorkflowBudget, DEFAULT_WORKFLOW_LIMITS } from '../../src/task/budget.ts'
 
 const responsibilityDigest = ({ template: _template, ...responsibility }: TaskContract): string =>
   digestOf(responsibility)
@@ -38,7 +41,7 @@ export async function decompose(
   )
     refuse('not-responsible', 'only the working owner may decompose')
   const revision = review?.method ?? run!.revision
-  const { domain, assets } = await loadMethod(apparatus, revision)
+  const { domain, assets } = await loadMethod(apparatus, revision, parent?.contract?.template)
   const existing = review?.children ?? parent!.decomposition?.children ?? []
   const standards = review?.criteria ?? parent!.contract!.criteria
   const children = input.children
@@ -77,8 +80,13 @@ export async function decompose(
     }
     const tasks = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
     let ancestor = parent ?? (review?.target.kind === 'acceptance' ? tasks.get(review.target.taskId) : undefined)
+    const rootHandoff = parent !== undefined && ancestor === parent && (existing.length === 0 || existing.length === 1 && existing[0]!.taskId === ids.get(child.key)) && children.length === 1
+      && child.requirement === 'required' && child.supports.length === standards.length
+      && standards.every(criterion => child.supports.includes(criterion.criterionId))
+      && apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, caller.agentId)?.role === 'root'
+      && ![...tasks.values()].some(task => task.decomposition?.children.some(edge => edge.taskId === parent.taskId))
     while (ancestor !== undefined) {
-      if (responsibilityDigest(ancestor.contract!) === responsibilityDigest(contract))
+      if (!rootHandoff && responsibilityDigest(ancestor.contract!) === responsibilityDigest(contract))
         refuse(
           'cyclic-dependency',
           'child repeats an ancestor responsibility and input; narrow the unresolved obligation',
@@ -93,9 +101,15 @@ export async function decompose(
         ...(child.handoff === undefined ? {} : { handoff: child.handoff }) },
     }
   })
+  const responsibilities = new Set(existing.map(edge => responsibilityDigest(taskStateOf(apparatus, edge.taskId).contract!)))
   for (const entry of prepared) {
+    if (!existing.some(edge => edge.taskId === entry.taskId)) {
+      const digest = responsibilityDigest(entry.contract)
+      if (responsibilities.has(digest)) refuse('cyclic-dependency', 'duplicate child responsibility and input; retry the original Task within its budget')
+      responsibilities.add(digest)
+    }
     if (entry.contract.template === undefined) continue
-    const selected = domain.templates.get(entry.contract.template.id)!
+    const selected = templateOf(domain, entry.contract.template)
     for (const input of entry.contract.inputs) {
       const expected = selected.inputs.find((other) => other.name === input.name)!.source
       if (input.source.kind === 'artifact' && expected.kind === 'artifact') {
@@ -118,7 +132,10 @@ export async function decompose(
     return false
   })
   assertDecomposition([...existing, ...fresh.map((e) => e.plan)], { criteria: standards }, parentId)
-  if (fresh.length) assertActive(apparatus, parentId)
+  if (review === undefined && fresh.length) assertWorkflowBudget(
+    apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), apparatus.store.load().entries(), parentId,
+    { nodes: fresh.length, plans: 1 })
+  if (fresh.length) assertActive(apparatus, parentId, 'plan')
   const commands = apparatus.tasks.forAgent(caller.agentId)
   for (const entry of fresh) {
     const agentId = String(agentSessionIdOf(entry.taskId))
@@ -145,21 +162,34 @@ function taskStateIf(apparatus: Apparatus, taskId: string): TaskState | undefine
   return apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId)
 }
 
-export async function propose(apparatus: Apparatus, caller: Caller, callId: string, input: { readonly goal: string; readonly method?: import('../../src/task/protocol.ts').RevisionRef },
-  context: { purpose: RunState['purpose']; relatedTo?: RunState['relatedTo'] } = { purpose: 'solve' },
+export async function propose(apparatus: Apparatus, caller: Caller, callId: string, input: { readonly goal?: string; readonly contract?: TaskContract; readonly learning?: boolean; readonly method?: import('../../src/task/protocol.ts').RevisionRef },
+  context: { purpose: RunState['purpose']; relatedTo?: RunState['relatedTo']; case?: RunState['case'] } = { purpose: 'solve' },
 ): Promise<Proposal> {
   const method = input.method ?? publishedMethod(apparatus) ?? (await seedMethod(apparatus))
   const domain = (await loadMethod(apparatus, method)).domain
   const taskId = taskIdOf(apparatus.controlId, caller.agentId, callId)
   await bindCaller(apparatus, caller)
-  const template = domain.templates.get(domain.rootTemplate)!
+  const template = apparatus.domain.rootTemplate === undefined ? undefined : (domain.templates.get(apparatus.domain.rootTemplate) ?? apparatus.domain.templates.get(apparatus.domain.rootTemplate))
+  const goal = input.goal ?? input.contract?.goal ?? ''
+  let requestCriterion = 'request'
+  while (template?.criteria.some(criterion => criterion.criterionId === requestCriterion)) requestCriterion += '-request'
+  const contract = assertContract(input.contract ?? (template === undefined
+    ? { goal, artifact: 'result.txt', inputs: [], criteria: [{ criterionId: 'request', statement: goal }] }
+    : { ...contractFor(domain, template, goal), criteria: [
+      ...template.criteria, { criterionId: requestCriterion, statement: goal },
+    ] }), 'root contract')
   const commands = apparatus.tasks.forAgent(caller.agentId)
   if (taskStateIf(apparatus, taskId) === undefined)
     await commands.admit({ commandId: `propose:${taskId}`,
       taskId,
-      contract: contractFor(domain, template, input.goal),
+      contract,
     })
   await commands.assign({ commandId: `assign:${taskId}`, taskId, agentId: caller.agentId })
+  await apparatus.store.emit({ commandId: `learning:${taskId}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
+    subject: taskId, kind: 'learning/configured', as: `agent:${caller.agentId}`, payload: { enabled: input.learning ?? context.purpose === 'solve' } })
+  if (taskStateOf(apparatus, taskId).workflowLimits === undefined)
+    await apparatus.store.emit({ commandId: `workflow-limits:${taskId}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
+      subject: taskId, kind: 'workflow/limits-frozen', as: `agent:${caller.agentId}`, payload: DEFAULT_WORKFLOW_LIMITS })
   const run = await startAttempt(apparatus, caller, taskId, callId, method, { domain, ...context })
   return proposalOf(apparatus, taskStateOf(apparatus, taskId), run)
 }

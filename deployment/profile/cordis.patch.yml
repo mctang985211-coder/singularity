@@ -35,6 +35,13 @@
         apiKeyEnv: DEEPSEEK_API_KEY
         api: openai-responses
         baseURL: https://api.deepseek.com/
+        retryPolicy:
+          mode: normal
+          maxRetries: 20
+          backoff:
+            initialDelayMs: 500
+            maxDelayMs: 180000
+            jitterRatio: 0.1
         models:
           - id: deepseek-flash
             name: DeepSeek-V4.1-Flash

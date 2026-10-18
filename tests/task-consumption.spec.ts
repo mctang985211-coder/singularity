@@ -40,6 +40,7 @@ let commands = 0
 /** One consumption fact, as the apparatus would emit it. */
 const consumed = (options: {
   readonly method: string
+  readonly mode?: import('../src/task/run.ts').ConsumptionMode
   readonly source?: string
   readonly revision?: RevisionRef
   readonly runId?: string
@@ -53,7 +54,7 @@ const consumed = (options: {
     runId: options.runId ?? RUN_ID,
     revision: options.revision ?? PIN,
     method: options.method,
-    source: options.source ?? SOURCE,
+    source: options.source ?? SOURCE, mode: options.mode ?? 'read',
   },
 })
 
@@ -93,6 +94,17 @@ describe('a consumption fact is bound to the run it names', () => {
 })
 
 describe('the declared methods nothing consumed, below a cutoff', () => {
+  it('keeps automatic binding and delivery distinct from an explicit asset read', async () => {
+    const log = await running()
+    await log.emit(consumed({ method: 'word-count', mode: 'bound' }))
+    await log.emit(consumed({ method: 'word-count', mode: 'delivered' }))
+    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count))
+      .toEqual(['word-count', 'limit-check', 'normalize'])
+    await log.emit(consumed({ method: 'word-count' }))
+    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count))
+      .toEqual(['limit-check', 'normalize'])
+  })
+
   it('names the declared methods with no consumption fact', async () => {
     const log = await running()
     await log.emit(consumed({ method: 'limit-check' }))
@@ -141,7 +153,7 @@ describe('the trusted command surface', () => {
       purpose: 'solve',
       commandId: 'start-child', taskId: CHILD, runId: RUN, revision: pin(live),
     })
-    const recorded = await commands.recordConsumption({ commandId: 'consumed-1', taskId: CHILD, runId: RUN, revision: pin(live), method: 'word-count', source: SOURCE,
+    const recorded = await commands.recordConsumption({ commandId: 'consumed-1', taskId: CHILD, runId: RUN, revision: pin(live), method: 'word-count', source: SOURCE, mode: 'read',
     })
     const entries = live.store.load().entries()
     // The log stamps the role, not the caller: the apparatus's own role, never the scheduler's.

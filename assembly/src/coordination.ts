@@ -4,14 +4,15 @@ import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import type { ControlReadCut } from '../../src/control/session-store.ts'
 import { postIdentifiedMessage } from '../../src/runtime/identified-message.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
-import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
+import { TASK_PROTOCOL, TASK_VERSION, type RunState, type TaskState } from '../../src/task/protocol.ts'
+import { foldSubjects } from '../../src/protocol/fold.ts'
 import type { TaskQuestion } from '../../src/task/questions.ts'
-import { projectPlan, childSettled, taskWaitingReason, stoppedExplorationOf } from '../../src/task/tree.ts'
+import { projectPlan, childSettled, taskRelations, taskWaitingReason, stoppedExplorationOf } from '../../src/task/tree.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import { sha256 } from './ids.ts'
-import { schedulerMessage } from './scheduler-message.ts'
+import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { sealedBytes } from './sealed.ts'
 import type { FrozenInputProducer } from './review.ts'
 
@@ -46,25 +47,25 @@ export function parentContextOf(apparatus: Apparatus, taskId: string) {
 }
 
 /** Port of the old batch/question write hold, derived from the one control fold. */
-export function waitingReason(apparatus: Apparatus, id: string, cut: ControlReadCut = apparatus.store.load()): string | undefined {
+export function waitingReason(apparatus: Apparatus, id: string, cut: ControlReadCut = apparatus.store.load(), action: 'plan' | 'execute' = 'execute'): string | undefined {
   const review = cut.stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, id)
   const task = cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, id)
   if (task !== undefined) {
-    return taskWaitingReason(cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), id)
+    return taskWaitingReason(cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), id, action)
   }
   const states = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   const stopped = review?.target.kind === 'acceptance' ? stoppedExplorationOf(states, review.target.taskId) : undefined
   if (stopped !== undefined) return `review subject belongs to stopped exploration ${stopped.taskId}: ${stopped.reason}`
   const children = projectPlan(id, [], review?.children ?? [], states).children
-  if (children.some(child => !childSettled(child)))
+  if (action === 'execute' && children.some(child => !childSettled(child)))
     return 'delegated responsibilities are pending; read evidence or answer children, then end the turn'
   const unmet = children.filter(child => child.requirement === 'required' && child.status !== 'verified')
-  if (unmet.length) return `required review evidence tasks have not verified: ${unmet.map(child => child.taskId).join(', ')}`
+  if (action === 'execute' && unmet.length) return `required review evidence tasks have not verified: ${unmet.map(child => child.taskId).join(', ')}`
   return undefined
 }
 
-export function assertActive(apparatus: Apparatus, id: string): void {
-  const reason = waitingReason(apparatus, id)
+export function assertActive(apparatus: Apparatus, id: string, action: 'plan' | 'execute' = 'execute'): void {
+  const reason = waitingReason(apparatus, id, apparatus.store.load(), action)
   if (reason !== undefined) refuse('illegal-transition', reason)
 }
 
@@ -85,6 +86,7 @@ export function coordinationOf(apparatus: Apparatus, id: string, cut: ControlRea
       && stoppedExplorationOf(states, state.taskId) === undefined && !question.answers.some(answer => answer.resolves))
     .map(question => ({ taskId: state.taskId, ...question })))
   return {
+    direction: review === undefined && run?.purpose !== 'improve' ? workflowDirection(states, id, cut.entries().length) : undefined,
     responsibility: {
       authority: review === undefined ? { kind: 'task' as const, taskId: id, runId: run?.runId ?? null,
         contractDigest: task!.contractDigest!, artifact: task!.contract!.artifact }
@@ -106,6 +108,8 @@ export function coordinationOf(apparatus: Apparatus, id: string, cut: ControlRea
         judgeFrozenSubject: review !== undefined && working,
       },
       executionMode: rootCoordinator ? 'coordinate' as const : 'work' as const,
+      canCoordinate: working,
+      canPlan: working && waitingReason(apparatus, id, cut, 'plan') === undefined,
       canExecute: working && waiting === null && !rootCoordinator,
       canSubmit: working && waiting === null && (!rootCoordinator || children.some(child => child.status === 'verified')),
       boundary: 'Delegation assigns the named child result. Supports links do not discharge parent criteria; the parent still owns selection and integration and must submit for independent acceptance.',
@@ -225,7 +229,7 @@ export async function readScopeOf(apparatus: Apparatus, agentId?: string, commit
       for (const child of states.get(id)!.decomposition?.children ?? []) collect(child.taskId)
       if (Object.values(states.get(id)!.runs).at(-1)?.purpose === 'improve')
         for (const task of states.values())
-          if (Object.values(task.runs).some((run) => run.purpose === 'evaluation' && run.relatedTo?.taskId === id))
+          if (Object.values(task.runs).some((run) => run.purpose === 'evaluation' && (run.case === undefined || run.case.split === 'evolve') && run.relatedTo?.taskId === id))
             collect(task.taskId)
     }
     if (review !== undefined) {
@@ -286,3 +290,38 @@ export async function readScopeOf(apparatus: Apparatus, agentId?: string, commit
   return { visible, revisions, audit, frozenProducers }
 }
 
+
+/** Global metadata gives direction; artifact/transcript permissions remain in readScopeOf. */
+export function directionForRun(apparatus: Apparatus, taskId: string, run: RunState) {
+  const cutoff = apparatus.store.committedOf(`start:${run.runId}`)!.seq + 1
+  const entries = apparatus.store.load().entries().filter(entry => entry.seq < cutoff)
+  return workflowDirection(foldSubjects<TaskState>(apparatus.registry, entries, TASK_PROTOCOL, TASK_VERSION), taskId, cutoff)
+}
+
+export function workflowDirection(states: ReadonlyMap<string, TaskState>, id: string, cutoff: number) {
+  const graph = taskRelations(states), rootId = graph.rootOf(id)
+  const task = states.get(id)!, root = states.get(rootId)!
+  const path = [id, ...graph.ancestors(id)]
+  const parentId = graph.parents.get(id)
+  const neighbors = new Set([
+    ...(parentId === undefined ? [] : states.get(parentId)!.decomposition!.children.map(child => child.taskId)),
+    ...task.contract!.inputs.flatMap(input => input.source.kind === 'artifact' ? [input.source.taskId] : []),
+    ...(graph.consumers.get(id) ?? []),
+  ])
+  return { cutoff, root: { taskId: rootId, goal: root.contract!.goal, contractDigest: root.contractDigest },
+    supportPath: path.map(taskId => {
+      const state = states.get(taskId)!, parentId = graph.parents.get(taskId)
+      const edge = parentId === undefined ? undefined : states.get(parentId)!.decomposition!.children.find(child => child.taskId === taskId)
+      return { taskId, goal: state.contract!.goal, contractDigest: state.contractDigest, parentId: parentId ?? null,
+        supports: edge?.supports ?? [] }
+    }),
+    interfaces: [...neighbors].filter(taskId => taskId !== id && graph.rootOf(taskId) === rootId).map(taskId => {
+      const state = states.get(taskId)!, run = Object.values(state.runs).at(-1)
+      return { taskId, goal: state.contract!.goal, contractDigest: state.contractDigest,
+        artifact: state.contract!.artifact, status: run?.status ?? 'pending',
+        consumesMyOutput: graph.consumers.get(id)?.includes(taskId) ?? false }
+    }),
+    consumers: graph.consumers.get(id) ?? [],
+    boundary: 'The root explains purpose; only your frozen contract defines acceptance. Full bodies require separate evidence authorization.',
+  }
+}

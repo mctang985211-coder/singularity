@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -28,7 +29,7 @@ const event = (seq: number): SessionEvent => ({ seq: SessionSeq(seq), time: seq,
 it('reviews only the exact direct producer Run and its sealed transcript despite later same-byte Runs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'review-producer-')); roots.push(root)
   const apparatus = await openApparatus('producer-scope', root,
-    await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
+    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
     new FakePersistence() as never, attachmentsAt(root), testProjections)
   const method = await seedMethod(apparatus)
   const addTask = async (taskId: string, inputs: TaskContract['inputs']) => {

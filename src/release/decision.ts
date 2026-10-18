@@ -39,6 +39,6 @@ export function decisionDraftOf(cut: ControlReadCut, roundId: string): { readonl
     refuse('evidence-input-mismatch', 'the winner and incumbent belong to different release environments')
   return { environmentId: winner.revision.environmentId, draft: releaseDraftOf(winner.revision, {
     kind: 'decision', roundId, decisionSeq: decision.seq, decisionDigest: decision.digest,
-    evaluationId: winner.evaluationId, reportDigest: digestOf(report), expected: round.plan.incumbent.revisionId,
+    evaluationId: winner.evaluationId, reportDigest: digestOf(report), expected: round.plan.productionHead ?? round.plan.incumbent.revisionId,
   }) }
 }

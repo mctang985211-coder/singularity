@@ -1,5 +1,7 @@
 import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import type { SkillCandidate } from '@deepseek-ai/dsh-skill'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
@@ -13,11 +15,11 @@ import { templateOf } from './domain.ts'
 import { spawnProcess } from './process.ts'
 import { assertRunFile } from './workspace.ts'
 
-export async function consumeMethod(apparatus: Apparatus, taskId: string, run: RunState, asset: string, source: string,
+export async function consumeMethod(apparatus: Apparatus, taskId: string, run: RunState, asset: string, source: string, mode: import('../../src/task/run.ts').ConsumptionMode = 'read',
 ): Promise<void> {
-  if (taskStateOf(apparatus, taskId).runs[run.runId]!.consumed.some((entry) => entry.method === asset)) return
-  await apparatus.tasks.recordConsumption({ commandId: `consume:${taskId}/${run.runId}/${asset}`, taskId,
-    runId: run.runId, revision: run.revision, method: asset, source: `${run.revision.digest}/${source}`,
+  if (taskStateOf(apparatus, taskId).runs[run.runId]!.consumed.some((entry) => entry.method === asset && entry.mode === mode)) return
+  await apparatus.tasks.recordConsumption({ commandId: `consume:${taskId}/${run.runId}/${asset}/${mode}`, taskId,
+    runId: run.runId, revision: run.revision, method: asset, mode, source: `${run.revision.digest}/${source}`,
   })
 }
 function workingFor(apparatus: Apparatus, agentId: string) {
@@ -36,6 +38,7 @@ async function skillsFor(apparatus: Apparatus, agentId: string) {
 }
 export interface MethodContext {
   readonly method: RevisionRef
+  readonly workflowGuidance: string
   readonly template: { readonly id: string; readonly digest: string } | null
   readonly guidance?: string
   readonly skills: readonly {
@@ -66,8 +69,8 @@ export interface MethodContext {
 export async function methodContext(apparatus: Apparatus, taskId: string, run: RunState): Promise<MethodContext> {
   const { reference, assets, domain, bindings } = await methodForRun(apparatus, run)
   const contract = taskStateOf(apparatus, taskId).contract!
-  const template = contract.template === undefined ? undefined : templateOf(domain, contract.template)
-  return { method: reference, template: template === undefined ? null : { id: template.id, digest: template.digest },
+  const template = contract.template === undefined ? undefined : domain.templates.get(contract.template.id) ?? templateOf(domain, contract.template)
+  return { method: reference, workflowGuidance: assets.workflowGuidance, template: template === undefined ? null : { id: template.id, digest: template.digest },
     ...(template?.guidance === undefined ? {} : { guidance: template.guidance }),
     skills: bindings.skills.map((binding) => {
       const skill = assets.skills.find((skill) => skill.name === binding.name)!
@@ -92,8 +95,35 @@ export async function methodContext(apparatus: Apparatus, taskId: string, run: R
     } }),
   }
 }
+/** Delivery means the exact method packet exists in the durable native inbox or entered message. */
+export async function confirmWorkflowDelivery(apparatus: Apparatus, taskId: string, run: RunState): Promise<boolean> {
+  const context = await methodContext(apparatus, taskId, run)
+  if (!context.workflowGuidance) return false
+  const task = taskStateOf(apparatus, taskId)
+  const node = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility!.agentId)!
+  const session = await apparatus.persistence.stat(SessionId(node.sessionId))
+  if (session === undefined) return false
+  const handle = await apparatus.persistence.open(SessionId(node.sessionId), 'read')
+  try {
+    for (const event of (await handle.read()).events) {
+      const messages = event.type === 'user/message' ? [event.data] : event.type === 'agent/inbox/spliced' ? event.data.inserted : []
+      for (const message of messages) {
+        const source = message.source
+        if (source.kind !== 'singularity' || source.controlId !== apparatus.controlId || source.taskId !== taskId || source.runId !== run.runId || source.purpose !== 'dispatch') continue
+        const packet = JSON.parse(message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')) as { method?: MethodContext }
+        if (digestOf(packet.method ?? null) !== digestOf(context)) refuse('command-conflict', 'native dispatch contains a different pinned method packet')
+        await consumeMethod(apparatus, taskId, run, 'workflowGuidance', `native-delivery:${node.sessionId}/${event.seq}`, 'delivered')
+        return true
+      }
+    }
+    return false
+  } finally { await handle.close() }
+}
+
 export async function readMethodContext(apparatus: Apparatus, taskId: string, run: RunState): Promise<MethodContext> {
   const context = await methodContext(apparatus, taskId, run)
+  if (context.workflowGuidance !== '')
+    await consumeMethod(apparatus, taskId, run, 'workflowGuidance', `read:workflow:${digestOf(context.workflowGuidance)}`)
   if (context.guidance !== undefined) {
     const template = context.template!
     await consumeMethod(apparatus, taskId, run, `guidance:${template.id}`, `read:guidance:${template.id}:${template.digest}`)
@@ -152,7 +182,7 @@ export async function runMethodTool(apparatus: Apparatus, caller: Caller, taskId
     },
   )
   if (result.exitCode !== null)
-    await consumeMethod(apparatus, taskId, run, `tool:${tool.name}`, `tool:${tool.name}:${digestOf(tool)}:${caller.sessionId}/${callId}`)
+    await consumeMethod(apparatus, taskId, run, `tool:${tool.name}`, `tool:${tool.name}:${digestOf(tool)}:${caller.sessionId}/${callId}`, 'invoked')
   if (result.failure !== undefined || result.exitCode !== 0) throw new Error(result.failure ?? `Tool exited ${result.exitCode}: ${result.stderr}`)
   return { artifact: result.stdout }
 }

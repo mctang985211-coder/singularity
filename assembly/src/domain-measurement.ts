@@ -23,9 +23,9 @@ export async function loadMeasurement(path: string): Promise<DomainMeasurement> 
     refuse('malformed-declaration', 'domain measurement must export describe and measure functions')
   const description: unknown = await ports['describe']()
   const declared = record(description, 'measurement description')
-  assertClosedKeys(declared, ['baselineArea', 'digest', 'tools', 'conditions', 'unit', 'direction'], 'measurement description', 'malformed-declaration',
+  assertClosedKeys(declared, ['baseline', 'digest', 'tools', 'conditions', 'unit', 'direction'], 'measurement description', 'malformed-declaration',
   )
-  const baseline = declared['baselineArea']
+  const baseline = declared['baseline']
   if (typeof baseline !== 'number' || !Number.isFinite(baseline) || baseline <= 0)
     refuse('malformed-declaration', 'measurement baseline must be a finite positive value')
   const digest = text(declared, 'digest', 'measurement description')

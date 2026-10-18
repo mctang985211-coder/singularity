@@ -22,11 +22,12 @@ import { declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
 import { publishedMethod, seedMethod } from './method.ts'
 import { sealedBytes } from './sealed.ts'
 import { sha256 } from './ids.ts'
-import { schedulerMessage } from './scheduler-message.ts'
+import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { assertRunFile } from './workspace.ts'
 import type { ProductionVerdict } from '../../src/verifier/production.ts'
 import { outcomesAnswered, planOutcomeOf } from './read.ts'
 import { reviewInputsOf } from './inputs.ts'
+import { searchView } from './rsi-history.ts'
 
 export const SUBJECT_INPUT = 'singularity-subject'
 // RRSI critic.py reviews intent/content before evaluation; it never solves a task.
@@ -82,6 +83,7 @@ export async function acceptanceSubject(apparatus: Apparatus, taskId: string, ru
     checks,
     inputs: run.submission!.files.inputs,
     inputProducers,
+    ...(task.search === undefined ? {} : { search: searchView(apparatus, task), rounds: task.rounds ?? [], transfer: task.transfer ?? null }),
     source: run.submission!.source,
     contributions: task.decomposition?.children.map((child) => {
       const state = taskStateOf(apparatus, child.taskId)

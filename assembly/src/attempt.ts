@@ -15,7 +15,7 @@ import { consumeMethod } from './method-run.ts'
 export const workspaceOf = (apparatus: Apparatus, taskId: string, runId: string): string =>
   join(apparatus.workspaceRoot, 'tasks', taskId, 'runs', runId)
 
-export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId: string, operationId: string, method: RevisionRef, context?: { domain: Domain; purpose: RunState['purpose']; relatedTo?: RunState['relatedTo'] },
+export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId: string, operationId: string, method: RevisionRef, context?: { domain: Domain; purpose: RunState['purpose']; relatedTo?: RunState['relatedTo']; case?: RunState['case'] },
 ): Promise<RunState> {
   const stopped = stoppedExplorationOf(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), taskId)
   if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
@@ -23,8 +23,8 @@ export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId:
   const state = taskStateOf(apparatus, taskId)
   if (state.runs[runId]?.bubble !== undefined) return state.runs[runId]!
   const contract = state.contract!
-  const loaded = await loadMethod(apparatus, method)
-  const domain = context?.domain ?? loaded.domain
+  const loaded = await loadMethod(apparatus, method, contract.template)
+  const domain = context === undefined ? loaded.domain : { ...loaded.domain, inputs: context.domain.inputs }
   const bindings = bindingsForContract(contract, loaded.assets)
   const template = contract.template === undefined ? undefined : templateOf(domain, contract.template)
   const inputs = await resolveInputs(apparatus, taskId, contract, domain)
@@ -32,6 +32,7 @@ export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId:
   await commands.startRun({ commandId: `start:${runId}`, taskId, runId,
     revision: method,
       purpose: context?.purpose ?? 'solve',
+      ...(context?.case === undefined ? {} : { case: context.case }),
       ...(context?.relatedTo === undefined ? {} : { relatedTo: context.relatedTo }),
     })
   const workspace = workspaceOf(apparatus, taskId, runId)
@@ -54,7 +55,7 @@ export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId:
       ],
       conditions: domain.measurement?.conditions ?? [],
     })
-    if (template !== undefined) await consumeMethod(apparatus, taskId, taskStateOf(apparatus, taskId).runs[runId]!, `template:${template.id}`, `template:${template.id}`,
+    if (template !== undefined) await consumeMethod(apparatus, taskId, taskStateOf(apparatus, taskId).runs[runId]!, `template:${template.id}`, `template:${template.id}:${template.digest}`, 'bound',
       )
   } catch (error) {
     await commands.failRun({ commandId: `prepare-failed:${taskId}/${runId}`, taskId, runId, reason: String(error) })

@@ -15,7 +15,7 @@ const reference = await readFile(join(DIR, 'reference.c'), 'utf8')
 it('loads a CPU kernel and fixed evaluator without prescribing candidate solutions or decomposition', async () => {
   const domain = await loadDomain(DIR, async () => { throw new Error('declaration loading ran a process') })
   expect([...domain.templates.keys()]).toEqual(['polybench-3mm'])
-  const template = domain.templates.get(domain.rootTemplate)!
+  const template = domain.templates.get(domain.rootTemplate!)!
   expect(template.initial!.bytes).toEqual(domain.inputs.find(input => input.ref === 'reference')!.bytes)
   expect(template.decomposition).toBeUndefined()
   expect(template.guidance).toBeUndefined()

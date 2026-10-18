@@ -1,11 +1,12 @@
 # Singularity 重构蓝图
 
-日期：2026-10-11。复核基线：`35b0c7c`。本页定义总目标与架构；施工顺序只在 [assembly-blueprint §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 维护。
+架构初稿：2026-10-11，基线 `35b0c7c`。最新整体审查：2026-10-17，基线 `4314487`。本页保留现有架构边界；后续施工顺序与目标设计以 [Task / Workflow RSI 终局计划](task-first-domain-rsi-plan.md) 为准。
 
 ## 1. 产品目标与范围
 
-Singularity 为 agent 提供领域任务运行基建，将工作中形成的 TaskTemplate、Skill、Tool 经可比较实验和独立审核发布，
-使后续 Run 实际消费已发布方法。领域提供目标、输入、独立验收与度量；内核保证责任、版本、来源和决定可判定。
+Task 是可独立交付、验收和追责的 workflow 节点。Workflow 由 Task 的责任、依赖、贡献和产物关系组成，复用同一 control 事实，不另设运行时。方法学习的目标包括节点定义、分解粒度、关系组织和配套 Skill/Tool。
+
+现行方法通过短 `workflowGuidance` 与可选 TaskTemplate、Skill、Tool 表达组织与求解方法。业务节点收到固定方法与全局方向，关系概览从同一 committed cut 投影。用户提供完整 Task 契约，领域提供保护输入、可选模板、独立验收与度量；内核保证责任、版本、来源和决定可判定。评测用于检验 workflow 演化，普通业务无需先定义任务集。多任务 case×trial 与独立迁移发布链路已实现；真实领域迁移效果仍待验证。
 
 本次交付私有独立 DSH 上的 G1/G2/G3、读面板、恢复与发布验证。完整 canvas、group/router、任意多图另定合同。
 G3 进化求解方法；RTL 是任务产物，其正确性/面积用于评测方法。直接优化 RTL 仍走普通 Task/Run。
@@ -15,10 +16,11 @@ G3 进化求解方法；RTL 是任务产物，其正确性/面积用于评测方
 
 | 对象 | 责任 |
 |---|---|
-| Task | 不可变领域契约、责任、分解与依赖；父最终产物独立验收 |
+| Task | workflow 中的责任节点；冻结契约、分解与依赖，父最终产物独立验收 |
 | Run | 对 Task 的一次完整求解；固定 revision/输入，终态封存来源 |
+| Workflow（投影） | 同一根任务的责任树与依赖/产物关系；没有第二份持久节点状态 |
 | Agent | 一个可继续的准确 DSH session；责任与父子关系由事实表达 |
-| Method / Revision | TaskTemplate、Skill、Tool 的内容版本；共用评估/批准/发布路径 |
+| Method / Revision | workflow 策略、TaskTemplate、Skill、Tool，共用评估/批准/发布路径 |
 | ReviewRun / Evidence | 独立会话对冻结对象逐条判断；测量固定真实实现，执行者不能自判 |
 | Release | 绑定 committed 决定和独立审核依据，切换前重检准确 head |
 
@@ -34,20 +36,19 @@ RRSI 只提供决定与正则化约束；执行复用 DSH/Task/Bubble，见 [ADR
 
 | 部分 | 已有 | 尚未通过的出口 |
 |---|---|---|
-| core | 单一控制存储、Task v17、Review v4、直接方法绑定、必需责任与可停止探索、measure/strategy/release | 最终工程验证与真实边界证据 |
-| G1/G2 | 一次性契约、独立审核、角色工具、父背景按需读取、产物依赖、同会话恢复、snapshot v9 | 新协议真实领域运行 |
-| G3 | 异步持久请求、独立双侧测评、唯一发布指针 | 小领域决定、SHA256、真实发布与后续消费 |
+| core | 单一控制存储、Task v23、Strategy v9、Measure v5、Review v5；批次预算、历史搜索头/S*、suite 矩阵与配对校准、冻结迁移 | 外部模型/工具来源不能靠本地声明完全证明 |
+| G1/G2 | 完整契约、可选模板、workflow 策略/方向、独立审核、整图预算、增量规划、恢复/取消、snapshot v13 | 新协议真实模型协调行为与领域运行 |
+| G3 | 异步有界稀疏搜索、case/family 反馈、冻结 champion、独立 validation/heldout、发布审核和唯一指针、CLI 报告 | Buckyball 真实案例/oracle 与完整环境、实际迁移/消融效果 |
 
-核心基础保留；装配生命周期需修正。[context](context.md) 只记录未关闭问题和证据边界，历史“通过”不代表新合同通过。
+核心基础与原生装配生命周期保留；模型请求的 retry、错误分类与最终失败直接由 DSH 处理，Task 只消费原生 turn/end；无自定义 provider 拦截与整图重启机制。[context](context.md) 只记录未关闭问题和证据边界，历史“通过”不代表新合同通过。
 代码/测试/门禁数量不用于推算完成率。体积是审查信号；每条新增状态/规则需有真实生产者、消费者和行为反例。
 
 ## 4. 当前文档的唯一职责
 
 | 文档 | 内容 |
 |---|---|
-| [agent-brief](agent-brief.md) | 交给执行者的任务书：实测状态、已知缺陷、工作包顺序与开发纪律 |
-| [round-10-plan](round-10-plan.md) | 本轮实测缺陷、当前能力状态与 W10—W14 工作包 |
-| [assembly-blueprint](assembly-blueprint.md) | 装配边界、剩余工作包及验收出口 |
+| [Task / Workflow RSI 终局计划](task-first-domain-rsi-plan.md) | 节点/图/方法定义、全局与局部上下文、T00–T16 工作包及唯一验收出口 |
+| [assembly-blueprint](assembly-blueprint.md) | 现有装配边界与历史工作包，不再维护新施工排序 |
 | [phase-g2-design](phase-g2-design.md) | 当前 G2 行为与领域/运行端口合同 |
 | [context](context.md) | 用户裁定索引、未关闭问题、实测边界；每轮替换当前状态，不追加历史 |
 | [standalone-dsh](standalone-dsh.md) | 私有宿主及真实可运行命令 |

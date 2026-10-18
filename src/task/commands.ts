@@ -1,4 +1,5 @@
 import type { ControlReadCut, ControlSessionStore } from '../control/session-store.ts'
+import { assertWorkflowBudget } from './budget.ts'
 import type { Envelope } from '../protocol/envelope.ts'
 import type { EmitInput } from '../protocol/memory-log.ts'
 import { refuse } from '../protocol/refusal.ts'
@@ -63,6 +64,7 @@ export interface AgentCommands {
     readonly revision: RevisionRef
       readonly purpose: import('./run.ts').RunState['purpose']
       readonly relatedTo?: import('./run.ts').RunState['relatedTo']
+      readonly case?: import('./run.ts').RunState['case']
     },
     as?: string,
   ): Promise<Envelope>
@@ -89,6 +91,7 @@ export interface AgentCommands {
     readonly taskId: string
     readonly runId: string
     readonly reason?: string
+    readonly cause?: 'runtime' | 'business' | 'cancelled'
   }, as?: string,
   ): Promise<Envelope>
 }
@@ -109,6 +112,7 @@ export interface TaskCommands extends AgentCommands {
     readonly revision: RevisionRef
     readonly method: string
     readonly source: string
+    readonly mode: import('./run.ts').ConsumptionMode
   }): Promise<Envelope>
   forAgent(agentId: string): AgentCommands
 }
@@ -143,7 +147,9 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         const cut = cutOf(options)
         const task = cut.task(input.parentTaskId)
         if (task === undefined) refuse('illegal-transition', 'decomposition requires an admitted parent')
-        const hold = taskWaitingReason(cut.tasks(), input.parentTaskId)
+        assertWorkflowBudget(cut.tasks(), options.store.load().entries(), input.parentTaskId,
+          { nodes: input.children.filter(child => !task.decomposition?.children.some(held => held.taskId === child.taskId)).length, plans: 1 })
+        const hold = taskWaitingReason(cut.tasks(), input.parentTaskId, 'plan')
         if (hold !== undefined) refuse('illegal-transition', hold)
         const run = Object.values(task.runs).at(-1)
         if (run !== undefined && (run.status !== 'running' || run.stage !== 'working'))
@@ -190,6 +196,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
     startRun: (input, as) =>
       emitRaw(options, input.commandId, TASK_KINDS.runStarted, input.taskId, { runId: input.runId, revision: input.revision,
           purpose: input.purpose,
+          ...(input.case === undefined ? {} : { case: input.case }),
           ...(input.relatedTo === undefined ? {} : { relatedTo: input.relatedTo }),
         }, as, () => {
         const cut = cutOf(options)
@@ -198,6 +205,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
           refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`,
             )
         const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
+        assertWorkflowBudget(cut.tasks(), options.store.load().entries(), input.taskId, { runs: 1 })
         if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
         // Cross-entity 1: the revision must exist, in the named environment, with the content
         // the pin claims. This reuses the environment slice's own check, not a second one.
@@ -259,7 +267,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         input.commandId,
         TASK_KINDS.runFailed,
         input.taskId,
-        { runId: input.runId, cause: 'runtime', ...(input.reason === undefined ? {} : { reason: input.reason }) },
+        { runId: input.runId, cause: input.cause ?? 'runtime', ...(input.reason === undefined ? {} : { reason: input.reason }) },
         as,
       ),
 
@@ -333,6 +341,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         runId: input.runId,
         revision: input.revision,
         method: input.method,
+        mode: input.mode,
         source: input.source,
       }, undefined, () => {
         const stopped = stoppedExplorationOf(cutOf(options).tasks(), input.taskId)

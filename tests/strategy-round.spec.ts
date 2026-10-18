@@ -50,7 +50,7 @@ const strategyLog = (): MemoryLog => new MemoryLog(strategyRegistry(), { subject
 const emit = (log: MemoryLog, kind: string, subject: string, payload: unknown): Envelope =>
   log.emit({ commandId: nextId('emit'), protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind, subject, payload })
 const plan = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-  round: 1, incumbent: INCUMBENT, candidates: 3, historyCutoff: 0, caliber: CALIBER, weights: WEIGHTS,
+  campaignId: 'test-campaign', round: 1, incumbent: INCUMBENT, candidates: 3, historyCutoff: 0, caliber: CALIBER, weights: WEIGHTS,
   ...over,
 })
 const emitPlan = (log: MemoryLog, subject: string, over: Record<string, unknown> = {}): Envelope => emit(log, STRATEGY_KINDS.roundOpened, subject, plan(over))
@@ -111,7 +111,7 @@ async function deployment(over: { calibration?: Calibration } = {}): Promise<Liv
 }
 async function openThrough(live: Live, over: Partial<OpenRoundInput> = {}): Promise<string> {
   const roundId = over.roundId ?? nextId('round')
-  await live.commands.openRound({
+  await live.commands.openRound({ campaignId: over.campaignId ?? (over.round === undefined ? 'test-campaign' : `scenario-${over.round}`),
     commandId: nextId('open'), roundId, round: over.round ?? 1, incumbent: INCUMBENT,
     candidates: over.candidates ?? 2, historyCutoff: over.historyCutoff ?? live.store.load().entries().length, caliber: over.caliber ?? CALIBER,
     weights: WEIGHTS,
@@ -154,7 +154,7 @@ describe('round/opened freezes one explicit round', async () => {
   it('carries the number, incumbent, plan, budget, cutoff and weights — and opens once', async () => {
     const log = strategyLog()
     const opened = emitPlan(log, 'round-1')
-    expect([Object.keys(opened.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.plan?.round]).toEqual([['caliber', 'candidates', 'historyCutoff', 'incumbent', 'round', 'weights'], 1])
+    expect([Object.keys(opened.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.plan?.round]).toEqual([['caliber', 'campaignId', 'candidates', 'historyCutoff', 'incumbent', 'round', 'weights'], 1])
     await expectRefusal(() => emitPlan(log, 'round-1'), 'illegal-transition', 'a different round, and it gets a different subject')
     await expectRefusal(() => emitPlan(log, 'round-zero', { round: 0 }), 'malformed-payload', 'never a count of history entries')
     await expectRefusal(() => emitPlan(log, 'round-empty', { candidates: 0 }), 'malformed-payload', 'at least 1')

@@ -1,5 +1,5 @@
 {
-  "why": "Every protocol, version, kind and payload member set this stack declares, with who produces each kind and who reads it. The `protocol-inventory` gate compares this file against the live registries in both directions, because a prose inventory in a document is not checked by anything: docs/context.md claimed 36 files, 140 tests and 9 gates at the commit where the truth was 44, 177 and 11, and nothing noticed. The member lists are compared with the value each kind declares once (`KindRule.members`, through `defineKind`), which is the same value the parse boundary applies to the payload before the parser runs \u2014 so this file can only disagree with the code when one of the two was edited, which is what makes adding a member a recorded act rather than a drift. Rounds three to five inferred the member set by handing each parser payloads and reading the refusal, and round five showed that mechanism's own limit: a parser that closes its payload over a member it never names is reached by no sample of a family that grows only by named members. Nothing is sampled now, and a kind whose row is a bare name is refused, as is a row that lists a member the declaration does not name. `producedBy` and `readBy` are not machine-checkable; they are here so that adding a shape is a recorded act with a named consumer, which is the one thing the previous system never had to do. What this file does not record: the closed shapes inside a payload (`nested`), which the kinds declare and the ledger's comparison does not reach.",
+  "why": "Declared protocol versions, payload members and their producers/consumers. The protocol-inventory gate compares these member sets against the live registries.",
   "protocols": [
     {
       "protocol": "agent",
@@ -43,7 +43,7 @@
     },
     {
       "protocol": "measure",
-      "version": 4,
+      "version": 5,
       "subject": "the evaluation id",
       "kinds": [
         {
@@ -69,7 +69,24 @@
             "metric",
             "weights",
             "trials",
-            "judgement"
+            "judgement",
+            "matrix"
+          ]
+        },
+        {
+          "name": "trial/failed",
+          "members": [
+            "slot",
+            "quality",
+            "cost",
+            "status",
+            "reason",
+            "run",
+            "verifierRef",
+            "verifierVersion",
+            "implementationDigest",
+            "detail",
+            "guardsMet"
           ]
         },
         {
@@ -92,7 +109,9 @@
             "verifierRef",
             "verifierVersion",
             "implementationDigest",
-            "detail"
+            "detail",
+            "run",
+            "guardsMet"
           ]
         }
       ],
@@ -172,7 +191,7 @@
     },
     {
       "protocol": "strategy",
-      "version": 7,
+      "version": 9,
       "subject": "the round id",
       "kinds": [
         {
@@ -195,8 +214,10 @@
         {
           "name": "round/opened",
           "members": [
+            "campaignId",
             "round",
             "incumbent",
+            "productionHead",
             "candidates",
             "historyCutoff",
             "caliber",
@@ -209,7 +230,7 @@
     },
     {
       "protocol": "task",
-      "version": 18,
+      "version": 23,
       "subject": "the task id",
       "kinds": [
         {
@@ -239,12 +260,47 @@
           ]
         },
         {
+          "name": "learning/configured",
+          "members": [
+            "enabled"
+          ]
+        },
+        {
           "name": "method/consumed",
           "members": [
             "runId",
             "revision",
             "method",
-            "source"
+            "source",
+            "mode"
+          ]
+        },
+        {
+          "name": "rsi/batch-ended",
+          "members": [
+            "batchId"
+          ]
+        },
+        {
+          "name": "rsi/batch-opened",
+          "members": [
+            "batchId",
+            "incumbent",
+            "editBudget",
+            "historyCutoff",
+            "untried",
+            "prune",
+            "slots"
+          ]
+        },
+        {
+          "name": "rsi/batch-slot-settled",
+          "members": [
+            "batchId",
+            "slot",
+            "status",
+            "detail",
+            "revision"
           ]
         },
         {
@@ -266,11 +322,41 @@
           ]
         },
         {
+          "name": "rsi/search-opened",
+          "members": [
+            "runId",
+            "maxProposals"
+          ]
+        },
+        {
           "name": "rsi/status",
           "members": [
             "status",
             "detail",
             "trace"
+          ]
+        },
+        {
+          "name": "rsi/transfer-frozen",
+          "members": [
+            "baseline",
+            "champion",
+            "suiteDigest",
+            "executionProfileDigest",
+            "roundId"
+          ]
+        },
+        {
+          "name": "rsi/transfer-settled",
+          "members": [
+            "outcome",
+            "report"
+          ]
+        },
+        {
+          "name": "rsi/transfer-started",
+          "members": [
+            "suiteDigest"
           ]
         },
         {
@@ -287,7 +373,8 @@
             "runId",
             "revision",
             "purpose",
-            "relatedTo"
+            "relatedTo",
+            "case"
           ]
         },
         {
@@ -366,9 +453,19 @@
             "agentId",
             "agentIdentity"
           ]
+        },
+        {
+          "name": "workflow/limits-frozen",
+          "members": [
+            "maxSteps",
+            "maxNodes",
+            "maxPlans",
+            "maxRuns",
+            "maxNoProgress"
+          ]
         }
       ],
-      "producedBy": "src/task/commands.ts createTaskCommands (the only surface that produces task facts)",
+      "producedBy": "src/task/commands.ts createTaskCommands; assembly/src/{improvement,rsi-proposal}.ts emits host-owned search facts governed by src/task/search.ts",
       "readBy": "src/task/view.ts projectTask/projectReceipt, src/task/tree.ts projectTree, src/task/consumption.ts unconsumedMethods"
     }
   ]

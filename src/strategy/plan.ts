@@ -2,7 +2,7 @@ import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.ts'
 import type { RevisionRef } from '../task/protocol.ts'
-import { digest, record, revisionRef, REVISION_MEMBERS } from '../task/shape.ts'
+import { digest, record, text, maybeText, revisionRef, REVISION_MEMBERS } from '../task/shape.ts'
 import type { RoundState } from './protocol.ts'
 
 /**
@@ -10,28 +10,22 @@ import type { RoundState } from './protocol.ts'
  * has a plan has a round number, a cutoff, a budget and a caliber that no later fact can move.
  */
 export interface RoundPlan {
+  readonly campaignId: string
   readonly round: number
   /** The one comparison the whole round is drafted against. */
   readonly incumbent: RevisionRef
+  readonly productionHead?: string
   /** m slots, `0..m-1`. */
   readonly candidates: number
   /** The frozen log position: this round reads only facts below it (R03). */
   readonly historyCutoff: number
-  /**
-   * The measurement settings every pooled candidate must have been measured under (§5.4).
-   *
-   * The **direction** is one of them, and it is the measurement's: the caliber contains the metric,
-   * so a round pools only numbers that agree on which way is better. A plan-level direction was a
-   * second declaration, read by every comparison and compared to the measurement's by nothing — a
-   * round could rank in `higher` while its measurements said `lower` and elect the worse candidate.
-   */
   readonly caliber: string
   readonly weights: { readonly quality: number; readonly cost: number }
 }
 
 const APPENDED = { appended: true } as const
 const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
-const OPENED_MEMBERS = ['round', 'incumbent', 'candidates', 'historyCutoff', 'caliber', 'weights'] as const
+const OPENED_MEMBERS = ['campaignId', 'round', 'incumbent', 'productionHead', 'candidates', 'historyCutoff', 'caliber', 'weights'] as const
 
 /** A non-negative integer. Absent, fractional, negative and non-numeric are all refusals. */
 export function count(source: Record<string, unknown>, key: string, where: string): number {
@@ -67,6 +61,8 @@ function openedPayload(raw: unknown, where: string, nested: { readonly incumbent
     refuse('malformed-payload', `${where}.weights.quality is 0: a round weighting quality at nothing cannot prefer a better candidate to a worse one`)
 
   return {
+    ...(source['productionHead'] === undefined ? {} : { productionHead: maybeText(source, 'productionHead', where)! }),
+    campaignId: text(source, 'campaignId', where),
     round,
     incumbent: revisionRef(source['incumbent'], `${where}.incumbent`, nested.incumbent),
     candidates,
@@ -76,14 +72,6 @@ function openedPayload(raw: unknown, where: string, nested: { readonly incumbent
   }
 }
 
-/**
- * The `round/opened` rule.
- *
- * One-shot: a round that later needs a different incumbent, cutoff, budget or caliber is a different
- * round, and the whole point of freezing them in one fact is that no later fact can move them. The
- * direction is not here because it is not the round's to freeze: it comes with the measurement the
- * round pools, and the caliber is what makes every pooled measurement agree on it.
- */
 export function openedKind(kind: string, emitter: string): KindRule<RoundState> {
   return defineKind<RoundState, RoundPlan, { incumbent: MemberSet; weights: MemberSet }>({
     guarantees: APPENDED,

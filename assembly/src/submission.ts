@@ -42,6 +42,7 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
   request: SubmissionInput,
   signal: AbortSignal,
   review: AcceptanceReview,
+  prepare?: () => Promise<void>,
 ): Promise<Submission> {
   const state = taskStateOf(apparatus, request.taskId)
   const path = 'path' in request ? request.path : state.contract!.artifact
@@ -88,11 +89,18 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
       )
     )
       refuse('evidence-input-mismatch', 'workspace input differs from the frozen snapshot')
+    const files = await sealFiles(apparatus, run, path, workspace)
+    // Only a valid, frozen submission may trigger external validation. Rejected calls
+    // leave the working Run available for correction and never end its search.
+    await prepare?.()
+    signal.throwIfAborted()
+    const transcript = await execution.sealTranscript(exec)
+    signal.throwIfAborted()
     await commands.submitRun({ commandId: 'seal:' + requestId, taskId: request.taskId, runId: run.runId,
       submission: { requestId, requestDigest,
-        artifactDigest: sha256(await readFile(join(workspace, path))), inputDigests,
-        files: await sealFiles(apparatus, run, path, workspace),
-        source: await execution.sealTranscript(exec),
+        artifactDigest: files.artifact.attachmentId.slice('sha256:'.length), inputDigests,
+        files,
+        source: transcript,
       },
     })
     release()
@@ -107,6 +115,7 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
     if (
       !signal.aborted &&
       current.status === 'running' &&
+      current.stage === 'submitted' &&
       !(error instanceof ProtocolRefusal && error.refusal.code === 'write-not-durable')
     )
       await commands.failRun({
@@ -128,7 +137,7 @@ export async function judgeAndRecord(apparatus: Apparatus, taskId: string, run: 
   const checks: ProductionVerdict[] =
     existing === undefined ? [] : JSON.parse((await sealedBytes(apparatus, existing.subject)).toString('utf8')).checks
   if (existing === undefined && contract.template !== undefined) {
-    const { domain } = await loadMethod(apparatus, run.revision)
+    const { domain } = await loadMethod(apparatus, run.revision, contract.template)
     const template = templateOf(domain, contract.template)
     if (template.checks.length > 0) await withSealedWorkspace(apparatus, run, contract.artifact, async (workspace) => {
       for (const { criterion, verifier: checker, input: inputName } of template.checks) {
@@ -139,7 +148,7 @@ export async function judgeAndRecord(apparatus: Apparatus, taskId: string, run: 
           command: commandOf(checker, join(workspace, contract.artifact), join(workspace, declared.name)),
           runJudge: async (execution) => {
             const ran = await runVerifierCommand({ command: execution.command, artifactPath: execution.artifactPath, inputs: execution.inputs },
-              (invocation) => spawnProcess(invocation, signal, workspace, { root: workspace, writable: false, protected: [], references: [domain.dir, ...domain.references, checker.program] }))
+              (invocation) => spawnProcess(invocation, signal, workspace, { root: workspace, writable: false, protected: [], references: [domain.dir, ...domain.references, ...(domain.verifierReferences ?? []), checker.program] }))
             return { verdict: ran.verdict, implementationDigest: sha256(await readFile(checker.program)), detail: ran.detail }
           },
         }))

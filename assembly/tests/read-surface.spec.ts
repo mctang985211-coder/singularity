@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -9,11 +10,11 @@ import { spawnProcess } from '../src/process.ts'
 import { propose, decompose } from '../src/surfaces.ts'
 import { startAttempt } from '../src/attempt.ts'
 import { submit } from '../src/submission.ts'
-import { historyOf, readArtifact, waitForTask } from '../src/read.ts'
+import { historyOf, readArtifact, waitForTask, readForAgent } from '../src/read.ts'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ChildSession } from '../../src/runtime/child-session.ts'
-import { schedulerMessage } from '../src/scheduler-message.ts'
+import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { TASK_PROTOCOL, TASK_VERSION } from '../../src/task/protocol.ts'
 import { fixtureReview } from './review-fixture.ts'
 import { attachmentsAt, FakePersistence, agentFor, execFor, fakeExecution, factsOf } from './seam.ts'
@@ -28,7 +29,7 @@ async function setup() {
     apparatus = await openApparatus(
       'free',
       root,
-      await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
+      await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
       medium as never,
       attachmentsAt(root), testProjections,
     ),
@@ -158,9 +159,28 @@ it('waits for a committed round outcome to enter and finish its native turn befo
     if (waits === 4) events.push({ seq: SessionSeq(events.length), time: 0, type: 'turn/end', data: {} } as SessionEvent)
   } } as ChildSession
   await expect(waitForTask({ ...h.apparatus, persistence }, analysis.taskId, session, new AbortController().signal))
-    .rejects.toThrow('stopped without submitting')
+    .resolves.toMatchObject({ status: 'failed', failureCause: 'business', failureReason: expect.stringContaining('stopped without submitting') })
   expect(waits).toBe(4)
   await h.apparatus.store.close()
+})
+
+it('ends an idle RSI Run without a submission or pending coordination instead of polling indefinitely', async () => {
+  const h = await setup()
+  const analysis = await propose(h.apparatus, { ...h.caller, agentId: 'analysis', sessionId: 'analysis' }, 'idle-analysis',
+    { goal: 'analyze methods' }, { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } })
+  let waits = 0
+  const session = { sessionId: 'analysis', wait: async () => { waits++ } } as ChildSession
+  const persistence = { open: async () => ({ read: async () => ({ events: [] }), close: async () => undefined }) } as unknown as SessionPersistence
+  const wait = () => waitForTask({ ...h.apparatus, persistence }, analysis.taskId, session, new AbortController().signal)
+  try {
+    await expect(wait()).resolves.toMatchObject({ status: 'failed', failureCause: 'business',
+      failureReason: 'the native agent stopped without submitting after coordination settled' })
+    expect(waits).toBe(1)
+    const failures = factsOf(h.medium).filter(fact => fact.subject === analysis.taskId && fact.kind === 'run/failed')
+    expect(failures).toHaveLength(1)
+    await expect(wait()).resolves.toMatchObject({ runId: analysis.runId, status: 'failed' })
+    expect(factsOf(h.medium).filter(fact => fact.subject === analysis.taskId && fact.kind === 'run/failed')).toEqual(failures)
+  } finally { await h.apparatus.store.close() }
 })
 
 
@@ -184,5 +204,22 @@ it('reads large sealed findings in explicit UTF-8 pages without copying them int
   await expect(readArtifact(h.apparatus, h.proposal.taskId, undefined, 1, 12)).rejects.toThrow('character boundary')
   await expect(readArtifact(h.apparatus, h.proposal.taskId, undefined, 0, 32769)).rejects.toThrow('32768')
   await expect(readArtifact(h.apparatus, h.proposal.taskId, 'foreign-run')).rejects.toThrow('no sealed artifact')
+  await h.apparatus.store.close()
+})
+
+it('keeps validation and heldout Tasks outside proposer reads and prepared memory scope', async () => {
+  const h = await setup()
+  const caller = { ...h.caller, agentId: 'analysis', sessionId: 'analysis' }
+  const analysis = await propose(h.apparatus, caller, 'analysis-private', { goal: 'analyze methods' },
+    { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } })
+  for (const split of ['evolve', 'validation', 'heldout'] as const) {
+    const trial = await propose(h.apparatus, { ...h.caller, agentId: `trial-${split}`, sessionId: `trial-${split}` }, split,
+      { goal: `private-${split}` }, { purpose: 'evaluation', relatedTo: { taskId: analysis.taskId, runId: analysis.runId },
+        case: { caseId: split, familyId: split, split } })
+    const request = readForAgent(h.apparatus, 'analysis', { kind: 'task', ref: trial.taskId })
+    if (split === 'evolve') await expect(request).resolves.toMatchObject({ taskId: trial.taskId })
+    else await expect(request).rejects.toThrow('outside this evidence scope')
+    await expect(readForAgent(h.apparatus, `trial-${split}`, { kind: 'task', ref: trial.taskId })).resolves.toMatchObject({ taskId: trial.taskId })
+  }
   await h.apparatus.store.close()
 })

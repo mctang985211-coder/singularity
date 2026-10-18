@@ -14,11 +14,13 @@ import {
 import { projectRound, type MeasureSlice, type RoundDecision } from './view.ts'
 
 export interface OpenRoundInput {
+  readonly campaignId: string
   readonly commandId: string
   readonly roundId: string
   /** The explicit round number (`review.md` R01). Never derived from history or candidate index. */
   readonly round: number
   readonly incumbent: RevisionRef
+  readonly productionHead?: string
   readonly candidates: number
 
   readonly historyCutoff: number
@@ -69,8 +71,10 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
         STRATEGY_KINDS.roundOpened,
         input.roundId,
         {
+          campaignId: input.campaignId,
           round: input.round,
           incumbent: input.incumbent,
+          ...(input.productionHead === undefined ? {} : { productionHead: input.productionHead }),
           candidates: input.candidates,
           historyCutoff: input.historyCutoff,
           caliber: input.caliber,
@@ -79,11 +83,21 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
         () => {
           for (const [subject, state] of options.store.load().statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION)) {
             if (subject === input.roundId || state.plan === undefined) continue
-            if (state.plan.round !== input.round) continue
+            if (state.plan.campaignId !== input.campaignId || state.plan.round !== input.round) continue
             refuse(
               'illegal-transition',
               `cannot open round ${input.round} as "${input.roundId}": round "${subject}" already carries that number (opened at ${state.openedAt ?? 'an unrecorded time'}, history cutoff ${state.plan.historyCutoff}); two rounds with one number would freeze two different histories under one identity`,
             )
+          }
+          const rounds = [...options.store.load().statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION).values()]
+            .filter(state => state.plan?.campaignId === input.campaignId && state.roundId !== input.roundId)
+          const previous = rounds.sort((a, b) => b.plan!.round - a.plan!.round)[0]
+          if (previous !== undefined) {
+            if (previous.decision === undefined) refuse('illegal-transition', 'settle the current search round before advancing its head')
+            if (previous.plan!.caliber !== input.caliber) refuse('caliber-mismatch', 'a campaign cannot change its frozen suite or execution caliber')
+            const selected = previous.submissions.find(candidate => candidate.slot === previous.decision!.winner)?.revision ?? previous.plan!.incumbent
+            if (!sameRevision(selected, input.incumbent)) refuse('evidence-input-mismatch', 'round incumbent must be the preceding accepted search head')
+            if (input.round !== previous.plan!.round + 1) refuse('illegal-transition', 'campaign round numbers must advance by one')
           }
         },
       ),

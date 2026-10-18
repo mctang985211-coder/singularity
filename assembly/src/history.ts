@@ -17,7 +17,7 @@ export async function readHistory(apparatus: Apparatus, agentId: string, input: 
   if (run?.purpose !== 'improve' || run.status !== 'running' || run.stage !== 'working')
     refuse('not-responsible', 'cross-round history belongs to the working RSI node')
   const roots = [...tasks.values()].filter(task => task.closure !== undefined && task.rsi !== undefined &&
-    (task.taskId === run.relatedTo!.taskId || task.rsi.status === 'completed' || task.rsi.status === 'failed'))
+    (task.taskId === run.relatedTo!.taskId || ['completed', 'failed', 'cancelled'].includes(task.rsi.status)))
   const from = input.from ?? 0, count = input.count ?? 20
   if (input.kind !== 'trajectory' && (!Number.isSafeInteger(from) || from < 0 || !Number.isSafeInteger(count) || count < 1 || count > 100))
     refuse('malformed-declaration', 'history pages require from >= 0 and count from 1 to 100')
@@ -32,7 +32,7 @@ export async function readHistory(apparatus: Apparatus, agentId: string, input: 
   // Related RSI/evaluation Tasks form the rest of this root's history. Exclude the current working RSI session.
   for (const task of tasks.values()) {
     const last = Object.values(task.runs).at(-1)
-    if (last?.relatedTo !== undefined && included.has(last.relatedTo.taskId) && last.status !== 'running') included.add(task.taskId)
+    if ((last?.case === undefined || last.case.split === 'evolve') && last?.relatedTo !== undefined && included.has(last.relatedTo.taskId) && last.status !== 'running') included.add(task.taskId)
   }
   const sessions = [...new Set([...included].flatMap(id => [...taskSessionsOf(apparatus, id)]))]
   const rounds = new Set([...included].flatMap(id => tasks.get(id)!.rounds?.map(round => round.roundId) ?? []))

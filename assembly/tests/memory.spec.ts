@@ -87,7 +87,7 @@ function projection(review?: ReviewRun, producers: readonly FrozenInputProducer[
     { taskId: 'unrelated', contract: contract('An unrelated responsibility'), runs: { verified: run('verified', 'verified') } },
   ]
   const environment: EnvironmentState = { environmentId: 'methods', revisions: { pinned: { revisionId: 'pinned', contentDigest: method.digest,
-    at: 'now', manifest: { rootTemplate: 'bounded', templates: [{ goal: 'Deliver the bounded count', guidance: 'Read the verified producer',
+    at: 'now', manifest: { workflowGuidance: '', templates: [{ goal: 'Deliver the bounded count', guidance: 'Read the verified producer',
       criteria: tasks[0]!.contract!.criteria }], skills: [{ name: 'count', description: 'ASCII counting', capabilities: [], requiredTools: [],
         content: 'Preserve the source order while extracting ASCII letters.' }], tools: [] } } } }
   const bytes = Buffer.from(JSON.stringify({ inputProducers: producers }))

@@ -29,7 +29,7 @@ async function setup(guidance?: string) {
   const apparatus = await openApparatus('method-context', root, await loadDomain(domainDir, spawnProcess),
     new FakePersistence() as never, attachmentsAt(root), testProjections)
   const assets: MethodAssets = {
-    rootTemplate: apparatus.domain.rootTemplate,
+    workflowGuidance: '',
     templates: [...apparatus.domain.templates.values()].map((template) => ({
       ...templateDeclaration(template),
       ...(template.id === apparatus.domain.rootTemplate
@@ -76,17 +76,17 @@ it('offers a pinned asset catalog and records only guidance and Skills actually 
     expect((await ctx.skills.list()).map((skill) => skill.name)).toEqual(['count'])
     expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.run.runId]!.consumed).toEqual(h.initialConsumption)
 
-    await readForAgent(h.apparatus, h.caller.agentId, { kind: 'template', ref: h.assets.rootTemplate })
+    await readForAgent(h.apparatus, h.caller.agentId, { kind: 'template', ref: h.apparatus.domain.rootTemplate! })
     expect(await readForAgent(h.apparatus, h.caller.agentId, { kind: 'method' })).toEqual(context)
     const guidanceUse = { method: `guidance:${context.template!.id}`,
-      source: `${h.method.digest}/read:guidance:${context.template!.id}:${context.template!.digest}` }
+      mode: 'read', source: `${h.method.digest}/read:guidance:${context.template!.id}:${context.template!.digest}` }
     expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.run.runId]!.consumed).toEqual([...h.initialConsumption, guidanceUse])
     expect((await ctx.skills.get('count'))!.content).toBe(h.assets.skills[0]!.content)
     const consumed = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.run.runId]!.consumed
     expect(consumed).toEqual([...h.initialConsumption, guidanceUse,
-      { method: 'skill:count', source: `${h.method.digest}/skill:count:${digestOf(h.assets.skills[0])}` }])
+      { method: 'skill:count', mode: 'read', source: `${h.method.digest}/skill:count:${digestOf(h.assets.skills[0])}` }])
     await readMethodContext(h.apparatus, h.proposal.taskId, h.run)
-    await readForAgent(h.apparatus, h.caller.agentId, { kind: 'template', ref: h.assets.rootTemplate })
+    await readForAgent(h.apparatus, h.caller.agentId, { kind: 'template', ref: h.apparatus.domain.rootTemplate! })
     await ctx.skills.get('count')
     expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.run.runId]!.consumed).toEqual(consumed)
   } finally { await ctx.fiber.dispose(); await h.apparatus.store.close() }
@@ -105,7 +105,7 @@ it('keeps goals out of optional guidance and supplies an executable verifier cal
     await expect(runMethodTool(h.apparatus, h.caller, h.proposal.taskId, 'sample', new AbortController().signal,
       tool.call.arguments.tool, tool.call.arguments.candidatePath)).resolves.toEqual({ artifact: '' })
     expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.run.runId]!.consumed).toEqual([...h.initialConsumption,
-      { method: 'tool:candidate-check', source: `${h.method.digest}/tool:candidate-check:${tool.digest}:${h.caller.sessionId}/sample` },
+      { method: 'tool:candidate-check', mode: 'invoked', source: `${h.method.digest}/tool:candidate-check:${tool.digest}:${h.caller.sessionId}/sample` },
     ])
   } finally { await h.apparatus.store.close() }
 })
@@ -147,7 +147,7 @@ it('limits execution reads to the pinned catalog and leaves audit asset reads ou
     const initial = taskStateOf(h.apparatus, audit.taskId).runs[audit.runId]!.consumed
     const method = await readForAgent(h.apparatus, auditCaller.agentId, { kind: 'method' })
     expect(method).toMatchObject({ reference: h.method, assets: h.assets })
-    await readForAgent(h.apparatus, auditCaller.agentId, { kind: 'template', ref: h.assets.rootTemplate })
+    await readForAgent(h.apparatus, auditCaller.agentId, { kind: 'template', ref: h.apparatus.domain.rootTemplate! })
     expect(taskStateOf(h.apparatus, audit.taskId).runs[audit.runId]!.consumed).toEqual(initial)
   } finally { await h.apparatus.store.close() }
 })
@@ -166,7 +166,7 @@ it('records failed verifier execution but leaves calls cancelled before launch o
     await expect(runMethodTool(h.apparatus, h.caller, h.proposal.taskId, 'failed', new AbortController().signal,
       tool.call.arguments.tool, tool.call.arguments.candidatePath)).rejects.toThrow('Tool exited 1')
     expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.run.runId]!.consumed).toEqual([...h.initialConsumption,
-      { method: `tool:${tool.name}`, source: `${h.method.digest}/tool:${tool.name}:${tool.digest}:${h.caller.sessionId}/failed` },
+      { method: `tool:${tool.name}`, mode: 'invoked', source: `${h.method.digest}/tool:${tool.name}:${tool.digest}:${h.caller.sessionId}/failed` },
     ])
   } finally { await h.apparatus.store.close() }
 })
@@ -215,7 +215,7 @@ it('confines bound method tools to their workspace inputs and explicitly shared 
   try {
     const source = `import{readFileSync}from'node:fs';process.stdout.write(readFileSync(${JSON.stringify(join(domainDir, 'samples/source.txt'))},'utf8'))`
     const method = await createMethod(h.apparatus, { ...h.assets,
-      templates: h.assets.templates.map(raw => (raw as { id: string }).id === h.assets.rootTemplate
+      templates: h.assets.templates.map(raw => (raw as { id: string }).id === h.apparatus.domain.rootTemplate
         ? { ...(raw as object), capabilities: ['source-lookup'] } : raw),
       tools: [{ name: 'source-lookup', source }],
     })
@@ -223,5 +223,68 @@ it('confines bound method tools to their workspace inputs and explicitly shared 
       'scoped', { goal: 'use only the frozen input', method })
     await expect(runMethodTool(h.apparatus, { ...h.caller, agentId: 'scoped-agent', sessionId: 'scoped-session' },
       proposal.taskId, 'source-lookup', new AbortController().signal, 'source-lookup')).rejects.toThrow('ENOENT')
+  } finally { await h.apparatus.store.close() }
+})
+
+it('delivers a pinned workflow once, records an explicit read separately and leaves acceptance unchanged', async () => {
+  const h = await setup()
+  try {
+    const { confirmWorkflowDelivery } = await import('../src/method-run.ts')
+    const { schedulerMessage } = await import('../../src/runtime/task-message.ts')
+    const revision = await createMethod(h.apparatus, { ...h.assets, workflowGuidance: 'Investigate the narrowest uncertain interface, then delegate only independent results.', templates: [] })
+    const contract = { goal: 'Solve a different Task without a template', artifact: 'result.txt', inputs: [],
+      criteria: [{ criterionId: 'result', statement: 'Return the requested independent result.' }] }
+    const task = await propose(h.apparatus, { ...h.caller, agentId: 'independent', sessionId: 'independent' }, 'independent', { contract, method: revision })
+    const run = taskStateOf(h.apparatus, task.taskId).runs[task.runId]!
+    await methodContext(h.apparatus, task.taskId, run)
+    expect(await confirmWorkflowDelivery(h.apparatus, task.taskId, run)).toBe(false)
+    expect(taskStateOf(h.apparatus, task.taskId).runs[run.runId]!.consumed).toEqual([])
+    const context = await methodContext(h.apparatus, task.taskId, run)
+    const message = schedulerMessage({ kind: 'singularity', purpose: 'dispatch', controlId: h.apparatus.controlId,
+      parentTaskId: task.taskId, taskId: task.taskId, runId: run.runId, factSeq: 0 }, JSON.stringify({ method: context }))
+    const native = { ...h.apparatus, persistence: { stat: async () => ({}), open: async () => ({
+      read: async () => ({ events: [{ type: 'user/message', seq: 0, data: message }] }), close: async () => undefined,
+    }) } } as unknown as typeof h.apparatus
+    expect(await confirmWorkflowDelivery(native, task.taskId, run)).toBe(true)
+    expect(await confirmWorkflowDelivery(native, task.taskId, run)).toBe(true)
+    expect(taskStateOf(h.apparatus, task.taskId).runs[run.runId]!.consumed.map(use => use.mode)).toEqual(['delivered'])
+    await readMethodContext(h.apparatus, task.taskId, run)
+    expect(taskStateOf(h.apparatus, task.taskId).runs[run.runId]!.consumed.map(use => use.mode)).toEqual(['delivered', 'read'])
+    expect(taskStateOf(h.apparatus, task.taskId).contract).toEqual(contract)
+    await expect(createMethod(h.apparatus, { ...h.assets, workflowGuidance: 'x'.repeat(8193) })).rejects.toThrow('8192')
+  } finally { await h.apparatus.store.close() }
+})
+
+it('keeps a frozen contract executable when a later method changes or removes its template', async () => {
+  const h = await setup()
+  try {
+    const { loadMethod } = await import('../src/method.ts')
+    const { submit } = await import('../src/submission.ts')
+    const { acceptanceSubject } = await import('../src/review.ts')
+    const { fixtureReview } = await import('./review-fixture.ts')
+    const { execFor, fakeExecution } = await import('./seam.ts')
+    const templates = h.assets.templates.map(raw => ({ ...raw as object, guidance: 'First revision guidance.' }))
+    const incumbent = await createMethod(h.apparatus, { ...h.assets, templates })
+    const source = await propose(h.apparatus, { ...h.caller, agentId: 'source', sessionId: 'source' }, 'source', { goal: 'count letters', method: incumbent })
+    for (const keepTemplate of [true, false]) {
+      const candidate = await createMethod(h.apparatus, { ...h.assets, templates: keepTemplate
+        ? templates.map(template => ({ ...template, guidance: 'New method guidance.' })) : [] })
+      const id = `candidate-${keepTemplate}`, caller = { ...h.caller, agentId: id, sessionId: id }
+      const trial = await propose(h.apparatus, caller, id, { contract: source.contract, method: candidate },
+        { purpose: 'evaluation', relatedTo: { taskId: source.taskId, runId: source.runId } })
+      const run = taskStateOf(h.apparatus, trial.taskId).runs[trial.runId]!
+      expect(trial.contract).toEqual(source.contract)
+      expect((await methodContext(h.apparatus, trial.taskId, run)).guidance).toBe(keepTemplate ? 'New method guidance.' : 'First revision guidance.')
+      await writeFile(join(trial.workspace, trial.contract.artifact), '35')
+      const review = fixtureReview(h.apparatus)
+      await expect(submit(h.apparatus, fakeExecution(() => undefined), caller, execFor(agentFor(id, id), id),
+        { taskId: trial.taskId, path: trial.contract.artifact }, new AbortController().signal,
+        async (taskId, run, checks) => {
+          expect(checks).toHaveLength(1)
+          expect((await acceptanceSubject(h.apparatus, taskId, run, checks)).contract).toEqual(source.contract)
+          return review(taskId, run, checks)
+        })).resolves.toMatchObject({ phase: 'verified' })
+      expect((await loadMethod(h.apparatus, candidate)).assets.templates).toHaveLength(keepTemplate ? templates.length : 0)
+    }
   } finally { await h.apparatus.store.close() }
 })

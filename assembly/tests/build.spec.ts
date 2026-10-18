@@ -24,10 +24,10 @@ async function fixture() {
   await cp(join(checkout, 'assembly/src'), join(root, 'assembly/src'), { recursive: true })
   await cp(join(checkout, 'src'), join(root, 'src'), { recursive: true })
   await mkdir(join(root, 'scripts'))
-  for (const file of ['deploy.mjs', 'dsh-control-runtime.mjs']) await cp(join(checkout, 'scripts', file), join(root, 'scripts', file))
+  for (const file of ['deploy.mjs', 'dsh-control-runtime.mjs', 'host-config.mjs']) await cp(join(checkout, 'scripts', file), join(root, 'scripts', file))
   await cp(join(checkout, 'deployment/profile'), join(root, 'deployment/profile'), { recursive: true })
   await symlink(join(checkout, 'node_modules'), join(root, 'node_modules'))
-  for (const file of ['package.json', 'pnpm-lock.yaml']) await cp(join(checkout, file), join(root, file))
+  for (const file of ['package.json', 'pnpm-lock.yaml', 'dsh-baseline.json']) await cp(join(checkout, file), join(root, file))
   await cp(join(checkout, 'assembly/package.json'), join(root, 'assembly/package.json'))
   await cp(join(checkout, 'assembly/presets'), join(root, 'assembly/presets'), { recursive: true })
   for (const file of ['client.js', 'panel.html', 'cordis.patch.yml', 'build.mjs'])
@@ -37,9 +37,9 @@ async function fixture() {
   const compilerOptions = { baseUrl: root, paths, module: 'nodenext', target: 'es2023', strict: true, noEmit: true, skipLibCheck: true,
     allowImportingTsExtensions: true,
   }
-  await writeFile(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions, include: ['src'] }))
+  await writeFile(join(root, 'tsconfig.json'), JSON.stringify({ extends: './.singularity/tsconfig.host.json', compilerOptions, include: ['src'] }))
   const assemblyPaths = JSON.parse(await readFile(join(checkout, 'assembly/tsconfig.json'), 'utf8')).compilerOptions.paths
-  await writeFile(join(root, 'assembly/tsconfig.json'), JSON.stringify({ compilerOptions: { ...compilerOptions, paths: assemblyPaths }, include: ['src'] }),
+  await writeFile(join(root, 'assembly/tsconfig.json'), JSON.stringify({ extends: '../.singularity/tsconfig.host.json', compilerOptions: { ...compilerOptions, paths: assemblyPaths }, include: ['src'] }),
   )
   await writeFile(join(root, 'src/value.ts'), 'export const value: number = 1\n')
   for (const entry of ['index', 'agent', 'web']) await writeFile(join(root, `assembly/src/${entry}.ts`),
@@ -117,8 +117,9 @@ describe('the deployable build', () => {
   it('deploys one retry executor without a gateway error-code policy', async () => {
     const deployment = await readFile(join(checkout, 'deployment/profile/cordis.patch.yml'), 'utf8')
     const bundle = await readFile(join(checkout, 'assembly/cordis.patch.yml'), 'utf8')
-    expect(deployment).not.toContain('retryPolicy:')
+    expect(deployment).toMatch(/retryPolicy:\s+mode: normal\s+maxRetries: 20/)
+    expect(deployment).toContain('maxDelayMs: 180000')
     expect(deployment).not.toContain('retryableCodes:')
-    expect(bundle).toMatch(/id: llm-retry\s+disabled: true/)
+    expect(bundle).not.toContain('id: llm-retry')
   })
 })

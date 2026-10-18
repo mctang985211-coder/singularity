@@ -1,3 +1,6 @@
+import { searchKinds, type SearchState } from './search.ts'
+import { workflowLimitsKind, type WorkflowLimits } from './budget.ts'
+import { transferKinds, type TransferState } from './transfer.ts'
 import { lifecycleKinds, type TaskClosure, type RSIStatus, type RoundRequest } from './lifecycle.ts'
 import { questionKinds, type TaskQuestion } from './questions.ts'
 import { digestOf } from '../protocol/envelope.ts'
@@ -23,7 +26,7 @@ import {
 export type { EvidenceRecord, RunState, RunStatus, RunSubmission } from './run.ts'
 
 export const TASK_PROTOCOL = 'task'
-export const TASK_VERSION = 18
+export const TASK_VERSION = 23
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'
@@ -96,6 +99,10 @@ export interface TaskState {
   readonly closure?: TaskClosure
   readonly rsi?: RSIStatus
   readonly rounds?: readonly RoundRequest[]
+  readonly search?: SearchState
+  readonly workflowLimits?: WorkflowLimits
+  readonly learning?: boolean
+  readonly transfer?: TransferState
   readonly questions?: readonly TaskQuestion[]
   readonly decomposition?: Decomposition
   /** Who is answerable for this task. A task without one cannot be worked on at all. */
@@ -123,7 +130,23 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
     initialState: { taskId: '', runs: {} },
     kinds: {
       ...lifecycleKinds(),
+      ...searchKinds(),
       ...questionKinds(),
+      ...transferKinds(),
+      'workflow/limits-frozen': workflowLimitsKind(),
+      'learning/configured': defineKind<TaskState, { enabled: boolean }, {}>({
+        guarantees: { appended: true }, emitter: SCHEDULER_ROLE, members: ['enabled'], nested: {},
+        parse: raw => {
+          const row = record(raw, 'learning policy')
+          if (typeof row['enabled'] !== 'boolean') refuse('malformed-payload', 'learning.enabled must be boolean')
+          return { enabled: row['enabled'] }
+        },
+        reduce: (state, _fact, payload) => {
+          if (state.contract === undefined || state.learning !== undefined || Object.keys(state.runs).length)
+            refuse('illegal-transition', 'freeze learning once before the first Run')
+          return { ...state, learning: payload.enabled }
+        },
+      }),
       [TASK_KINDS.admitted]: defineKind<TaskState, { contract: TaskContract }, { contract: MemberSet }>({
         guarantees: { appended: true },
         members: ['contract'],

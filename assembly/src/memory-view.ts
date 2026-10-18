@@ -7,7 +7,7 @@ import { refuse } from '../../src/protocol/refusal.ts'
 import type { Apparatus } from './apparatus.ts'
 import { readScopeOf } from './coordination.ts'
 import type { MemoryScope } from './memory.ts'
-import { readParentMemory, type ParentMemoryRef } from './parent-memory.ts'
+import { readParentMemory, readParentMemoryFailure, type ParentMemoryRef } from './parent-memory.ts'
 import { rsiMemorySourceOf } from './rsi-memory.ts'
 
 export interface MemoryReadInput {
@@ -17,6 +17,8 @@ export interface MemoryReadInput {
 }
 interface MemoryEntry {
   readonly ref: string
+  readonly status: 'ready' | 'failed'
+  readonly error: string | null
   readonly preparedFor: MemoryScope
   readonly goal: string
   readonly runStatus: TaskState['runs'][string]['status']
@@ -67,16 +69,18 @@ export async function readMemoryForAgent(apparatus: Apparatus, agentId: string, 
     try {
       const ownRun = Object.values(owner!.runs).at(-1)!
       for (const event of (await handle.read()).events) {
-        if (event.type !== 'singularity/parent-memory') continue
-        const scope = event.data.checkpoint.scope
+        if (event.type !== 'singularity/parent-memory' && event.type !== 'singularity/parent-memory-failed') continue
+        const scope = event.type === 'singularity/parent-memory' ? event.data.checkpoint.scope : event.data.scope
         if (scope.kind !== 'task' || scope.taskId !== owner!.taskId || scope.runId !== ownRun.runId) continue
-        const source = event.data.checkpoint.sources.at(-1)!
+        const source = event.type === 'singularity/parent-memory' ? event.data.checkpoint.sources.at(-1)! : event.data.source
         if (event.ignorable !== true || scope.contractDigest !== owner!.contractDigest ||
             scope.method.environmentId !== ownRun.revision.environmentId || scope.method.revisionId !== ownRun.revision.revisionId ||
             scope.method.digest !== ownRun.revision.digest || source.sessionId !== predecessor.sessionId)
           refuse('evidence-input-mismatch', 'RSI memory does not match its receiving Run or explicit predecessor')
         entries.push({ native: { sessionId: node.sessionId, eventSeq: Number(event.seq), memoryId: event.data.memoryId },
           entry: { ref: event.data.memoryId, preparedFor: scope, goal: owner!.contract!.goal,
+            status: event.type === 'singularity/parent-memory' ? 'ready' : 'failed',
+            error: event.type === 'singularity/parent-memory-failed' ? event.data.reason : null,
             runStatus: ownRun.status, currentRun: true,
             source: { kind: 'task', id: predecessor.task.taskId, sessionId: source.sessionId, eventCount: source.eventCount } } })
       }
@@ -94,19 +98,21 @@ export async function readMemoryForAgent(apparatus: Apparatus, agentId: string, 
         sessions.set(sessionId, events)
       }
       for (const event of events) {
-        if (event.type !== 'singularity/parent-memory') continue
-        const scope = event.data.checkpoint.scope
+        if (event.type !== 'singularity/parent-memory' && event.type !== 'singularity/parent-memory-failed') continue
+        const scope = event.type === 'singularity/parent-memory' ? event.data.checkpoint.scope : event.data.scope
         if (scope.kind !== 'task' || scope.taskId !== task.taskId) continue
         const run = task.runs[scope.runId]
         if (event.ignorable !== true || run === undefined || scope.contractDigest !== task.contractDigest ||
             scope.method.environmentId !== run.revision.environmentId || scope.method.revisionId !== run.revision.revisionId ||
             scope.method.digest !== run.revision.digest)
           refuse('evidence-input-mismatch', 'memory directory checkpoint does not match its Task Run or parent session')
-        const source = event.data.checkpoint.sources.at(-1)!
+        const source = event.type === 'singularity/parent-memory' ? event.data.checkpoint.sources.at(-1)! : event.data.source
         if (source.sessionId !== sessionId)
           refuse('evidence-input-mismatch', 'memory directory checkpoint does not match its parent session')
         entries.push({ native: { sessionId, eventSeq: Number(event.seq), memoryId: event.data.memoryId },
           entry: { ref: event.data.memoryId,
+            status: event.type === 'singularity/parent-memory' ? 'ready' : 'failed',
+            error: event.type === 'singularity/parent-memory-failed' ? event.data.reason : null,
             preparedFor: scope, goal: task.contract!.goal,
             runStatus: run.status, currentRun: Object.values(task.runs).at(-1)!.runId === run.runId,
             source: { kind: parent.kind, id: parent.id, sessionId,
@@ -119,6 +125,10 @@ export async function readMemoryForAgent(apparatus: Apparatus, agentId: string, 
   if (input.ref !== undefined) {
     const selected = entries.find(({ entry }) => entry.ref === input.ref)
     if (selected === undefined) refuse('not-responsible', 'checkpoint is outside this memory scope')
+    if (selected.entry.status === 'failed') {
+      await readParentMemoryFailure(apparatus.persistence, selected.native)
+      return { entry: selected.entry, checkpoint: null }
+    }
     return { entry: selected.entry, checkpoint: await readParentMemory(apparatus.persistence, selected.native) }
   }
   const ownRun = owner === undefined ? undefined : Object.values(owner.runs).at(-1)

@@ -17,10 +17,10 @@ export interface RoundRequest {
 }
 export interface TaskClosure {
   readonly runId: string
-  readonly reason: 'accepted' | 'failed'
+  readonly reason: 'accepted' | 'failed' | 'cancelled'
 }
 export interface RSIStatus {
-  readonly status: 'pending' | 'running' | 'completed' | 'failed'
+  readonly status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   readonly detail: string
   readonly trace?: FileAttachmentRef
 }
@@ -34,7 +34,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       parse: (raw) => {
         const row = record(raw, 'task closure'),
           reason = text(row, 'reason', 'task closure')
-        if (!['accepted', 'failed'].includes(reason))
+        if (!['accepted', 'failed', 'cancelled'].includes(reason))
           refuse('malformed-payload', 'unknown task closure')
         return { runId: text(row, 'runId', 'task closure'), reason: reason as TaskClosure['reason'] }
       },
@@ -45,7 +45,8 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
           state.closure !== undefined ||
           run.status === 'running' ||
           Object.values(state.runs).at(-1)?.runId !== payload.runId ||
-          (payload.reason === 'accepted') !== (run.status === 'verified')
+          (payload.reason === 'accepted') !== (run.status === 'verified') ||
+          (payload.reason === 'cancelled') !== (run.failureCause === 'cancelled')
         )
           refuse('illegal-transition', 'closure requires the last terminal Run and its actual outcome')
         return { ...state, closure: payload }
@@ -59,7 +60,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       parse: (raw) => {
         const row = record(raw, 'RSI status'),
           status = text(row, 'status', 'RSI status')
-        if (!['pending', 'running', 'completed', 'failed'].includes(status))
+        if (!['pending', 'running', 'completed', 'failed', 'cancelled'].includes(status))
           refuse('malformed-payload', 'unknown RSI status')
         const trace = row['trace'] === undefined ? undefined : record(row['trace'], 'sealed trajectory')
         if (trace !== undefined) {
@@ -86,11 +87,12 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
           state.rsi === undefined
             ? ['pending']
             : state.rsi.status === 'pending'
-              ? ['running', 'failed']
+              ? ['running', 'failed', 'cancelled']
               : state.rsi.status === 'running'
-                ? ['completed', 'failed']
-                : state.rsi.status === 'failed' && state.rsi.trace !== undefined && isDeepStrictEqual(payload.trace, state.rsi.trace)
-                  ? ['running']
+                ? ['completed', 'failed', 'cancelled']
+                : state.rsi.status === 'failed'
+                  ? state.rsi.trace === undefined ? ['pending', 'cancelled']
+                    : isDeepStrictEqual(payload.trace, state.rsi.trace) ? ['running', 'cancelled'] : ['cancelled']
                 : []
         if (!allowed.includes(payload.status)) refuse('illegal-transition', 'invalid RSI transition')
         return { ...state, rsi: { ...state.rsi, ...payload } }
@@ -121,6 +123,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       reduce: (state, envelope, payload) => {
         requireResponsible(state, envelope.actor, 'request evaluation')
         const run = requireRun(state, payload.runId, 'request evaluation')
+        if (state.transfer !== undefined) refuse('illegal-transition', 'champion is frozen; search evaluations are closed')
         if (
           run.purpose !== 'improve' ||
           run.status !== 'running' ||

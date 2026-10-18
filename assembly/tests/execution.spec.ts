@@ -37,7 +37,7 @@ describe('the DSH execution port', () => {
     const commit = deferred()
     let durable = false
     const h = harness(undefined, async () => { await commit.promise; durable = true })
-    h.ctx.emit('agent/error', { agent: h.agent, turn: 1, step: 0, error: new Error('provider 503') })
+    h.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'SERVER', message: 'provider 503' } } })
     const other = h.sessions.create(SessionId('other'))
     await h.sessions.flush(other)
     const flushed = h.sessions.flush(h.session)
@@ -54,23 +54,21 @@ describe('the DSH execution port', () => {
 
   it('propagates failure persistence errors through the native flush barrier', async () => {
     const h = harness(undefined, async () => { throw new Error('failure append failed') })
-    h.ctx.emit('agent/error', { agent: h.agent, turn: 1, step: 0, error: new Error('provider 503') })
+    h.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'SERVER', message: 'provider 503' } } })
     await expect(h.sessions.flush(h.session)).rejects.toThrow('failure append failed')
     await expect(h.execution.close()).rejects.toThrow('failure append failed')
   })
 
-  it('forwards agent runtime errors through the failure port once per exact live turn', async () => {
+  it('uses the native turn ending without replacing its structured failure with agent/error', async () => {
     const failures: TurnFailure[] = []
     const h = harness(undefined, failure => { failures.push(failure) })
     h.session.append('turn/start', { turn: 1 })
-    h.ctx.emit('agent/error', { agent: h.agent, turn: 1, step: 0, error: new Error('checkpoint flush failed') })
-    expect(failures).toHaveLength(1)
-    h.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'UNKNOWN', message: 'checkpoint flush failed' } } })
-    h.ctx.emit('agent/error', { agent: { ...h.agent }, turn: 2, step: 0, error: new Error('stale agent') })
-    expect(failures).toMatchObject([{ sessionId: 'root', turn: 1, reason: { kind: 'error', error: { message: 'checkpoint flush failed' } } }])
+    h.ctx.emit('agent/error', { agent: h.agent, turn: 1, step: 0, error: new Error('terminated') })
+    expect(failures).toHaveLength(0)
+    const reason = { kind: 'error' as const, error: { code: 'TRANSPORT', message: 'terminated' } }
+    const ended = h.session.append('turn/end', { turn: 1, reason })
+    expect(failures).toEqual([{ sessionId: 'root', turn: 1, seq: Number(ended.seq), reason }])
     await h.execution.close()
-    h.ctx.emit('agent/error', { agent: h.agent, turn: 2, step: 0, error: new Error('after close') })
-    expect(failures).toHaveLength(1)
   })
 
   it('forwards error and abort endings from the exact live agent session through one failure port', async () => {

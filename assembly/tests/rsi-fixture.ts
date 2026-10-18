@@ -13,7 +13,7 @@ export function rsiProposal(baseline: MethodAssets, method: MethodAssets, taskId
   }, edit: { hypothesis: 'Reusing sufficient frozen evidence avoids repeated inspection while preserving independent acceptance.',
     targets_mode: 'repeated_inspection', why_not_lower_lever: 'The redundant step follows guidance, so a conditional instruction is appropriate.',
     trigger_condition: 'The identical frozen input has already been inspected.', changes: structuralEditsOf(baseline, method),
-    predicted_affected: [taskId], retroactive_check: {
+    predicted_affected: [taskId], predicted_cases: [], predicted_families: [], retroactive_check: {
       corrective: 'The cited execution could reuse an established input identity instead of inspecting it again.',
       preservative: 'Independent acceptance remains mandatory and unchanged.',
       transfer: 'Evidence identity checking applies to unfamiliar inputs and does not prescribe a solution.',

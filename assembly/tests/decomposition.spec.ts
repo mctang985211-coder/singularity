@@ -29,7 +29,7 @@ async function setup(withRecipe = false) {
   const medium = new FakePersistence()
   const apparatus = await openApparatus('plans', root, await loadDomain(domainDir, spawnProcess), medium as never, attachmentsAt(root), testProjections)
   const caller = callerOf(agentFor('parent', 'parent-session'))
-  const method = withRecipe ? await createMethod(apparatus, { rootTemplate: apparatus.domain.rootTemplate,
+  const method = withRecipe ? await createMethod(apparatus, { workflowGuidance: '',
     templates: [...apparatus.domain.templates.values()].map((template) => ({ ...templateDeclaration(template),
       ...(template.id === apparatus.domain.rootTemplate ? { decomposition: { children: recipe } } : {}),
     })), skills: [], tools: [],
@@ -80,7 +80,7 @@ describe('one complete task declaration', () => {
     const h = await setup()
     const extract = h.children[0]!, count = h.children[1]!
     await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: [
-      { ...extract, key: 'first' }, { ...extract, key: 'second' },
+      { ...extract, key: 'first' }, { ...extract, key: 'second', contract: { ...extract.contract, goal: 'Independently verify source order by extracting letters.' } },
       { ...count, dependsOn: ['first', 'second'], contract: { ...count.contract,
         inputs: [{ ...count.contract.inputs[0]!, source: { kind: 'artifact', taskId: 'second' } }] } },
     ] })
@@ -142,7 +142,7 @@ describe('one complete task declaration', () => {
     const before = factsOf(h.medium)
     await expect(createMethod(h.apparatus, { ...assets, templates: assets.templates.map((raw) => {
       const template = raw as { id: string }
-      return template.id === assets.rootTemplate ? { ...template,
+      return template.id === h.apparatus.domain.rootTemplate ? { ...template,
         decomposition: { children: [{ ...recipe[0]!, template: 'missing' }] } } : template
     }) })).rejects.toThrow()
     expect(factsOf(h.medium)).toEqual(before)
@@ -168,12 +168,66 @@ describe('one complete task declaration', () => {
     expect(factsOf(h.medium)).toEqual(before)
   })
 
-  it('retains the execution hold while child responsibilities are pending', async () => {
+  it('rejects repeated responsibility under a fresh child key while work is pending', async () => {
     const h = await setup()
     await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: h.children })
     const before = factsOf(h.medium)
     await expect(decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId,
-      children: [{ ...h.children[0]!, key: 'additional' }] })).rejects.toThrow('delegated responsibilities are pending')
+      children: [{ ...h.children[0]!, key: 'additional' }] })).rejects.toThrow('duplicate child responsibility')
     expect(factsOf(h.medium)).toEqual(before)
   })
+})
+
+it('appends independent responsibilities during child execution while retaining execution and submission barriers', async () => {
+  const h = await setup()
+  await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: [h.children[0]!] })
+  const child = h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).get(h.parent.taskId)!.decomposition!.children[0]!
+  const state = h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).get(child.taskId)!
+  await startAttempt(h.apparatus, { ...h.caller, agentId: state.responsibility!.agentId, sessionId: state.responsibility!.agentId }, child.taskId, 'in-flight', h.parent.method)
+  const additional = { ...h.children[0]!, key: 'independent', contract: { ...h.children[0]!.contract, goal: 'Independently check the source encoding.' } }
+  await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: [additional] })
+  const { coordinationOf } = await import('../src/coordination.ts')
+  expect(coordinationOf(h.apparatus, h.parent.taskId).responsibility).toMatchObject({ canPlan: true, canExecute: false, canSubmit: false })
+  const before = factsOf(h.medium)
+  await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: [additional] })
+  expect(factsOf(h.medium)).toEqual(before)
+})
+
+it('allows one exact root-to-worker handoff, replays it, and refuses recursive redelegation', async () => {
+  const h = await setup()
+  const handoff = { key: 'deliver', contract: h.parent.contract, supports: h.parent.contract.criteria.map(criterion => criterion.criterionId),
+    dependsOn: [], maxRuns: 1, requirement: 'required' as const }
+  await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: [handoff] })
+  const before = factsOf(h.medium)
+  await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: [handoff] })
+  expect(factsOf(h.medium)).toEqual(before)
+  const state = h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).get(h.parent.taskId)!
+  const childId = state.decomposition!.children[0]!.taskId
+  const child = h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).get(childId)!
+  const caller = { ...h.caller, agentId: child.responsibility!.agentId, sessionId: child.responsibility!.agentId }
+  await startAttempt(h.apparatus, caller, childId, 'working', h.parent.method)
+  await expect(decompose(h.apparatus, h.scheduler, caller, { taskId: childId, children: [handoff] })).rejects.toThrow('ancestor responsibility')
+})
+
+it('exposes direction and root-local metadata without exposing another trial', async () => {
+  const h = await setup()
+  await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: h.children.map(child => ({ ...child,
+    handoff: { decisions: ['Private branch working advice'], hypotheses: [], exclusions: [], evidence: [] },
+  })) })
+  const states = h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
+  const child = [...states.values()].find(state => state.contract?.template?.id === 'extract-letters')!
+  const caller = { ...h.caller, agentId: child.responsibility!.agentId, sessionId: child.responsibility!.agentId }
+  await startAttempt(h.apparatus, caller, child.taskId, 'metadata', h.parent.method)
+  const foreign = await propose(h.apparatus, { ...h.caller, agentId: 'foreign', sessionId: 'foreign' }, 'foreign',
+    { contract: { goal: 'Private task in a different trial', artifact: 'private.txt', inputs: [], criteria: [{ criterionId: 'private', statement: 'Private criterion' }] } })
+  const { coordinationOf } = await import('../src/coordination.ts')
+  const { readForAgent } = await import('../src/read.ts')
+  expect(coordinationOf(h.apparatus, child.taskId).direction!.root).toMatchObject({ taskId: h.parent.taskId, goal: h.parent.contract.goal })
+  const overview = await readForAgent(h.apparatus, caller.agentId, { kind: 'workflow' }) as { rootId: string; nodes: { taskId: string }[] }
+  expect(overview.rootId).toBe(h.parent.taskId)
+  expect(overview.nodes).toHaveLength(3)
+  expect(overview.nodes.some(node => node.taskId === foreign.taskId)).toBe(false)
+  expect(JSON.stringify(overview)).not.toContain('Private branch working advice')
+  expect(JSON.stringify(overview)).not.toContain('handoff')
+  await expect(readForAgent(h.apparatus, caller.agentId, { kind: 'workflow', ref: foreign.taskId })).rejects.toThrow('outside this Task root')
 })

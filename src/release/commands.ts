@@ -12,6 +12,7 @@ import { RELEASE_KINDS, RELEASE_PROTOCOL, RELEASE_VERSION, releaseDraftOf, type 
 
 export interface ReleaseCommandOptions {
   readonly store: ControlSessionStore
+  readonly require?: () => void
 }
 export interface ReleaseCommands {
   draft(input: { readonly commandId: string; readonly revision: RevisionRef }): Promise<Envelope>
@@ -33,7 +34,10 @@ export interface ReleaseCommands {
 
 export function createReleaseCommands(options: ReleaseCommandOptions): ReleaseCommands {
   const emit = (commandId: string, kind: string, subject: string, payload: unknown, require?: () => void) =>
-    options.store.emit({ commandId, protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind, subject, payload }, require,
+    options.store.emit({ commandId, protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind, subject, payload }, () => {
+      options.require?.()
+      require?.()
+    },
     )
   const validate = (environmentId: string, draft: ReleaseDraft): void => {
     const cut = options.store.load()
@@ -90,6 +94,7 @@ export function createReleaseCommands(options: ReleaseCommandOptions): ReleaseCo
     publish: (input) => options.store.emit({ commandId: input.commandId, protocol: ENVIRONMENT_PROTOCOL, version: ENVIRONMENT_VERSION,
       kind: ENVIRONMENT_KINDS.pointerSwitched, subject: input.environmentId, payload: { expected: input.expected, to: input.to },
         }, () => {
+      options.require?.()
       const release = options.store.load().stateOf<ReleaseState>(RELEASE_PROTOCOL, RELEASE_VERSION, input.environmentId)
       if (release === undefined || release.draftDigest === '')
         refuse('unapproved-revision', `cannot release revision "${input.to}" in environment "${input.environmentId}": no draft is on the table`,

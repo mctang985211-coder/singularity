@@ -1,7 +1,30 @@
 # context.md —— 当前接手状态
 
 本页在每轮结束时**替换当前状态**，只保留未关闭问题、已批准合同索引和证据边界。
-历史解释从固定基线实测记录与 Git 查证；剩余施工顺序只在 [assembly-blueprint §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 维护。
+历史解释从固定基线实测记录与 Git 查证；剩余施工顺序在 [Task 优先的领域 RSI 计划](task-first-domain-rsi-plan.md) 维护。
+
+2026-10-18：当前 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，仅用于新图。已接通完整契约、可选模板、workflow 策略与方向、在飞构图与整图预算、持久取消/学习开关；suite case×trial、失败计分、历史 S*、配对区间、最多 6 槽的稀疏搜索及反馈；冻结 champion 后独立 validation/heldout 与审核/CAS；CLI 和私有宿主便携配置。原生 delivery、retry/用量和隔离有离线见证。完整状态和局限见[计划第 9 节](task-first-domain-rsi-plan.md#9-详细实施任务)。
+
+最新 CommandCode 只读检查（cutoff 131）：`/home/ROXY/singularity-next/buckyball-commandcode-20261018-172430` 的业务根 `task-5fc54cd5510aba92` 已 accepted。RSI `improve-043d458189286ffefc4b48eb` 最终报告也通过，但零提案、零评估；不能称为有效搜索。原生 seq208 把候选文件误交报告提交工具，driver 预检前先写 control seq122 search-ended，随后 seq209 才拒绝路径；后续合法提案被永久封死且误报批次未结束。完整因果与历史事件见计划 §2.2。
+
+本次删除独立 search-ended 与 proposal started/settled 镜像状态，Run 提交是唯一搜索关闭边界。正确路径、文件、输入和附件封存先于迁移验证；批次冷恢复使用封存候选字节；非法 Method 先纯解析再 prune；测量缺失/未知成本/不足样本投影为证据不足。首次启动失败可显式恢复，终态 analysis 和取消不复活；默认步骤上限覆盖 RSI/审核。取消或分析失败会中止在飞筛选、评估、验证和后代；发布在现有串行提交区重查 Run 与根 RSI，终止事实先入队时不能发布。取消支持精确 taskId，旧 root 不会误停同会话的新 root。业务已验收结果保留。
+
+最终 `pnpm verify` **退出 0：90 文件 / 944 测试 / 7 门禁通过**，日志 `/tmp/singularity-rsi-state-final-verify.log`；`pnpm run doctor`、`git diff --check` 通过。两个子代理完成恢复/取消与实跑/发布交叉审查；本次覆盖范围和有限证据见计划 §2.2。
+
+上一轮已删除 `provider.ts`、provider 侧日志、整图停机/重启 API/UI 与 `DSH_AGENT_ERROR` 包装；DSH 原生负责重试和最终失败。历史 partial-output veto 断流、HTTP 402/QUOTA 与本次提前结束搜索是不同故障。历史运行与冻结 checkout 不改写，本次只修复和离线验证主仓，未重载宿主或调用付费模型。完整验证记录保留在计划 §2.2；更早异步等待不稳定仍无根因证明。
+
+Buckyball 收尾已完成：独立冻结 C/ISA 源码投影、真实 stdio MCP 配置/BEMU 构建、6 题/3 族明确标注的合成案例、私有独立 scalar+BEMU oracle。12 个正反样本、工具漂移 unknown、错误假设驳回、worker 读隔离及两个 verifier 并发取消均符合预期。仅支持 C/ISA+BEMU 功能；不是全仓/MLIR/RTL/PPA 复现。每个 split 只有一族，不满足冻结的最少三族门槛，不得声称迁移提升；oracle 反例也不是模型调查 Task。
+
+**较早只读检查首次真实 pilot（cutoff 247）。** 运行目录 `/home/ROXY/singularity-next/buckyball-pilot-20261018`，UI `http://127.0.0.1:7340`，control `singularity-buckyball-pilot-20261018`，根 `task-2d32b3cb8b21b08e`，模型 `deepseek/deepseek-flash`。首次业务根已 `verified / accepted`，`behavior` 与 `isa-and-scope` 均为 pass；一个方法候选通过 critic 和加载检查，基线矩阵有效完成 2/4、候选有效 0/4，余额不足 HTTP 402 及其连带失败使学习 Task/根 RSI 为 failed。未进入迁移验证，也无新方法发布；不将有效测量缺失解释为候选成功率零或无改善。`progress-check-20261018.json` 保存本次完整观测，当时 119 个生产文件与实跑冻结 checkout 内容一致。本次未重启或调用模型。
+
+`launch.json` 汇总启动 PID、身份与证据；`experiment-spec.json` 冻结规则；`startup-report.json` 保存启动时状态。检查或取消用：
+
+```sh
+node /home/ROXY/singularity-next/buckyball-commandcode-20261018-172430/control.mjs status
+node /home/ROXY/singularity-next/buckyball-commandcode-20261018-172430/control.mjs cancel
+```
+
+`host.log` 含私有 launch token，不公开。作者脏树和旧实验保持原状。模型服务端 revision opaque，验证集未污染不具有跨 control 的全局证明。
 
 ## 18. G1/G2 接手审核与用户裁定（2026-10-11，基线 `35b0c7c`）
 
@@ -17,10 +40,10 @@ SHA256 领域只提供一份完整 RTL `sha256.v`、一份固定 Yosys 综合指
 
 - 最新 SHA256 max 实跑 `/home/ROXY/singularity-next/sha256-max-20261015-154731/` 已停止并保留现场，冻结 Task v15 / Review v5 / snapshot v9 与最简领域；control `singularity-sha256-max-20261015-154731`，root `session-b6c4f915-f0ac-4949-9c6e-7b9662692166`。全新 home/control，预算 300000000 原生 tokens，启动 tasks/known/reserved/unknown 均为零；root 与实际 child 原生请求均为 reasoningEffort=max。父背景 checkpoint 成功；子节点的原生 TokenMeter 把 reasoning 按字符估算为过高上下文，触发压缩，8192 输出额度导致四次截断，而 BasicCompaction 吞掉错误继续下一步。本轮未完成任务验收或 RSI；原始事件、费用与停止记录见 anomaly-diagnosis.json、memory-anomaly-evidence.json。取消产生的未知 usage 与之前的摘要截断分开记录。
 - 前一已停止 SHA256 实跑为 `/home/ROXY/singularity-next/sha256-root-20261015-040521/`，使用冻结的 Task v14 / Review v3 / snapshot v8。根实际分解，但生成的子合同把系统遍历及每种变体实测列为验收义务。`task-db07eb87ba823d75` 原生会话 seq1058 已记录面积 64105.232 µm²、schedule/functional verifier exit=0，seq1084、1156 仍选择追加搜索并等待 2592 个候选。领域 measurement 每次仅运行固定综合流，遍历脚本由节点自行生成；达标后缺少停止协调、把探索变成必需覆盖和父生成错误优先级标准均有实际记录。可追溯摘录、准确 session/seq 和冻结脚本摘要见该目录 execution-analysis.json；局部输出不代表根验收或 RSI 收益。
-- 当前协议为 Task v18、Review v5、snapshot v9。父背景 memory、责任投影、可停止探索和最简 SHA256 领域已构建通过；全量回归 73 个文件、757 项测试通过，7 项门禁通过。原生 host 集成验证默认生成父背景、子模型未读取前不注入、工具回读、动态责任上下文和等待执行限制；轮后直接封存 token-meter 的 tokenUsage 原生投影，冷读结果与 ui-chat 视图逐字段一致，四个原生计费桶相加且 reasoning 不重复计数，缺失 usage 不阻断本节点、同伴节点、后续根任务或 RSI；取消测试覆盖后代、待办问答、未完成审核与冷恢复。私有 DSH 的 TokenMeter、BasicCompaction 修复经 278 项定向测试并安装，原有 Session 补丁产物校验未变；真实 Loader 预设验证自动摘要截断终止回合、保留 MAX_TOKENS 和原生用量来源。原始 child 会话 seq380 离线计价由 806378 修正为 115774，低于 800000 触发阈值，替换后重新估算且不负向归零。验证及复演结果保存在最新实验目录的 repair-validation.json、token-meter-before.json、token-meter-after.json。本轮实跑已停止，尚无复杂任务收敛或 RSI 收益结论；前一 Task v14 的测试仅为历史证据。
+- Task v18 / Review v5 / snapshot v9 阶段的历史验证：父背景 memory、责任投影、可停止探索和最简 SHA256 领域已构建通过；全量回归 73 个文件、757 项测试通过，7 项门禁通过。原生 host 集成验证默认生成父背景、子模型未读取前不注入、工具回读、动态责任上下文和等待执行限制；轮后直接封存 token-meter 的 tokenUsage 原生投影，冷读结果与 ui-chat 视图逐字段一致，四个原生计费桶相加且 reasoning 不重复计数，缺失 usage 不阻断本节点、同伴节点、后续根任务或 RSI；取消测试覆盖后代、待办问答、未完成审核与冷恢复。私有 DSH 的 TokenMeter、BasicCompaction 修复经 278 项定向测试并安装，原有 Session 补丁产物校验未变；真实 Loader 预设验证自动摘要截断终止回合、保留 MAX_TOKENS 和原生用量来源。原始 child 会话 seq380 离线计价由 806378 修正为 115774，低于 800000 触发阈值，替换后重新估算且不负向归零。验证及复演结果保存在最新实验目录的 repair-validation.json、token-meter-before.json、token-meter-after.json。本轮实跑已停止，尚无复杂任务收敛或 RSI 收益结论；前一 Task v14 的测试仅为历史证据。
 - `sha256-memory-20261015-023610` 因 root 持续原子求解而停止；`sha256-root-20261015-033722` 启动时发现 Bubble 把实现工具注册到 agent 自有 scope，也已停止。各轮保留原生 usage 与零账启动记录，不重置已发生费用，不恢复旧协议实验。
 - 隔离重构实跑位于 `/home/ROXY/singularity-next/assembly-rewrite-20261015-001246/`：抽取 `task-6cc92339a853891e` 独立通过后才启动计数 `task-240d7ce3a0ff9576`，父 `task-8c96b924fcdf5025` 复用其封存的 `35\n`，三个独立审核、五项标准全通过。七个模型会话均只有一个 system 版本，method/模板按需读取。RSI 已冻结候选，预算中断前尚未发起评估、发布或提交报告；已知 2,938,875 tokens，另有一个缺 usage 的中断事件，不猜计费。host 已停止；审计入口为该目录的 workload-evidence.json。此实跑验证 Task v13 接口与两阶段业务链，不能代替当前 Task v17 修复或复杂任务效果验证。
-- 基于 `f892376` 的 Task v10、Review v1、snapshot v6 历史验证包含 657 项测试、7 项协议门禁和五个离线探针；提示与工具说明修正另经构建、43 项方法/分解测试和 32 项读面/分解测试复验。该历史结果不代表当前 Task v17、Review v5、snapshot v9 的验证，也不证明领域收益。
+- 基于 `f892376` 的 Task v10、Review v1、snapshot v6 历史验证包含 657 项测试、7 项协议门禁和五个离线探针；提示与工具说明修正另经构建、43 项方法/分解测试和 32 项读面/分解测试复验。该历史结果不代表当前 Task v23、Review v5、snapshot v13 的验证，也不证明领域收益。
 - Task v12、Review v2、snapshot v7 的历史完整 verify 通过 674 项测试与 7 项门禁；等待责任的 `assembly-m26-parent-waits-for-a-running-child` 变异被捕获。测试覆盖问答持久化、真实 Cordis Skill scope、方法固定版本、按文件工具授权、证据分页、审核贡献引用、原父 Run 通知及已提交孩子的冷恢复；验证日志位于实验目录 core-v12-final-verify.log，离线检查不等于复杂任务收敛。
 - 隔离实例位于 `/home/ROXY/singularity-next/task-rsi-20261014-core-v10/`。`letters3` 根 `task-0ba8dbedac505bea` 独立审核通过；RSI `improve-6a418dd39b84a823e81c73da` 自主提交候选、完成独立双侧测评并决定无赢家，报告经 `review-05005d3b91989f6d1016295b` 通过，control seq 73 记录 completed。该实例费用 3,866,739 tokens，无未知 usage；它证明流程闭环，未发布新方法，也不证明复杂任务机制有效。
 - 首次 SHA256 根 `task-e2f97f93931e506f` 包办探索，最终记录 80 次 bash、2 次 singularity_read、零分解；按用户纠正中断，未提交验收。已知费用 4,592,384 tokens，取消产生 1 条未知 usage，按声明上下文和输出上限保守预留 1,131,072；该预留不是实际可比较候选费用，旧实例不继续调用。
@@ -41,7 +64,7 @@ Run 直接固定方法版本，Bubble 冻结输入附件、artifact 输入的 pr
 
 执行节点可有界摸底以决定责任边界，独立结果先委派再求解；单一最终文件不代表原子责任。孩子自行探索后代，父不重复接管其工作。分解显式声明 `requirement: required | exploration`：required 必须 verified，exploration 可择优并由父用 `singularity_stop_explorations` 记录理由停止。停止不产生通过证据、不满足输入依赖，仍依赖被停分支的探索必须一并停止。任何孩子结算即通知父判断证据是否足够，无需等全部探索结束才协调。宿主每次请求前投影当前标准、已委派责任、未通过的必需工作、活动探索、待回答问题和 canSubmit，并据此限制等待期间的执行及提交。
 
-父仍须完成集成与独立验收，保留证据如何影响选择。handoff 区分决策、假设、排除路径及已验证证据，父会话历史不整体复制。RSI 的 subject.json 仅含冻结摘要，完整轨迹通过 singularity_read 分页读取。模型只用 singularity_propose_method 提交完整方法；宿主绑定 incumbent/round，先审查、再复用封存业务基线并冷启动候选，决策后独立审核发布。提案与发布审核仅暴露文件读写、封存材料读取和判断提交，不提供执行、网页或委派工具；无赢家或发布被拒时恢复原 RSI 会话修订。
+父仍须完成集成与独立验收，保留证据如何影响选择。handoff 区分决策、假设、排除路径及已验证证据，父会话历史不整体复制。RSI 的 subject.json 仅含冻结摘要，完整轨迹通过 singularity_read 分页读取。模型只用 singularity_propose_method 提交完整方法；宿主绑定 incumbent/round，先审查、再复用封存业务基线并冷启动候选，决策后独立审核发布。提案与发布审核仅暴露文件读写、封存材料读取和判断提交，不提供执行、网页或委派工具；无赢家或发布被拒时恢复原 RSI 会话，可在剩余额度内修订或如实结束。
 
 结构化 memory 是给子 Task 的父背景，默认在子执行前尝试生成；摘要失败以原生 log-only 事件保存原因，目录标记 ready/failed，失败背景不阻断业务 Task，持久化和来源完整性错误仍传播；不把摘要直接注入子 system prompt。`singularity_memory()` 提供可读分支的统一分页目录（from/count 默认 20、最大 100），inherited 标出本节点继承引用，传 ref 才读完整 checkpoint。root 看整棵树，普通节点按现有任务可见范围且不跨根，独立审核及其取证后代仅看同一审核分支，RSI 可读关联执行分支。目录只投影原生 checkpoint 的身份、适用 Task/Run、来源截止位置与当前 Run 状态，不生成新摘要；历史 Run 与当前 Run 分开标记。checkpoint 固定 formatVersion、scope、sources、decisions、evidenceRefs、hypotheses、openQuestions、exclusions。模型按子责任筛选父会话与继承背景中的决定、依据、假设、疑问和排除路径；宿主从事实投影合同/方法身份、来源前缀及精确 verified Run 的证据身份与状态。checkpoint 和模型调用写入原生 log-only 事件，读取/恢复校验来源摘要、原始输入/输出和证据范围；不另建 memory store。JSON schema 不保证叙述语义保真，父声称 verified 不能提升为验收事实，其他分支的摘要不能增加本节点责任。
 
@@ -51,9 +74,9 @@ Run 直接固定方法版本，Bubble 冻结输入附件、artifact 输入的 pr
 
 Run 失败不立即等于 Task 关闭：根 agent 可在当前回合重试；静默且没有新的 working Run 时才关闭根。成功和失败都可进入后续分析，evaluation 根不触发 RSI。审核尚未委派取证任务时没有计划通知；冷恢复已提交的孩子仅恢复原会话与独立验收，不给执行者重发求解指令，验收完成后从新 fold 推进依赖。
 
-业务结果返回后，后台等待相关原生会话静默并 flush，封存完整轨迹和费用，再启动独立分析。RSI 通过 singularity_propose_method 提交候选文件，先做结构检查和独立可迁移性、权限与泄漏审查；拒绝交回原会话修订，通过后冻结 round 请求并返回。基线复用已封存业务 root，候选依次隔离试跑；无赢家时原会话修订后重提。宿主从现有 measure / strategy / release 事实继续，复用 trial、审核、决定和唯一发布指针。通知使用现有带身份的原生消息恢复，不另建工作流或状态文件。未执行 RSI 必须说明原因。
+业务结果返回后，后台等待相关原生会话静默并 flush，封存轨迹和费用，再启动独立分析。RSI 通过 singularity_propose_method 提交 1–3 个候选路径，先做结构检查和独立可迁移性、权限与泄漏审查；拒绝也消耗槽位，通过后冻结 round 请求。suite 按 case×trial 隔离比较，单题 debug 才复用已封存业务基线；无赢家可以继续剩余槽位或如实结束，总计最多 6 槽、repair=0，恢复不重置。冻结 champion 后执行独立 validation 和可选 heldout，发布再经审核与 CAS。宿主从现有 measure / strategy / release 事实恢复，不另建工作流或状态文件。未执行 RSI 必须说明原因。
 
-模型请求不设 campaign token 预算闸门，也没有未知用量的保守预留账本。根轮次结束、相关原生会话静默并 flush 后，读取 token-meter 注册的 tokenUsage 原生投影，封存 summary.usage 和逐会话四个原始计费桶供 RSI 与脚本读取。总数与 ui-chat 的 StatsPills 一致：uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens，reasoning 已包含在 outputTokens。缺失 usage、重试和替换直接遵循原生投影语义；assembly 不扫描调用、补计辅助费用或建立未知用量判断，不取消节点、关闭 Run、跳过 RSI 或阻断后续调用。父背景原始 stream 仅供证据回读；原生压缩事务、摘要和恢复全由 DSH 管理。
+模型请求不设 campaign token 预算闸门，也没有未知用量的保守预留账本。根轮次结束、相关原生会话静默并 flush 后，读取 token-meter 注册的 tokenUsage 原生投影，封存 summary.usage 和逐会话四个计费桶供 RSI 与脚本读取。总数与 ui-chat 的 StatsPills 同口径：uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens，reasoning 已包含在 outputTokens。复用根会话按准确 dispatch 和本 Run 封存提交界定区间，以原生前缀投影差值排除前后 Task；缺 dispatch 或缺 billing sample 明确标记不完整，比较成本为 unknown，不估算、不取消节点或阻断后续调用。轨迹保留连续原生前缀以验证来源，压缩事务与恢复仍由 DSH 管理。
 
 ### 18.5 不要重建的基础
 
@@ -89,6 +112,6 @@ Run 失败不立即等于 Task 关闭：根 agent 可在当前回合重试；静
 | 有范围的任务与历史读取（context/src/reads/guards.ts、context/src/session） | 简化保留 | 自身分支、祖先、直接关系、交接及回答引用；增加直接同级责任可见性以复用证据，同级后代仍受边界限制。正文/轨迹分页，审核读取冻结前缀，跨根拒绝。 |
 | 持久化父子问答（task-runtime/src/service/questions.ts） | 简化保留 | question / answer 绑定双方准确 Run，requestKey 幂等；阻塞问题关闭执行与提交，现有原生 inbox 恢复投递，不新增问答文件、第二消息队列或状态索引。 |
 | Task→Skill/Tool capability manifest（task-runtime/src/capability.ts） | 替代 | 固定方法内按统一合同选择；按需读取、provider、调用授权和文件挂载一致。部署原生基础工具仍由 DSH 提供；领域部署与 Bubble 约束不把未实现 capability 当已授权。 |
-| Run waiting_children 与 batch settlement（task-runtime/src/orchestration/batch.ts、settlement.ts） | 替代 | 等待从子事实、问题和 round 推导，命令与原生执行共用一个判定；required 必须通过，exploration 可明确停止。父等待期间只读及协调，不重复执行委派工作；停止分支撤销未完后代执行，不自动接管。 |
+| Run waiting_children 与 batch settlement（task-runtime/src/orchestration/batch.ts、settlement.ts） | 替代 | 等待从子事实、问题和 round 推导，命令与原生执行共用一个判定；required 必须通过，exploration 可明确停止。父等待期间可读、协调及追加不冲突规划，不重复执行委派工作；停止分支撤销未完后代执行，不自动接管。 |
 | 子证据回交与原 Run 恢复（task-runtime/src/orchestration/observe.ts、replay.ts） | 保留并简化 | 每次子结果结算即交回成果引用与审核证据，通知绑定父 Run，可停止未选探索后集成；同一事实去重，重试父 Run 有独立通知身份。已提交孩子冷恢复只继续验收，不重启求解。父审核收到贡献、封存轨迹及审核引用以判断证据如何参与集成。 |
 | 独立审核、轨迹与 RSI 发布（verifier / evolution / environment） | 保留与替代 | 任务和发布审核独立；真实 Task 责任、问答、资产消费、成本和轨迹用于 RSI。单一方法指针替代独立资产准入链；旧版源码存在机制不作为整体可靠性证据。 |

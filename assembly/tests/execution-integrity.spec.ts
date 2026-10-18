@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile, readFile, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -23,7 +24,7 @@ async function setup() {
     apparatus = await openApparatus(
       'submission',
       root,
-      await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
+      await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
       medium as never,
       attachmentsAt(root), testProjections,
     )

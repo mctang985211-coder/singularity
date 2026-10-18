@@ -54,9 +54,23 @@ describe('the deployment domain', () => {
     expect(await asyncRefusalOf(() => loadDomain(dir, spawnProcess))).toMatchObject({ code: 'malformed-declaration' })
   })
 
+  it('keeps verifier-only references out of worker references and rejects shared overlap', async () => {
+    const dir = await fixture(declaration()), privateDir = await fixture(declaration())
+    await writeFile(join(dir, 'task.json'), JSON.stringify({ ...declaration(), verifierReferences: [privateDir] }))
+    const domain = await loadDomain(dir, spawnProcess)
+    expect(domain.references).toEqual([])
+    expect(domain.verifierReferences).toEqual([privateDir])
+    for (const changed of [{ verifierReferences: ['.'] }, { verifierReferences: [privateDir], references: [privateDir] },
+      { verifierReferences: [privateDir], references: [join(privateDir, 'pass.txt')] },
+      { verifierReferences: [join(privateDir, 'missing')] }, { verifierReferences: [42] }, { verifierReferences: ['../outside'] }]) {
+      await writeFile(join(dir, 'task.json'), JSON.stringify({ ...declaration(), ...changed }))
+      expect(await asyncRefusalOf(() => loadDomain(dir, spawnProcess))).toMatchObject({ code: 'malformed-declaration' })
+    }
+  })
+
   it('reads the shared contract fields and binds independent checks to their declared inputs', async () => {
     const declared = declaration(), dir = await fixture(declared)
-    const domain = await loadDomain(dir, spawnProcess), root = domain.templates.get(domain.rootTemplate)!
+    const domain = await loadDomain(dir, spawnProcess), root = domain.templates.get(domain.rootTemplate!)!
     expect([domain.rootTemplate, root.goal, root.inputs, root.artifact, root.criteria]).toEqual([
       'root', declared.templates[0]!.goal, declared.templates[0]!.inputs, 'report.txt', declared.templates[0]!.criteria,
     ])
@@ -139,7 +153,7 @@ describe('the deployment domain', () => {
   })
 
   it.each([
-    ['unknown root', { rootTemplate: 'absent' }],
+    ['unknown root', { rootTemplate: 'missing' }],
     ['unknown protected source', { templates: [sourced('root', { kind: 'protected', ref: 'absent' })] }],
     ['unknown artifact source', { templates: [...declaration().templates, sourced('child', { kind: 'artifact', template: 'absent' })] }],
     ['artifact root', { templates: [sourced('root', { kind: 'artifact', template: 'root' })] }],

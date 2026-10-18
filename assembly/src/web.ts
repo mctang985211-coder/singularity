@@ -3,6 +3,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
 import { dirname, extname, resolve, sep } from 'node:path'
 import { ProtocolRefusal } from '../../src/protocol/refusal.ts'
+import { assertClosedKeys } from '../../src/protocol/envelope.ts'
+import { nonEmpty, record } from './shape.ts'
 
 import type { Context } from '@deepseek-ai/cordis'
 // Register the host's service types without adding a runtime dependency.
@@ -13,8 +15,8 @@ export const name = 'singularity-web'
 export const inject = ['singularity', 'webServer']
 
 export const TASKS_PATH = '/singularity/tasks'
-export const RESTART_PATH = '/singularity/restart'
 export const RSI_MEMORY_PATH = '/singularity/rsi-memory'
+export const CANCEL_PATH = '/singularity/cancel'
 
 export const PANEL_PATH = '/singularity/panel'
 
@@ -97,7 +99,7 @@ function servePanel(ctx: Context): () => void {
 
 export function apply(ctx: Context): void {
   ctx.effect(() => servePanel(ctx))
-  for (const path of [TASKS_PATH, RESTART_PATH, RSI_MEMORY_PATH]) ctx.effect(() =>
+  for (const path of [TASKS_PATH, RSI_MEMORY_PATH, CANCEL_PATH]) ctx.effect(() =>
     ctx.webServer.register({
       kind: 'exact',
       path,
@@ -123,19 +125,21 @@ export function apply(ctx: Context): void {
           res.end()
           return
         }
-        if (path === RESTART_PATH) {
-          if (!(await ctx.singularity.read()).providerStopped) {
-            sendJson(res, 409, { message: 'Only a graph stopped by an unstable provider can be restarted' })
-            return
-          }
-          await ctx.singularity.restart()
-        }
-        if (path === RSI_MEMORY_PATH) {
+        if (path === RSI_MEMORY_PATH || path === CANCEL_PATH) {
           try {
             const chunks: Buffer[] = []
             for await (const chunk of req) chunks.push(Buffer.from(chunk))
-            await ctx.singularity.inheritRsi(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-            sendJson(res, 200, { status: 'linked' })
+            const input = record(JSON.parse(Buffer.concat(chunks).toString('utf8')), 'service request')
+            if (path === CANCEL_PATH) {
+              assertClosedKeys(input, ['sessionId', 'taskId'], 'cancellation')
+              sendJson(res, 200, await ctx.singularity.cancel({ sessionId: nonEmpty(input['sessionId'], 'sessionId'),
+                ...(input['taskId'] === undefined ? {} : { taskId: nonEmpty(input['taskId'], 'taskId') }) }))
+            } else {
+              assertClosedKeys(input, ['sessionId', 'previousRootId'], 'RSI memory link')
+              await ctx.singularity.inheritRsi({ sessionId: nonEmpty(input['sessionId'], 'sessionId'),
+                previousRootId: nonEmpty(input['previousRootId'], 'previousRootId') })
+              sendJson(res, 200, { status: 'linked' })
+            }
           } catch (error) {
             if (!(error instanceof SyntaxError || error instanceof ProtocolRefusal)) throw error
             sendJson(res, 400, { message: String(error) })

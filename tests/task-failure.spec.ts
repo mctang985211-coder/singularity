@@ -9,7 +9,7 @@ import { ARTIFACT, BUBBLE_INPUTS, SUBJECTS, taskRegistry, UNIT_IMPLEMENTATION, U
 import { CHILD_A, CHILD_B, failed, judge, openRun, planned } from './tree-fixtures.ts'
 
 describe('failed Runs record the cause that determines retry eligibility', () => {
-  it.each([undefined, 'cancelled', 1])('refuses an absent or unknown cause %s without a failure fact', async (cause) => {
+  it.each([undefined, 'unknown', 1])('refuses an absent or unknown cause %s without a failure fact', async (cause) => {
     const registry = taskRegistry()
     const log = await planned(registry)
     await openRun(log, CHILD_A, 'a1')

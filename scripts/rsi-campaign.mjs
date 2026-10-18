@@ -3,14 +3,14 @@ import { readFile, writeFile, rename } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { connectHost } from './singularity.mjs'
 
 /** A new business root starts only after the previous root's RSI report settles. */
 export function nextCampaignStep(state, snapshot) {
-  if (snapshot.providerStopped) throw new Error('provider 不稳定；campaign stopped')
   const last = state.iterations.at(-1)
   const root = last === undefined ? undefined : snapshot.tasks.find(task => task.sessionId === last.sessionId)
   if (last !== undefined) {
-    if (root?.rsi?.status === 'failed') throw new Error(`RSI failed for ${root.taskId}: ${root.rsi.detail}`)
+    if (['failed', 'cancelled'].includes(root?.rsi?.status)) throw new Error(`RSI ${root.rsi.status} for ${root.taskId}: ${root.rsi.detail}`)
     if (root?.rsi?.status !== 'completed') return { kind: 'wait' }
     if (state.iterations.length >= state.rounds) return { kind: 'complete', rootId: root.taskId }
   }
@@ -21,7 +21,6 @@ export function nextCampaignStep(state, snapshot) {
 
 export async function runCampaign(base, rounds = 5) {
   if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error('rounds must be a positive integer')
-  const { chromium } = await import('playwright')
   const metaPath = join(base, 'experiment.json'), statePath = join(base, 'campaign.json')
   const meta = JSON.parse(await readFile(metaPath, 'utf8'))
   let state
@@ -40,32 +39,15 @@ export async function runCampaign(base, rounds = 5) {
     await writeFile(statePath + '.tmp', JSON.stringify(state, null, 2) + '\n')
     await rename(statePath + '.tmp', statePath)
   }
-  const text = await readFile(join(base, 'host.log'), 'utf8')
-  const entry = text.match(new RegExp('http://127\\.0\\.0\\.1:' + meta.port + '/\\?token=[^\\s]+'))?.[0]
-  if (entry === undefined) throw new Error('Host authentication entry is not ready')
-  const secret = entry.split('?token=')[1]
-  const browser = await chromium.launch({ headless: true })
+  const host = await connectHost({ url: process.env['SINGULARITY_URL'] || `http://127.0.0.1:${meta.port}` })
   try {
-    const page = await browser.newPage()
-    await page.goto(entry)
-    const rpc = async (method, request) => page.evaluate(async ({ method, request }) => {
-      const response = await fetch('/api/' + method, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method, payload: { args: { request } } }),
-      })
-      const body = await response.json()
-      if (!body.result?.ok) throw new Error(JSON.stringify(body))
-      return body.result.value
-    }, { method, request })
+    const rpc = host.rpc
     const activated = new Set()
     while (true) {
       const pending = state.iterations.at(-1)
       if (pending !== undefined && !activated.has(pending.sessionId)) {
-        if (pending.previousRootId !== undefined) await page.evaluate(async ({ sessionId, previousRootId }) => {
-          const response = await fetch('/singularity/rsi-memory', { method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId, previousRootId }) })
-          if (!response.ok) throw new Error(`RSI memory handoff HTTP ${response.status}: ${await response.text()}`)
-        }, { sessionId: pending.sessionId, previousRootId: pending.previousRootId })
+        if (pending.previousRootId !== undefined)
+          await host.inheritRsi({ sessionId: pending.sessionId, previousRootId: pending.previousRootId })
         await rpc('session/prompt', { requestId: pending.requestId, sessionId: pending.sessionId, mode: 'queue',
           content: [{ type: 'text', text: await readFile(join(base, 'request.txt'), 'utf8') }], clientTimeZone: 'Asia/Shanghai' })
         activated.add(pending.sessionId)
@@ -74,11 +56,7 @@ export async function runCampaign(base, rounds = 5) {
         delete state.error
         await save()
       }
-      const snapshot = await page.evaluate(async () => {
-        const response = await fetch('/singularity/tasks')
-        if (!response.ok) throw new Error(`snapshot HTTP ${response.status}`)
-        return response.json()
-      })
+      const snapshot = await host.snapshot()
       const step = nextCampaignStep(state, snapshot)
       if (step.kind === 'complete') {
         Object.assign(state.iterations.at(-1), { rootId: step.rootId, completedAt: new Date().toISOString(),
@@ -112,10 +90,10 @@ export async function runCampaign(base, rounds = 5) {
     }
   } catch (error) {
     state.status = 'failed'
-    state.error = String(error).replaceAll(secret, '[redacted]')
+    state.error = String(error)
     await save()
     throw new Error(state.error)
-  } finally { await browser.close() }
+  }
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

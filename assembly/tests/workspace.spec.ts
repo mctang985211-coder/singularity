@@ -63,7 +63,7 @@ describe('preparing a workspace', () => {
   it('stages the declared inputs, and the seed at the path a submission is judged on', async () => {
     const domain = await loadDomain(await sourceDomain(), spawnProcess)
     const workspace = await workspaceOf()
-    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes,
+    await prepareWorkspace(domain.templates.get(domain.rootTemplate!)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes,
         },
       ],
       workspace,
@@ -77,7 +77,7 @@ describe('preparing a workspace', () => {
     const domain = await loadDomain(dir, spawnProcess)
     await writeFile(join(dir, 'input.txt'), 'something else entirely\n', 'utf8')
     const workspace = await workspaceOf()
-    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes,
+    await prepareWorkspace(domain.templates.get(domain.rootTemplate!)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes,
         },
       ],
       workspace,
@@ -89,13 +89,13 @@ describe('preparing a workspace', () => {
   it('refuses to prepare an existing Run workspace and preserves its frozen files', async () => {
     const domain = await loadDomain(await sourceDomain(), spawnProcess)
     const workspace = await workspaceOf()
-    await prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes,
+    await prepareWorkspace(domain.templates.get(domain.rootTemplate!)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes,
         },
       ],
       workspace,
     )
     await writeFile(join(workspace, 'rtl', 'edited.v'), 'what the model produced\n', 'utf8')
-    await expect(prepareWorkspace(domain.templates.get(domain.rootTemplate)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes,
+    await expect(prepareWorkspace(domain.templates.get(domain.rootTemplate!)!, [{ name: 'in/protected.txt', source: {kind: 'protected', ref: 'protected', digest: domain.inputs[0]!.digest}, digest: domain.inputs[0]!.digest, read: async () => domain.inputs[0]!.bytes,
           },
         ],
         workspace,

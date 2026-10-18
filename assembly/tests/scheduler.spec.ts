@@ -23,7 +23,7 @@ import { templateDeclaration } from '../src/template.ts'
 import { readMethodContext } from '../src/method-run.ts'
 import { coordinationOf, waitingReason, askParent, answerChild, deliverQuestions } from '../src/coordination.ts'
 import { createScheduler, type Scheduler } from '../src/scheduler.ts'
-import { schedulerMessage } from '../src/scheduler-message.ts'
+import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { contractFor } from '../src/inputs.ts'
 import { loadDomain } from '../src/domain.ts'
 import { sha256 } from '../src/ids.ts'
@@ -52,7 +52,7 @@ async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skill
   )
   const runtime = nativeRuntime()
   const method = skillContent === undefined ? await seedMethod(apparatus) : await createMethod(apparatus, {
-    rootTemplate: domain.rootTemplate, templates: [...domain.templates.values()].map(templateDeclaration),
+    workflowGuidance: '', templates: [...domain.templates.values()].map(templateDeclaration),
     skills: [{ name: 'investigate', description: 'Investigate scoped evidence', capabilities: [], requiredTools: [], content: skillContent }], tools: [],
   })
   const addPlan = async (parentTaskId: string, holder: string, parentSession: string, childTaskId: string, model: string,
@@ -60,7 +60,7 @@ async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skill
   ) => {
     const parent = runtime.agent(parentSession, model)
     await bindCaller(apparatus, { agentId: holder, sessionId: parentSession, model: { provider: 'test', model } })
-    const template = domain.templates.get(domain.rootTemplate)!
+    const template = domain.templates.get(domain.rootTemplate!)!
     const contract = { ...contractFor(domain, template, 'count letters'), ...(skillContent === undefined ? {} : { skills: ['investigate'] }) }
     await apparatus.tasks.admit({ commandId: 'admit:' + parentTaskId, taskId: parentTaskId, contract })
     await apparatus.tasks.assign({ commandId: 'assign:' + parentTaskId, taskId: parentTaskId, agentId: holder })

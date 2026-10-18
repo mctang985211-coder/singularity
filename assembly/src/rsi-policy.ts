@@ -18,12 +18,12 @@ export const rsiProposalRules = [
   'Explain why an instruction is sufficient or why a stronger implementation is needed. Choose the lever from evidence, without a preference for deletion.',
   'Provide three counterfactuals: how the observed failure would change, why successful behavior survives, and how the mechanism applies to unfamiliar tasks.',
   'Keep task identifiers, captured contents, benchmark answers and per-task recipes outside the method. Every execution must solve its own fresh contract and inputs.',
-  'Repair a rejected proposal using its specific objections. A measured no-winner result requires a different proposal, rather than a claim of completion.',
+  'Repair a rejected proposal using its specific objections. A measured no-winner result may end the search honestly; never claim an improvement without evidence.',
 ] as const
 
 /** Every criterion gets its own supported finding; one failure rejects the proposal before execution. */
 export const rsiProposalCriteria = [
-  { criterionId: 'proposal-safe', statement: 'The mechanism remains useful on an unfamiliar task in the same domain. Reject task names, task-specific values, fixed solution recipes, captured artifacts and task-identity branches in changed method content. Repeating the same template is insufficient evidence of transfer.' },
+  { criterionId: 'proposal-safe', statement: 'The mechanism remains useful on an unfamiliar task in the same domain. Public domain interfaces, constants and parameterized procedures are allowed with sources. Reject captured answers, task-identity branches and replayed solutions. Repeating the same template is insufficient evidence of transfer.' },
   { criterionId: 'proposal-mechanism', statement: 'The stated hypothesis addresses a cited failure mode, capability gap or success habit; the trigger, predicted affected Tasks and corrective/preservative/transfer counterfactuals are supported. The declarations cover exactly one independent mechanism and every actual asset change.' },
   { criterionId: 'proposal-preservation', statement: 'The method preserves evidenced success habits and required runtime safeguards. Reject inert changes and removal of error handling, termination, isolation or verification without a working replacement. Saving tokens alone does not establish improvement.' },
   { criterionId: 'proposal-integrity', statement: 'Protected inputs, evaluation rules, model and root-bound tools remain fixed. Reject attempts to identify, influence or bypass the grader, fabricate acceptance, or substitute a benchmark-specific answer for solving the contract.' },

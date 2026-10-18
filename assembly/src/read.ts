@@ -1,8 +1,9 @@
+import { searchHistory, searchFeedback } from './rsi-history.ts'
 import { rsiProposalContract } from './rsi-proposal.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { setTimeout } from 'node:timers/promises'
 import type { ChildSession } from '../../src/runtime/child-session.ts'
-import { childSettled, projectTree, type TreeView } from '../../src/task/tree.ts'
+import { childSettled, projectTree, taskRelations, type TreeView } from '../../src/task/tree.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../../src/environment/protocol.ts'
@@ -30,7 +31,7 @@ import { readHistory } from './history.ts'
 import { trajectoryPage, textPage } from './pages.ts'
 
 export interface ReadInput {
-  readonly kind?: 'summary' | 'task' | 'artifact' | 'template' | 'method' | 'round' | 'subject' | 'trajectory' | 'roots' | 'sessions' | 'usage' | 'steps'
+  readonly kind?: 'summary' | 'workflow' | 'task' | 'artifact' | 'template' | 'method' | 'round' | 'subject' | 'trajectory' | 'roots' | 'sessions' | 'usage' | 'steps'
   readonly rootId?: string
   readonly ref?: string
   readonly runId?: string
@@ -53,6 +54,22 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
   const { visible, audit, frozenProducers } = await readScopeOf(apparatus, agentId, cut)
   const run = task === undefined ? undefined : Object.values(task.runs).at(-1)!
   const current = review?.reviewId ?? task!.taskId
+  if (input.kind === 'workflow') {
+    if (review !== undefined || audit || task === undefined) refuse('not-responsible', 'workflow metadata belongs to business Tasks')
+    const graph = taskRelations(tasks), rootId = graph.rootOf(task.taskId)
+    if (input.ref !== undefined && (!tasks.has(input.ref) || graph.rootOf(input.ref) !== rootId))
+      refuse('not-responsible', 'workflow is outside this Task root')
+    const from = input.from ?? 0, count = input.count ?? 20
+    if (!Number.isSafeInteger(from) || from < 0 || !Number.isSafeInteger(count) || count < 1 || count > 100)
+      refuse('malformed-declaration', 'workflow range must use a nonnegative offset and 1 to 100 entries')
+    const nodes = [...tasks.values()].filter(state => graph.rootOf(state.taskId) === rootId)
+    return { cutoff: cut.entries().length, rootId, total: nodes.length, next: from + count < nodes.length ? from + count : null,
+      nodes: nodes.slice(from, from + count).map(state => ({ taskId: state.taskId, goal: state.contract!.goal,
+        contractDigest: state.contractDigest, parentId: graph.parents.get(state.taskId) ?? null,
+        children: state.decomposition?.children.map(({ taskId, supports, dependsOn, maxRuns, requirement }) =>
+          ({ taskId, supports, dependsOn, maxRuns, requirement })) ?? [],
+        status: Object.values(state.runs).at(-1)?.status ?? 'pending' })) }
+  }
   if (input.kind === 'subject') {
     if (review !== undefined)
       return { subjectDigest: review.subjectDigest, ...textPage(await sealedBytes(apparatus, review.subject), input.from, input.count) }
@@ -75,7 +92,8 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
     return input.kind === 'artifact' ? readArtifact(apparatus, id, input.runId, input.from, input.count)
       : readTask(apparatus, taskStateOf(apparatus, id))
   }
-  let reference = review?.method ?? run!.revision
+  const search = run?.purpose === 'improve' && task?.search !== undefined ? searchHistory(apparatus, task) : undefined
+  let reference = review?.method ?? search?.incumbent ?? run!.revision
   if (input.kind === 'method' && input.ref !== undefined && input.ref !== reference.revisionId && input.ref !== reference.digest) {
     if (!audit) refuse('unknown-revision', 'execution methods are pinned to this Run')
     const allowed = [...tasks.values()].filter((state) => visible!.has(state.taskId)).flatMap((state) => {
@@ -128,6 +146,8 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
       ...(source === undefined ? {} : { rootExecutionContext: { model: source.model, tools: source.tools, conditions: source.conditions, inputs: source.inputs } }),
       rootCapabilities: 'Root coordinates, reads evidence, delegates and submits a verified child artifact. Root cannot execute bash, write/edit files, invoke Skills or method Tools. Implementation and integration belong to children. Candidate procedures must respect these roles.',
       proposal: rsiProposalContract,
+      ...(search === undefined ? {} : { nextRound: search.directives, feedback: await searchFeedback(apparatus, task!),
+        cases: apparatus.domain.suite?.cases.filter(c => c.split === 'evolve').map(c => ({ caseId: c.caseId, familyId: c.familyId, trials: c.trials, weight: c.weight })) ?? [] }),
       costAccounting: 'Compare native token-meter/tokenUsage for one fresh business root, its delegated work and independent acceptance through submission. RSI analysis, proposal, evaluation orchestration and publication review usage never enters any comparison. Candidate cost must be at most 125% of baseline; no quality gain permits no cost increase.',
     }
   }
@@ -315,8 +335,12 @@ export async function waitForTask(apparatus: Apparatus, taskId: string, session:
     const outcomes = (task.rounds ?? []).map((r) => apparatus.store.committedOf(`round-settled:${r.roundId}`)!.seq)
     if (tree !== undefined) outcomes.push(planOutcomeOf(apparatus, tree)!.seq)
     if (await outcomesAnswered(apparatus, session.sessionId, taskId, answers, 'answer') &&
-      await outcomesAnswered(apparatus, session.sessionId, taskId, outcomes))
-      refuse('illegal-transition', 'the native agent stopped without submitting its working Run after coordination settled')
+      await outcomesAnswered(apparatus, session.sessionId, taskId, outcomes)) {
+      await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
+        commandId: `no-submission:${taskId}/${run.runId}`, taskId, runId: run.runId, cause: 'business',
+        reason: 'the native agent stopped without submitting after coordination settled' })
+      return taskStateOf(apparatus, taskId).runs[run.runId]!
+    }
     await setTimeout(100, undefined, { signal })
   }
 }

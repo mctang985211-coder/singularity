@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
+import { hostFindings, hostInstall } from './host-config.mjs'
 import { checkBuild } from '../assembly/build.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -131,19 +132,14 @@ export function mutationFindings(ledger, textOf = (file) => readFileSync(join(RO
 }
 
 function alignmentFindingsWith(baseline) {
-  const findings = []
+  const findings = hostFindings(hostInstall(), baseline)
   for (const entry of baseline.packages) {
-    const installed = JSON.parse(readFileSync(join(baseline.installRoot, entry.name.replace('@deepseek-ai/', ''), 'package.json'), 'utf8'),
-    )
-    if (installed.version !== entry.version) findings.push(`${entry.name}: installed ${installed.version}, expected ${entry.version}`)
     const peer = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).peerDependencies[entry.name]
     if (peer !== entry.version) findings.push(`${entry.name}: peer ${peer}, expected ${entry.version}`)
   }
-  for (const file of ['tsconfig.json', 'assembly/tsconfig.json']) {
-    const config = JSON.parse(readFileSync(join(ROOT, file), 'utf8'))
-    for (const [alias, targets] of Object.entries(config.compilerOptions.paths))
-      for (const path of targets) if (!path.startsWith(baseline.installRoot + '/')) findings.push(`${file} ${alias} points outside the private DSH install`)
-  }
+  const generated = JSON.parse(readFileSync(join(ROOT, '.singularity/tsconfig.host.json'), 'utf8'))
+  for (const [alias, targets] of Object.entries(generated.compilerOptions.paths))
+    for (const path of targets) if (!path.startsWith(hostInstall() + '/')) findings.push(`${alias} points outside the configured private host`)
   return findings
 }
 

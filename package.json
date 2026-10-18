@@ -11,7 +11,9 @@
     "build": "node assembly/build.mjs",
     "test": "vitest run",
     "gates": "node scripts/gates.mjs",
-    "verify": "node -e \"console.log('verify: offline only; no product evidence')\" && pnpm build && pnpm test && pnpm gates"
+    "verify": "node -e \"console.log('verify: offline only; no product evidence')\" && pnpm build && pnpm test && pnpm gates",
+    "setup:host": "node scripts/setup-host.mjs",
+    "doctor": "node scripts/singularity.mjs doctor"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
@@ -57,5 +59,10 @@
     "@deepseek-ai/dsh-attachment": {
       "optional": true
     }
+  },
+  "packageManager": "pnpm@11.18.0",
+  "license": "UNLICENSED",
+  "bin": {
+    "singularity": "scripts/singularity.mjs"
   }
 }

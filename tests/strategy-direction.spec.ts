@@ -129,7 +129,7 @@ async function round(instance: Live, sides: readonly (readonly [string, Revision
   if (first === undefined) throw new Error('a round needs at least one measured candidate')
   const caliber = caliberDigestOf(measureStateOf(instance.store, first[0]))
   if (caliber === undefined) throw new Error(`the measurement "${first[0]}" carries no caliber`)
-  await instance.commands.openRound({
+  await instance.commands.openRound({ campaignId: 'test-campaign',
     commandId: nextId('open'), roundId: 'round-1', round: 1, incumbent: INCUMBENT, candidates: sides.length, historyCutoff: instance.store.load().entries().length, caliber, weights: WEIGHTS,
   })
   for (const [slot, [evaluationId, revision]] of sides.entries())

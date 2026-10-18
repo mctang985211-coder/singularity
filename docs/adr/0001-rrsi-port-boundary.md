@@ -2,6 +2,8 @@
 
 **Status:** accepted (2026-10-09)
 
+**Implementation audit (2026-10-17):** this ADR records the intended boundary, not proof that every regularizer is implemented. The current code lacks several orchestration constraints and uses single-task evaluation; see the [source audit and implementation plan](../task-first-domain-rsi-plan.md), sections 4–7. That plan retains the TypeScript/DSH execution boundary and explicitly schedules the missing work.
+
 ## Decision
 
 RRSI ([google-research/rrsi](https://github.com/google-research/rrsi) @ `be50316`) enters Singularity as a
@@ -17,7 +19,7 @@ repair boundary: a rejected proposal returns concrete reasons rather than ending
 The model exposes one proposal operation, `singularity_propose_method({path})`; incumbent and round
 identity are host-bound. The runtime reuses the sealed business root as the incumbent evaluation, then
 executes candidates through Harness Tasks and independent acceptance. No-winner outcomes resume the same
-RSI session for revision; publication has its own independent review. Costs include only the business
+RSI session for bounded revision or an honest negative report; publication has its own independent review. Costs include only the business
 root, its delegated work and acceptance through submission. RSI usage never enters any comparison.
 The analyst initially receives a compact evidence summary, lists sealed event metadata, then pages
 the selected native event by UTF-8 bytes. Its tools read evidence, edit files, propose and submit;

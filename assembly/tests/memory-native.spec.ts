@@ -1,11 +1,11 @@
+import { hostRequire } from '../../scripts/host-config.mjs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createRequire } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, LlmAdapter, LlmError, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -20,11 +20,11 @@ import { sha256 } from '../src/ids.ts'
 import { mountCampaignMemory } from '../src/index.ts'
 import { memoryCallsOf } from '../src/memory-call.ts'
 import { readMemoryForAgent } from '../src/memory-view.ts'
-import { parentMemoryRefOf, prepareParentMemory, readParentMemory } from '../src/parent-memory.ts'
+import { ParentMemoryUnavailable, parentMemoryRefOf, prepareParentMemory, readParentMemory, readParentMemoryFailure } from '../src/parent-memory.ts'
 import type { MemoryContext, MemoryDraft } from '../src/memory.ts'
 import { linkRsiMemory, rsiMemorySourceOf } from '../src/rsi-memory.ts'
 
-const nativeRequire = createRequire('/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-agent-loop/package.json')
+const nativeRequire = hostRequire()
 const { default: SystemPrompt } = await import(nativeRequire.resolve('@deepseek-ai/dsh-system-prompt')) as typeof import('@deepseek-ai/dsh-system-prompt')
 const { default: SessionProjections } = await import(nativeRequire.resolve('@deepseek-ai/dsh-session-projection')) as typeof import('@deepseek-ai/dsh-session-projection')
 
@@ -50,6 +50,7 @@ class MemoryAdapter extends LlmAdapter {
   summaryFinish = true
   summaryUsage = true
   summaryError = false
+  summaryThrows?: Error
   duringSummary?: () => void
   override async resolveModel(provider: string, model: string) {
     return { provider, id: model, name: model, context: { contextWindow: 200_000 } }
@@ -58,6 +59,7 @@ class MemoryAdapter extends LlmAdapter {
     this.requests.push(options)
     const summary = options.messages[0]?.content.some(block => block.type === 'text' && block.text.startsWith('Summarize parent conversation data'))
     if (summary) this.duringSummary?.()
+    if (summary && this.summaryThrows !== undefined) throw this.summaryThrows
     if (summary && this.summaryError) {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: '{"decisions":[' }
@@ -173,6 +175,10 @@ it.each([
   await expect(prepare(h)).rejects.toThrow(expected)
   const events = await durableEvents(h.ctx, h.agent)
   expect(events.filter(event => event.type === 'singularity/parent-memory')).toEqual([])
+  expect(events.filter(event => event.type === 'singularity/parent-memory-failed')).toHaveLength(1)
+  h.adapter.response = JSON.stringify(draft)
+  await expect(prepare(h)).rejects.toBeInstanceOf(ParentMemoryUnavailable)
+  expect(h.adapter.requests).toHaveLength(3)
 })
 
 it('does not execute summarizer tool requests', async () => {
@@ -181,13 +187,58 @@ it('does not execute summarizer tool requests', async () => {
   expect(h.execute).not.toHaveBeenCalled()
 })
 
-it('propagates a malformed summary to queued scopes without publishing checkpoints', async () => {
+it('rejects malformed summaries independently for queued scopes without publishing checkpoints', async () => {
   const h = await fixture(); h.adapter.response = '{'
   const sibling = { ...h.context, scope: { ...scope, kind: 'task' as const, taskId: 'sibling', runId: 'sibling-run' } }
   const results = await Promise.allSettled([prepare(h), prepare(h, sibling)])
   expect(results.map(result => result.status)).toEqual(['rejected', 'rejected'])
   expect((await durableEvents(h.ctx, h.agent)).filter(event => event.type === 'singularity/parent-memory')).toEqual([])
+  expect(h.adapter.requests).toHaveLength(4)
 })
+
+it.each(['provider', 'truncated'] as const)('records an optional %s failure once and permits later business calls', async kind => {
+  const h = await fixture()
+  h.adapter.summaryError = kind === 'provider'
+  h.adapter.summaryFinish = kind !== 'truncated'
+  await expect(prepare(h)).rejects.toBeInstanceOf(ParentMemoryUnavailable)
+  const events = await durableEvents(h.ctx, h.agent)
+  const failed = events.find(event => event.type === 'singularity/parent-memory-failed')!
+  const ref = { sessionId: String(h.agent.session.id), eventSeq: Number(failed.seq), memoryId: failed.data.memoryId }
+  expect(await readParentMemoryFailure(h.ctx.sessionPersistence, ref)).toMatchObject({ scope })
+  await expect(prepare(h)).rejects.toBeInstanceOf(ParentMemoryUnavailable)
+  expect(h.adapter.requests).toHaveLength(3)
+  await h.send('continue after optional summary failure')
+  expect(h.adapter.requests).toHaveLength(4)
+})
+
+it('lets a queued sibling prepare its own background after the earlier provider summary fails', async () => {
+  const h = await fixture()
+  let summaries = 0
+  h.adapter.duringSummary = () => { h.adapter.summaryError = ++summaries === 1 }
+  const sibling = { ...h.context, scope: { ...scope, kind: 'task' as const, taskId: 'sibling', runId: 'sibling-run' } }
+  const results = await Promise.allSettled([prepare(h), prepare(h, sibling)])
+  expect(results[0]).toMatchObject({ status: 'rejected', reason: expect.any(ParentMemoryUnavailable) })
+  expect(results[1]?.status).toBe('fulfilled')
+  expect(summaries).toBe(2)
+  const events = await durableEvents(h.ctx, h.agent)
+  expect(events.filter(event => event.type === 'singularity/parent-memory-failed')).toHaveLength(1)
+  expect(parentMemoryRefOf(String(h.agent.session.id), events, sibling.scope)).toBeDefined()
+})
+
+it.each([new Error('transport disconnected'), new LlmError('provider disconnected', 'TRANSPORT')])(
+  'lets native stream normalization preserve an optional adapter throw: %s', async failure => {
+    const h = await fixture(); h.adapter.summaryThrows = failure
+    await expect(prepare(h)).rejects.toBeInstanceOf(ParentMemoryUnavailable)
+    const events = await durableEvents(h.ctx, h.agent)
+    const settled = memoryCallsOf(events).find(event => event.data.phase === 'settled')!
+    expect(settled.data.phase === 'settled' && settled.data.stream).toEqual(expect.arrayContaining([
+      expect.objectContaining({ chunk: { type: 'finish', reason: { kind: 'error', failure: expect.objectContaining({ message: failure.message }) } } }),
+    ]))
+    await expect(prepare(h)).rejects.toBeInstanceOf(ParentMemoryUnavailable)
+    expect(h.adapter.requests).toHaveLength(3)
+    await h.send('business continues after native normalized provider throw')
+    expect(h.adapter.requests).toHaveLength(4)
+  })
 
 it('propagates persistence failure instead of treating it as an unavailable optional summary', async () => {
   const h = await fixture(), failure = new Error('native persistence flush failed')
@@ -199,6 +250,20 @@ it('propagates persistence failure instead of treating it as an unavailable opti
 it('propagates a shared persistence failure to queued summaries', async () => {
   const h = await fixture(), failure = new Error('native persistence unavailable')
   vi.spyOn(h.ctx.sessions, 'flush').mockRejectedValueOnce(failure)
+  const sibling = { ...h.context, scope: { ...scope, kind: 'task' as const, taskId: 'sibling', runId: 'sibling-run' } }
+  const results = await Promise.allSettled([prepare(h), prepare(h, sibling)])
+  expect(results).toEqual([{ status: 'rejected', reason: failure }, { status: 'rejected', reason: failure }])
+})
+
+it('propagates failure-marker durability errors to queued summaries', async () => {
+  const h = await fixture(), failure = new Error('failure marker was not durable')
+  h.adapter.summaryError = true
+  const flush = h.ctx.sessions.flush.bind(h.ctx.sessions)
+  let flushes = 0
+  vi.spyOn(h.ctx.sessions, 'flush').mockImplementation(async session => {
+    if (++flushes === 4) throw failure
+    return flush(session)
+  })
   const sibling = { ...h.context, scope: { ...scope, kind: 'task' as const, taskId: 'sibling', runId: 'sibling-run' } }
   const results = await Promise.allSettled([prepare(h), prepare(h, sibling)])
   expect(results).toEqual([{ status: 'rejected', reason: failure }, { status: 'rejected', reason: failure }])
@@ -313,6 +378,26 @@ async function memoryDirectory(apparatus: Apparatus, agentId: string, input: { f
   if (result.entries === undefined) throw new Error('expected memory directory')
   return result
 }
+
+it('exposes failed optional background in the same scoped directory without offering a checkpoint', async () => {
+  const h = await globalFixture(), childId = await h.addTask('failed-background', 'left')
+  h.adapter.response = '{'
+  await expect(h.checkpoint('failed-background', 'left')).rejects.toBeInstanceOf(ParentMemoryUnavailable)
+  const directory = await memoryDirectory(h.apparatus, childId)
+  const entry = directory.entries.find(entry => entry.ref === directory.inherited)!
+  expect(entry).toMatchObject({ status: 'failed', preparedFor: { taskId: 'failed-background' }, source: { id: 'left' } })
+  expect(entry.error).toMatch(/JSON/)
+  expect(await readMemoryForAgent(h.apparatus, childId, { ref: entry.ref })).toMatchObject({ entry, checkpoint: null })
+  expect((await memoryDirectory(h.apparatus, h.rootId)).entries.some(value => value.ref === entry.ref && value.status === 'failed')).toBe(true)
+  expect((await memoryDirectory(h.apparatus, h.rightId)).entries.some(value => value.ref === entry.ref)).toBe(false)
+  const forged = structuredClone(await durableEvents(h.ctx, h.native.get('left')!))
+  const failure = forged.find(event => event.type === 'singularity/parent-memory-failed')!
+  Object.assign(failure.data.source, { digest: 'f'.repeat(64) })
+  const persistence = { open: async (sessionId: string, mode: string) => String(sessionId) === String(h.native.get('left')!.session.id)
+    ? { read: async () => ({ events: forged }), close: async () => undefined }
+    : h.ctx.sessionPersistence.open(SessionId(sessionId), mode as 'read') } as unknown as Context['sessionPersistence']
+  await expect(readMemoryForAgent({ ...h.apparatus, persistence }, childId, { ref: entry.ref })).rejects.toThrow('native session prefix')
+})
 
 it('hands normalized RSI memory to a fresh session across roots, with a cold source and no business or review access', async () => {
   const h = await globalFixture()

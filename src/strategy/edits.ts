@@ -35,6 +35,7 @@ export function structuralEditsOf(baseline: unknown, candidate: unknown): readon
     for (const target of [...new Set([...left.keys(), ...right.keys()])].sort())
       if (left.get(target) !== right.get(target)) edits.push({ asset, target })
   }
+  if (before['workflowGuidance'] !== after['workflowGuidance']) edits.push({ asset: 'workflow', target: 'workflowGuidance' })
   return edits
 }
 
@@ -54,8 +55,10 @@ export function structuralEditDetailsOf(baseline: { templates: readonly unknown[
     return [path || '$']
   }
   return structuralEditsOf(baseline, candidate).map(edit => {
-    const key = edit.asset === 'template' ? 'id' : 'name'
-    const find = (assets: typeof baseline) => assets[`${edit.asset}s`].find(raw => (raw as Record<string, unknown>)[key] === edit.target)
+    if (edit.asset === 'workflow') return { ...edit, paths: ['workflowGuidance'] }
+    const asset = edit.asset
+    const key = asset === 'template' ? 'id' : 'name'
+    const find = (assets: typeof baseline) => assets[`${asset}s`].find(raw => (raw as Record<string, unknown>)[key] === edit.target)
     return { ...edit, paths: differences(find(baseline), find(candidate), '') }
   })
 }

@@ -37,6 +37,7 @@ import { BUBBLE_INPUT_MEMBERS, inputList, type Bubble, type BubbleInput } from '
 import { assertCriterionShape, criterionList, CRITERION_MEMBERS, type VerifierCriterion } from '../task/contract.ts'
 import { SCHEDULER_ROLE, verifierRoleOf, type RevisionRef } from '../task/protocol.ts'
 import { digest, maybeText, record, revisionRef, REVISION_MEMBERS, text } from '../task/shape.ts'
+import type { EvaluationMatrix } from './suite.ts'
 
 export const MEASURE_PROTOCOL = 'measure'
 /**
@@ -46,12 +47,13 @@ export const MEASURE_PROTOCOL = 'measure'
  * covered the run identity itself. Older versions are refused by name with no compatibility layer —
  * comparability is a historical interpretation, and it moved.
  */
-export const MEASURE_VERSION = 4
+export const MEASURE_VERSION = 5
 
 export const MEASURE_KINDS = {
   evaluationOpened: 'evaluation/opened',
   trialRecorded: 'trial/recorded',
   trialMissed: 'trial/missed',
+  trialFailed: 'trial/failed',
   constraintChecked: 'constraint/checked',
 } as const
 
@@ -111,6 +113,23 @@ export interface TrialRecord {
   /** The content digest of the implementation that actually produced the number. */
   readonly implementationDigest: string
   readonly detail?: string
+  readonly run?: EvaluationRun
+  readonly guardsMet?: boolean
+}
+
+/** A scored business outcome without a submitted artifact. Infrastructure errors are misses. */
+export interface FailedTrial {
+  readonly slot: number
+  readonly quality: number
+  readonly cost?: number
+  readonly status: 'no-submission' | 'business-failure'
+  readonly reason: string
+  readonly run: EvaluationRun
+  readonly verifierRef: string
+  readonly verifierVersion: string
+  readonly implementationDigest: string
+  readonly detail?: string
+  readonly guardsMet?: boolean
 }
 
 /** One planned slot that produced no observation, with the reason it did not. */
@@ -166,6 +185,8 @@ export interface EvaluationState {
   readonly observed: readonly TrialRecord[]
   readonly missed: readonly MissedTrial[]
   readonly checks: readonly ConstraintCheck[]
+  readonly failed?: readonly FailedTrial[]
+  readonly matrix?: EvaluationMatrix
 }
 
 /** A finite number: `NaN` and `Infinity` would not survive the digest a fact's identity is taken over. */
@@ -217,7 +238,38 @@ function trialOf(raw: unknown, where: string, members: MemberSet): TrialRecord {
     verifierVersion: text(source, 'verifierVersion', where),
     implementationDigest: digest(source, 'implementationDigest', where),
     ...(detail === undefined ? {} : { detail }),
+    ...(source['run'] === undefined ? {} : { run: runOf(source['run'], `${where}.run`) }),
+    ...(source['guardsMet'] === undefined ? {} : { guardsMet: guardFlag(source['guardsMet']) }),
   }
+}
+
+function guardFlag(raw: unknown): boolean {
+  if (typeof raw !== 'boolean') refuse('malformed-payload', 'guardsMet must be boolean')
+  return raw
+}
+
+function runOf(raw: unknown, where: string): EvaluationRun {
+  const row = record(raw, where)
+  assertClosedKeys(row, RUN_MEMBERS, where)
+  return { taskId: text(row, 'taskId', where), runId: text(row, 'runId', where) }
+}
+
+export function matrixShape(raw: unknown): EvaluationMatrix {
+  const row = record(raw, 'evaluation matrix')
+  assertClosedKeys(row, ['suiteDigest', 'executionProfileDigest', 'split', 'slots'], 'evaluation matrix')
+  if (!['evolve', 'validation', 'heldout'].includes(String(row['split'])) || !Array.isArray(row['slots']) || row['slots'].length === 0)
+    refuse('malformed-payload', 'matrix requires a split and planned slots')
+  const slots = row['slots'].map((raw, index) => {
+    const slot = record(raw, `matrix slot ${index}`)
+    assertClosedKeys(slot, ['caseId', 'familyId', 'contractDigest', 'trial', 'weight'], 'matrix slot')
+    const trial = finite(slot, 'trial', 'matrix slot'), weight = finite(slot, 'weight', 'matrix slot')
+    if (!Number.isSafeInteger(trial) || trial < 0 || weight <= 0) refuse('malformed-payload', 'matrix trial and weight invalid')
+    return { caseId: text(slot, 'caseId', 'matrix slot'), familyId: text(slot, 'familyId', 'matrix slot'),
+      contractDigest: digest(slot, 'contractDigest', 'matrix slot'), trial, weight }
+  })
+  if (new Set(slots.map(slot => `${slot.caseId}:${slot.trial}`)).size !== slots.length) refuse('malformed-payload', 'duplicate matrix slot')
+  return { suiteDigest: digest(row, 'suiteDigest', 'matrix'), executionProfileDigest: digest(row, 'executionProfileDigest', 'matrix'),
+    split: row['split'] as EvaluationMatrix['split'], slots }
 }
 
 function missedOf(raw: unknown, where: string): MissedTrial {
@@ -282,6 +334,7 @@ function requireSlot(trials: number, slot: number, where: string): void {
 }
 
 function requireEmptySlot(state: EvaluationState, slot: number, where: string): void {
+  if (state.failed?.some(entry => entry.slot === slot)) refuse('evidence-conflict', `${where} records a settled failed trial again`)
   const observation = state.observed.find((entry) => entry.slot === slot)
   if (observation !== undefined)
     refuse('evidence-conflict', `${where} records trial slot ${slot} again; it already carries the observation ${String(observation.quality)} from ${observation.verifierRef}@${observation.verifierVersion}, and one slot carries one observation`,
@@ -325,6 +378,7 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
           weights: EvaluationWeights
           trials: number
           judgement: readonly VerifierCriterion[]
+          matrix?: EvaluationMatrix
         },
         {
           baseline: MemberSet
@@ -335,7 +389,7 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
           judgement: MemberSet }
       >({
         guarantees: { appended: true },
-        members: ['baseline', 'candidate', 'run', 'context', 'metric', 'weights', 'trials', 'judgement'],
+        members: ['baseline', 'candidate', 'run', 'context', 'metric', 'weights', 'trials', 'judgement', 'matrix'],
         // The shapes inside this payload, by the member that holds each, handed to the reader that
         // closes it: `judgement[]` goes to `contract.ts`'s criterion reader, and each entry there is
         // the declaration rather than a copy the reader keeps.
@@ -355,7 +409,10 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
             )
           const run = record(source['run'], `${where}.run`)
           assertClosedKeys(run, nested.run, `${where}.run`)
+          const matrix = source['matrix'] === undefined ? undefined : matrixShape(source['matrix'])
+          if (matrix !== undefined && matrix.slots.length !== trials) refuse('malformed-payload', 'matrix must cover every planned trial')
           return {
+            ...(matrix === undefined ? {} : { matrix }),
             baseline: revisionRef(source['baseline'], `${where}.baseline`, nested.baseline),
             candidate: revisionRef(source['candidate'], `${where}.candidate`, nested.candidate),
             run: { taskId: text(run, 'taskId', `${where}.run`), runId: text(run, 'runId', `${where}.run`) },
@@ -382,13 +439,14 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
             weights: payload.weights,
             trials: payload.trials,
             judgement: payload.judgement,
+            ...(payload.matrix === undefined ? {} : { matrix: payload.matrix }),
           }
         },
       }),
 
       [MEASURE_KINDS.trialRecorded]: defineKind<EvaluationState, TrialRecord, { inputDigests: MemberSet }>({
         guarantees: { appended: true },
-        members: ['slot', 'quality', 'cost', 'artifactDigest', 'inputDigests', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail',
+        members: ['slot', 'quality', 'cost', 'artifactDigest', 'inputDigests', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail', 'run', 'guardsMet',
         ],
         // `inputDigests[]` is closed by `inputList`, which is handed this one set; the declaration is
         // what closes each entry.
@@ -406,6 +464,29 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
           requireEmitterRole(envelope, plan.metric.measured, subject, where)
           requireImplementationDigest(payload.implementationDigest, plan.metric.measured, subject, where)
           return { ...state, observed: [...state.observed, payload] }
+        },
+      }),
+
+      [MEASURE_KINDS.trialFailed]: defineKind<EvaluationState, FailedTrial, {}>({
+        guarantees: { appended: true },
+        members: ['slot', 'quality', 'cost', 'status', 'reason', 'run', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail', 'guardsMet'], nested: {},
+        emitter: payload => verifierRoleOf(payload),
+        parse: (raw, where) => {
+          const row = record(raw, where), status = row['status'], detail = maybeText(row, 'detail', where), cost = maybeFinite(row, 'cost', where)
+          if (status !== 'no-submission' && status !== 'business-failure') refuse('malformed-payload', 'failed trial requires an ordinary business outcome')
+          return { slot: finite(row, 'slot', where), quality: finite(row, 'quality', where), status,
+            reason: text(row, 'reason', where), run: runOf(row['run'], where), verifierRef: text(row, 'verifierRef', where),
+            verifierVersion: text(row, 'verifierVersion', where), implementationDigest: digest(row, 'implementationDigest', where),
+            ...(cost === undefined ? {} : { cost }), ...(detail === undefined ? {} : { detail }),
+            ...(row['guardsMet'] === undefined ? {} : { guardsMet: guardFlag(row['guardsMet']) }) }
+        },
+        reduce: (state, envelope, payload) => {
+          const plan = requirePlan(state, 'failed trial', envelope.subject)
+          requireSlot(plan.trials, payload.slot, 'failed trial')
+          requireEmptySlot(state, payload.slot, 'failed trial')
+          requireEmitterRole(envelope, plan.metric.measured, 'metric', 'failed trial')
+          requireImplementationDigest(payload.implementationDigest, plan.metric.measured, 'metric', 'failed trial')
+          return { ...state, failed: [...(state.failed ?? []), payload] }
         },
       }),
 

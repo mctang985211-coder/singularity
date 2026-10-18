@@ -10,11 +10,12 @@ import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/prot
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
-import { schedulerMessage } from './scheduler-message.ts'
+import { schedulerMessage } from '../../src/runtime/task-message.ts'
+import { methodContext, confirmWorkflowDelivery } from './method-run.ts'
 import { loadMethod } from './method.ts'
 import { proposalOf } from './surfaces.ts'
 import { planOutcomeOf } from './read.ts'
-import { deliverQuestions, parentContextOf } from './coordination.ts'
+import { deliverQuestions, parentContextOf, directionForRun } from './coordination.ts'
 import { createReviewCommands } from '../../src/review/commands.ts'
 
 export interface Scheduler {
@@ -103,8 +104,10 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
           registry.get(SessionId(held.sessionId))?.cancel({ kind: 'parent' })
           for (const child of held.children) await terminateBranch(child.taskId, reason)
         }
-    const node = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility!.agentId)!
-    registry.get(SessionId(node.sessionId))?.cancel({ kind: 'parent' })
+    if (task.responsibility !== undefined) {
+      const node = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility.agentId)!
+      registry.get(SessionId(node.sessionId))?.cancel({ kind: 'parent' })
+    }
     for (const child of task.decomposition?.children ?? []) await terminateBranch(child.taskId, reason)
     const session = live.get(taskId)
     if (session !== undefined) {
@@ -196,7 +199,9 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
         controlId: apparatus.controlId, parentTaskId, taskId, runId: run.runId, factSeq: apparatus.store.committedOf(`start:${run.runId}`)!.seq,
         },
         JSON.stringify({
-          assigned: await proposalOf(apparatus, state, run),
+          assigned: proposalOf(apparatus, state, run),
+          method: await methodContext(apparatus, taskId, run),
+          direction: directionForRun(apparatus, taskId, run),
           ...parentContextOf(apparatus, taskId),
           previous:
             previous === undefined
@@ -220,6 +225,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
           ...(message === undefined ? {} : { message }), signal: lifecycle.signal })
         live.set(taskId, session)
       } else if (message !== undefined) await session.post(message)
+      if (message !== undefined) await confirmWorkflowDelivery(apparatus, taskId, run)
       const actual = session.agent?.session.requestHeader()?.config ?? session.agent?.options
       if (actual !== undefined && (actual.provider !== model.provider || actual.model !== model.model))
         refuse('illegal-transition', 'the child model route differs from its frozen Run bubble')

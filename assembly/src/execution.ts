@@ -94,10 +94,6 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
       error => { pending.failure = { error } },
     )
   }
-  const crashed = ctx.on('agent/error', ({ agent, turn, error }) => {
-    report(agent, { sessionId: String(agent.session.id), turn, seq: Number(agent.session.seq),
-      reason: { kind: 'error', error: { code: 'DSH_AGENT_ERROR', message: error instanceof Error ? error.message : String(error) } } })
-  })
   const ended = ctx.on('session/event', (session, event) => {
     if (event.type !== 'turn/end') return
     const reason = event.data.reason
@@ -114,7 +110,6 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
   const close = (): Promise<void> => closing ??= (async () => {
     closed = true
     ended()
-    crashed()
     const granted = [...active.values()].filter(entry => entry.exec.agent !== undefined && borrowed.has(entry.exec.agent))
     for (const entry of granted) entry.controller.abort(new Error('the execution port has closed'))
     try { await Promise.all([wait(granted), wait([...failedTurns.values()])]) }
@@ -124,7 +119,6 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     yield guard
     yield listen
     yield ended
-    yield crashed
     yield flushing
     yield close
   })

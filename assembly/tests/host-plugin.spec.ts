@@ -45,7 +45,7 @@ describe('the host plugin', () => {
     await ctx.plugin(JsonlPersistence, { root: join(workspace, 'sessions'), compression: 'none' })
     await apply(ctx, { controlId: 'lib-1', domainDir: REAL, workspaceRoot: workspace })
     expect(typeof ctx.singularity.forCall).toBe('function')
-    expect(Object.keys(ctx.singularity).sort()).toEqual(['forCall', 'inheritRsi', 'memoryContext', 'mountSkills', 'read', 'restart', 'world'])
+    expect(Object.keys(ctx.singularity).sort()).toEqual(['cancel', 'forCall', 'inheritRsi', 'memoryContext', 'mountSkills', 'read', 'world'])
     await ctx.fiber.dispose()
   })
 

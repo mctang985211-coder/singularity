@@ -11,11 +11,12 @@ import { caliberDigestOf, projectEvaluation } from '../src/measure/view.ts'
 import { digestOf } from '../src/protocol/envelope.ts'
 import { foldSubjects } from '../src/protocol/fold.ts'
 import { ProtocolRegistry } from '../src/protocol/registry.ts'
+import { refuse } from '../src/protocol/refusal.ts'
 import { createReleaseCommands } from '../src/release/commands.ts'
 import { declareReleaseProtocol, RELEASE_KINDS, RELEASE_PROTOCOL, RELEASE_VERSION, type ReleaseState } from '../src/release/protocol.ts'
 import { createStrategyCommands } from '../src/strategy/commands.ts'
 import { declareStrategyProtocol, STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_VERSION } from '../src/strategy/protocol.ts'
-import { verifierRoleOf, type RevisionRef } from '../src/task/protocol.ts'
+import { declareTaskProtocol, TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type RevisionRef, type TaskState } from '../src/task/protocol.ts'
 import { asyncRefusalOf } from './fixtures.ts'
 
 const metric = { criterionId: 'quality', statement: 'quality score', verifierRef: 'meter', verifierVersion: '1', implementationDigest: 'a'.repeat(64) }
@@ -38,6 +39,7 @@ async function setup(quality = 0.8, decide = true, report = true) {
   declareMeasureProtocol(registry)
   declareStrategyProtocol(registry)
   declareReleaseProtocol(registry)
+  declareTaskProtocol(registry)
   const store = await ControlSessionStore.open({ persistence: context.sessionPersistence, controlId: 'release-decision', registry,
     subjects: { environment: 'environment', publisher: 'publisher', scheduler: 'scheduler', strategy: 'strategy', approver: 'approval',
       [verifierRoleOf(metric)]: 'meter' } })
@@ -80,7 +82,7 @@ async function setup(quality = 0.8, decide = true, report = true) {
       const state = [...states.values()].find(state => state.candidate?.revisionId === pin.revisionId)
       return state === undefined ? null : projectEvaluation(state)
     } }) })
-  await strategy.openRound({ commandId: 'round-open', roundId: 'round', round: 1, incumbent: baseline,
+  await strategy.openRound({ campaignId: 'test-campaign', commandId: 'round-open', roundId: 'round', round: 1, incumbent: baseline,
     candidates: 1, historyCutoff: store.load().entries().length,
     caliber: caliberDigestOf(baselineEvaluation)!, weights: { quality: 1, cost: 1 } })
   if (report) await evaluate('candidate-evaluation', candidate, quality)
@@ -130,6 +132,50 @@ describe('release@3 binds committed strategy decisions', () => {
       kind: ENVIRONMENT_KINDS.pointerSwitched, subject: 'library', payload: { expected: 'baseline', to: 'candidate' } })
     expect(await asyncRefusalOf(() => h.releases.publish({ commandId: 'decision-publish', environmentId: 'library',
       expected: 'candidate', to: 'candidate' }))).toMatchObject({ code: 'illegal-transition' })
+  })
+
+  it.each(['cancelled', 'failed', 'analysis-failed'] as const)('checks queued %s facts before committing publication', async outcome => {
+    const h = await setup()
+    await h.releases.draftFromDecision({ commandId: 'decision-draft', roundId: 'round' })
+    await h.approve('decision-approved')
+    const taskFact = (subject: string, kind: string, payload: unknown) => h.store.emit({
+      commandId: `${subject}:${kind}:${h.store.load().entries().length}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
+      subject, kind, payload,
+    })
+    for (const taskId of ['root', 'analysis']) {
+      await taskFact(taskId, 'task/admitted', { contract: { goal: taskId, artifact: 'report.txt', inputs: [],
+        criteria: [{ criterionId: 'complete', statement: 'complete the task' }] } })
+      await taskFact(taskId, 'task/assigned', { agentId: taskId, agentIdentity: 'scheduler' })
+      await taskFact(taskId, 'run/started', { runId: 'run', revision: h.baseline,
+        purpose: taskId === 'root' ? 'solve' : 'improve',
+        ...(taskId === 'analysis' ? { relatedTo: { taskId: 'root', runId: 'run' } } : {}) })
+    }
+    await taskFact('root', 'run/failed', { runId: 'run', cause: 'business', reason: 'no answer' })
+    await taskFact('root', 'task/closed', { runId: 'run', reason: 'failed' })
+    await taskFact('root', 'rsi/status', { status: 'pending', detail: 'queued analysis' })
+    await taskFact('root', 'rsi/status', { status: 'running', detail: 'analysis started',
+      trace: { attachmentId: `sha256:${'d'.repeat(64)}`, name: 'subject.json', bytes: 2 } })
+    const task = (taskId: string) => h.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId)!
+    const active = () => {
+      if (task('root').rsi?.status !== 'running' || task('analysis').runs['run']!.status !== 'running')
+        refuse('illegal-transition', 'publication requires active analysis')
+    }
+    const releases = createReleaseCommands({ store: h.store, require: active })
+    const end = outcome === 'analysis-failed'
+      ? taskFact('analysis', 'run/failed', { runId: 'run', cause: 'runtime', reason: 'provider failed' })
+      : taskFact('root', 'rsi/status', { status: outcome, detail: 'analysis ended' })
+    // The terminal fact is queued, but ordinary reads still see the previous committed cut.
+    expect(task('root').rsi!.status).toBe('running')
+    expect(task('analysis').runs['run']!.status).toBe('running')
+    active()
+    const results = await Promise.allSettled([end, releases.publish({ commandId: 'queued-publish',
+      environmentId: 'library', expected: 'baseline', to: 'candidate' })])
+    expect(results[0]!.status).toBe('fulfilled')
+    expect(results[1]).toMatchObject({ status: 'rejected', reason: { refusal: {
+      code: 'illegal-transition', detail: 'publication requires active analysis',
+    } } })
+    expect(h.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, 'library')!.pointer).toBe('baseline')
+    expect(h.store.load().entries().some(fact => fact.commandId === 'queued-publish')).toBe(false)
   })
 
   it('refuses a committed winner whose evaluation report is missing from its decision cut', async () => {

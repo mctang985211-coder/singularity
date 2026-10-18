@@ -1,0 +1,749 @@
+diff --git a/packages/compaction/compaction-basic/README.i18n.yaml b/packages/compaction/compaction-basic/README.i18n.yaml
+index aca17e342e..29cbe4d3f7 100644
+--- a/packages/compaction/compaction-basic/README.i18n.yaml
++++ b/packages/compaction/compaction-basic/README.i18n.yaml
+@@ -42,8 +42,8 @@
+   en: 54945a18965f12a8
+   zh: fecd5d4fc2f2e6d6
+ /deepseek-ai-dsh-compaction-basic/understand-the-implementation/automatic-triggers-and-overflow-recovery:
+-  en: d62d65547dd0b2dc
+-  zh: 5c21671f16d94f5a
++  en: 3a72cc528e412ef8
++  zh: 10cf3f4bfea30e5d
+ /deepseek-ai-dsh-compaction-basic/understand-the-implementation/summarization-mechanics:
+   en: 967531b71453eb88
+   zh: c7919b46e36763e6
+@@ -93,8 +93,8 @@
+   en: d31d3e3d46542c91
+   zh: 5a42f873993e0c79
+ /deepseek-ai-dsh-compaction-basic/known-limitations-and-deferred-work:
+-  en: 8f459fa26e079883
+-  zh: 4acdcefa71ebb409
++  en: 98188daec2c72d10
++  zh: eb6c1c0c6763432c
+ /deepseek-ai-dsh-compaction-basic/known-limitations-and-deferred-work/dev-note:
+   en: 1fec7b90c3b68c49
+   zh: ad9ae54a598846d0
+diff --git a/packages/compaction/compaction-basic/README.md b/packages/compaction/compaction-basic/README.md
+index fa4ae2fb48..d15b4ce093 100644
+--- a/packages/compaction/compaction-basic/README.md
++++ b/packages/compaction/compaction-basic/README.md
+@@ -112,7 +112,7 @@ The backend is built on four commitments:
+ 
+ With `auto: true`, a serial `agent/pre-step` listener checks pressure before request derivation: it prices the latest durable routed request envelope through `ctx.tokenMeter`, and when pressure crosses the routed model's threshold it prunes, then summarizes the oldest balanced span while keeping a priced recent tail. Every selected range starts at the first surface node that is not a `system/message`, so a system prompt at surface node 0 is never shadowed; a later `system/message` appended by an in-history prompt update is ordinary history that the range may shadow, and the agent loop's projection then replaces node 0 with the current prompt when their text differs ([decision rule](../../core/agent-loop/README.md#understand-the-implementation)). The `agent/request-error` listener reacts to a provider-confirmed `CONTEXT_WINDOW_EXCEEDED`: it bypasses the normal threshold and retention policy, attempts one maximal balanced head reduction, and authorizes a retry only after the surface replacement generation advances. Cancellation stays authoritative throughout.
+ 
+-Pressure policy resolves capacity from the adapter that owns the durable route. Missing capacity, output plus headroom exhausting the window, or a retained budget at least as large as the threshold makes the manual pressure path throw a target-specific configuration error. The automatic listener warns once for that exact target and skips proactive compaction until its configuration is corrected; provider-confirmed overflow recovery remains available.
++Pressure policy resolves capacity from the adapter that owns the durable route. Missing capacity, output plus headroom exhausting the window, or a retained budget at least as large as the threshold throws a target-specific configuration error. The automatic pressure listener propagates configuration and compaction failures to end the current turn before another task request. The durable compaction markers and original failure remain available for diagnosis; a truncated summary retains the `MAX_TOKENS` failure code.
+ 
+ ### Summarization mechanics
+ 
+@@ -244,7 +244,7 @@ These limits define when automatic condensation is a poor fit or needs special c
+ - **Overflow classification is adapter-maintained** — provider wording can change; both DeepSeek adapters normalize recognized context-limit failures to `CONTEXT_WINDOW_EXCEEDED`.
+ - **Some indivisible-unit and envelope-only overflow remains outside surface compaction** — recovery cannot shrink system/tools/prefix, split an indivisible non-tool node, or repair a tool unit whose non-prunable remainder still exceeds the window. The optional pruner can shrink text-bearing tool-result bulk inside an otherwise indivisible pair.
+ - **`compactRegion` requires an open turn** — a manual call on a fully-closed session throws ("no open turn") rather than compacting.
+-- **Summarization failure preserves the latest durable surface** — before any replacement, the auto path logs a warning and proceeds with full over-budget history. If pruning already landed, a later summarization failure proceeds from that durable pruned surface. Summarization truncation at `maxTokens`, which hidden reasoning tokens can consume, follows the same rule.
++- **Failed pressure compaction preserves the latest durable surface** — the turn ends without replacing history with an invalid checkpoint or rolling back pruning that already landed. A summary truncated at `maxTokens`, which hidden reasoning tokens can consume, also ends the turn.
+ 
+ <a id="dev-note"></a>
+ ### Dev Note
+diff --git a/packages/compaction/compaction-basic/README.zh.md b/packages/compaction/compaction-basic/README.zh.md
+index 1cb48123cd..1649dda1be 100644
+--- a/packages/compaction/compaction-basic/README.zh.md
++++ b/packages/compaction/compaction-basic/README.zh.md
+@@ -112,7 +112,7 @@ kind: "package-reference"
+ 
+ 当 `auto: true` 时，串行 `agent/pre-step` listener 会在请求派生前检查压力：它通过 `ctx.tokenMeter` 为最新持久路由请求 envelope 定价，当压力越过路由模型的阈值时，先剪枝，再在保留已定价近期尾部的同时摘要最旧的平衡范围。每个选定范围都从第一个不是 `system/message` 的 surface 节点开始，因此位于 surface 节点 0 的系统提示词永不会被遮蔽；由历史内提示词更新追加的后续 `system/message` 是普通历史，范围可以遮蔽它，agent loop（智能体循环）的投影随后会在二者文本不同时用当前提示词替换节点 0（[决策规则](../../core/agent-loop/README.zh.md#understand-the-implementation)）。`agent/request-error` listener 响应提供方确认的 `CONTEXT_WINDOW_EXCEEDED`：它绕过常规阈值与保留策略，尝试一次最大平衡头部缩减，并且只在表层替换 generation 前进后才授权重试。取消全程保持最终决定权。
+ 
+-压力策略从拥有持久路由的适配器解析容量。容量缺失、输出预留与余量耗尽窗口，或保留预算不小于阈值时，手动压力路径会抛出目标特定配置错误。自动 listener 会对该精确目标警告一次，并在配置修正前跳过主动压缩；提供方确认溢出后的恢复仍然可用。
++压力策略从拥有持久路由的适配器解析容量。容量缺失、输出预留与余量耗尽窗口，或保留预算不小于阈值时，会抛出目标特定配置错误。自动压力 listener 会传播配置和压缩失败，在下一次任务请求前结束当前轮次。持久化压缩标记和原始错误保留下来供诊断；摘要截断保留 `MAX_TOKENS` 错误码。
+ 
+ ### 摘要机制
+ 
+@@ -244,7 +244,7 @@ Rules:
+ - **溢出分类由适配器维护**——提供方措辞可能改变；两个 DeepSeek 适配器将可识别的上下文限制失败规范化为 `CONTEXT_WINDOW_EXCEEDED`。
+ - **部分不可分单元与仅 envelope 溢出仍不在表层压缩范围内**——恢复无法缩减系统／工具／前缀、拆分不可分的非工具节点，或修复不可剪枝剩余部分仍超出窗口的工具单元。可选 pruner 可以缩减原本不可分工具对内的文本型工具结果主体。
+ - **`compactRegion` 要求存在未结束的轮次**——在完全关闭的会话上手动调用会抛出异常（「no open turn」），而不是执行压缩。
+-- **摘要失败会保留最新持久表层**——任何替换前，自动路径会记录警告，并携带完整超预算历史继续。如果剪枝已落地，后续摘要失败会从该持久剪枝表层继续。因达到 `maxTokens` 而发生的摘要截断（隐藏推理 token 可能会耗尽该额度）遵循同一规则。
++- **压力压缩失败会保留最新持久表层**——轮次结束，不以无效检查点替换历史，也不回滚已经落地的剪枝。因达到 `maxTokens` 而发生的摘要截断（隐藏推理 token 可能会耗尽该额度）同样会结束轮次。
+ 
+ <a id="dev-note"></a>
+ ### 开发备注
+diff --git a/packages/compaction/compaction-basic/src/index.ts b/packages/compaction/compaction-basic/src/index.ts
+index 163cec3810..aa373969ec 100644
+--- a/packages/compaction/compaction-basic/src/index.ts
++++ b/packages/compaction/compaction-basic/src/index.ts
+@@ -130,7 +130,6 @@ export class BasicCompactionEngine extends CompactionEngine {
+   /** Resolved and validated compaction configuration. */
+   readonly config: ResolvedConfig
+ 
+-  private readonly warnedPressureConfigTargets = new Set<string>()
+   private readonly overflowRetries = new WeakMap<Agent, number>()
+   private readonly overflowAgents = new WeakMap<Session, Agent>()
+ 
+@@ -143,7 +142,8 @@ export class BasicCompactionEngine extends CompactionEngine {
+   /**
+    * Register automatic between-step pressure and model-request overflow
+    * recovery. `compactIfNeeded` stays dynamically dispatched so subclass
+-   * overrides are honored at event time.
++   * overrides are honored at event time. Pressure failures abort the turn
++   * before another task request is admitted.
+    */
+   private _registerAutomaticCompaction(): void {
+     const { ctx } = this
+@@ -160,17 +160,8 @@ export class BasicCompactionEngine extends CompactionEngine {
+       next,
+     ): Promise<PreStepDecision> => {
+       if (!signal.aborted) {
+-        try {
+-          const result = await this.compactIfNeeded(agent, 'pressure', signal)
+-          if (result !== null) logResult(result, 'step pressure')
+-        } catch (error: unknown) {
+-          if (error instanceof TargetPressureConfigError) {
+-            if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
+-            this.warnedPressureConfigTargets.add(error.targetKey)
+-          }
+-          const message = error instanceof Error ? error.message : String(error)
+-          ctx.logger.warn(`step compaction failed: ${message}; continuing the turn`)
+-        }
++        const result = await this.compactIfNeeded(agent, 'pressure', signal)
++        if (result !== null) logResult(result, 'step pressure')
+       }
+       return next()
+     })
+diff --git a/packages/compaction/compaction-basic/src/summarizer.ts b/packages/compaction/compaction-basic/src/summarizer.ts
+index 2d258fa410..4dea6b3a9e 100644
+--- a/packages/compaction/compaction-basic/src/summarizer.ts
++++ b/packages/compaction/compaction-basic/src/summarizer.ts
+@@ -200,11 +200,8 @@ function finishError(finish: FinishReason): Error | undefined {
+     case 'aborted': {
+       return new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+     }
+-    case 'max-tokens': {
+-      const error = new Error('summarization truncated at the token cap (incomplete checkpoint)') as Error & { code?: string }
+-      error.code = 'MAX_TOKENS'
+-      return error
+-    }
++    case 'max-tokens':
++      return new LlmError('summarization truncated at the token cap (incomplete checkpoint)', 'MAX_TOKENS')
+     default:
+       return undefined
+   }
+diff --git a/packages/compaction/compaction-basic/tests/compaction-basic.spec.ts b/packages/compaction/compaction-basic/tests/compaction-basic.spec.ts
+index 3736aa5c5e..fa1fee2b74 100644
+--- a/packages/compaction/compaction-basic/tests/compaction-basic.spec.ts
++++ b/packages/compaction/compaction-basic/tests/compaction-basic.spec.ts
+@@ -1736,28 +1736,23 @@ describe('automatic listener and loader composition', () => {
+     expect(pressured.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
+   })
+ 
+-  it('warns and continues after operational failures, including non-Errors', async () => {
++  it.each([new Error('temporary failure'), 'temporary failure'])('propagates an operational failure unchanged: %s', async (error) => {
+     const ctx = createContext()
+-    const warnings: string[] = []
+-    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+     const compact = new TestCompactionEngine(ctx, {
+       headroomTokens: 0,
+       maxTokens: 8192,
+       thresholdRatio: 0.5,
+       retainTokens: 180,
+     })
+-    compact.error = 'temporary failure'
++    compact.error = error
+     const session = conversation(4)
+ 
+-    await expect(preStep(ctx, agent(session, MODEL))).resolves.toEqual({ kind: 'enter', messages: [] })
+-    expect(warnings).toContainEqual(expect.stringContaining('temporary failure'))
++    await expect(preStep(ctx, agent(session, MODEL))).rejects.toBe(error)
+     expect(session.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(false)
+   })
+ 
+-  it('warns once per routed target when proactive pressure has no context metadata', async () => {
++  it('rejects proactive pressure without context metadata', async () => {
+     const ctx = createContext()
+-    const warnings: string[] = []
+-    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+     vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+       provider,
+       id: model,
+@@ -1771,18 +1766,12 @@ describe('automatic listener and loader composition', () => {
+     })
+     const session = conversation(4)
+ 
+-    await preStep(ctx, agent(session, MODEL))
+-    await preStep(ctx, agent(session, MODEL))
+-
+-    expect(warnings).toEqual([
+-      expect.stringContaining(`no context capacity for ${MODEL}/${MODEL}`),
+-    ])
++    await expect(preStep(ctx, agent(session, MODEL)))
++      .rejects.toThrow(`no context capacity for ${MODEL}/${MODEL}`)
+   })
+ 
+-  it('warns once per routed target when absolute retention exceeds its resolved threshold', async () => {
++  it('rejects absolute retention exceeding its resolved threshold', async () => {
+     const ctx = createContext()
+-    const warnings: string[] = []
+-    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+     void new TestCompactionEngine(ctx, {
+       headroomTokens: 0,
+       maxTokens: 8192,
+@@ -1791,18 +1780,12 @@ describe('automatic listener and loader composition', () => {
+     })
+     const session = conversation(4)
+ 
+-    await preStep(ctx, agent(session, MODEL))
+-    await preStep(ctx, agent(session, MODEL))
+-
+-    expect(warnings).toEqual([
+-      expect.stringContaining('retainTokens (500) must be less than threshold tokens 500'),
+-    ])
++    await expect(preStep(ctx, agent(session, MODEL)))
++      .rejects.toThrow('retainTokens (500) must be less than threshold tokens 500')
+   })
+ 
+-  it.each([1_000, 1_500])('warns once and continues when the output reserve is %i for a 1,000-token window', async (maxTokens) => {
++  it.each([1_000, 1_500])('rejects an output reserve of %i for a 1,000-token window', async (maxTokens) => {
+     const ctx = createContext(1_000)
+-    const warnings: string[] = []
+-    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+     vi.spyOn(ctx.llm, 'resolveModelInfo').mockResolvedValue({
+       provider: MODEL,
+       id: MODEL,
+@@ -1814,13 +1797,8 @@ describe('automatic listener and loader composition', () => {
+     const session = conversation(4)
+     const before = session.snapshotEvents()
+ 
+-    await expect(preStep(ctx, agent(session, MODEL))).resolves.toEqual({ kind: 'enter', messages: [] })
+-    await expect(preStep(ctx, agent(session, MODEL))).resolves.toEqual({ kind: 'enter', messages: [] })
+-
+-    expect(warnings).toEqual([
+-      expect.stringContaining(`reserves ${maxTokens} completion tokens`),
+-    ])
+-    expect(warnings[0]).toContain('configure the adapter model\'s contextWindow above the effective request maxTokens')
++    await expect(preStep(ctx, agent(session, MODEL)))
++      .rejects.toThrow(`reserves ${maxTokens} completion tokens`)
+     expect(session.snapshotEvents()).toEqual(before)
+     expect(compact.calls).toHaveLength(0)
+   })
+diff --git a/packages/compaction/compaction-basic/tests/compaction-loop-repro.spec.ts b/packages/compaction/compaction-basic/tests/compaction-loop-repro.spec.ts
+index b6c8ff7f86..82bd861615 100644
+--- a/packages/compaction/compaction-basic/tests/compaction-loop-repro.spec.ts
++++ b/packages/compaction/compaction-basic/tests/compaction-loop-repro.spec.ts
+@@ -24,6 +24,9 @@ import { Session, SessionId, type SessionEvent, type SurfaceEvent } from '@deeps
+  * surface-position semantics rather than raw-log scanning.
+  */
+ 
++// The first pressure-selected prefix must be longer than a framed checkpoint.
++const TASK_CONTEXT = 'task context '.repeat(200)
++
+ class ReproCompactionEngine extends BasicCompactionEngine {
+   override async summarize(): Promise<{ summary: ContentBlock[]; provider: string; model: string }> {
+     return {
+@@ -46,7 +49,7 @@ class StepwiseToolAdapter extends LlmAdapter {
+       provider,
+       id: model,
+       name: model,
+-      context: { contextWindow: 400 },
++      context: { contextWindow: 800 },
+     })
+   }
+ 
+@@ -227,15 +230,15 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
+         provider: 'unconfigured-agent-fallback',
+         model: 'unconfigured-agent-fallback',
+       })
+-      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do a routed multi-step task' }], source: { kind: 'user' } }))
++      agent.followup(createUserMessage({ content: [{ type: 'text', text: `do a routed multi-step task ${TASK_CONTEXT}` }], source: { kind: 'user' } }))
+       await waitForIdle(ctx, agent)
+ 
+       expect(agent.session.requestHeader()?.config.model).toBe('mock')
+-      expect(agent.session.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(true)
+       expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+         type: 'turn/end',
+         data: { reason: { kind: 'completed' } },
+       })
++      expect(agent.session.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(true)
+     } finally {
+       await ctx.fiber.dispose()
+     }
+@@ -245,7 +248,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
+     const { ctx } = await harness(8)
+     try {
+       const agent = await ctx.agentLoop.create(SessionId('post-step-order'), { provider: 'mock', model: 'mock' })
+-      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do tool work' }], source: { kind: 'user' } }))
++      agent.followup(createUserMessage({ content: [{ type: 'text', text: `do tool work ${TASK_CONTEXT}` }], source: { kind: 'user' } }))
+       await waitForIdle(ctx, agent)
+ 
+       const events = agent.session.snapshotEvents()
+@@ -277,7 +280,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
+     const { ctx } = await harness(8)
+     try {
+       const agent = await ctx.agentLoop.create(SessionId('repro'), { provider: 'mock', model: 'mock' })
+-      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do a long multi-step task' }], source: { kind: 'user' } }))
++      agent.followup(createUserMessage({ content: [{ type: 'text', text: `do a long multi-step task ${TASK_CONTEXT}` }], source: { kind: 'user' } }))
+       await waitForIdle(ctx, agent)
+ 
+       const events = agent.session.snapshotEvents()
+@@ -306,6 +309,109 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
+   })
+ })
+ 
++describe('automatic pressure failure through the real loop', () => {
++  it.each(['max-tokens', 'empty', 'oversized', 'success'] as const)(
++    'continues task execution only after a valid summary: %s',
++    async (outcome) => {
++      const ctx = new Context()
++      const errors: unknown[] = []
++      let summaryCalls = 0
++      let toolCalls = 0
++      const adapter = new class extends StepwiseToolAdapter {
++        override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
++          if (options.purpose !== 'compaction') {
++            yield * super.stream(options)
++            return
++          }
++          summaryCalls += 1
++          const text = outcome === 'empty' ? ''
++            : outcome === 'oversized' ? 'checkpoint '.repeat(2_000)
++              : 'CURRENT CHECKPOINT'
++          yield { type: 'block-start', index: 0, blockType: 'text' }
++          yield { type: 'block-end', index: 0, block: { type: 'text', text } }
++          yield { type: 'usage', usage: { inputTokens: 500, outputTokens: 32 } }
++          yield { type: 'finish', reason: { kind: outcome === 'max-tokens' ? 'max-tokens' : 'stop' } }
++        }
++      }(1)
++
++      try {
++        await mountAgentLoopTestDependencies(ctx)
++        await mountInvariants(ctx)
++        await ctx.plugin(AgentLoop, { agents: [] })
++        await ctx.plugin(TokenMeter)
++        ctx.llm.registerAdapter(['mock'], adapter)
++        ctx.on('agent/error', ({ error }) => { errors.push(error) })
++        ctx.tools.register(defineContentToolFixture({
++          name: 'work',
++          description: 'does work',
++          parameters: { i: { type: 'number' } },
++          async execute() {
++            toolCalls += 1
++            return [{ type: 'text', text: 'task evidence '.repeat(40) }]
++          },
++        }))
++        await ctx.plugin(BasicCompactionEngine, {
++          auto: true,
++          headroomTokens: 0,
++          thresholdRatio: 0.8,
++          retainTokens: 0,
++          maxTokens: 64,
++          compactionRetries: 0,
++        })
++
++        const agent = await ctx.agentLoop.create(SessionId(`pressure-${outcome}`), {
++          provider: 'mock', model: 'mock',
++        })
++        agent.followup(createUserMessage({
++          content: [{ type: 'text', text: `run a multi-step task ${TASK_CONTEXT}` }],
++          source: { kind: 'user' },
++        }))
++        await agent.whenIdle()
++
++        const events = agent.session.snapshotEvents()
++        expect(summaryCalls).toBe(1)
++        expect(toolCalls).toBe(1)
++        expect(events.filter(event => event.type === 'compaction/start')).toHaveLength(1)
++        expect(events.filter(event => event.type === 'compaction/end')).toHaveLength(1)
++        if (outcome === 'success') {
++          expect(errors).toEqual([])
++          expect(adapter.calls).toBe(2)
++          expect(events.filter(event => event.type === 'compaction/summary')).toHaveLength(1)
++          expect(events.at(-1)).toMatchObject({
++            type: 'turn/end', data: { reason: { kind: 'completed' } },
++          })
++        } else {
++          const message = outcome === 'max-tokens'
++            ? 'summarization truncated at the token cap (incomplete checkpoint)'
++            : outcome === 'empty' ? 'summarization produced no text summary content'
++              : 'summary is not smaller than the shadowed content'
++          expect(adapter.calls).toBe(1)
++          expect(errors).toHaveLength(1)
++          expect(errors[0]).toBeInstanceOf(Error)
++          expect(errors[0]).toMatchObject({ message: expect.stringContaining(message) })
++          expect(events.filter(event => event.type === 'step/start')).toHaveLength(1)
++          expect(events.filter(event => event.type === 'compaction/summary')).toHaveLength(0)
++          expect(events.find(event => event.type === 'compaction/end')).toMatchObject({
++            data: { error: expect.stringContaining(message) },
++          })
++          expect(events.at(-1)).toMatchObject({
++            type: 'turn/end',
++            data: { reason: {
++              kind: 'error',
++              error: {
++                code: outcome === 'max-tokens' ? 'MAX_TOKENS' : 'UNKNOWN',
++                message: expect.stringContaining(message),
++              },
++            } },
++          })
++        }
++      } finally {
++        await ctx.fiber.dispose()
++      }
++    },
++  )
++})
++
+ describe('token pressure after loop-admitted system prompts', () => {
+   it.each([false, true])('counts initial and replaced prompts once with retry=%s', async (retry) => {
+     const ctx = new Context()
+diff --git a/packages/llm/token-meter/README.i18n.yaml b/packages/llm/token-meter/README.i18n.yaml
+index 161e2e3988..dec8258fdb 100644
+--- a/packages/llm/token-meter/README.i18n.yaml
++++ b/packages/llm/token-meter/README.i18n.yaml
+@@ -21,11 +21,11 @@
+   en: e8c4cd1e945f86ba
+   zh: 133c1f1a85179d30
+ /deepseek-ai-dsh-token-meter/use-this-package/measuring-pressure:
+-  en: 58de3b364ab5af6b
+-  zh: c5440af43d321e56
++  en: f90059cce9474317
++  zh: a317ce356825d8fe
+ /deepseek-ai-dsh-token-meter/use-this-package/session-projections:
+-  en: 0a4c3ae2763be227
+-  zh: 0e2c5a77f9b4b94f
++  en: fb5eb89802a6ab1c
++  zh: c9a0c74cc1354dd8
+ /deepseek-ai-dsh-token-meter/use-this-package/composition:
+   en: 1a0b7f49e01cba08
+   zh: 666213a1024767c5
+@@ -36,8 +36,8 @@
+   en: 9630d7e26193a512
+   zh: 94222c2a487c4b8c
+ /deepseek-ai-dsh-token-meter/understand-the-implementation/design-philosophy:
+-  en: 921a2c40433abc06
+-  zh: 5172de58e8724be8
++  en: c2b2bf6ea4770120
++  zh: b3459fedeafc79e8
+ /deepseek-ai-dsh-token-meter/understand-the-implementation/source-map:
+   en: 0bea6321416c49d4
+   zh: 5446b39910df9829
+@@ -57,8 +57,8 @@
+   en: 40294c1c31b74824
+   zh: c2284876b56d2dbc
+ /deepseek-ai-dsh-token-meter/known-limitations-and-deferred-work:
+-  en: a8c57e6f8c5009a2
+-  zh: 5975018d14bfbdbb
++  en: c1a69d063d99d25a
++  zh: d00590787fabdebd
+ /deepseek-ai-dsh-token-meter/known-limitations-and-deferred-work/dev-note:
+   en: ce725ee5fe2ebaa3
+   zh: 0cd07dddbf4011c0
+diff --git a/packages/llm/token-meter/README.md b/packages/llm/token-meter/README.md
+index e6d957bd14..cda83fa0e9 100644
+--- a/packages/llm/token-meter/README.md
++++ b/packages/llm/token-meter/README.md
+@@ -40,15 +40,15 @@ const { totalTokens, surfaceTokens, nodes } = ctx.tokenMeter.measure(session)
+ const price = ctx.tokenMeter.estimateMessage(message)
+ ```
+ 
+-Each measurement resolves the effective envelope's provider/model through the optional `llm` service. Image occurrences use the routed request's visual-token price plus model-visible text when the adapter declares pricing, and occurrences selected by an `image/offload` event are priced as the route's placeholder text exactly as the surface sends them; other routes keep the fixed heuristic. File occurrences use the exact route-independent handle text that the same `llm` service resolves for adapter dispatch, including its current execution-world path or explicit no-path message. Each node also carries route-independent `heuristicTokens` for replacement shadow prices. Provider usage is reused only when the latest successful call's canonical request envelope matches the measured envelope and its total is no lower than that call's full route-priced anchor; otherwise the complete current envelope and surface are estimated. Surface changes stay signed relative to a matching anchor repriced under the same route, including negative deltas after shrinking replacements.
++Each measurement resolves the effective envelope's provider/model through the optional `llm` service. Image occurrences use the routed request's visual-token price plus model-visible text when the adapter declares pricing, and occurrences selected by an `image/offload` event are priced as the route's placeholder text exactly as the surface sends them; other routes keep the fixed heuristic. File occurrences use the exact route-independent handle text that the same `llm` service resolves for adapter dispatch, including its current execution-world path or explicit no-path message. Each node also carries route-independent `heuristicTokens` for replacement shadow prices. Provider usage takes precedence over the heuristic when the latest successful call's canonical request envelope matches the measured envelope. A surface replacement, image offload, or shortened durable assistant output invalidates that usage anchor; the complete current envelope and surface are then estimated until another successful call reports usage.
+ 
+-The measurement anchor includes the priced surface immediately before the successful `assistant/message`, including system and user messages admitted after `step/start` and replacements made before a retry. With unchanged durable output, the completed call has zero surface delta: its prompt is already included in provider usage. Later surface changes remain signed deltas against that anchor.
++The measurement anchor includes the priced surface immediately before the successful `assistant/message`, including system and user messages admitted after `step/start` and replacements made before a retry. With unchanged durable output, the completed call has zero surface delta: its prompt is already included in provider usage. Appended content adds its estimated price to that anchor; removed content is never subtracted from reported usage using a different heuristic scale.
+ 
+ ### Session projections
+ 
+ When the composition provides `ctx.sessionProjections`, token-meter registers three projection units. `tokenUsage` carries the complete durable log's `uncachedInputTokens`, `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens`. A final assistant-message sample replaces streaming usage from the same attempt; `llm/retry-started` ends that replacement scope, so a retry in the same step contributes another billed attempt. `contextPressure` carries optional `pressureTokens` (the newest provider-reported prompt size), optional `projectedTokens` (what the next request's prompt would cost), and optional `contextWindow` from the newest `request/context` record. `contextBreakdown` carries heuristic `systemTokens`, `toolsTokens`, and `messageTokens` — the context's composition, not its provider-billed size. Unloading the plugin removes all three keys.
+ 
+-Image offload reprices existing node identities while preserving prior usage anchors. The fixed reference heuristic excludes `offloaded` metadata, so an offload decision does not change `contextBreakdown` or the scalar heuristic total; route-aware measurement replaces the selected visual prices with placeholder text.
++Image offload reprices existing node identities and invalidates the prior measurement usage anchor. The fixed reference heuristic excludes `offloaded` metadata, so an offload decision does not change `contextBreakdown` or the scalar heuristic total; route-aware measurement replaces the selected visual prices with placeholder text.
+ 
+ `contextBreakdown` classifies the last nonempty surviving `system/message` in surface order as `systemTokens`; empty dormant nodes contribute nothing, and no nonempty system means zero. `messageTokens` includes every other visible node, including superseded prompts. Their sum always equals `measure().nodes[].heuristicTokens`, including after unmetered replacements, compaction, and per-node prompt clearing. `toolsTokens` follows the latest `request/header`. All three use the fixed heuristic, not route image pricing or file-handle projection; they are approximate composition, not billing or `projectedTokens`.
+ 
+@@ -79,7 +79,7 @@ This section explains the design behind the service; the observable behavior is
+ 
+ ### Design philosophy
+ 
+-The service is built on one fold and one anchor. Each session gets an isolated replay state — consumed-event cursor, canonical request header, priced surface, step boundary, and measurement anchor — advanced by folding the durable log. Provider usage anchors a measurement only when its canonical envelope matches and its total is no lower than the full route-priced cost of the same call; otherwise the complete envelope and surface are estimated. The route-independent `heuristicTokens` field keeps replacement shadow-price projections deterministic. The fold is total and allocation-fresh: a malformed event throws before any mutation, so the same log fails identically on every retry.
++The service is built on one fold and one anchor. Each session gets an isolated replay state — consumed-event cursor, canonical request header, priced surface, step boundary, and measurement anchor — advanced by folding the durable log. Provider usage anchors a measurement while its canonical envelope matches and its retained content has not been replaced or offloaded; otherwise the complete envelope and surface are estimated. The route-independent `heuristicTokens` field keeps replacement shadow-price projections deterministic. The fold is total and allocation-fresh: a malformed event throws before any mutation, so the same log fails identically on every retry.
+ 
+ ### Source map
+ 
+@@ -139,7 +139,7 @@ These limits define where the measurement stops and future work begins. They are
+ 
+ - **The fixed heuristic is approximate** — text without reusable provider usage is priced by character count plus structural overhead, not an exact provider tokenizer or request serializer; only image occurrences on routes with declared pricing carry provider-exact visual tokens.
+ - **Every measurement clones the current surface** — coherent immutable snapshots make reads O(surface), including below-threshold pressure checks.
+-- **Provider usage is only reusable for an identical canonical envelope** — tools, provider, model, or call-config changes deliberately fall back to full heuristic estimation; system-prompt changes are signed surface deltas until the next successful call.
++- **Provider usage is only reusable for an identical canonical envelope and retained content** — tools, provider, model, call-config changes, and replacements estimate the current content until the next successful call. An appended system update adds its estimated price to the usage anchor.
+ - **A system-prompt rewrite carries no shadow price** — the loop replaces a system node without an adjacent metering event, so `contextPressure.projectedTokens` folds that replacement at zero delta until the next usage sample; `contextBreakdown.systemTokens` and `measure()` reprice the new prompt immediately.
+ - **Composition checkpoints retain the current surface** — exact system/message classification needs positional entries; checkpoint size and surface-event folding are O(current retained surface).
+ 
+diff --git a/packages/llm/token-meter/README.zh.md b/packages/llm/token-meter/README.zh.md
+index 526be7b2e3..958783c778 100644
+--- a/packages/llm/token-meter/README.zh.md
++++ b/packages/llm/token-meter/README.zh.md
+@@ -40,15 +40,15 @@ const { totalTokens, surfaceTokens, nodes } = ctx.tokenMeter.measure(session)
+ const price = ctx.tokenMeter.estimateMessage(message)
+ ```
+ 
+-每次测量都会通过可选的 `llm` 服务解析生效 envelope 的提供方／模型。适配器声明图片定价时，图片出现处使用路由请求的视觉 token 价格加模型可见文本，`image/offload` 事件选中的出现位置则按路由的占位文本计价，与表层实际发送的一致；其他路由保持固定启发式规则。文件出现处使用同一个 `llm` 服务为适配器分发解析的确切、与路由无关的 句柄文本，其中包含当前执行世界路径或明确的无路径说明。每个节点还携带与路由无关的 `heuristicTokens`，供替换影子价使用。只有当最新成功调用的规范请求 envelope 与已测量 envelope 匹配、且其总量不低于该调用完整路由定价锚点时，才复用提供方用量；否则会对完整当前 envelope 与表面做估算。表面变更保持相对于按同一路由重新定价的匹配锚点的带符号值，包括缩减替换后的负 delta。
++每次测量都会通过可选的 `llm` 服务解析生效 envelope 的提供方／模型。适配器声明图片定价时，图片出现处使用路由请求的视觉 token 价格加模型可见文本，`image/offload` 事件选中的出现位置则按路由的占位文本计价，与表层实际发送的一致；其他路由保持固定启发式规则。文件出现处使用同一个 `llm` 服务为适配器分发解析的确切、与路由无关的句柄文本，其中包含当前执行世界路径或明确的无路径说明。每个节点还携带与路由无关的 `heuristicTokens`，供替换影子价使用。最新成功调用的规范请求 envelope 与测量 envelope 匹配时，提供方用量优先于启发式估算。表面替换、图片省略或持久 assistant 输出缩短会使该用量锚点失效；此后估算完整当前 envelope 与表面，直到另一次成功调用报告用量。
+ 
+-测量锚点包含成功的 `assistant/message` 之前的已计价表面，包括 `step/start` 之后接纳的系统与用户消息，以及重试之前执行的替换。持久输出未变时，完成调用的表面增量为零：其提示词已包含在提供方用量中。后续表面变更仍是相对于该锚点的带符号增量。
++测量锚点包含成功的 `assistant/message` 之前的已计价表面，包括 `step/start` 之后接纳的系统与用户消息，以及重试之前执行的替换。持久输出未变时，完成调用的表面增量为零：其提示词已包含在提供方用量中。追加内容按估算价格叠加到该锚点；删除内容时，不会用不同尺度的启发式价格扣减提供方报告的用量。
+ 
+ ### 会话投影
+ 
+ 当组合提供 `ctx.sessionProjections` 时，token-meter 注册三个投影单元。`tokenUsage` 携带完整持久日志中的 `uncachedInputTokens`、`outputTokens`、`cacheReadTokens` 与 `cacheWriteTokens`。最终 assistant 消息样本会替换同一次尝试的流式用量；`llm/retry-started` 会结束该替换范围，因此同一步骤中的重试会贡献另一次计费用量。`contextPressure` 携带可选 `pressureTokens`（提供方报告的最新提示词规模）、可选 `projectedTokens`（下一个请求的提示词将花费多少）与来自最新一条 `request/context` 记录的可选 `contextWindow`。`contextBreakdown` 携带启发式 `systemTokens`、`toolsTokens` 与 `messageTokens`——上下文的构成，而非提供方计费规模。卸载插件会移除全部三个键。
+ 
+-图片省略重新计算现有节点的价格，同时保留此前的用量锚点。固定引用启发式规则不计入 `offloaded` 元数据，因此一次省略决定不改变 `contextBreakdown` 或标量启发式总量，按路由的测量则把所选图片的视觉价格换成占位文本价格。
++图片省略重新计算现有节点的价格，并使此前的测量用量锚点失效。固定引用启发式规则不计入 `offloaded` 元数据，因此一次省略决定不改变 `contextBreakdown` 或标量启发式总量，按路由的测量则把所选图片的视觉价格换成占位文本价格。
+ 
+ `contextBreakdown` 把 surface 顺序中最后一个非空且存活的 `system/message` 归入 `systemTokens`；休眠的空节点不贡献 token，没有非空系统消息时为零。`messageTokens` 包含其余所有可见节点，包括被取代的提示词。两者之和始终等于 `measure().nodes[].heuristicTokens`，未计量替换、压缩和逐节点清空提示词之后也成立。`toolsTokens` 跟随最新 `request/header`。三个数字都使用固定启发式规则，而非路由图片定价或文件句柄投影；它们是近似构成，不是计费数据或 `projectedTokens`。
+ 
+@@ -79,7 +79,7 @@ const price = ctx.tokenMeter.estimateMessage(message)
+ 
+ ### 设计理念
+ 
+-服务建立在一个 fold 与一个锚点之上。每个会话都有隔离的回放状态——已消费事件游标、规范请求标头、已计价表面、步骤边界与测量锚点——通过折叠持久日志推进。只有当提供方用量的规范 envelope 匹配、且其总量不低于同一次调用的完整路由定价时，才用它锚定测量；否则会估算完整 envelope 与表面。与路由无关的 `heuristicTokens` 字段使替换影子价投影保持确定性。fold 是整体且分配全新的：格式错误事件会在任何变更前抛出，因此同一份日志每次重试都以相同方式失败。
++服务建立在一个 fold 与一个锚点之上。每个会话都有隔离的回放状态——已消费事件游标、规范请求标头、已计价表面、步骤边界与测量锚点——通过折叠持久日志推进。提供方用量的规范 envelope 匹配、且保留内容未被替换或省略时，用量会锚定测量；否则会估算完整 envelope 与表面。与路由无关的 `heuristicTokens` 字段使替换影子价投影保持确定性。fold 是整体且分配全新的：格式错误事件会在任何变更前抛出，因此同一份日志每次重试都以相同方式失败。
+ 
+ ### 源码地图
+ 
+@@ -139,7 +139,7 @@ const price = ctx.tokenMeter.estimateMessage(message)
+ 
+ - **固定启发式规则是近似值**——没有可复用提供方用量的文本按字符数加结构开销计价，而非精确提供方分词器或请求序列化器；只有声明了定价的路由上的图片出现处携带提供方精确的视觉 token。
+ - **每次测量都克隆当前表面**——连贯不可变快照让读取为 O(surface)，包括低于阈值的压力检查。
+-- **提供方用量只在规范 envelope 完全相同时可复用**——工具、提供方、模型或调用配置变化会刻意回退到完整启发式估算；系统提示词变更在下一次成功调用之前按带符号的表面增量计量。
++- **提供方用量仅能对相同的规范 envelope 与保留内容复用**——工具、提供方、模型、调用配置变更及内容替换都会估算当前内容，直到下一次成功调用。追加的系统更新按估算价格叠加到用量锚点。
+ - **系统提示词改写不带影子价**——循环替换 system 节点时没有紧邻的计量事件，因此 `contextPressure.projectedTokens` 以零增量折叠该替换，直到下一个用量样本；`contextBreakdown.systemTokens` 与 `measure()` 会立即按新提示词重新计价。
+ - **构成检查点保留当前 surface**——精确的 system/message 分类需要位置条目；检查点大小和 surface 事件折叠成本为 O(当前保留 surface)。
+ 
+diff --git a/packages/llm/token-meter/src/index.ts b/packages/llm/token-meter/src/index.ts
+index f721d26219..b2977b369a 100644
+--- a/packages/llm/token-meter/src/index.ts
++++ b/packages/llm/token-meter/src/index.ts
+@@ -129,11 +129,11 @@ export class TokenMeter extends Service {
+    * pricing every node is priced under: a route whose adapter declares image
+    * pricing charges each retained image its visual tokens plus its
+    * model-visible text, while other routes keep the fixed heuristic. Provider
+-   * usage is reused only when the latest successful call's canonical request
+-   * envelope matches `requestHeader` and its total is no lower than that
+-   * call's full route-priced anchor; otherwise the complete envelope and
+-   * surface are repriced. The anchor includes all surface nodes immediately
+-   * before the assistant message, including inputs admitted after step/start.
++   * usage takes precedence over heuristics when the latest successful call's
++   * canonical request envelope matches `requestHeader`. Replacing retained
++   * content or offloading an image invalidates that anchor; the current
++   * envelope and surface are then estimated until another call reports usage.
++   * The anchor includes inputs admitted after step/start.
+    *
+    * `requestHeader` replaces the latest logged envelope for pressure and node
+    * pricing; the node set always describes the current session surface. Every
+@@ -156,16 +156,12 @@ export class TokenMeter extends Service {
+     let baseline: TokenMeasurementBaseline
+     let surfaceDeltaTokens: number
+     if (anchor !== undefined && optionalHeaderEquals(anchor.header, header)) {
+-      // Matching headers share one route, so the anchored snapshot reprices
+-      // under the same pricing as the current surface and the signed delta
+-      // compares like with like.
++      // Appended content and the anchor use the same routed attachment prices.
+       const anchorSurfaceTokens = priceSurface(anchor.nodes, pricing, fileText).surfaceTokens
+         + anchor.assistantTokens
+       const estimatedAnchorTokens = estimateToolsTokens(header) + anchorSurfaceTokens
+       const usage = anchor.usage
+-      // Signed heuristic deltas remain conservative only from an anchor
+-      // that is at least as large as the matching full heuristic price.
+-      baseline = usage !== undefined && usageTokens(usage) >= estimatedAnchorTokens
++      baseline = usage !== undefined
+         ? { kind: 'usage', tokens: usageTokens(usage), usage }
+         : { kind: 'estimated', tokens: estimatedAnchorTokens }
+       surfaceDeltaTokens = surface.surfaceTokens - anchorSurfaceTokens
+@@ -184,7 +180,7 @@ export class TokenMeter extends Service {
+       logRevision: state.consumedEvents,
+       baseline,
+       surfaceDeltaTokens,
+-      totalTokens: Math.max(0, baseline.tokens + surfaceDeltaTokens),
++      totalTokens: baseline.tokens + surfaceDeltaTokens,
+       surfaceTokens: surface.surfaceTokens,
+       nodes: surface.nodes,
+     }))
+@@ -251,6 +247,7 @@ export class TokenMeter extends Service {
+ 
+     switch (event.type) {
+       case 'image/offload': {
++        nextAnchor = undefined
+         const offloaded = new Map(event.data.targets.map(target => [target.seq, new Set(target.imageIndexes)]))
+         state.surface = state.surface.map((node) => {
+           const indexes = offloaded.get(node.seq)
+@@ -304,12 +301,15 @@ export class TokenMeter extends Service {
+       // replace them before succeeding. Only the pre-assistant surface is priced
+       // by this call. Provider output stays separate from durable output rewrites.
+       if (event.data.usage !== undefined && nextHeader !== undefined) {
+-        nextAnchor = {
+-          header: nextHeader,
+-          nodes: [...state.surface],
+-          assistantTokens: this._estimateProviderAssistant(event),
+-          usage: event.data.usage,
+-        }
++        const assistantTokens = this._estimateProviderAssistant(event)
++        nextAnchor = eventTokens < assistantTokens
++          ? undefined
++          : {
++              header: nextHeader,
++              nodes: [...state.surface],
++              assistantTokens,
++              usage: event.data.usage,
++            }
+       } else {
+         nextAnchor = {
+           header: nextHeader,
+@@ -320,6 +320,10 @@ export class TokenMeter extends Service {
+       }
+     }
+ 
++    // A usage sample cannot price removed content by subtracting heuristics
++    // whose scale may differ from the provider's token counts.
++    if (plan !== undefined && plan.target !== 'append') nextAnchor = undefined
++
+     state.header = nextHeader
+     state.stepStart = nextStepStart
+     if (plan !== undefined) {
+diff --git a/packages/llm/token-meter/src/types.ts b/packages/llm/token-meter/src/types.ts
+index 487e031385..e48e3edd89 100644
+--- a/packages/llm/token-meter/src/types.ts
++++ b/packages/llm/token-meter/src/types.ts
+@@ -12,7 +12,7 @@ export type { ContextBreakdownProjection, ContextPressureProjection, TokenUsageP
+ /** Token-meter plugin configuration; the fixed estimator has no settings. */
+ export type TokenMeterConfig = Record<string, never>
+ 
+-/** The baseline from which a signed surface delta produces current pressure. */
++/** The baseline to which appended content adds current pressure. */
+ export type TokenMeasurementBaseline =
+   | { readonly kind: 'none'; readonly tokens: 0 }
+   | { readonly kind: 'estimated'; readonly tokens: number }
+@@ -24,7 +24,7 @@ export interface TokenMeasurement {
+   readonly logRevision: SessionLogOffset
+   /** Provider or heuristic anchor used for this measurement. */
+   readonly baseline: TokenMeasurementBaseline
+-  /** Signed repricing of current surface content relative to the baseline anchor. */
++  /** Estimated additions since the baseline; replacements invalidate the anchor. */
+   readonly surfaceDeltaTokens: number
+   /** Non-negative current request-and-response pressure. */
+   readonly totalTokens: number
+diff --git a/packages/llm/token-meter/tests/route-pricing.spec.ts b/packages/llm/token-meter/tests/route-pricing.spec.ts
+index bf11f1b039..40a03e7288 100644
+--- a/packages/llm/token-meter/tests/route-pricing.spec.ts
++++ b/packages/llm/token-meter/tests/route-pricing.spec.ts
+@@ -243,7 +243,7 @@ describe('request projection pricing', () => {
+       .toThrow('route image pricing answered 0 prices for 1 occurrences')
+   })
+ 
+-  it('offloads one of two equal attachments without rewriting the prior usage anchor', async () => {
++  it('invalidates reported usage when one of two equal attachments is offloaded', async () => {
+     const placeholder = '[offloaded]'
+     const { ctx, meter, session } = await harness(() => ({
+       priceImages: images => images.map(block => block.offloaded === true
+@@ -262,9 +262,10 @@ describe('request projection pricing', () => {
+       const after = meter.measure(session)
+       const saving = VISUAL_TOKENS + estimateContent([{ type: 'text', text: HANDLE_TEXT }])
+         - estimateContent([{ type: 'text', text: placeholder }])
+-      expect(after.baseline).toEqual(before.baseline)
+-      expect(after.surfaceDeltaTokens - before.surfaceDeltaTokens).toBe(-saving)
+-      expect(after.totalTokens).toBe(before.totalTokens - saving)
++      expect(before.baseline.kind).toBe('usage')
++      expect(after.baseline.kind).toBe('estimated')
++      expect(after.surfaceDeltaTokens).toBe(0)
++      expect(after.totalTokens).toBe(before.surfaceTokens - saving)
+       expect(after.nodes[0]?.heuristicTokens).toBe(before.nodes[0]?.heuristicTokens)
+       const projection = session.deriveMessages()[0]!
+       expect(projection.content).toEqual([{ type: 'image', attachment: ref, offloaded: true }, { type: 'image', attachment: ref }])
+diff --git a/packages/llm/token-meter/tests/token-meter.spec.ts b/packages/llm/token-meter/tests/token-meter.spec.ts
+index f207905573..6de3d068f6 100644
+--- a/packages/llm/token-meter/tests/token-meter.spec.ts
++++ b/packages/llm/token-meter/tests/token-meter.spec.ts
+@@ -291,7 +291,7 @@ describe('replay anchors and surface folds', () => {
+     reasoningTokens: 6,
+   }
+ 
+-  it('uses disjoint provider usage and signed durable-output rewrites', () => {
++  it('uses disjoint provider usage and prices additional durable output', () => {
+     const service = meter()
+     const session = Session.create(SessionId('usage'))
+     session.append('user/message', createUserMessage({
+@@ -312,7 +312,7 @@ describe('replay anchors and surface folds', () => {
+     }).toThrow(TypeError)
+   })
+ 
+-  it('selects a heuristic anchor when provider usage would undercut its scale', () => {
++  it('prefers reported usage below the heuristic and invalidates it after replacement', () => {
+     const service = meter()
+     const session = Session.create(SessionId('low-usage-anchor'))
+     appendSystem(session, 'system context')
+@@ -322,7 +322,9 @@ describe('replay anchors and surface folds', () => {
+     })
+ 
+     const anchored = service.measure(session)
+-    expect(anchored.baseline.kind).toBe('estimated')
++    expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
++    expect(anchored.totalTokens).toBe(27)
++    expect(anchored.surfaceTokens).toBeGreaterThan(anchored.totalTokens)
+     const assistant = anchored.nodes[1]!.seq
+     session.append('user/message', createUserMessage({
+       content: [{ type: 'text', text: 'short' }],
+@@ -333,12 +335,35 @@ describe('replay anchors and surface folds', () => {
+     })
+ 
+     const shrunken = service.measure(session)
+-    expect(27 + shrunken.surfaceDeltaTokens).toBeLessThan(0)
++    expect(shrunken.baseline.kind).toBe('estimated')
++    expect(shrunken.surfaceDeltaTokens).toBe(0)
+     expect(shrunken.totalTokens).toBeGreaterThan(0)
+     expect(shrunken.totalTokens).toBe(service.measure(
+       session,
+       header('different-model'),
+     ).totalTokens)
++    const restored = Session.create(SessionId('low-usage-restored'), session.snapshotEvents())
++    expect(service.measure(restored)).toEqual({ ...shrunken, logRevision: restored.seq })
++    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
++      step: 2,
++      usage: { inputTokens: 5, outputTokens: 2 },
++    })
++    expect(service.measure(session).baseline).toMatchObject({ kind: 'usage', tokens: 7 })
++  })
++
++  it('estimates shortened durable output without subtracting its heuristic from reported usage', () => {
++    const service = meter()
++    const session = Session.create(SessionId('shortened-durable-output'))
++    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
++      providerText: 'long reasoning or answer '.repeat(1000),
++      durableText: 'short retained answer',
++      usage: { inputTokens: 20, outputTokens: 7 },
++    })
++    const result = service.measure(session)
++    expect(result.baseline.kind).toBe('estimated')
++    expect(result.surfaceDeltaTokens).toBe(0)
++    expect(result.totalTokens).toBe(service.estimateMessage(textMessage('short retained answer', 'assistant')))
++    expect(result.totalTokens).toBeGreaterThan(0)
+   })
+ 
+   it('uses an estimated anchor when provider usage is absent', () => {
+@@ -408,7 +433,7 @@ describe('replay anchors and surface folds', () => {
+     expect(result.logRevision).toBe(2)
+   })
+ 
+-  it('replays seeded append and replace operations with signed deltas', () => {
++  it('replays appended usage deltas and invalidates the anchor after replacement', () => {
+     const service = meter()
+     const original = Session.create(SessionId('surface-original'))
+     appendSuccessfulCall(original, header('deepseek-v4-flash'), {
+@@ -436,7 +461,9 @@ describe('replay anchors and surface folds', () => {
+     expect(after.logRevision).toBe(seeded.snapshotEvents().length)
+     expect(Object.isFrozen(after.nodes)).toBe(true)
+     expect(Object.isFrozen(after.nodes[0])).toBe(true)
+-    expect(after.surfaceDeltaTokens).toBeLessThan(0)
++    expect(after.surfaceDeltaTokens).toBe(0)
++    expect(after.baseline.kind).toBe('estimated')
++    expect(after.totalTokens).toBe(after.surfaceTokens)
+     expectSurfaceTotal(after)
+     expect(before.nodes).toHaveLength(2)
+     // The earlier snapshot still reports the log it measured: seed + boundary.

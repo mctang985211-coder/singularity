@@ -1,3 +1,4 @@
+import { hostInstall } from '../scripts/host-config.mjs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -13,7 +14,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it } from 'vitest'
 
-const installed = process.env['DSH_CONTROL_INSTALLED'] ?? '/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai'
+const installed = hostInstall()
 const resolveInstalled = createRequire(join(installed, 'resolve.cjs'))
 const { SystemPrompt } = await import(pathToFileURL(resolveInstalled.resolve('@deepseek-ai/dsh-system-prompt')).href) as typeof import('@deepseek-ai/dsh-system-prompt')
 const { SessionProjectionRegistry } = await import(pathToFileURL(resolveInstalled.resolve('@deepseek-ai/dsh-session-projection')).href) as { SessionProjectionRegistry: Plugin<void> }

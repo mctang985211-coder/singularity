@@ -1,21 +1,23 @@
+import { hostRequire } from '../../scripts/host-config.mjs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createRequire } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, LlmAdapter, resolveRetryPolicy, type GenerateOptions, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { afterEach, expect, it, vi } from 'vitest'
 import { mountCampaignMemory } from '../src/index.ts'
-import { mountProviderCalls, isProviderRetryDelay } from '../src/provider.ts'
-import { projectedTokenUsage, billedTokens } from '../src/evaluation-cost.ts'
+import { projectedTokenUsage, taskTokenUsage, taskExecutionWindow, completeUsage, billedTokens } from '../src/evaluation-cost.ts'
 import type { Apparatus } from '../src/apparatus.ts'
+import { schedulerMessage } from '../../src/runtime/task-message.ts'
+import { digestOf } from '../../src/protocol/envelope.ts'
 
-const nativeRequire = createRequire('/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai/dsh-agent-loop/package.json')
+const nativeRequire = hostRequire()
 const { default: SystemPrompt } = await import(nativeRequire.resolve('@deepseek-ai/dsh-system-prompt')) as typeof import('@deepseek-ai/dsh-system-prompt')
 const { default: SessionProjections } = await import(nativeRequire.resolve('@deepseek-ai/dsh-session-projection')) as typeof import('@deepseek-ai/dsh-session-projection')
 const { default: BasicCompaction } = await import(nativeRequire.resolve('@deepseek-ai/dsh-compaction-basic')) as typeof import('@deepseek-ai/dsh-compaction-basic')
@@ -31,6 +33,9 @@ class UsageAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
   reportUsage = false
   sample: TokenUsage = { inputTokens: 100, outputTokens: 5, totalTokens: 105 }
+  override providerRetryPolicy() {
+    return resolveRetryPolicy({ mode: 'normal', backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 } }, 'usage fixture')
+  }
   override async resolveModel(provider: string, model: string) {
     return { provider, id: model, name: model, context: { contextWindow: 200_000 } }
   }
@@ -56,6 +61,7 @@ async function fixture() {
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(JsonlPersistence, { root: join(directory, 'sessions'), compression: 'none' })
   await ctx.plugin(AgentLoop, { agents: [] })
+  LlmRetry.apply(ctx)
   mountCampaignMemory(ctx)
   const adapter = new UsageAdapter()
   ctx.llm.registerAdapter(['usage-test'], adapter)
@@ -90,28 +96,20 @@ it('continues the same native session and peers after missing usage, with no cam
 
 it('counts retried provider attempts through the native token-meter projection', async () => {
   const h = await fixture()
-  const timer = globalThis.setTimeout
-  const fastTimer = ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) =>
-    timer(callback, isProviderRetryDelay(delay) ? 0 : delay, ...args)) as typeof setTimeout
-  vi.spyOn(globalThis, 'setTimeout').mockImplementation(fastTimer)
   const original = h.adapter.stream.bind(h.adapter)
   let failed = 0
   h.adapter.reportUsage = true
   h.adapter.stream = async function* (options) {
     if (failed++ < 2) {
       yield { type: 'usage', usage: this.sample }
-      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'ANY', message: 'upstream failed' } } }
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', message: 'upstream failed' } } }
     } else yield* original(options)
   }
-  const unavailable = vi.fn()
-  const lifetime = new AbortController()
-  mountProviderCalls(h.ctx, () => lifetime.signal, unavailable)
   try {
     await h.send()
     expect(h.usage()).toEqual({ uncachedInputTokens: 300, outputTokens: 15, cacheReadTokens: 0, cacheWriteTokens: 0 })
     expect((await h.events()).filter(event => event.type === 'assistant/attempt')).toHaveLength(2)
     expect((await h.events()).filter(event => event.type === 'assistant/message')).toHaveLength(1)
-    expect(unavailable).not.toHaveBeenCalled()
   } finally { vi.restoreAllMocks() }
 })
 
@@ -142,4 +140,34 @@ it('uses the ui-chat total across native cache buckets and counts reasoning only
   await h.send()
   expect(h.usage()).toEqual({ uncachedInputTokens: 20, cacheReadTokens: 70, cacheWriteTokens: 10, outputTokens: 5 })
   expect(billedTokens(h.usage())).toBe(105)
+})
+
+it('bounds a reused root by its own dispatch and submission, including failed or undispatched Tasks', async () => {
+  const h = await fixture()
+  // Old unreported usage is outside both new Tasks' evidence intervals.
+  await h.send()
+  h.adapter.reportUsage = true
+  const dispatch = async (taskId: string) => {
+    h.root.followup(schedulerMessage({ kind: 'singularity', purpose: 'dispatch', controlId: 'cost-scope',
+      parentTaskId: taskId, taskId, runId: taskId, factSeq: 0 }, 'Complete this Task.'))
+    await h.root.whenIdle()
+    expect(await h.ctx.sessions.flush(h.root.session)).toBe(true)
+  }
+  await dispatch('first')
+  const first = await h.events(), sessionId = String(h.root.session.id), eventCount = first.length
+  const source = { sessionId, eventCount, digest: digestOf({ sessionId, eventCount, events: first }) }
+  await dispatch('second')
+  const events = await h.events(), handle = await h.ctx.sessionPersistence.open(h.root.session.id, 'read')
+  const apparatus = { projections: h.ctx.sessionProjections } as Apparatus
+  try {
+    const sealed = taskExecutionWindow(events, 'cost-scope', 'first', source)
+    expect(sealed.events).toEqual(first)
+    expect(completeUsage(sealed.events.slice(sealed.from))).toBe(true)
+    expect(billedTokens(taskTokenUsage(apparatus, handle, sealed.events, sealed.from))).toBe(105)
+    const failed = taskExecutionWindow(events, 'cost-scope', 'first')
+    expect(billedTokens(taskTokenUsage(apparatus, handle, failed.events, failed.from))).toBe(105)
+    const undispatched = taskExecutionWindow(events, 'cost-scope', 'never-dispatched')
+    expect(undispatched.complete).toBe(false)
+    expect(billedTokens(taskTokenUsage(apparatus, handle, undispatched.events, undispatched.from))).toBe(0)
+  } finally { await handle.close() }
 })

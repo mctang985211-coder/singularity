@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -16,7 +17,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((r) => rm(r, { rec
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'artifact-recovery-'))
   roots.push(root)
-  const domain = await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess),
+  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
     medium = new FakePersistence(),
     apparatus = await openApparatus('recovery', root, domain, medium as never, attachmentsAt(root), testProjections)
   const agent = agentFor('worker', 'worker'),

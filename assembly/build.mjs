@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Script } from 'node:vm'
 import { build } from 'vite'
+import { configureHost, hostInstall } from '../scripts/host-config.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const FACES = ['.', './agent', './web', './client']
@@ -29,7 +30,7 @@ async function inputsAt(root) {
     ...(await filesAt(root, 'assembly/frontend')),
     ...(await filesAt(root, 'assembly/presets')),
     'package.json', 'pnpm-lock.yaml', 'tsconfig.json', 'assembly/tsconfig.json', 'assembly/build.mjs', 'assembly/package.json',
-    'assembly/client.js',
+    'assembly/client.js', 'dsh-baseline.json', 'scripts/host-config.mjs',
     'assembly/panel.html',
     'assembly/cordis.patch.yml',
   ].sort()
@@ -88,6 +89,7 @@ export async function checkBuild(root = ROOT) {
 }
 
 export async function buildAssembly(root = ROOT) {
+  await configureHost(root, hostInstall())
   const inputs = await hashes(root, await inputsAt(root))
   for (const config of ['tsconfig.json', 'assembly/tsconfig.json', 'assembly/frontend/tsconfig.json'])
     execFileSync(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--noEmit', '-p', config],

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Background, Controls, MiniMap, ReactFlow, ReactFlowProvider } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
@@ -11,16 +11,6 @@ const nodeTypes = { agent: AgentNode }, edgeTypes = { agent: AgentEdge }
 function Canvas() {
   const nodes = useStore(state => state.nodes), edges = useStore(state => state.edges)
   const error = useStore(state => state.error), snapshot = useStore(state => state.snapshot)
-  const [restarting, setRestarting] = useState(false)
-  const restart = async () => {
-    setRestarting(true)
-    try {
-      const response = await fetch('/singularity/restart', { method: 'POST' })
-      if (!response.ok) throw new Error(await response.text())
-      useStore.getState().receive(await response.json())
-    } catch (error) { useStore.setState({ error: String(error) }) }
-    finally { setRestarting(false) }
-  }
   useEffect(() => {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout>
@@ -46,7 +36,6 @@ function Canvas() {
     return () => { controller.abort(); clearTimeout(timer); window.removeEventListener('message', receive) }
   }, [])
   return <div className="sg-shell"><div className="sg-toolbar">Singularity · {snapshot?.controlId} · committed #{snapshot?.cutoff}
-    {snapshot?.providerStopped && <><span role="alert">provider 不稳定；整张图已结束</span><button disabled={restarting} onClick={() => void restart()}>{restarting ? '正在重启…' : '一键重启'}</button></>}
     {error && <span role="alert">{error}</span>}</div>
     <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} nodesDraggable={false} nodesConnectable={false}
       deleteKeyCode={null} minZoom={0.04} maxZoom={2} fitView proOptions={{ hideAttribution: true }}

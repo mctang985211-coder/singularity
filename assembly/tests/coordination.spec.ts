@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -25,7 +26,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((r) => rm(r, { rec
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'task-coordination-')); roots.push(root)
   const persistence = new FakePersistence(), runtime = nativeRuntime()
-  const domain = await loadDomain('/home/ROXY/code/singularity-core/deployment/domain/letters', spawnProcess)
+  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
   const apparatus = await openApparatus('coordination', root, domain, persistence as never, attachmentsAt(root), testProjections)
   const parent = runtime.agent('parent'), caller = callerOf(parent)
   const proposal = await propose(apparatus, caller, 'root', { goal: 'count letters' })
@@ -87,7 +88,7 @@ it('pins questions to the direct parent, blocks execution, and rejects self/peer
   expect(parentCoordination.questionsToAnswer).toHaveLength(1)
   expect(parentCoordination.responsibility).toMatchObject({
     authority: { kind: 'task', taskId: h.proposal.taskId, runId: h.proposal.runId },
-    criteriaToAccept: ['letters'], requiredUnverified: [h.child.taskId, h.peer.taskId],
+    criteriaToAccept: ['letters', 'request'], requiredUnverified: [h.child.taskId, h.peer.taskId],
     executionMode: 'coordinate', canExecute: false, canSubmit: false,
   })
   expect(parentCoordination.responsibility.delegated).toMatchObject([
@@ -259,11 +260,15 @@ it('converges through persistent questions, reviewed child evidence and integrat
   await h.scheduler.close(); await h.apparatus.store.close()
 })
 
-it('rejects decomposition, submission and retries at the command boundary while responsibilities are pending', async () => {
+it('permits new planning but rejects execution and retries while responsibilities are pending', async () => {
   const h = await setup(), commands = h.apparatus.tasks.forAgent(h.caller.agentId)
+  await commands.admit({ commandId: 'admit:overlapping', taskId: 'overlapping', contract: {
+    goal: 'Resolve a separate open interface', artifact: 'interface.txt', inputs: [],
+    criteria: [{ criterionId: 'interface', statement: 'Explain the independent interface' }],
+  } })
   await expect(commands.decompose({ commandId: 'overlap', parentTaskId: h.proposal.taskId, children: [
     { taskId: 'overlapping', dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const }] }))
-    .rejects.toThrow('delegated responsibilities')
+    .resolves.toMatchObject({ kind: 'task/decomposed' })
   await h.apparatus.tasks.forAgent(h.caller.agentId).failRun({ commandId: 'parent-failed',
     taskId: h.proposal.taskId, runId: h.proposal.runId, reason: 'parent interrupted' })
   await expect(commands.startRun({ commandId: 'take-back', taskId: h.proposal.taskId, runId: 'take-back',

@@ -1,7 +1,6 @@
 {
-  "note": "The one DSH baseline this repo targets. Nothing here is installed into this repo: the host DSH profile provides these packages at runtime. The root below is the private environment of docs/standalone-dsh.md — the development loop resolves its DSH packages there and nowhere else. Alignment is enforced by the dsh-alignment gate; this comment enforces nothing.",
+  "note": "Private DSH host contract. Configure the authorized patched installation with pnpm setup:host. No private package is fetched or silently substituted. Runtime artifacts are pinned independently of package versions.",
   "dshVersion": "0.2.0-rc.2",
-  "installRoot": "/home/ROXY/singularity-next/dsh/node_modules/@deepseek-ai",
   "packages": [
     {
       "name": "@deepseek-ai/cordis",
@@ -29,9 +28,9 @@
     }
   ],
   "checkout": {
-    "path": "/home/ROXY/code/bb_work/harness/thirdparty/deepseek-harness",
-    "commit": "639ed01539",
-    "tag": "v0.2.0-rc.2"
+    "commit": "639ed015397290b3745d163aafe02ffee4aa3f84",
+    "tag": "v0.2.0-rc.2",
+    "repository": "https://github.com/deepseek-ai/deepseek-harness"
   },
   "drift": {
     "upstreamHead": "d743267388641bc76f17c45ce8b4c231aed1d32c",
@@ -41,5 +40,23 @@
     "registryAlphaTag": "0.2.1-alpha.2",
     "whyNotNewer": "We align to the version the HOST RUNS, not to the newest published. The DSH CLI on this machine is 0.2.0-rc.2 and provides these peers at runtime; declaring 0.2.1-alpha.2 would name a version the host does not supply. cordis is versioned independently at 4.0.4, which is why this file lists versions per package rather than one number. Move when the host CLI is upgraded: update dshVersion and the per-package entries here, then re-run pnpm verify and the control probe.",
     "trap": "The registry's `latest` tag is 0.0.1-rc.1, far BEHIND the host. `next` is 0.2.0-rc.2 and `alpha` is 0.2.1-alpha.2. Reading `latest` looks like an upgrade and would be a large downgrade."
+  },
+  "patches": [
+    {
+      "name": "session-log-only",
+      "sha256": "e18f0f9eb562d2c585a6da6c31a4faf630dc46e4a8c00c8d6f0acb0cac426053"
+    },
+    {
+      "name": "memory-pressure",
+      "sha256": "c23f805250a29097d3d9cd8b1f925ccc5322ba90c9734ef3bfdc365504aa3dd8"
+    }
+  ],
+  "artifacts": {
+    "dsh-session/lib/index.js": "03e3a5421d33f1f0216483249a8b105ee5c853c176ee334b02d838fe1019c144",
+    "dsh-session/lib/invariant.js": "53066dc4945c0159fb5b48944b578a2d2d22f2f3bd5042599f2f6278edc84466",
+    "dsh-session/lib/types/index.d.ts": "d79b82272aa0ef34817d8b5ef457d0405f2f08b7408ea1d06087938fc5112c5d",
+    "dsh-session/lib/types/types.d.ts": "47dba68b697429bd777d66f5da9a24790683066cca3dd42506f0168dfae6c61b",
+    "dsh-token-meter/lib/index.js": "29dfa31ebee78e2df7030b3a4fa391378ffdb7804b5e39d1632c2f4e053de65a",
+    "dsh-compaction-basic/lib/index.js": "411324d7f37a05562687e42435c2475c66819ed11ea275040f97e0082b9a7cf2"
   }
 }

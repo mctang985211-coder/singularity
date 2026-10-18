@@ -1,0 +1,24 @@
+Singularity Core is a private project. No open source license is granted for original project code.
+
+RRSI decision rules and search design are adapted from google-research/rrsi,
+commit be50316e1db05914068a973f322770ef08ed7ba1 (Apache License 2.0).
+The adaptations use Task contracts, immutable method assets, native DSH execution,
+explicit missing evidence, a +25% cost ceiling and deterministic slot ordering.
+See src/strategy/decision.ts, docs/divergence-ledger.md and third_party/rrsi/LICENSE.
+The complete upstream implementation is not included.
+
+The host patch files under third_party/dsh modify DeepSeek Harness,
+commit 639ed015397290b3745d163aafe02ffee4aa3f84 (MIT, Copyright 2026 DeepSeek).
+They retain log-only session events and correct memory pressure accounting.
+The host itself is an explicitly configured external dependency, not downloaded here.
+See third_party/dsh/LICENSE and dsh-baseline.json for source and artifact digests.
+
+deployment/domain/sha256/sha256.v contains Secworks SHA-256 RTL,
+Copyright (c) 2013 Secworks Sweden AB, with its complete BSD-style notices in the source.
+Those notices must accompany source and binary redistribution.
+
+deployment/domain/polybench/reference.c adapts PolyBench/C 4.2.1 3mm,
+Copyright (c) 2010-2016 Ohio State University.
+See deployment/domain/polybench/LICENSE.txt for its full redistribution conditions.
+
+These third-party terms do not license unrelated original project code.

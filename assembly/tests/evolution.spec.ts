@@ -9,13 +9,14 @@ import { declareMeasureProtocol, MEASURE_PROTOCOL, MEASURE_VERSION, type Evaluat
 } from '../../src/measure/protocol.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { ProtocolRegistry } from '../../src/protocol/registry.ts'
-import type { VerifierCriterion } from '../../src/task/contract.ts'
+import type { TaskContract, VerifierCriterion } from '../../src/task/contract.ts'
 import { declareStrategyProtocol, STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_VERSION, type RoundState,
 } from '../../src/strategy/protocol.ts'
 import { declareTaskProtocol, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type RevisionRef,
 } from '../../src/task/protocol.ts'
-import { createEvolution, structuralEditsOf, type SolveResult } from '../src/evolution.ts'
+import { createEvolution, structuralEditsOf, type SolveResult, type EvolutionOptions } from '../src/evolution.ts'
 import { FakePersistence } from './seam.ts'
+import { parseSuite } from '../../src/measure/suite.ts'
 import { structuralEditDetailsOf } from '../../src/strategy/edits.ts'
 
 const criterion: VerifierCriterion = {
@@ -24,7 +25,7 @@ const criterion: VerifierCriterion = {
 }
 const inputs = [{ name: 'letters.txt', digest: 'b'.repeat(64) }]
 const initial = {
-  rootTemplate: 'root', templates: [{ id: 'root', goal: 'count letters' }, { id: 'part', goal: 'read letters' },
+  workflowGuidance: '', templates: [{ id: 'root', goal: 'count letters' }, { id: 'part', goal: 'read letters' },
   ],
   skills: [{ name: 'skill', description: 'method', capabilities: [], requiredTools: [], content: 'count carefully' }], tools: [{ name: 'tool', source: 'export const count = input => input.length' }],
 }
@@ -61,16 +62,17 @@ async function fixture() {
   }
   // This solve double establishes real core Task/Run/Bubble facts; native execution and token
   // accounting are the host port's separate integration contract.
-  async function solve({ revision, operationId, started,
+  async function solve({ revision, operationId, started, contract: requestedContract,
   }: {
     revision: RevisionRef
     operationId: string
+    contract?: TaskContract
     started: (run: { taskId: string; runId: string }) => Promise<void> }): Promise<SolveResult> {
     calls.push({ revision, operationId })
     const taskId = `${operationId}:task`
     const runId = `${operationId}:run`
     const facts: readonly { readonly kind: string; readonly payload: unknown }[] = [
-      { kind: TASK_KINDS.admitted, payload: { contract: {
+      { kind: TASK_KINDS.admitted, payload: { contract: requestedContract ?? {
             artifact: 'artifact.json',
             goal: 'count letters', template: { id: 'root', digest: 'c'.repeat(64) },
         inputs: [{ name: inputs[0]!.name, source: { kind: 'protected', ref: 'letters', digest: inputs[0]!.digest } },
@@ -105,13 +107,56 @@ async function fixture() {
 }
 
 describe('method evolution', () => {
+  it.each(['higher', 'lower'] as const)('refuses a failure reward better than a successful observation (%s)', async direction => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 1),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check boundary first' }, 1)
+    const suite = parseSuite({ version: 1, suiteId: 'unsafe-penalty', failureQuality: direction === 'lower' ? 0 : 2,
+      cases: [{ caseId: 'case', familyId: 'family', sourceId: 'source', split: 'evolve', weight: 1, trials: 2, hardGuards: [],
+        contract: { goal: 'case', artifact: 'artifact.json', inputs: [{ name: inputs[0]!.name,
+          source: { kind: 'protected', ref: 'letters', digest: inputs[0]!.digest } }], criteria: [{ criterionId: 'correct', statement: 'correct' }] } }] })
+    const evolution = createEvolution({ ...live.options, metric: { ...live.options.metric, direction }, suite, executionProfileDigest: 'e'.repeat(64) })
+    await expect(evolution.runRound({ campaignId: 'penalty', roundId: 'penalty-r1', round: 1, incumbent, candidates: [candidate] }))
+      .rejects.toThrow('failureQuality must be at least as bad')
+  })
+
+  it('runs a frozen case matrix through the same solve port, scores ordinary failures and resumes only unfilled slots', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 0), candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check the boundary first' }, 1)
+    const suite = parseSuite({ version: 1, suiteId: 'matrix-v1', failureQuality: 0, cases: ['parse', 'calculate'].map((id, index) => ({
+      caseId: id, familyId: id, sourceId: id, split: 'evolve', weight: index + 1, trials: 2, hardGuards: [],
+      contract: { goal: id, artifact: 'artifact.json', inputs: [{ name: inputs[0]!.name, source: { kind: 'protected', ref: 'letters', digest: inputs[0]!.digest } }], criteria: [{ criterionId: 'correct', statement: id }] },
+    })) })
+    const solve: EvolutionOptions['solve'] = async request => {
+      const result = await live.solve(request)
+      const met = request.revision.digest === candidate.digest || request.case?.caseId === 'parse'
+      return { ...result, quality: met ? 1.2 : 0, met, guardsMet: true }
+    }
+    const options = { ...live.options, suite, executionProfileDigest: 'e'.repeat(64), baseline: solve, solve }
+    let interrupted = false
+    const request = { campaignId: 'matrix', roundId: 'matrix-r1', round: 1, incumbent, candidates: [candidate] }
+    await expect(createEvolution({ ...options, solve: async input => {
+      if (!interrupted && input.case?.caseId === 'calculate') { interrupted = true; throw new Error('crash before next slot') }
+      return solve(input)
+    } }).runRound(request)).rejects.toThrow('crash')
+    expect(live.calls).toHaveLength(6)
+    const result = await createEvolution(options).runRound(request)
+    expect(result.winner).toBe(0)
+    expect(result.slots[0]).toMatchObject({ quality: 1.2, denominator: 4, admissible: true })
+    expect(live.calls).toHaveLength(8)
+    const baseline = live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'matrix-r1:bootstrap:evaluation')!
+    expect(baseline.observed.filter(t => JSON.parse(t.detail!).met === false)).toHaveLength(2)
+    expect(baseline.matrix?.slots.map(s => s.caseId)).toEqual(['parse', 'parse', 'calculate', 'calculate'])
+    expect(new Set(live.calls.map(call => call.operationId)).size).toBe(8)
+    await createEvolution(options).runRound(request)
+    expect(live.calls).toHaveLength(8)
+  })
+
   it('records unknown native costs and completes evaluation without blocking later rounds', async () => {
     const live = await fixture()
     const incumbent = await live.revision('initial', initial, 1)
     const candidate = await live.revision('unknown-cost', { ...initial, templates: [{ ...initial.templates[0]!, goal: 'stream letters' }, initial.templates[1]!] }, 1)
     const evolution = createEvolution({ ...live.options, solve: async request => ({ ...(await live.solve(request)), cost: null }) })
-    expect((await evolution.runRound({ roundId: 'unknown-cost-1', round: 1, incumbent, candidates: [candidate] })).winner).toBeNull()
-    expect((await evolution.runRound({ roundId: 'unknown-cost-2', round: 2, incumbent, candidates: [candidate] })).winner).toBeNull()
+    expect((await evolution.runRound({ campaignId: 'test-campaign', roundId: 'unknown-cost-1', round: 1, incumbent, candidates: [candidate] })).winner).toBeNull()
+    expect((await evolution.runRound({ campaignId: 'test-campaign', roundId: 'unknown-cost-2', round: 2, incumbent, candidates: [candidate] })).winner).toBeNull()
     expect(evolution.history()).toHaveLength(2)
   })
 
@@ -124,7 +169,7 @@ describe('method evolution', () => {
         ...(await live.solve(request)), cost: request.revision.digest === candidate.digest ? 50 : 100,
     }),
     })
-    expect((await evolution.runRound({ roundId: 'cost-only', round: 1, incumbent, candidates: [candidate] })).winner,
+    expect((await evolution.runRound({ campaignId: 'test-campaign', roundId: 'cost-only', round: 1, incumbent, candidates: [candidate] })).winner,
     ).toBe(0)
   })
 
@@ -153,7 +198,7 @@ describe('method evolution', () => {
     const live = await fixture()
     const incumbent = await live.revision('initial', initial, 0)
     const good = await live.revision('good', { ...initial, tools: [{ name: 'tool', source: 'improved tool' }] }, 1)
-    const input = { roundId: 'resumed', round: 1, incumbent, candidates: [good] }
+    const input = { campaignId: 'test-campaign', roundId: 'resumed', round: 1, incumbent, candidates: [good] }
     const interrupted = createEvolution({ ...live.options, solve: async (request) => {
       if (request.revision.revisionId === 'good') throw new Error('process stopped before candidate solve')
       return live.solve(request)
@@ -192,7 +237,7 @@ describe('method evolution', () => {
       1,
     )
     const bad = await live.revision('bad', { ...initial, tools: [{ name: 'tool', source: 'broken method' }] }, 0)
-    const first = await live.evolution.runRound({ roundId: 'r1', round: 1, incumbent, candidates: [good, bad] })
+    const first = await live.evolution.runRound({ campaignId: 'test-campaign', roundId: 'r1', round: 1, incumbent, candidates: [good, bad] })
     expect(first.winner).toBe(0)
     expect(first.slots.map((slot) => slot.quality)).toEqual([1, 0])
     expect(first.outcomes[1]?.admitted).toBe(false)
@@ -218,7 +263,7 @@ describe('method evolution', () => {
     // The second proposal's incumbent and revisions are chosen from the committed first history.
     const previous = consumedHistory[0]!
     expect(previous.winner).toBe(0)
-    const second = await live.evolution.runRound({ roundId: 'r2', round: 2, incumbent: good, candidates: [next, worse],
+    const second = await live.evolution.runRound({ campaignId: 'test-campaign', roundId: 'r2', round: 2, incumbent: good, candidates: [next, worse],
     })
     expect(second.winner).toBeNull()
     expect(live.calls).toHaveLength(6)
@@ -259,7 +304,7 @@ describe('method evolution', () => {
       metric: { ...live.options.metric, unit: 'baseline area ratio', direction: 'lower' },
       calibration: { floor: 0.01, source: 'declared' }, weights: { quality: 100, cost: 15 },
     })
-    const round = await evolution.runRound({ roundId: 'area', round: 1, incumbent, candidates: [smaller, invalid] })
+    const round = await evolution.runRound({ campaignId: 'test-campaign', roundId: 'area', round: 1, incumbent, candidates: [smaller, invalid] })
     expect(round.winner).toBe(0)
     expect(round.slots.map((slot) => [slot.quality, slot.denominator, slot.constraintsMet])).toEqual([[0.95, 2, true], [0.5, 2, false],
     ])
@@ -278,9 +323,9 @@ describe('method evolution', () => {
       },
       1,
     )
-    await expect(live.evolution.runRound({ roundId: 'empty', round: 1, incumbent, candidates: [] })).rejects.toThrow('at least one',
+    await expect(live.evolution.runRound({ campaignId: 'test-campaign', roundId: 'empty', round: 1, incumbent, candidates: [] })).rejects.toThrow('at least one',
     )
-    const result = await live.evolution.runRound({ roundId: 'r1', round: 1, incumbent, candidates: [candidate] })
+    const result = await live.evolution.runRound({ campaignId: 'test-campaign', roundId: 'r1', round: 1, incumbent, candidates: [candidate] })
     expect(result.winner).toBe(0)
   })
 
@@ -292,7 +337,7 @@ describe('method evolution', () => {
       candidates.push(await live.revision(`changed-${slot}`, { ...initial, tools: [{ name: 'tool', source: `changed ${slot}` }] }, 1))
       live.contexts.set(`excluded:${slot}:candidate:trial:0`, [`other conditions ${slot}`])
     }
-    const request = { roundId: 'excluded', round: 1, incumbent, candidates }
+    const request = { campaignId: 'test-campaign', roundId: 'excluded', round: 1, incumbent, candidates }
     const result = await live.evolution.runRound(request)
     expect(result.decided).toBe(true)
     expect(result.winner).toBeNull()
@@ -313,19 +358,34 @@ describe('method evolution', () => {
     )
     const bad = await live.revision('bad', { ...initial, tools: [{ name: 'tool', source: 'another method' }] }, 1)
     live.contexts.set('r1:0:candidate:trial:0', ['changed dataset conditions'])
-    const result = await live.evolution.runRound({ roundId: 'r1', round: 1, incumbent, candidates: [good, bad] })
+    const result = await live.evolution.runRound({ campaignId: 'test-campaign', roundId: 'r1', round: 1, incumbent, candidates: [good, bad] })
     expect(result.winner).toBe(1)
     expect(result.slots[0]).toMatchObject({ admissible: false, reason: expect.stringContaining('changed dataset conditions') })
     expect(result.slots[0]!.reason).toContain('conditions')
     expect(result.slots[1]!.admissible).toBe(true)
     expect(live.calls.map(call => call.revision.revisionId)).toEqual(['initial', 'good', 'bad'])
     const count = live.store.load().entries().length
-    expect(await live.evolution.runRound({ roundId: 'r1', round: 1, incumbent, candidates: [good, bad] })).toEqual(result)
+    expect(await live.evolution.runRound({ campaignId: 'test-campaign', roundId: 'r1', round: 1, incumbent, candidates: [good, bad] })).toEqual(result)
     expect(live.store.load().entries()).toHaveLength(count)
     const failed = createEvolution({ ...live.options, solve: async () => { throw new Error('native agent failed') },
     })
-    await expect(failed.runRound({ roundId: 'r2', round: 2, incumbent, candidates: [good, bad] })).rejects.toThrow('native agent failed',
+    await expect(failed.runRound({ campaignId: 'test-campaign', roundId: 'r2', round: 2, incumbent: bad, candidates: [good] })).rejects.toThrow('native agent failed',
     )
     expect(live.evolution.history()).toEqual([result])
   })
+})
+
+it.each(['higher', 'lower'] as const)('holds historical best quality across accepted search heads (%s) and resets at a new campaign', async direction => {
+  const h = await fixture(), sign = direction === 'higher' ? 1 : -1
+  const baseline = await h.revision('s0', initial, 0.9, true)
+  const first = await h.revision('s1', { ...initial, workflowGuidance: 'Choose a cheaper investigation.' }, 0.9 - sign * 0.009, true)
+  const second = await h.revision('s2', { ...initial, workflowGuidance: 'Choose a still cheaper investigation.' }, 0.9 - sign * 0.018, true)
+  const solve: typeof h.solve = async request => ({ ...await h.solve(request), cost: { s0: 100, s1: 90, s2: 81 }[request.revision.revisionId]! })
+  const evolution = createEvolution({ ...h.options, metric: { ...h.options.metric, direction },
+    calibration: { floor: 0.01, source: 'declared' }, weights: { quality: 100, cost: 15 }, baseline: solve, solve })
+  expect((await evolution.runRound({ campaignId: 'quality', roundId: 'quality-1', round: 1, incumbent: baseline, candidates: [first] })).winner).toBe(0)
+  const rejected = await evolution.runRound({ campaignId: 'quality', roundId: 'quality-2', round: 2, incumbent: first, candidates: [second] })
+  expect(rejected.winner).toBeNull()
+  expect(rejected.slots[0]!.reason).toContain('historical best S* 0.9000')
+  expect((await evolution.runRound({ campaignId: 'separate', roundId: 'separate-1', round: 1, incumbent: first, candidates: [second] })).winner).toBe(0)
 })

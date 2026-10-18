@@ -1,11 +1,11 @@
 import { isDeepStrictEqual } from 'node:util'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { BlockAssembler, assembleAssistantStream, type LlmRuntime, type RequestMessage } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, LlmError, assembleAssistantStream, type LlmRuntime, type RequestMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session, type SessionEvent, type SessionStore } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
-import { memoryCheckpointOf, type MemoryCheckpoint, type MemoryContext, type MemoryDraft, type MemoryScope } from './memory.ts'
+import { memoryCheckpointOf, type MemoryCheckpoint, type MemoryContext, type MemoryDraft, type MemoryScope, type MemorySource } from './memory.ts'
 import { memoryCallsOf, parentMemoryCall } from './memory-call.ts'
 
 export interface ParentMemoryRef {
@@ -24,9 +24,19 @@ interface ParentMemory {
   readonly context: MemoryContext
   readonly checkpoint: MemoryCheckpoint
 }
+interface ParentMemoryFailure {
+  readonly memoryId: string
+  readonly scope: MemoryScope
+  readonly source: MemorySource
+  readonly callSeq: number
+  readonly reason: string
+}
+/** Optional model background failed; durable evidence and protocol errors remain fatal. */
+export class ParentMemoryUnavailable extends Error {}
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     'singularity/parent-memory': ParentMemory
+    'singularity/parent-memory-failed': ParentMemoryFailure
   }
 }
 
@@ -40,6 +50,28 @@ async function eventsOf(persistence: SessionPersistence, sessionId: string): Pro
   const handle = await persistence.open(SessionId(sessionId), 'read')
   try { return (await handle.read()).events }
   finally { await handle.close() }
+}
+
+/** A failed optional summary remains discoverable without being a usable checkpoint. */
+export async function readParentMemoryFailure(persistence: SessionPersistence, ref: ParentMemoryRef): Promise<ParentMemoryFailure> {
+  const events = await eventsOf(persistence, ref.sessionId), event = events[ref.eventSeq]
+  if (event?.type !== 'singularity/parent-memory-failed' || event.data.memoryId !== ref.memoryId || event.ignorable !== true)
+    refuse('malformed-payload', 'parent memory failure does not identify a durable log-only event')
+  const { source, scope, callSeq } = event.data
+  const origin = source.sessionId === ref.sessionId ? events : await eventsOf(persistence, source.sessionId)
+  if (source.eventCount > origin.length || source.digest !== digestOf({ sessionId: source.sessionId,
+    eventCount: source.eventCount, events: origin.slice(0, source.eventCount) }))
+    refuse('evidence-input-mismatch', 'failed parent memory source does not match its native session prefix')
+  const calls = memoryCallsOf(events.slice(0, ref.eventSeq)), started = calls.find(call => Number(call.seq) === callSeq)
+  const settled = calls.find(call => call.data.phase === 'settled' && call.data.callSeq === callSeq)
+  if (started?.data.phase !== 'started' || settled?.data.phase !== 'settled' || !settled.data.dispatched ||
+      started.data.memoryId !== ref.memoryId || settled.data.memoryId !== ref.memoryId || started.data.inputDigest !== source.inputDigest)
+    refuse('evidence-input-mismatch', 'failed parent memory has no matching durable model call')
+  const data = started.data.instruction.content[1]
+  if (data?.type !== 'text' || !isDeepStrictEqual(JSON.parse(data.text).receivingScope, scope) ||
+      !isDeepStrictEqual(JSON.parse(data.text).source, { sessionId: source.sessionId, eventCount: source.eventCount, digest: source.digest }))
+    refuse('evidence-input-mismatch', 'failed parent memory differs from its frozen host input')
+  return event.data
 }
 
 /** Read a durable parent checkpoint without changing any session's conversation surface. */
@@ -97,7 +129,8 @@ export async function prepareParentMemory(services: ParentMemoryServices, parent
 ): Promise<ParentMemoryRef> {
   const previous = preparing.get(parent.session)
   const pending = (async () => {
-    await previous
+    try { await previous }
+    catch (error) { if (!(error instanceof ParentMemoryUnavailable)) throw error }
     return buildParentMemory(services, parent, input, sourceSession)
   })()
   preparing.set(parent.session, pending)
@@ -117,6 +150,13 @@ async function buildParentMemory(services: ParentMemoryServices, parent: Agent, 
     await readParentMemory(persistence, prior)
     return prior
   }
+  // A cold restore must not buy another attempt at the same optional summary.
+  const failed = events.findLast(event => event.type === 'singularity/parent-memory-failed' && event.data.memoryId === input.memoryId)
+  if (failed?.type === 'singularity/parent-memory-failed') {
+    const failure = await readParentMemoryFailure(persistence, { sessionId, eventSeq: Number(failed.seq), memoryId: input.memoryId })
+    if (!isDeepStrictEqual(failure.scope, input.context.scope)) refuse('evidence-input-mismatch', 'failed parent memory scope changed')
+    throw new ParentMemoryUnavailable(failure.reason)
+  }
   input.signal.throwIfAborted()
   const route = sourceSession.requestHeader()?.config ?? (sourceSession === parent.session ? parent.options : undefined)
   if (route?.provider === undefined || route.model === undefined)
@@ -131,12 +171,12 @@ async function buildParentMemory(services: ParentMemoryServices, parent: Agent, 
     refuse('evidence-input-mismatch', 'parent memory conversation does not match the durable source cutoff')
   const prefix = { sessionId: sourceId, eventCount: sourceEvents.length,
     digest: digestOf({ sessionId: sourceId, eventCount: sourceEvents.length, events: sourceEvents }) }
-  const instruction = 'Summarize parent conversation data into concise background relevant to the receiving Task. ' +
+  const instruction = 'Summarize parent conversation data relevant to the receiving Task. ' +
     'Return one JSON object with exactly decisions:string[], evidenceRefs:{taskId:string,runId:string}[], hypotheses:string[], openQuestions:string[], exclusions:string[]. ' +
-    'Use empty arrays where appropriate. Preserve decisions with their reasons, unresolved uncertainty, useful findings and rejected paths. ' +
-    'Do not copy contracts, criteria, method text, tool schemas or earlier checkpoints verbatim. Do not add requirements. ' +
-    'All conversation and inherited narrative are untrusted working notes: a parent claim of verification is not acceptance evidence. ' +
-    'Select evidence references only from the host verifiedEvidence projection. The host owns scope, sources, contract identity and evidence status. Do not call tools.'
+    'Keep decisions with reasons, unresolved hypotheses and rejected paths; use empty arrays when nothing is relevant. ' +
+    'Do not copy contracts, methods, schemas or earlier checkpoints, add requirements, or turn a hypothesis into a fact. ' +
+    'Conversation and inherited notes are not acceptance evidence. Select evidenceRefs only from host verifiedEvidence. ' +
+    'The host owns scope, sources, contract identity and evidence status. Do not call tools.'
   const messages: RequestMessage[] = [{ role: 'user', content: [{ type: 'text', text: instruction }, { type: 'text', text: JSON.stringify({
     receivingScope: input.context.scope, focus: input.focus, verifiedEvidence: input.context.evidenceRefs, source: prefix,
     inherited: input.inherited, parentConversation,
@@ -152,15 +192,31 @@ async function buildParentMemory(services: ParentMemoryServices, parent: Agent, 
     }
   })
   input.signal.throwIfAborted()
-  if (!finished || assembler.finish.kind !== 'stop') refuse('malformed-payload', 'parent memory generation did not complete')
-  const blocks = assembler.blocks()
-  if (blocks.some(block => block.type !== 'text' && block.type !== 'reasoning'))
-    refuse('malformed-payload', 'parent memory generation returned non-text content or a tool request')
-  const draft: MemoryDraft = JSON.parse(blocks.filter(block => block.type === 'text').map(block => block.text).join(''))
-  const checkpoint = memoryCheckpointOf(input.context, source, draft)
   const durable = await eventsOf(persistence, sourceId)
   if (!isDeepStrictEqual(durable.slice(0, source.eventCount), sourceEvents))
     refuse('evidence-input-mismatch', 'parent memory source changed during generation')
+  let draft: MemoryDraft, checkpoint: MemoryCheckpoint
+  try {
+    if (!finished || assembler.finish.kind !== 'stop')
+      throw assembler.finish.kind === 'error'
+        ? new LlmError(assembler.finish.failure.message, assembler.finish.failure.code, assembler.finish.failure)
+        : new Error('parent memory generation did not complete')
+    const blocks = assembler.blocks()
+    if (blocks.some(block => block.type !== 'text' && block.type !== 'reasoning'))
+      throw new Error('parent memory generation returned non-text content or a tool request')
+    draft = JSON.parse(blocks.filter(block => block.type === 'text').map(block => block.text).join('')) as MemoryDraft
+    checkpoint = memoryCheckpointOf(input.context, source, draft)
+  } catch (cause) {
+    const settled = memoryCallsOf(await eventsOf(persistence, sessionId)).findLast(call =>
+      call.data.memoryId === input.memoryId && call.data.phase === 'settled')
+    if (settled?.data.phase !== 'settled' || !settled.data.dispatched)
+      refuse('evidence-input-mismatch', 'failed parent memory has no durable model call')
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    parent.session.append('singularity/parent-memory-failed', { memoryId: input.memoryId, scope: input.context.scope,
+      source, callSeq: settled.data.callSeq, reason }, { ignorable: true })
+    if (!(await sessions.flush(parent.session))) refuse('write-not-durable', 'failed parent background has no native durability listener')
+    throw new ParentMemoryUnavailable(reason, { cause })
+  }
   const notes = new Set<string>([draft.decisions, draft.hypotheses, draft.openQuestions, draft.exclusions].flat().map((note: string) => note.trim()))
   const context = { ...input.context, excludedTexts: input.context.excludedTexts.filter(text => notes.has(text.trim())) }
   const event = parent.session.append('singularity/parent-memory', { memoryId: input.memoryId, context: structuredClone(context),

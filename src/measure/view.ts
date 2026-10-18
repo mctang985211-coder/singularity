@@ -71,10 +71,11 @@ export interface EvaluationView {
   readonly admissible: boolean
   /** Why it is not admissible, naming each failing rule. `null` only when it is admissible. */
   readonly why: string | null
+  readonly families?: readonly { readonly familyId: string; readonly quality: number; readonly planned: number; readonly observed: number }[]
 }
 
 /** The measured cost, or `null` if any observation left it unknown. Nothing measured has no cost. */
-function costOf(observed: readonly TrialRecord[]): number | null {
+function costOf(observed: readonly Pick<TrialRecord, 'cost'>[]): number | null {
   if (observed.length === 0) return null
   let total = 0
   for (const entry of observed) {
@@ -89,7 +90,7 @@ function costOf(observed: readonly TrialRecord[]): number | null {
 export function projectEvaluation(state: EvaluationState): EvaluationView {
   const denominator = state.trials ?? 0
   const judgement = state.judgement ?? []
-  const observed = state.observed
+  const observed = [...state.observed, ...(state.failed ?? [])]
 
   const missing: MissingSlot[] = []
   for (let slot = 0; slot < denominator; slot += 1) {
@@ -107,6 +108,7 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
   })
 
   const reasons: string[] = []
+  if (state.matrix !== undefined && observed.some(entry => entry.guardsMet !== true)) reasons.push('a trial failed or did not establish its hard guards')
   if (state.trials === undefined) reasons.push('no measurement plan was opened for this evaluation, so there is nothing to report it against')
   for (const constraint of constraints) {
     if (constraint.met === null) reasons.push(`hard constraint "${constraint.criterionId}" has not been checked by its implementation`)
@@ -117,11 +119,15 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
       `${missing.length} of ${denominator} planned trial slots have no observation: ${missing.map((entry) => `slot ${entry.slot} (${entry.reason})`).join('; ')}`,
     )
 
+  const weighted = (slots: readonly number[]) => {
+    const weight = slots.reduce((sum, slot) => sum + (state.matrix?.slots[slot]?.weight ?? 1), 0)
+    return weight === 0 ? 0 : slots.reduce((sum, slot) => sum + (observed.find(entry => entry.slot === slot)?.quality ?? 0) * (state.matrix?.slots[slot]?.weight ?? 1), 0) / weight
+  }
   return {
     denominator,
     observed: observed.length,
     missing,
-    quality: denominator === 0 ? 0 : observed.reduce((total, entry) => total + entry.quality, 0) / denominator,
+    quality: weighted(Array.from({ length: denominator }, (_, slot) => slot)),
     cost: costOf(observed),
     // The metric is the plan's, so its direction is the plan's too — read from the one place the
     // plan wrote it, never restated by a reader that would then be free to disagree with it.
@@ -129,6 +135,10 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
     constraints,
     admissible: reasons.length === 0,
     why: reasons.length === 0 ? null : reasons.join('; '),
+    ...(state.matrix === undefined ? {} : { families: [...new Set(state.matrix.slots.map(slot => slot.familyId))].sort().map(familyId => {
+      const slots = state.matrix!.slots.flatMap((slot, index) => slot.familyId === familyId ? [index] : [])
+      return { familyId, quality: weighted(slots), planned: slots.length, observed: observed.filter(entry => slots.includes(entry.slot)).length }
+    }) }),
   }
 }
 
@@ -159,7 +169,7 @@ export interface Caliber {
 export function caliberOf(state: EvaluationState): Caliber | undefined {
   const { context, metric, weights, trials, judgement } = state
   if (context === undefined || metric === undefined || weights === undefined || trials === undefined || judgement === undefined) return undefined
-  return { context, metric, weights, trials, judgement }
+  return { context: state.matrix === undefined ? context : digestOf(state.matrix), metric, weights, trials, judgement }
 }
 
 /**

@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import { testProjections } from './seam.ts'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -27,7 +28,7 @@ import { contractFor } from '../src/inputs.ts'
 import { submit } from '../src/submission.ts'
 import { fixtureReview } from './review-fixture.ts'
 
-const dir = '/home/ROXY/code/singularity-core/deployment/domain/letters'
+const dir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
 const tool = "import {readFileSync} from 'node:fs'; process.stdout.write(String((readFileSync(process.argv[2],'utf8').match(/[A-Za-z]/g)??[]).length))"
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
@@ -38,7 +39,7 @@ async function setup() {
   const medium = new FakePersistence()
   const apparatus = await openApparatus('method-spec', root, domain, medium as unknown as SessionPersistence, attachmentsAt(root), testProjections,
   )
-  const assets: MethodAssets = { rootTemplate: apparatus.domain.rootTemplate, templates: [...apparatus.domain.templates.values()].map((template) => ({
+  const assets: MethodAssets = { workflowGuidance: '', templates: [...apparatus.domain.templates.values()].map((template) => ({
     ...templateDeclaration(template), ...(template.id === apparatus.domain.rootTemplate ? { skills: ['count'] } : {}),
   })), skills: [{ name: 'count', description: 'Count letters', capabilities: ['count'], requiredTools: ['count'], content: 'Count letters using available evidence.',
       },
@@ -113,7 +114,7 @@ it('keeps optional guidance separate from the fixed objective and preserves its 
   const { apparatus, assets, caller, root, medium } = await setup()
   const method = await createMethod(apparatus, { ...assets, templates: assets.templates.map((raw) => {
     const template = raw as { id: string }
-    return template.id === assets.rootTemplate ? { ...template, guidance: 'APPLY_CANDIDATE_METHOD_MARKER', skills: ['count'] } : template
+    return template.id === apparatus.domain.rootTemplate ? { ...template, guidance: 'APPLY_CANDIDATE_METHOD_MARKER', skills: ['count'] } : template
   }) })
   const proposal = await propose(apparatus, caller, 'evaluation-context', { goal: 'fixed human objective', method }, { purpose: 'evaluation' })
   const task = taskStateOf(apparatus, proposal.taskId)
@@ -125,7 +126,7 @@ it('keeps optional guidance separate from the fixed objective and preserves its 
   expect(task.runs[proposal.runId]!.consumed.filter(use => !use.method.startsWith('template:'))).toEqual([])
   expect(await readMethodContext(apparatus, task.taskId, task.runs[proposal.runId]!)).toEqual(context)
   const consumption = taskStateOf(apparatus, task.taskId).runs[proposal.runId]!.consumed
-  expect(consumption).toContainEqual({ method: 'guidance:count-source', source: `${method.digest}/read:guidance:count-source:${context.template!.digest}` })
+  expect(consumption).toContainEqual({ method: 'guidance:count-source', mode: 'read', source: `${method.digest}/read:guidance:count-source:${context.template!.digest}` })
   expect(consumption.some(use => use.method === 'skill:count')).toBe(false)
   await apparatus.store.close()
   const restored = await openApparatus('method-spec', root, await loadDomain(dir, spawnProcess), medium as unknown as SessionPersistence, attachmentsAt(root), testProjections)
@@ -203,11 +204,11 @@ it('refuses dropping a protected checker or replacing the frozen root initial co
   const { apparatus, assets } = await setup()
   await expect(createMethod(apparatus, { ...assets, templates: assets.templates.map(raw => {
     const template = raw as { id: string }
-    return template.id === assets.rootTemplate ? { ...template, checks: [] } : template
+    return template.id === apparatus.domain.rootTemplate ? { ...template, checks: [] } : template
   }) })).rejects.toThrow('acceptance')
   await expect(createMethod(apparatus, { ...assets, templates: assets.templates.map(raw => {
     const template = raw as { id: string }
-    return template.id === assets.rootTemplate ? { ...template, initial: { content: '35' } } : template
+    return template.id === apparatus.domain.rootTemplate ? { ...template, initial: { content: '35' } } : template
   }) })).rejects.toThrow('initial root source')
   await apparatus.store.close()
 })
@@ -284,7 +285,7 @@ it('freezes capability bindings to Skills and Tools from the same Revision and r
   const method = await createMethod(apparatus, { ...assets,
     templates: assets.templates.map((raw) => {
       const template = raw as { id: string }
-      return template.id === assets.rootTemplate ? { ...template, capabilities: ['count', 'probe', 'yosys'] } : template
+      return template.id === apparatus.domain.rootTemplate ? { ...template, capabilities: ['count', 'probe', 'yosys'] } : template
     }), tools: [...assets.tools, probe],
   })
   const proposal = await propose(apparatus, caller, 'bind-generated-assets', { goal: 'count letters', method })
@@ -300,7 +301,7 @@ it('freezes capability bindings to Skills and Tools from the same Revision and r
   expect((await runMethodTool(apparatus, caller, proposal.taskId, 'probe', new AbortController().signal, 'probe')).artifact,
   ).toBe('probe result')
   expect(taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!.consumed).toContainEqual({
-    method: 'tool:probe', source: `${method.digest}/tool:probe:${digestOf(probe)}:${caller.sessionId}/probe`,
+    method: 'tool:probe', mode: 'invoked', source: `${method.digest}/tool:probe:${digestOf(probe)}:${caller.sessionId}/probe`,
   })
   await apparatus.store.close()
 })
@@ -336,7 +337,7 @@ it('keeps an existing Run on its Revision across publication and reload, while a
     expect(firstResult.artifact).toMatch(/^\d+$/)
     const originalRun = taskStateOf(restored, original.taskId).runs[original.runId]!
     expect(originalRun.revision).toEqual(first)
-    expect(originalRun.consumed).toContainEqual({ method: 'skill:count', source: `${first.digest}/skill:count:${digestOf(assets.skills[0])}`,
+    expect(originalRun.consumed).toContainEqual({ method: 'skill:count', mode: 'read', source: `${first.digest}/skill:count:${digestOf(assets.skills[0])}`,
     })
     expect(originalRun.consumed.every((use) => use.source.startsWith(`${first.digest}/`))).toBe(true)
     expect(publishedMethod(restored)).toEqual(second)
@@ -389,24 +390,27 @@ it('records the first actual Tool execution even when it fails and records it on
   await expect(runMethodTool(apparatus, caller, proposal.taskId, 'failed', new AbortController().signal, 'count', 'candidate.txt'),
   ).rejects.toThrow('rejected candidate')
   expect(taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!.consumed.filter((use) => use.method === 'tool:count'))
-    .toEqual([{ method: 'tool:count', source: `${method.digest}/tool:count:${digestOf(conditional)}:${caller.sessionId}/failed` }])
+    .toEqual([{ method: 'tool:count', mode: 'invoked', source: `${method.digest}/tool:count:${digestOf(conditional)}:${caller.sessionId}/failed` }])
   await writeFile(join(proposal.workspace, 'candidate.txt'), 'pass')
   await runMethodTool(apparatus, caller, proposal.taskId, 'success', new AbortController().signal, 'count', 'candidate.txt')
   await runMethodTool(apparatus, caller, proposal.taskId, 'again', new AbortController().signal, 'count', 'candidate.txt')
   expect(taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!.consumed.filter((use) => use.method === 'tool:count'),
   ).toEqual([
-    { method: 'tool:count', source: `${method.digest}/tool:count:${digestOf(conditional)}:${caller.sessionId}/failed`,
+    { method: 'tool:count', mode: 'invoked', source: `${method.digest}/tool:count:${digestOf(conditional)}:${caller.sessionId}/failed`,
     },
   ])
   await apparatus.store.close()
 })
 
-it('rejects a method without its protected root template', async () => {
+it('accepts a method without templates and still admits a complete Task contract', async () => {
   const { apparatus, assets } = await setup()
-  await expect(
-    createMethod(apparatus, { ...assets, templates: assets.templates.filter((t) => (t as { id: string }).id !== assets.rootTemplate),
-    }),
-  ).rejects.toThrow()
+  const method = await createMethod(apparatus, { ...assets, templates: [] })
+  const contract = { goal: 'Return a new independently specified value', artifact: 'value.txt', inputs: [],
+    criteria: [{ criterionId: 'value', statement: 'The value is 42.' }] }
+  const task = await propose(apparatus, { agentId: 'new-task', sessionId: 'new-task', model: { provider: 'test', model: 'test' } },
+    'no-templates', { contract, method })
+  expect(task.contract).toEqual(contract)
+  expect((await contextFor(apparatus, task)).template).toBeNull()
   await apparatus.store.close()
 })
 

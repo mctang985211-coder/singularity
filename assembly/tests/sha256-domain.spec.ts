@@ -11,7 +11,7 @@ import { loadDomain } from '../src/domain.ts'
 const DIR = fileURLToPath(new URL('../../deployment/domain/sha256', import.meta.url))
 const runProcess: VerifierProcess = async () => { throw new Error('loading a declaration must not run a process') }
 const domain = await loadDomain(DIR, runProcess)
-const template = domain.templates.get(domain.rootTemplate)!
+const template = domain.templates.get(domain.rootTemplate!)!
 
 it('loads one RTL and one synthesis guide without prescribing an exploration workflow', async () => {
   expect((await readdir(DIR)).sort()).toEqual(['sha256.v', 'task.json', 'yosys.md'])

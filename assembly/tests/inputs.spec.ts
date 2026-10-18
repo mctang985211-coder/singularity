@@ -90,7 +90,7 @@ describe('template input binding and sealed preparation', () => {
     const domain = { ...h.domain, dir: temporaryDir }
     await writeFile(sourcePath, 'changed after the loader sealed its input')
     expect(await readFile(sourcePath)).not.toEqual(frozen)
-    const template = domain.templates.get(domain.rootTemplate)!
+    const template = domain.templates.get(domain.rootTemplate!)!
     await h.admit(contractFor(domain, template, template.goal))
     const apparatus = { ...h.apparatus, domain }
     const run = await startAttempt(apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(apparatus))
@@ -195,7 +195,7 @@ describe('template input binding and sealed preparation', () => {
 
   it('rejects an artifact substituted for the template protected source before creating a revision or Run', async () => {
     const h = await setup()
-    const root = h.domain.templates.get(h.domain.rootTemplate)!
+    const root = h.domain.templates.get(h.domain.rootTemplate!)!
     const contract = contractFor(h.domain, root, root.goal)
     await h.admit({ ...contract, inputs: [{ name: root.inputs[0]!.name, source: { kind: 'artifact', taskId: 'producer' } }],
     })
@@ -204,7 +204,7 @@ describe('template input binding and sealed preparation', () => {
 
   it('rejects protected bytes different from the template reference before creating a revision or Run', async () => {
     const h = await setup()
-    const template = h.domain.templates.get(h.domain.rootTemplate)!
+    const template = h.domain.templates.get(h.domain.rootTemplate!)!
     const contract = contractFor(h.domain, template, template.goal)
     await h.admit({ ...contract, inputs: [{ name: template.inputs[0]!.name,
       source: { kind: 'protected', ref: 'source', digest: 'a'.repeat(64) } }],
@@ -238,7 +238,7 @@ describe('template input binding and sealed preparation', () => {
     const original = await loadDomain(domainDir, spawnProcess)
     const secondBytes = Buffer.from('a!')
     const inputs = [...original.inputs, { ref: 'second', sourcePath: 'second.txt', bytes: secondBytes, digest: sha256(secondBytes) }]
-    const declared = templateDeclaration(original.templates.get(original.rootTemplate)!)
+    const declared = templateDeclaration(original.templates.get(original.rootTemplate!)!)
     const template = await readTemplate(original.dir, { ...declared, id: 'two-checks',
       inputs: [...declared.inputs, { name: 'in/second.txt', source: { kind: 'protected', ref: 'second' } }],
       criteria: [...declared.criteria, { criterionId: 'second-count', statement: 'the report also equals the count of the second input' }],

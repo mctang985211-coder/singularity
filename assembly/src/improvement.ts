@@ -11,12 +11,15 @@ import { historyOf, waitForTask } from './read.ts'
 import { loadMethod } from './method.ts'
 import { sha256 } from './ids.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
-import { schedulerMessage } from './scheduler-message.ts'
+import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
+import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { SUBJECT_INPUT } from './review.ts'
 import { sealedBytes } from './sealed.ts'
-import { taskSessionsOf, projectedTokenUsage, billedTokens, executionEvents } from './evaluation-cost.ts'
+import { DEFAULT_WORKFLOW_LIMITS } from '../../src/task/budget.ts'
+import { taskSessionsOf, taskTokenUsage, taskExecutionWindow, completeUsage, billedTokens, executionEvents } from './evaluation-cost.ts'
 export const improvementTools = new Set(['read', 'glob', 'grep', 'write', 'edit',
   'singularity_read', 'singularity_memory', 'singularity_propose_method', 'singularity_submit'])
+export const improvementTaskId = (taskId: string, runId: string): string => `improve-${sha256(`${taskId}/${runId}`).slice(0, 24)}`
 export function assertImprovementOwner(apparatus: Apparatus, agentId: string): void {
   const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()].findLast(
     (t) => t.responsibility?.agentId === agentId,
@@ -28,13 +31,18 @@ export function assertImprovementOwner(apparatus: Apparatus, agentId: string): v
     refuse('illegal-transition', 'RSI requires a closed business root')
 }
 export async function explorationOf(apparatus: Apparatus, taskId: string, runId: string): Promise<Buffer> {
-  const history = await historyOf(apparatus, [], taskStateOf(apparatus, taskId).responsibility!.agentId)
-  const sessions: { sessionId: string; eventCount: number; digest: string; events: readonly SessionEvent[];
-    tokenUsage: ReturnType<typeof projectedTokenUsage> }[] = []
+  const task = taskStateOf(apparatus, taskId)
+  const history = await historyOf(apparatus, [], task.responsibility!.agentId)
+  const ownSession = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility!.agentId)!.sessionId
+  const sessions: { sessionId: string; from: number; complete: boolean; eventCount: number; digest: string; events: readonly SessionEvent[];
+    tokenUsage: ReturnType<typeof taskTokenUsage> }[] = []
   for (const sessionId of taskSessionsOf(apparatus, taskId)) {
     const handle = await apparatus.persistence.open(SessionId(sessionId), 'read')
     try {
-      const events = executionEvents((await handle.read()).events)
+      const native = (await handle.read()).events
+      const { events, from, complete } = sessionId === ownSession
+        ? taskExecutionWindow(native, apparatus.controlId, taskId, task.runs[runId]!.submission?.source)
+        : { events: executionEvents(native), from: 0, complete: true }
       assertContiguous(handle.id, events, 0)
       for (const task of history.tasks) for (const run of task.runs) {
         const source = run.source
@@ -43,17 +51,19 @@ export async function explorationOf(apparatus: Apparatus, taskId: string, runId:
           refuse('digest-mismatch', 'sealed exploration transcript changed')
       }
       const eventCount = events.length
-      sessions.push({ sessionId, eventCount, digest: digestOf({ sessionId, eventCount, events }), events,
-        tokenUsage: projectedTokenUsage(apparatus, handle, events) })
+      const tokenUsage = taskTokenUsage(apparatus, handle, events, from)
+      sessions.push({ sessionId, from, eventCount, digest: digestOf({ sessionId, eventCount, events }), events, tokenUsage,
+        complete: complete && Object.values(tokenUsage).every(value => value >= 0) && completeUsage(events.slice(from)) })
     } finally { await handle.close() }
   }
   const states = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
-  const usage = sessions.map(({ sessionId, eventCount, digest, tokenUsage }) => ({
-    sessionId, eventCount, digest, tokenUsage, tokens: billedTokens(tokenUsage), trajectoryRef: sessionId,
+  const usage = sessions.map(({ sessionId, from, complete, eventCount, digest, tokenUsage }) => ({
+    sessionId, from, complete, eventCount, digest, tokenUsage, tokens: billedTokens(tokenUsage), trajectoryRef: sessionId,
   }))
   const summary = {
     root: { taskId, runId },
-    usage: { source: 'token-meter/tokenUsage', tokens: usage.reduce((total, session) => total + session.tokens, 0) },
+    usage: { source: 'token-meter/tokenUsage', tokens: usage.reduce((total, session) => total + session.tokens, 0),
+      complete: sessions.every(session => session.complete) },
     methods: history.methods.map(({ reference }) => reference),
     tasks: history.tasks.map((task) => ({ taskId: task.taskId, contract: task.contract,
       sessionId: task.sessionId, decomposition: task.decomposition,
@@ -75,7 +85,8 @@ export async function explorationOf(apparatus: Apparatus, taskId: string, runId:
 export async function startImprovement(apparatus: Apparatus, seams: ChildSessionSeams, parent: Agent,
   taskId: string, runId: string, signal: AbortSignal,
 ): Promise<TaskState> {
-  const id = `improve-${sha256(`${taskId}/${runId}`).slice(0, 24)}`
+  signal.throwIfAborted()
+  const id = improvementTaskId(taskId, runId)
   const existing = apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, id)
   const previous = existing === undefined ? undefined : Object.values(existing.runs).at(-1)
   if (previous !== undefined && previous.status !== 'running') return existing!
@@ -93,21 +104,29 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
   const commands = apparatus.tasks.forAgent(agentId)
   if (existing === undefined)
     await commands.admit({ commandId: `admit:${id}`, taskId: id, contract: {
-        goal: 'Improve reusable domain methods from frozen exploration evidence using RRSI analysis, an attributable hypothesis, independent screening and isolated evaluation. Revise no-winner attempts until an approved winner is published, then report measured effects and limits truthfully.',
+        goal: 'Improve reusable domain methods from frozen exploration evidence using RRSI analysis, an attributable hypothesis, independent screening and isolated evaluation. Use a bounded search; report measured improvement, no improvement or insufficient evidence truthfully.',
         artifact: 'report.json',
         inputs: [{ name: 'subject.json', source: { kind: 'protected', ref: SUBJECT_INPUT, digest: input.digest } }],
         criteria: [
           {
             criterionId: 'improvement-reported',
             statement:
-              'The report cites actual trajectory evidence, explains the analysis and reusable mechanism, preserves evidenced success habits, accurately reports an independently evaluated and approved published winner, distinguishes attribution from sampling noise, and states whether transfer to unfamiliar tasks was tested.',
+              'The report cites actual trajectory evidence, explains the analysis and reusable mechanism, preserves evidenced success habits, accurately reports the actual search outcome, including no improvement or insufficient evidence, distinguishes attribution from sampling noise, and states whether transfer to unfamiliar tasks was tested.',
           },
         ],
       },
     })
   await commands.assign({ commandId: `assign:${id}`, taskId: id, agentId })
+  signal.throwIfAborted()
+  if (taskStateOf(apparatus, id).workflowLimits === undefined)
+    await apparatus.store.emit({ commandId: `workflow-limits:${id}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
+      subject: id, kind: 'workflow/limits-frozen', as: `agent:${agentId}`, payload: DEFAULT_WORKFLOW_LIMITS })
   const run = await startAttempt(apparatus, { agentId, sessionId: agentId, model: callerOf(parent).model }, id, id, method, { domain, purpose: 'improve', relatedTo: { taskId, runId } },
   )
+  signal.throwIfAborted()
+  if (taskStateOf(apparatus, id).search === undefined)
+    await apparatus.store.emit({ commandId: `search:${id}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
+      kind: 'rsi/search-opened', subject: id, as: `agent:${agentId}`, payload: { runId: run.runId, maxProposals: 6 } })
   const session = await openChildSession(seams, { agentId: id, cwd: workspaceOf(apparatus, id, run.runId), parent,
     preset: 'singularity-improve',
     model: run.bubble!.model, signal, message: schedulerMessage({ kind: 'singularity', purpose: 'dispatch', controlId: apparatus.controlId,
@@ -124,6 +143,7 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
   const stop = () => session.stop()
   signal.addEventListener('abort', stop, { once: true })
   try {
+    signal.throwIfAborted()
     await waitForTask(apparatus, id, session, signal)
     return taskStateOf(apparatus, id)
   } catch (error) {

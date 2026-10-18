@@ -15,12 +15,16 @@ import { RELEASE_PROTOCOL } from '../../src/release/protocol.ts'
 import { methodEnvironment, loadMethod, bindingsForContract, type MethodAssets, type MethodBindings } from './method.ts'
 import type { RevisionRef } from '../../src/task/protocol.ts'
 import { coordinationOf } from './coordination.ts'
+import { digestOf } from '../../src/protocol/envelope.ts'
+import { sealedBytes } from './sealed.ts'
+import { pairedReport } from '../../src/measure/paired.ts'
+import { searchView } from './rsi-history.ts'
 
 export interface ControlSnapshot {
-  readonly providerStopped: boolean
-  readonly formatVersion: 9
+  readonly formatVersion: 13
   readonly geometry: Readonly<Record<string, { x: number; y: number; width: number; height: number }>>
   readonly controlId: string
+  readonly suiteDigest: string | null
   readonly cutoff: number
   readonly tasks: readonly {
     readonly taskId: string
@@ -32,6 +36,10 @@ export interface ControlSnapshot {
     readonly purpose: string
     readonly closure: TaskState['closure'] | null
     readonly rsi: TaskState['rsi'] | null
+    readonly learning: boolean | null
+    readonly search: ReturnType<typeof searchView>
+    readonly transfer: TaskState['transfer'] | null
+    readonly transferReport?: unknown
     readonly requests: NonNullable<TaskState['rounds']>
     readonly bindings: MethodBindings | null
     readonly coordination: ReturnType<typeof coordinationOf>
@@ -70,7 +78,9 @@ export interface ControlSnapshot {
     readonly submissions: RoundState['submissions']
     readonly decision: RoundState['decision'] | null
     readonly evaluations: readonly { readonly evaluationId: string
-      readonly report: ReturnType<typeof projectEvaluation> }[]
+      readonly report: ReturnType<typeof projectEvaluation>
+      readonly state: EvaluationState
+      readonly paired: ReturnType<typeof pairedReport> | null }[]
   }[]
   readonly releases: readonly { readonly seq: number
     readonly kind: string
@@ -80,6 +90,7 @@ export interface ControlSnapshot {
     readonly taskId: string
     readonly runId: string
     readonly method: string
+    readonly mode: import('../../src/task/run.ts').ConsumptionMode
     readonly source: string
     readonly revision: RevisionRef }[]
   readonly budget: { readonly rootSolves: number; readonly childRuns: number; readonly terminalRuns: number }
@@ -107,6 +118,10 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
     tasks.push({
       closure: state.closure ?? null,
       rsi: state.rsi ?? null,
+      learning: state.learning ?? null,
+      search: searchView(apparatus, state, committed),
+      transfer: state.transfer ?? null,
+      ...(state.transfer?.report === undefined ? {} : { transferReport: JSON.parse((await sealedBytes(apparatus, state.transfer.report)).toString('utf8')) as unknown }),
       requests: state.rounds ?? [],
       taskId, goal: state.contract.goal, phase: view.phase,
       coordination: coordinationOf(apparatus, taskId, committed),
@@ -155,16 +170,17 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
   const evaluations = committed.statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION)
   const rounds = [...committed.statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION).values()].map((round) => ({
     roundId: round.roundId, plan: round.plan, submissions: round.submissions, decision: round.decision ?? null,
-    evaluations: round.submissions.flatMap((submission) => {
-      const state = evaluations.get(submission.evaluationId)
-      return state === undefined ? [] : [{ evaluationId: submission.evaluationId, report: projectEvaluation(state) }]
+    evaluations: [`${round.roundId}:bootstrap:evaluation`, ...round.submissions.map(s => s.evaluationId)].flatMap(evaluationId => {
+      const state = evaluations.get(evaluationId), baseline = evaluations.get(`${round.roundId}:bootstrap:evaluation`)
+      return state === undefined ? [] : [{ evaluationId, state, report: projectEvaluation(state),
+        paired: baseline?.matrix && state.matrix && state !== baseline ? pairedReport(baseline, state) : null }]
     }),
   }))
   const releases = entries.filter((entry) => entry.protocol === RELEASE_PROTOCOL || entry.kind === 'pointer/switched')
     .map((entry) => ({ seq: entry.seq, kind: entry.kind, environmentId: entry.subject, payload: entry.payload }))
   const consumption = entries.filter((entry) => entry.kind === 'method/consumed')
     .map((entry) => {
-    const use = entry.payload as { runId: string; method: string; source: string }
+    const use = entry.payload as { runId: string; method: string; source: string; mode: import('../../src/task/run.ts').ConsumptionMode }
     const execution = committed.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, entry.subject)!.runs[use.runId]!
       return { seq: entry.seq, taskId: entry.subject, ...use, revision: execution.revision }
   })
@@ -187,7 +203,8 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
     rows.set(column, row + 1)
     geometry[task] = { x: column * 330, y: row * 145, width: 260, height: 105 }
   }
-  return { formatVersion: 9, providerStopped: false,
+  return { formatVersion: 13,
+    suiteDigest: apparatus.domain.suite === undefined ? null : digestOf(apparatus.domain.suite),
     reviews, geometry, controlId: apparatus.controlId, cutoff: entries.length, tasks: ordered, plans, methods, rounds, releases, consumption, budget,
   }
 }

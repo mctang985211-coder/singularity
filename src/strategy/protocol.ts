@@ -13,14 +13,14 @@ import { count, openedKind, requirePlan, type RoundPlan } from './plan.ts'
 export type { RoundPlan } from './plan.ts'
 
 export const STRATEGY_PROTOCOL = 'strategy'
-export const STRATEGY_VERSION = 7
+export const STRATEGY_VERSION = 9
 
 /** The trusted role that freezes a round, receives its candidates and closes it. */
 export const STRATEGY_ROLE = 'strategy'
 
 /** The structural asset classes a candidate may change. A value here has a real edit path. */
-export type EditAsset = 'skill' | 'tool' | 'template'
-const EDIT_ASSETS: readonly string[] = ['skill', 'tool', 'template']
+export type EditAsset = 'workflow' | 'skill' | 'tool' | 'template'
+const EDIT_ASSETS: readonly string[] = ['workflow', 'skill', 'tool', 'template']
 
 /** One structural change, by the identity of what it touches. */
 export interface StructuralEdit {

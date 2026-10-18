@@ -1,0 +1,140 @@
+diff --git a/packages/core/session/README.i18n.yaml b/packages/core/session/README.i18n.yaml
+index d2ab139d2c..f05fcf460d 100644
+--- a/packages/core/session/README.i18n.yaml
++++ b/packages/core/session/README.i18n.yaml
+@@ -21,8 +21,8 @@
+   en: f80dab583fa3939d
+   zh: 5a9a79ebcef86119
+ /deepseek-ai-dsh-session/use-this-package/append-and-derive:
+-  en: aa5f1951ecf3ac0c
+-  zh: 62a599ace8f2bf15
++  en: 4f85c1bc8b0985e9
++  zh: 1dbca59396a674c2
+ /deepseek-ai-dsh-session/use-this-package/read-the-log:
+   en: 2b29cfeac7a2baa8
+   zh: b535b04dcbc29d3d
+diff --git a/packages/core/session/README.md b/packages/core/session/README.md
+index 4a73a20c95..ba0296ee18 100644
+--- a/packages/core/session/README.md
++++ b/packages/core/session/README.md
+@@ -41,6 +41,8 @@ ctx.sessions.list()              // every live session, in creation order
+ 
+ `session.append(type, data, opts?)` commits one typed event — it snapshots and freezes the payload, validates it as lossless JSON, and notifies observers. `session.deriveMessages()` projects the log into the `Message[]` the model sees, incrementally and cached:
+ 
++External plugins may pass `{ ignorable: true }` when appending a log-only event that is safe for other Harness readers to omit. The marker survives persistence and reload; required events omit it. Log-only options cannot carry surface placement or source-event references.
++
+ ```text
+ session.append('user/message', { role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } },
+   { surfaceOp: 'append' })
+diff --git a/packages/core/session/README.zh.md b/packages/core/session/README.zh.md
+index 7fb334cfaa..627fd7b9f6 100644
+--- a/packages/core/session/README.zh.md
++++ b/packages/core/session/README.zh.md
+@@ -41,6 +41,8 @@ ctx.sessions.list()              // every live session, in creation order
+ 
+ `session.append(type, data, opts?)` 提交一个类型化事件——它先快照并冻结载荷、校验其为无损 JSON，再通知观察者。`session.deriveMessages()` 把日志投影为模型看到的 `Message[]`，采用增量且有缓存的方式：
+ 
++外部插件追加仅日志事件时，如果其他 Harness 读取器可以安全地忽略该事件，可传入 `{ ignorable: true }`。此标记在持久化和重新加载后保留；要求读取器理解的事件省略此标记。仅日志选项不能携带 surface 放置或源事件引用。
++
+ ```text
+ session.append('user/message', { role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } },
+   { surfaceOp: 'append' })
+diff --git a/packages/core/session/src/index.ts b/packages/core/session/src/index.ts
+index b0cfa0c19b..462f263029 100644
+--- a/packages/core/session/src/index.ts
++++ b/packages/core/session/src/index.ts
+@@ -15,7 +15,7 @@ import type { Scoped } from '@deepseek-ai/dsh-scope'
+ import type { Message } from '@deepseek-ai/dsh-llm'
+ import { SESSION_FORMAT_VERSION, SessionLogOffset, SessionSeq } from './types.ts'
+ import type { TypertLookup } from '@deepseek-ai/dsh-typert-protocol'
+-import type { CreateSessionOptions, EpochHeader, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SessionId, SessionSeedEventState, SurfaceIntent, SurfaceEventType } from './types.ts'
++import type { CreateSessionOptions, EpochHeader, LogOnlyIntent, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SessionId, SessionSeedEventState, SurfaceIntent, SurfaceEventType } from './types.ts'
+ import { SurfaceManager, validateSessionEventData, validateSurfaceMetadata } from './surface.ts'
+ import type { SessionSurface, SessionMessageProjection } from './surface.ts'
+ import { foldRequestHeader } from './request-header.ts'
+@@ -699,7 +699,9 @@ export class Session {
+    *   declare how it joins the surface, the sole source of derived model
+    *   history) and
+    *   rejected by the compiler for non-surface types like `turn/start` or
+-   *   `assistant/attempt`. Assistant messages embed their exact provider
++   *   `assistant/attempt`. Log-only plugin events may instead pass
++   *   `{ ignorable: true }` so readers without the plugin retain the record.
++   *   Assistant messages embed their exact provider
+    *   stream and cannot cite top-level source events.
+    * @returns the logged event — its assigned `seq`/`time` plus the SNAPSHOT of
+    *   `data` that entered the log, so reading `event.data` back sees the logged
+@@ -722,10 +724,13 @@ export class Session {
+   append<T extends SessionEventType>(
+     type: T,
+     data: SessionEventMap[T],
+-    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent<T>] : []
++    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent<T>] : [opts?: LogOnlyIntent]
+   ): SessionEvent<T> {
+-    const surfaceOpts: SurfaceIntent | undefined = opts[0]
++    const surfaceOpts: SurfaceIntent | LogOnlyIntent | undefined = opts[0]
++    const ignorable = surfaceOpts !== undefined && 'ignorable' in surfaceOpts ? surfaceOpts.ignorable : undefined
++    if (ignorable !== undefined && ignorable !== true) throw new Error('session append ignorable marker must be true')
+     const surfaceMetadata = {
++      ...ignorable === undefined ? {} : { ignorable },
+       ...surfaceOpts?.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: surfaceOpts.sourceEventSeqs },
+       ...surfaceOpts?.surfaceOp === undefined ? {} : { surfaceOp: surfaceOpts.surfaceOp },
+     }
+diff --git a/packages/core/session/src/types.ts b/packages/core/session/src/types.ts
+index 593c86d52a..a2f9f823ca 100644
+--- a/packages/core/session/src/types.ts
++++ b/packages/core/session/src/types.ts
+@@ -521,3 +521,10 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
+     'session/not-found': { readonly sessionId: SessionId }
+   }
+ }
++
++/** Explicit omission safety for a plugin-owned log-only event. */
++export interface LogOnlyIntent {
++  readonly ignorable: true
++  readonly surfaceOp?: never
++  readonly sourceEventSeqs?: never
++}
+diff --git a/packages/core/session/tests/ignorable-append.spec.ts b/packages/core/session/tests/ignorable-append.spec.ts
+new file mode 100644
+index 0000000000..3faa1eb377
+--- /dev/null
++++ b/packages/core/session/tests/ignorable-append.spec.ts
+@@ -0,0 +1,38 @@
++import { Context } from '@deepseek-ai/cordis'
++import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
++import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence'
++import { expect, it, vi } from 'vitest'
++
++declare module '@deepseek-ai/dsh-session/types' {
++  interface SessionEventMap {
++    'external/metering-test': { tokens: number }
++  }
++}
++
++it('appends an explicitly ignorable plugin record that persists and restores without changing messages', async () => {
++  const ctx = new Context()
++  await ctx.plugin(SessionStore)
++  try {
++    const session = ctx.sessions.create(SessionId('external-metering'))
++    const observed = vi.fn()
++    ctx.on('session/event', observed)
++    const event = session.append('external/metering-test', { tokens: 13 }, { ignorable: true })
++    expect(event.ignorable).toBe(true)
++    expect(observed).toHaveBeenCalledWith(session, event)
++    const events = session.snapshotEvents()
++    expect(() => validateStoredEvents(session.header, [...events])).not.toThrow()
++    const restored = Session.create(session.id, events)
++    expect(restored.eventAt(event.seq)).toEqual(event)
++    expect(restored.deriveMessages()).toEqual([])
++    expect(restored.surface.nodes).toEqual([])
++    const required = { ...event, ignorable: undefined }
++    expect(() => validateStoredEvents(session.header, [required])).toThrow('not marked ignorable')
++  } finally { await ctx.fiber.dispose() }
++})
++
++it('rejects a malformed omission marker before publishing the log-only record', () => {
++  const session = Session.create(SessionId('invalid-marker'))
++  expect(() => session.append('external/metering-test', { tokens: 1 }, { ignorable: false } as never))
++    .toThrow('ignorable marker must be true')
++  expect(session.seq).toBe(0)
++})

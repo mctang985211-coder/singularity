@@ -1,23 +1,3 @@
-/**
- * The decomposition tree: readiness, named blockers, and how sub-tasks support the parent.
- *
- * This is a **whole-log** read, which the task protocol did not have before. It exists because the
- * questions it answers are cross-subject by nature: whether a sub-task exists, whether what it
- * depends on has verified, and whether the parent's own Run accepted its criteria.
- * Those cannot be decided by a per-subject reducer, and copying the answers onto the parent subject
- * would record the same fact twice.
- *
- * Two rules carry the weight:
- *
- * 1. **Only `verified` satisfies a dependency.** Other outcomes leave dependents waiting or blocked.
- * 2. **A parent is independently accepted.** Its own verified Run decides its criteria.
- *    Child support describes contribution; it cannot replace the parent's judgement.
- *
- * The projection is for reading and diagnosis. Enforcement of the same conditions happens at the
- * serial command boundary, which is the only place a check can stop work from starting.
- *
- * @module singularity-core/task/tree
- */
 
 import { refuse } from '../protocol/refusal.ts'
 import type { AcceptanceCriterion } from './contract.ts'
@@ -88,7 +68,7 @@ export const childSettled = (child: TreeChildView): boolean =>
   child.status === 'verified' || child.status === 'stopped' || child.status === 'blocked' || child.status === 'cancelled'
 
 /** One hold, shared by the command boundary and native execution admission. */
-export function taskWaitingReason(tasks: ReadonlyMap<string, TaskState>, taskId: string): string | undefined {
+export function taskWaitingReason(tasks: ReadonlyMap<string, TaskState>, taskId: string, action: 'plan' | 'execute' = 'execute'): string | undefined {
   const task = tasks.get(taskId)!
   const stopped = stoppedExplorationOf(tasks, taskId)
   if (stopped !== undefined) return `exploration ${stopped.taskId} was stopped by parent ${stopped.parentTaskId}: ${stopped.reason}`
@@ -96,7 +76,7 @@ export function taskWaitingReason(tasks: ReadonlyMap<string, TaskState>, taskId:
   const questions = run === undefined ? [] : openQuestions(task, run.runId).filter((q) => q.blocking)
   if (questions.length)
     return `waiting for parent answers: ${questions.map((q) => q.questionId).join(', ')}; read or coordinate, then end the turn`
-  if (task.decomposition !== undefined) {
+  if (action === 'execute' && task.decomposition !== undefined) {
     const children = projectOne(task, tasks).children
     if (!children.every(childSettled))
       return 'delegated responsibilities are pending; read evidence, answer children, or stop unselected exploration, then end the turn'
@@ -280,4 +260,25 @@ export function stoppedExplorationOf(tasks: ReadonlyMap<string, TaskState>, task
     if (stopped !== undefined) return { parentTaskId: parent.taskId, ...stopped }
     current = parent.taskId
   }
+}
+
+/** Read-only relationships for one committed cut; never persisted as another graph. */
+export function taskRelations(tasks: ReadonlyMap<string, TaskState>) {
+  const parents = new Map<string, string>()
+  const consumers = new Map<string, string[]>()
+  for (const task of tasks.values()) {
+    for (const child of task.decomposition?.children ?? []) parents.set(child.taskId, task.taskId)
+    for (const input of task.contract?.inputs ?? []) if (input.source.kind === 'artifact') {
+      const ids = consumers.get(input.source.taskId) ?? []
+      if (!ids.includes(task.taskId)) ids.push(task.taskId)
+      consumers.set(input.source.taskId, ids)
+    }
+  }
+  const ancestors = (id: string): string[] => {
+    const path: string[] = []
+    for (let parent = parents.get(id); parent !== undefined; parent = parents.get(parent)) path.push(parent)
+    return path
+  }
+  const rootOf = (id: string): string => ancestors(id).at(-1) ?? id
+  return { parents, consumers, ancestors, rootOf }
 }
