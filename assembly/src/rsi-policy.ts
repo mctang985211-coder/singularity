@@ -7,7 +7,7 @@ export const rsiDesignReference = {
 export const rsiAnalysisRules = [
   'Separate recurring failure modes, missing capabilities and successful habits. Attach native event references to every finding.',
   'Merge findings with the same cause, separate distinct causes, and prioritize the observed impact. Preserve stable names across RSI rounds.',
-  'Describe mechanisms independently of task names, files, constants and answers. Keep concrete observations only in evidence references.',
+  'Describe reusable mechanisms, not task identities or captured answers. Public domain interfaces, constants, tool paths and parameterized procedures are allowed with sources; keep task-instance details in evidence references.',
   'Distinguish observation from a hypothesis. Read targeted evidence to resolve contradictions; an inherited summary is not proof.',
   'Record successful behavior that a change must preserve. The analysis describes the problem; the edit separately proposes a solution.',
 ] as const
@@ -18,7 +18,7 @@ export const rsiProposalRules = [
   'Explain why an instruction is sufficient or why a stronger implementation is needed. Choose the lever from evidence, without a preference for deletion.',
   'Provide three counterfactuals: how the observed failure would change, why successful behavior survives, and how the mechanism applies to unfamiliar tasks.',
   'Keep task identifiers, captured contents, benchmark answers and per-task recipes outside the method. Every execution must solve its own fresh contract and inputs.',
-  'Repair a rejected proposal using its specific objections. A measured no-winner result may end the search honestly; never claim an improvement without evidence.',
+  'Correct static format refusals using their named fields before admission. After admission every invalid, rejected or failed candidate consumes a frozen slot; any revised mechanism is a new candidate within the remaining budget. Never claim an improvement without evidence; a no-winner or insufficient-evidence result may end the search honestly.',
 ] as const
 
 /** Every criterion gets its own supported finding; one failure rejects the proposal before execution. */
@@ -32,4 +32,4 @@ export const rsiProposalCriteria = [
 ] as const
 
 export const rsiCriticRequirements = rsiProposalCriteria.map(criterion => criterion.statement).join('\n') +
-  '\nJudge the actual changed content and its evidence. Existing task-specific content is not permission to copy that recipe into a new path. Claims of transfer are hypotheses until tested. Return concrete objections for repair; do not solve or benchmark the business task.'
+  '\nJudge the actual changed content and its evidence. Existing task-specific content is not permission to copy that recipe into a new path. Claims of transfer are hypotheses until tested. Return concrete supported objections; any revision is a new candidate within the remaining budget. Do not solve or benchmark the business task.'

@@ -248,13 +248,14 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
           evidenceInputs: reviewInputsOf(review, data).map(({ name, source }) => ({ name, source })),
           output: {
             path: 'review.json',
-            shape: {
+            instruction: 'Fill this template: preserve subjectDigest and criterionIds, replace details/evidence with actual findings, and choose one verdict per criterion: pass, fail, partial or unknown. No extra fields.',
+            template: {
               subjectDigest,
               findings: review.criteria.map((c) => ({
                 criterionId: c.criterionId,
-                verdict: 'pass | fail | partial | unknown',
-                detail: 'Exact finding and supporting evidence',
-                evidence: ['file or task reference'],
+                verdict: 'unknown',
+                detail: '<supported finding or exact missing evidence>',
+                evidence: ['<actual subject field, native page or file reference>'],
               })),
             },
           },

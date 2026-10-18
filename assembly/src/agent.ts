@@ -30,13 +30,12 @@ Delegate integration only when needed. Submit a verified direct child's sealed a
 export const reviewGuidance = `Read the complete frozen subject with singularity_read(kind=subject), following next pages. Judge every criterion; guidance, handoffs and summaries cannot add acceptance requirements. Protected non-pass checks cannot become pass.
 For acceptance, inspect the artifact, exact input producers and integration. Use bounded evidence Tasks to resolve judgment gaps, without repairing the subject or repeating established work. Refutation can satisfy an investigation, not a required implementation.
 For proposal review, inspect the changed method, cited evidence and mechanism; plausibility is not measured transfer. For publication, judge frozen measurements and release criteria. These assignments have no submitted-artifact, execution or delegation: use the subject and readable evidence.
-Write review.json with the supplied subjectDigest and one supported finding per criterion, then singularity_submit. An honest fail or unknown judgment completes the review. Stop when the assigned questions are answered.`
-const improvementGuidance = `Improve reusable methods from frozen evidence. Cross-round history is RSI-only; never inject past answers into business or acceptance sessions.
-Read the complete singularity_read(kind=subject) and the pinned singularity_read(kind=method) for analysis and proposal requirements. Inspect selected native events and outcomes on demand; summaries are hypotheses, not proof. Do not search host files or ingest entire histories.
-Analyze failure_modes, capability_gaps and success_habits. Choose one independent mechanism with an observable trigger, predicted affected Tasks and stable evolve case/family IDs, behavior to preserve and a counterexample that would refute it. Explain transfer to unfamiliar tasks. Shorter prompts, fewer steps and lower tokens alone do not demonstrate learning.
-Read nextRound and feedback from the current method before drafting. Write one to three proposal files with analysis, edit and method; call singularity_propose_method({paths}) once for that batch. All candidates derive from the same search head. Invalid and rejected slots consume the frozen limit; there are no free repairs. The host checks, evaluates and decides publication. Pending means end the turn; resume from the committed round outcome. Do not poll or execute business work. Use objections and measured outcomes to revise the mechanism.
-Respect the host-frozen search limit. No improvement and insufficient evidence are valid terminal outcomes; submit report.json when no proposal or evaluation is pending. Cite measured effects, preserved behavior, attribution limits and untested transfer. Repeated success on one task is not domain generalization.
-Compare native usage for the business root, descendants and independent acceptance through submission. Keep all RSI analysis, proposals, screening, orchestration and publication usage separate.`
+Fill the dispatch output.template: keep subjectDigest and every criterionId, choose pass/fail/partial/unknown, and support each finding. Write review.json, then singularity_submit. An honest fail or unknown judgment completes the review. Stop when the assigned questions are answered.`
+const improvementGuidance = `Improve reusable workflow organization, skills and tools from frozen evidence. Do not solve or benchmark business tasks.
+At start/resume/compaction, read singularity_read({kind:"method"}) without ref for the current search head, nextRound, feedback, proposal.template and reportTemplate. Read kind=subject through complete=true; inspect selected trajectory events on demand. Summaries are hypotheses; use singularity_read for evidence, not host-file searches.
+Analyze observed failures, gaps and success habits; unobserved lists stay empty. Choose one evidenced mechanism per candidate: trigger, affected Tasks/evolve IDs, correction, preservation, transfer and a refuting observation. Public domain knowledge with sources is allowed; keep task answers, identity branches, replayed patches and held-out data out of methods and business memory.
+Fill proposal.template with real evidence and a changed complete method; retain unchanged assets and declare the exact diff. Follow nextRound's remainingSlots/reservedSlot/pruneSlot. Write 1–3 proposal JSON files in your workspace and call singularity_propose_method({paths}). Static refusals allow correction; admitted failures consume slots. Pending: end the turn, do not poll; resume from host feedback.
+With no pending batch/evaluation, fill reportTemplate with known facts, missing measurements as null and attribution limits. Submit only report.json via singularity_submit({path:"report.json"}). This closes search; with a suite the host then runs private validation/publication after sealing. Do not wait for or predict results caused by submission. No improvement/insufficient evidence is valid; fewer nodes/tokens alone do not prove improvement.`
 
 export function guidanceFor(purpose: string | undefined): string {
   return (purpose === 'root' ? rootGuidance : purpose === 'review' ? reviewGuidance : purpose === 'improve' ? improvementGuidance : taskGuidance) + '\nUse singularity_memory on demand for prepared background; summaries are working notes, not acceptance evidence.'
@@ -109,10 +108,11 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
     defineTool({
       name: 'singularity_read',
       description:
-        'summary lists related Tasks and sessions. workflow pages relationship metadata in your root. task reads the contract and state. method reads pinned assets and evaluation rules. template lists declarations or, with ref=id, a prefilled contract. artifact ref=taskId reads sealed text (from/count bytes, default 16384, max 32768). trajectory ref=sessionId lists event metadata (from/count events, default 20, max 100). Add eventSeq to read that exact event as JSON text (from/count UTF-8 bytes, default 4096, max 8192); follow next until complete. Large event bodies are never in the index. subject reads your frozen review/RSI assignment as UTF-8 byte pages (default 4096, max 8192); follow next until complete. Other pages use from/count entries (default 20, max 100).' +
-        (config.role === 'improve' ? ' History: roots lists closed rounds; sessions/usage/steps with rootId query those separately. Add rootId to trajectory for a historical session.' : ''),
+        'summary lists related Tasks and sessions; task reads contract/state. method reads method guidance and evaluation rules. template lists declarations or, with ref=id, a prefilled contract. artifact ref=taskId reads sealed text (from/count bytes, default 16384, max 32768). trajectory ref=sessionId lists event metadata (from/count events, default 20, max 100); copy its seq into eventSeq to read/cite that event (from/count UTF-8 bytes, default 4096, max 8192). subject pages the frozen review/RSI assignment (UTF-8 bytes, default 4096, max 8192). Follow next offsets until complete=true for text pages; an event index is not event evidence. Other pages use from/count entries (default 20, max 100).' +
+        (config.role === 'root' || config.role === 'task' ? ' workflow pages relationship metadata in your root.' : '') +
+        (config.role === 'improve' ? ' method without ref returns the current search head, proposal.template with its complete method, reportTemplate, nextRound, feedback and evolve cases; re-read after each round. round ref=roundId reads committed measurements. roots lists closed roots; sessions/usage/steps with rootId query historical evidence. Add rootId to historical trajectory reads and citations.' : ''),
       parameters: {
-        kind: { type: 'string', enum: config.role === 'task' || config.role === 'root'
+        kind: { type: 'string', required: true, enum: config.role === 'task' || config.role === 'root'
           ? ['summary', 'workflow', 'task', 'artifact', 'template', 'method', 'trajectory'] as const : config.role === 'improve'
             ? ['summary', 'task', 'artifact', 'template', 'method', 'round', 'subject', 'trajectory', 'roots', 'sessions', 'usage', 'steps'] as const
             : ['summary', 'task', 'artifact', 'template', 'method', 'round', 'subject', 'trajectory'] as const },
@@ -138,8 +138,9 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
     }),
     defineTool({
       name: 'singularity_submit',
-      description:
-        'Seal the final artifact already written in this workspace and submit it for independent acceptance. Reviewers submit review.json.',
+      description: config.role === 'improve'
+        ? 'Submit only the final report.json already written in your workspace using kind=method reportTemplate. No batch/evaluation may be pending. This closes search; suite private validation/publication follows sealing. Report only facts known before submission. Proposal files go to singularity_propose_method.'
+        : 'Seal the final artifact already written in this workspace for independent acceptance. Reviewers fill dispatch output.template and submit review.json.',
       parameters: { path: { type: 'string', required: true } }, output,
       execute: async (args, exec) => JSON.stringify(await attempt(() => {
             const surface = ctx.singularity.forCall(exec)
@@ -235,7 +236,7 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
   ]
   const improve = [defineTool({
     name: 'singularity_propose_method',
-    description: 'Submit one batch of one to three proposal JSON files (paths) with analysis, edit and method (format and frozen directives from kind=method). The runtime validates evidence and declared changes, then applies the upstream critic before evaluation. Rejected returns reasons to repair. Pending returns a roundId: end the turn and read that round when resumed. Evaluation, selection and approved publication are automatic; RSI usage never enters cost.',
+    description: 'Submit 1–3 distinct workspace proposal JSON paths within nextRound.remainingSlots. Fill proposal.template from kind=method without ref, using real evidence and the complete changed method. Static refusal names file/field and consumes no slots: fix and resubmit. Admitted candidates consume slots even if invalid/rejected/failed. The host screens and evaluates; status=pending means end the turn until the host resumes you. Only report.json uses singularity_submit.',
     parameters: { paths: { type: 'array', required: true, items: { type: 'string' } } }, output,
     execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).proposeMethod(args))),
   })]

@@ -1,5 +1,5 @@
 import { searchHistory, searchFeedback } from './rsi-history.ts'
-import { rsiProposalContract } from './rsi-proposal.ts'
+import { rsiProposalContract, rsiProposalTemplate, RSI_REPORT_FORMAT, RSI_REPORT_TEMPLATE } from './rsi-proposal.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { setTimeout } from 'node:timers/promises'
 import type { ChildSession } from '../../src/runtime/child-session.ts'
@@ -142,10 +142,13 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
   if (input.kind === 'method') {
     const { assets } = await loadMethod(apparatus, reference)
     const source = run?.purpose === 'improve' ? tasks.get(run.relatedTo!.taskId)!.runs[run.relatedTo!.runId]!.bubble! : undefined
-    return { reference, assets, format: METHOD_FORMAT, evaluation,
+    // The authoring template owns the one complete asset copy; do not double its context.
+    const authoring = run?.purpose === 'improve'
+    return { reference, ...(!authoring ? { assets } : {}), format: METHOD_FORMAT, evaluation,
       ...(source === undefined ? {} : { rootExecutionContext: { model: source.model, tools: source.tools, conditions: source.conditions, inputs: source.inputs } }),
       rootCapabilities: 'Root coordinates, reads evidence, delegates and submits a verified child artifact. Root cannot execute bash, write/edit files, invoke Skills or method Tools. Implementation and integration belong to children. Candidate procedures must respect these roles.',
-      proposal: rsiProposalContract,
+      proposal: { ...rsiProposalContract, ...(authoring ? { template: rsiProposalTemplate(assets) } : {}) },
+      ...(authoring ? { reportFormat: RSI_REPORT_FORMAT, reportTemplate: structuredClone(RSI_REPORT_TEMPLATE) } : {}),
       ...(search === undefined ? {} : { nextRound: search.directives, feedback: await searchFeedback(apparatus, task!),
         cases: apparatus.domain.suite?.cases.filter(c => c.split === 'evolve').map(c => ({ caseId: c.caseId, familyId: c.familyId, trials: c.trials, weight: c.weight })) ?? [] }),
       costAccounting: 'Compare native token-meter/tokenUsage for one fresh business root, its delegated work and independent acceptance through submission. RSI analysis, proposal, evaluation orchestration and publication review usage never enters any comparison. Candidate cost must be at most 125% of baseline; no quality gain permits no cost increase.',

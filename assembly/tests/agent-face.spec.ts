@@ -146,6 +146,15 @@ describe('small role interfaces', () => {
       { kind: 'template', ref: 'integrate', producers: { finding: 'finding-key', baseline: 'baseline-task' } },
     ])
   })
+  it('refuses a trajectory request missing kind before it can silently read a summary', async () => {
+    let calls = 0
+    const s = scope({ history: async () => { calls++; return {} } })
+    apply(s.ctx, { role: 'improve' })
+    const read = s.tools.find(tool => tool.name === 'singularity_read')!
+    await expect(read.execute({ ref: 'business-session', eventSeq: 7 }, execFor(agentFor('a', 'a'), 'read')))
+      .rejects.toBeInstanceOf(ToolArgsError)
+    expect(calls).toBe(0)
+  })
   it('exposes one optional memory directory and reference read to every role', async () => {
     for (const role of ['root', 'task', 'review', 'improve'] as const) {
       const calls: unknown[] = []

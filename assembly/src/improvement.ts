@@ -111,7 +111,7 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
           {
             criterionId: 'improvement-reported',
             statement:
-              'The report cites actual trajectory evidence, explains the analysis and reusable mechanism, preserves evidenced success habits, accurately reports the actual search outcome, including no improvement or insufficient evidence, distinguishes attribution from sampling noise, and states whether transfer to unfamiliar tasks was tested.',
+              'The JSON report cites actual trajectory evidence, explains the analysis and reusable mechanism, preserves evidenced success habits, and accurately reports search facts known before submission, including no improvement or insufficient evidence. It distinguishes attribution from sampling noise and marks untested transfer honestly. Private validation/publication triggered after sealing this report is reported by the host, not predicted by the author.',
           },
         ],
       },
@@ -136,7 +136,7 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
         method,
         trace: 'subject.json',
         evidenceReading:
-          'Read the frozen subject with singularity_read(kind=subject) byte pages. It holds an exploration summary and native token-meter/tokenUsage totals. Trajectory reads list event metadata; select eventSeq and page its bytes. Read the pinned method before editing.',
+          'Read kind=method without ref for the current search head, proposal.template, reportTemplate and nextRound; the dispatch method is only the initial reference. Read kind=subject through complete=true for frozen evidence and native usage. trajectory ref=sessionId lists seq; read/cite it as eventSeq. Proposals use singularity_propose_method; only report.json uses singularity_submit.',
       }),
     ),
   })

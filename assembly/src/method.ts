@@ -48,7 +48,8 @@ export interface MethodAssets {
   readonly skills: readonly MethodSkill[]
   readonly tools: readonly MethodTool[]
 }
-export const METHOD_FORMAT = `Candidate JSON: {workflowGuidance:string, templates:Template[], skills:Skill[], tools:Tool[]}.
+export const METHOD_FORMAT = `Complete Method JSON: {workflowGuidance:string, templates:Template[], skills:Skill[], tools:Tool[]}.
+All four fields are required. RSI proposal.template.method contains the complete current Method: edit it and retain every unchanged asset. This is a complete replacement, not a partial patch. Empty arrays explicitly remove their assets.
 workflowGuidance is explicit reusable workflow advice, empty or at most 8192 UTF-8 bytes. Templates are optional patterns; an empty array is legal. Task contracts own goals, inputs and acceptance.
 Skill: {name:kebab-case, description:string, capabilities:string[], requiredTools:string[], content:string}.
 Tool: {name:kebab-case, source:string, verifier?:{samples:{name:string, artifactContent:string, inputContent:string, expected:'pass'|'fail'}[]}}.
@@ -102,52 +103,60 @@ const names = (value: unknown, where: string): string[] => list(value, where).ma
   if (typeof entry !== 'string' || entry.length === 0) refuse('malformed-declaration', `${where} must contain names`)
   return entry
 })
+/** Check the replacement envelope before a missing collection can look like asset deletion. */
+export function assertMethodShape(raw: unknown): asserts raw is MethodAssets {
+  const content = record(raw, 'method')
+  assertClosedKeys(content, ['workflowGuidance', 'templates', 'skills', 'tools'], 'method', 'malformed-declaration')
+  const missing = ['workflowGuidance', 'templates', 'skills', 'tools'].filter(key => !Object.hasOwn(content, key))
+  if (missing.length) refuse('malformed-declaration', `Missing ${missing.map(key => `method.${key}`).join(', ')}. method must be a complete replacement; copy kind=method proposal.template.method and retain unchanged fields`)
+  if (typeof content['workflowGuidance'] !== 'string' || Buffer.byteLength(content['workflowGuidance']) > 8192)
+    refuse('malformed-declaration', 'method.workflowGuidance must be an explicit string of at most 8192 UTF-8 bytes')
+  for (const field of ['templates', 'skills', 'tools']) list(content[field], `method.${field}`)
+}
 export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: string,
 ): Promise<{ assets: MethodAssets; domain: Domain }> {
-  const content = record(raw, 'Revision')
-  assertClosedKeys(content, ['workflowGuidance', 'templates', 'skills', 'tools'], 'Revision', 'malformed-declaration')
-  const skills = list(content['skills'], 'Revision.skills').map((raw, index) => {
-    const skill = record(raw, `skills[${index}]`)
-    assertClosedKeys(skill, ['name', 'description', 'capabilities', 'requiredTools', 'content'], 'Skill', 'malformed-declaration',
+  assertMethodShape(raw)
+  const content = raw
+  const skills = content.skills.map((raw, index) => {
+    const path = `method.skills[${index}]`, skill = record(raw, path)
+    assertClosedKeys(skill, ['name', 'description', 'capabilities', 'requiredTools', 'content'], path, 'malformed-declaration',
     )
-    const name = text(skill, 'name', 'Skill')
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) refuse('malformed-declaration', 'Skill name must be kebab-case')
-    return { name, description: text(skill, 'description', 'Skill'), content: text(skill, 'content', 'Skill'),
-      capabilities: names(skill['capabilities'], 'Skill.capabilities'), requiredTools: names(skill['requiredTools'], 'Skill.requiredTools'),
+    const name = text(skill, 'name', path)
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) refuse('malformed-declaration', `${path}.name must be kebab-case`)
+    return { name, description: text(skill, 'description', path), content: text(skill, 'content', path),
+      capabilities: names(skill['capabilities'], `${path}.capabilities`), requiredTools: names(skill['requiredTools'], `${path}.requiredTools`),
     }
   })
-  const tools = list(content['tools'], 'Revision.tools').map((raw) => {
-    const tool = record(raw, 'Tool')
-    assertClosedKeys(tool, ['name', 'source', 'verifier'], 'Tool', 'malformed-declaration')
-    const name = text(tool, 'name', 'Tool')
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) refuse('malformed-declaration', 'Tool name must be kebab-case')
+  const tools = content.tools.map((raw, index) => {
+    const path = `method.tools[${index}]`, tool = record(raw, path)
+    assertClosedKeys(tool, ['name', 'source', 'verifier'], path, 'malformed-declaration')
+    const name = text(tool, 'name', path)
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) refuse('malformed-declaration', `${path}.name must be kebab-case`)
     let verifier: MethodTool['verifier']
     if (tool['verifier'] !== undefined) {
-      const declaration = record(tool['verifier'], 'Tool.verifier')
-      assertClosedKeys(declaration, ['samples'], 'Tool.verifier', 'malformed-declaration')
-      verifier = { samples: list(declaration['samples'], 'Tool.verifier.samples').map((raw) => {
-        const sample = record(raw, 'verifier sample')
-        assertClosedKeys(sample, ['name', 'artifactContent', 'inputContent', 'expected'], 'verifier sample', 'malformed-declaration',
+      const declaration = record(tool['verifier'], `${path}.verifier`)
+      assertClosedKeys(declaration, ['samples'], `${path}.verifier`, 'malformed-declaration')
+      verifier = { samples: list(declaration['samples'], `${path}.verifier.samples`).map((raw, index) => {
+        const samplePath = `${path}.verifier.samples[${index}]`, sample = record(raw, samplePath)
+        assertClosedKeys(sample, ['name', 'artifactContent', 'inputContent', 'expected'], samplePath, 'malformed-declaration',
           )
         const expected = sample['expected']
-        if (expected !== 'pass' && expected !== 'fail') refuse('malformed-declaration', 'verifier samples require positive and negative verdicts')
+        if (expected !== 'pass' && expected !== 'fail') refuse('malformed-declaration', `${samplePath}.expected must be pass or fail`)
         const artifactContent = sample['artifactContent'], inputContent = sample['inputContent']
         if (typeof artifactContent !== 'string' || typeof inputContent !== 'string')
-          refuse('malformed-declaration', 'verifier sample artifactContent and inputContent must be literal file contents',
+          refuse('malformed-declaration', `${samplePath}.artifactContent and inputContent must be literal file contents`,
             )
-        return { name: text(sample, 'name', 'sample'), artifactContent, inputContent, expected }
+        return { name: text(sample, 'name', samplePath), artifactContent, inputContent, expected }
       }),
       }
     }
-    return { name, source: text(tool, 'source', 'Tool'), ...(verifier === undefined ? {} : { verifier }) }
+    return { name, source: text(tool, 'source', path), ...(verifier === undefined ? {} : { verifier }) }
   })
   for (const assets of [skills, tools]) if (new Set(assets.map((asset) => asset.name)).size !== assets.length) refuse('malformed-declaration', 'Revision repeats asset names')
   for (const skill of skills) for (const name of skill.requiredTools)
     if (!tools.some((tool) => tool.name === name)) refuse('malformed-declaration', `Skill ${skill.name} requires unavailable Tool ${name}`)
   const workflowGuidance = content['workflowGuidance']
-  if (typeof workflowGuidance !== 'string' || Buffer.byteLength(workflowGuidance) > 8192)
-    refuse('malformed-declaration', 'workflowGuidance must be an explicit string of at most 8192 UTF-8 bytes')
-  const assets: MethodAssets = { workflowGuidance, templates: list(content['templates'], 'Revision.templates'), skills, tools,
+  const assets: MethodAssets = { workflowGuidance, templates: content.templates, skills, tools,
   }
   const verifiers = [...domain.verifiers]
   if (assetRoot === undefined) for (const tool of tools) {
@@ -185,11 +194,11 @@ export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: stri
     }
   }
   const templates = new Map<string, TaskTemplate>()
-  for (const rawTemplate of assets.templates) {
-    const declared = record(rawTemplate, 'Revision template')
+  for (const [index, rawTemplate] of assets.templates.entries()) {
+    const path = `method.templates[${index}]`, declared = record(rawTemplate, path)
     if (declared['initial'] !== undefined && record(declared['initial'], 'template initial')['from'] !== undefined)
       refuse('malformed-declaration', 'Revision initial source must be frozen as initial.content')
-    const template = await readTemplate(domain.dir, rawTemplate, verifiers, 'Revision template')
+    const template = await readTemplate(domain.dir, rawTemplate, verifiers, path)
     if (templates.has(template.id)) refuse('malformed-declaration', 'Revision repeats template ' + template.id)
     const original = domain.templates.get(template.id)
     if (template.id === domain.rootTemplate && original !== undefined) {

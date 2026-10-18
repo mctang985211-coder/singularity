@@ -11,6 +11,7 @@ import { loadDomain } from '../src/domain.ts'
 import { spawnProcess } from '../src/process.ts'
 import { propose } from '../src/surfaces.ts'
 import { TASK_PROTOCOL, TASK_VERSION } from '../../src/task/protocol.ts'
+import { parseSuite } from '../../src/measure/suite.ts'
 import { attachmentsAt, FakePersistence, agentFor, factsOf, testProjections } from './seam.ts'
 import { rsiProposal } from './rsi-fixture.ts'
 
@@ -46,10 +47,14 @@ it('rejects unsupported mechanisms, missing success protection, empty evidence a
   expect(() => parseRsiProposal({ ...proposal, method: baseline }, baseline)).toThrow('actual method diff')
 })
 
-it('settles a malformed prune candidate as invalid and leaves later batches usable', async () => {
+it('refuses malformed batches before consuming slots, then charges a complete candidate that fails prune', async () => {
   const root = await mkdtemp(join(tmpdir(), 'rsi-prune-')), medium = new FakePersistence()
-  const apparatus = await openApparatus('prune', root,
-    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const suite = parseSuite({ version: 1, suiteId: 'preflight', failureQuality: 0, cases: [{
+    caseId: 'evolve-letters', familyId: 'letters', sourceId: 'letters-source', split: 'evolve', trials: 2, weight: 1, hardGuards: [],
+    contract: { goal: 'count letters', artifact: 'report.txt', inputs: [], criteria: [{ criterionId: 'correct', statement: 'correct count' }] },
+  }] })
+  const apparatus = await openApparatus('prune', root, { ...domain, suite },
     medium as never, attachmentsAt(root), testProjections)
   try {
     const parent = agentFor('business', 'business')
@@ -69,20 +74,56 @@ it('settles a malformed prune candidate as invalid and leaves later batches usab
     const { assets } = await loadMethod(apparatus, run.revision)
     history.read.mockReturnValue({ incumbent: run.revision,
       directives: { historyCutoff: apparatus.store.load().entries().length, untried: [], prune: true } })
-    // A missing collection looks like deletion to the structural diff. It must
-    // fail method parsing before the prune check dereferences that collection.
-    const { templates: _templates, ...missingTemplates } = assets
-    const malformed = rsiProposal(assets, missingTemplates as MethodAssets, source.taskId, parent.id)
-    expect(parseRsiProposal(malformed, assets).edit.changes.some(change => change.asset === 'template')).toBe(true)
-    await writeFile(join(analysis.workspace, 'malformed.json'), JSON.stringify(malformed))
-    const call = (path: string) => proposeRsiMethod(apparatus, {}, agent, agent.id, { paths: [path] }, new AbortController().signal)
-    await expect(call('malformed.json')).resolves.toMatchObject({ status: 'invalid', reason: expect.stringContaining('Revision.templates') })
     const validShape = rsiProposal(assets, { ...assets, workflowGuidance: 'Preserve independent acceptance.' }, source.taskId, parent.id)
-    await writeFile(join(analysis.workspace, 'no-prune.json'), JSON.stringify(validShape))
-    await expect(call('no-prune.json')).resolves.toMatchObject({ status: 'invalid',
+    const proposal = { ...validShape, edit: { ...validShape.edit, predicted_cases: ['evolve-letters'] } }
+    const { eventSeq: _eventSeq, ...missingSeq } = proposal.analysis.success_habits[0]!.evidence[0]!
+    const { templates: _templates, ...missingTemplates } = assets
+    const { skills: _skills, ...missingSkills } = assets
+    const { tools: _tools, ...missingTools } = assets
+    const { inputs: _inputs, ...missingInputs } = assets.templates[0] as Record<string, unknown>
+    const malformed = [
+      { path: 'broken-json.json', content: '{', field: 'invalid JSON' },
+      { path: 'missing-event.json', field: 'analysis.success_habits[0].evidence[0].eventSeq', raw: { ...proposal,
+        analysis: { ...proposal.analysis, success_habits: [{ ...proposal.analysis.success_habits[0],
+          evidence: [{ ...missingSeq, rootId: source.taskId }] }] } } },
+      { path: 'duplicate-label.json', field: 'analysis.capability_gaps[0].gap', raw: { ...proposal,
+        analysis: { ...proposal.analysis, capability_gaps: [{ gap: proposal.analysis.failure_modes[0]!.mode,
+          description: 'Duplicated mechanism label.', evidence: proposal.analysis.failure_modes[0]!.evidence }] } } },
+      { path: 'missing-templates.json', field: 'method.templates', raw: { ...proposal, method: missingTemplates } },
+      { path: 'missing-skills.json', field: 'method.skills', raw: { ...proposal, method: missingSkills } },
+      { path: 'missing-tools.json', field: 'method.tools', raw: { ...proposal, method: missingTools } },
+      { path: 'missing-tool-source.json', field: 'method.tools[0].source', raw: { ...proposal,
+        method: { ...proposal.method, tools: [{ name: 'missing-source' }] },
+        edit: { ...proposal.edit, changes: [{ asset: 'workflow', target: 'workflowGuidance' }, { asset: 'tool', target: 'missing-source' }] } } },
+      { path: 'missing-template-inputs.json', field: 'method.templates[0].inputs', raw: { ...proposal,
+        method: { ...proposal.method, templates: [missingInputs, ...assets.templates.slice(1)] },
+        edit: { ...proposal.edit, changes: [{ asset: 'workflow', target: 'workflowGuidance' },
+          { asset: 'template', target: missingInputs['id'] }] } } },
+      { path: 'undeclared-diff.json', field: 'edit.changes', raw: { ...proposal, edit: { ...proposal.edit, changes: [] } } },
+      { path: 'unknown-case.json', field: 'edit.predicted_cases', raw: { ...proposal, edit: { ...proposal.edit, predicted_cases: ['invented-case'] } } },
+    ]
+    const call = (paths: readonly string[]) => proposeRsiMethod(apparatus, {}, agent, agent.id, { paths }, new AbortController().signal)
+    const before = factsOf(medium)
+    for (const invalid of malformed) {
+      await writeFile(join(analysis.workspace, invalid.path), invalid.content ?? JSON.stringify(invalid.raw))
+      const error = await call([invalid.path]).then(() => undefined, error => error)
+      expect(error, invalid.path).toMatchObject({ refusal: { code: 'malformed-declaration' } })
+      expect(error.refusal.detail, invalid.path).toContain(invalid.path)
+      expect(error.refusal.detail, invalid.path).toContain(invalid.field)
+      expect(error.refusal.detail, invalid.path).toContain('no candidate slots consumed')
+      expect(factsOf(medium), invalid.path).toEqual(before)
+    }
+    await writeFile(join(analysis.workspace, 'no-prune.json'), JSON.stringify(proposal))
+    // One valid file does not buy admission for a mixed batch with a malformed peer.
+    await expect(call(['no-prune.json', 'missing-event.json'])).rejects.toThrow('missing-event.json')
+    expect(factsOf(medium)).toEqual(before)
+    expect(taskStateOf(apparatus, analysis.taskId).search!.batches ?? []).toHaveLength(0)
+    const admitted = await call(['no-prune.json'])
+    expect(admitted).toMatchObject({ admitted: true, slotsConsumed: 1, status: 'invalid',
       reason: 'stalled search requires a real current-asset deletion in its prune slot' })
+    expect(admitted).not.toHaveProperty('roundId')
     const batches = taskStateOf(apparatus, analysis.taskId).search!.batches!
-    expect(batches).toHaveLength(2)
+    expect(batches).toHaveLength(1)
     expect(batches.every(batch => batch.settled && batch.outcomes.length === 1 && batch.outcomes[0]!.status === 'invalid')).toBe(true)
     expect(factsOf(medium).some(fact => fact.kind === 'review/started')).toBe(false)
   } finally {
