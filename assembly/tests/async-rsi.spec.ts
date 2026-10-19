@@ -12,6 +12,7 @@ import { SESSION_FORMAT_VERSION, SessionId, SessionSeq, SessionLogOffset, type S
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { afterEach, expect, it, vi } from 'vitest'
 import { digestOf } from '../../src/protocol/envelope.ts'
+import { structuralEditsOf, structuralEditDetailsOf } from '../../src/strategy/edits.ts'
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { postIdentifiedMessage } from '../../src/runtime/identified-message.ts'
 import type { ChildSessionRequest } from '../../src/runtime/child-session.ts'
@@ -184,6 +185,11 @@ async function fixture({ suite = false, heldout = true } = {}) {
           expect(subject).toBe(await readFile(join(request.cwd, 'subject.json'), 'utf8'))
           if (assignment.purpose === 'proposal') {
             const frozen = JSON.parse(subject)
+            expect(frozen.edit.changes).toEqual(structuralEditsOf(frozen.baseline, frozen.assets))
+            expect(frozen.changes).toEqual(structuralEditDetailsOf(frozen.baseline, frozen.assets))
+            const method = await driver!.forCall(execFor(agent, 'review-method')).history({ kind: 'method' })
+            expect(method).toMatchObject({ assets: frozen.baseline })
+            for (const field of ['proposal', 'reportFormat', 'reportTemplate']) expect(method).not.toHaveProperty(field)
             expect(frozen.nativeEvidence).toEqual([{ reference: expect.objectContaining({ sessionId: 'business', eventSeq: 0 }), page: {
               seq: 0, type: logs.get('business')![0]!.type, from: 0, complete: true,
               totalBytes: Buffer.byteLength(JSON.stringify(logs.get('business')![0], null, 2)),

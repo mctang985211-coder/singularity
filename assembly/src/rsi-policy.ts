@@ -32,4 +32,4 @@ export const rsiProposalCriteria = [
 ] as const
 
 export const rsiCriticRequirements = rsiProposalCriteria.map(criterion => criterion.statement).join('\n') +
-  '\nJudge the actual changed content and its evidence. Existing task-specific content is not permission to copy that recipe into a new path. Claims of transfer are hypotheses until tested. Return concrete supported objections; any revision is a new candidate within the remaining budget. Do not solve or benchmark the business task.'
+  '\nIn this review subject, baseline is the before method, assets is the applied after method, and changes lists host-computed changed paths. edit.changes contains validated asset/target keys; author-only value fields have already been applied and are intentionally omitted. Judge actual changed content and nativeEvidence, rather than applying the authoring schema to this projection. Existing task-specific content is not permission to copy that recipe into a new path. Claims of transfer are hypotheses until tested. Return concrete supported objections; any revision is a new candidate within the remaining budget. Do not solve or benchmark the business task.'

@@ -73,6 +73,32 @@ export function assertTemplateContract(domain: Domain, contract: TaskContract): 
   return template
 }
 
+export async function protectedInputsOf(apparatus: Apparatus, scopeId: string, domain: Domain) {
+  const cut = apparatus.store.load(), tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
+  const reviews = [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()]
+  let ancestor = scopeId, review: ReviewRun | undefined
+  while (true) {
+    review = reviews.find((r) => r.reviewId === ancestor || r.children.some((c) => c.taskId === ancestor))
+    if (review !== undefined) break
+    const parent = [...tasks.values()].find((t) => t.decomposition?.children.some((c) => c.taskId === ancestor))
+    if (parent === undefined) break
+    ancestor = parent.taskId
+  }
+  const frozen = review === undefined ? [] : reviewInputsOf(review,
+    JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as ReviewFiles)
+  return [
+    ...domain.inputs.map(({ ref, digest, bytes }) => ({ ref, digest, read: async () => bytes })),
+    ...frozen.map(({ source, attachment }) => ({ ...source, read: () => sealedBytes(apparatus, attachment) })),
+  ]
+}
+
+export function assertProtectedInputs(contract: TaskContract, available: readonly { ref: string; digest: string }[]): void {
+  for (const { name, source } of contract.inputs) {
+    if (source.kind === 'protected' && !available.some(input => input.ref === source.ref && input.digest === source.digest))
+      refuse('evidence-input-mismatch', `input ${name} references an unavailable protected ref/digest (${source.ref}); copy a source from the current contract/template or Review evidenceInputs. Available: ${JSON.stringify(available.map(({ ref, digest }) => ({ ref, digest })))}`)
+  }
+}
+
 export async function resolveInputs(apparatus: Apparatus, taskId: string, contract: TaskContract, domain: Domain,
 ): Promise<readonly PreparedInput[]> {
   const template = assertTemplateContract(domain, contract)
@@ -82,28 +108,12 @@ export async function resolveInputs(apparatus: Apparatus, taskId: string, contra
       taskStateOf(apparatus, input.source.taskId).contract!.template?.id !== expected.template)
       refuse('evidence-input-mismatch', 'contract producer differs from its pinned template')
   }
-  const cut = apparatus.store.load(), tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
-  const reviews = [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()]
-  let ancestor = taskId, review: ReviewRun | undefined
-  while (true) {
-    review = reviews.find((r) => r.children.some((c) => c.taskId === ancestor))
-    if (review !== undefined) break
-    const parent = [...tasks.values()].find((t) => t.decomposition?.children.some((c) => c.taskId === ancestor))
-    if (parent === undefined) break
-    ancestor = parent.taskId
-  }
-  const frozen = review === undefined ? [] : reviewInputsOf(review,
-    JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as ReviewFiles)
-  const available = [
-    ...domain.inputs.map(({ ref, digest, bytes }) => ({ ref, digest, read: async () => bytes })),
-    ...frozen.map(({ source, attachment }) => ({ ...source, read: () => sealedBytes(apparatus, attachment) })),
-  ]
+  const available = await protectedInputsOf(apparatus, taskId, domain)
+  assertProtectedInputs(contract, available)
   return contract.inputs.map((input) => {
     const source = input.source
     if (source.kind === 'protected') {
-      const protectedInput = available.find((input) => input.ref === source.ref)
-      if (protectedInput?.digest !== source.digest)
-        refuse('evidence-input-mismatch', 'the deployment no longer declares the frozen input ' + input.name)
+      const protectedInput = available.find((input) => input.ref === source.ref)!
       return { name: input.name, digest: protectedInput.digest, read: protectedInput.read, source }
     }
     const producer = taskStateOf(apparatus, source.taskId)

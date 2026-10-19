@@ -147,6 +147,8 @@ it('limits execution reads to the pinned catalog and leaves audit asset reads ou
     const initial = taskStateOf(h.apparatus, audit.taskId).runs[audit.runId]!.consumed
     const method = await readForAgent(h.apparatus, auditCaller.agentId, { kind: 'method' })
     expect(method).toMatchObject({ reference: h.method, assets: h.assets, proposal: { pending: null } })
+    expect(method).toHaveProperty('proposal.format')
+    expect(method).toHaveProperty('reportTemplate')
     expect(method).not.toHaveProperty('proposal.template.method')
     await readForAgent(h.apparatus, auditCaller.agentId, { kind: 'template', ref: h.apparatus.domain.rootTemplate! })
     expect(taskStateOf(h.apparatus, audit.taskId).runs[audit.runId]!.consumed).toEqual(initial)

@@ -45,6 +45,29 @@ async function setup(withRecipe = false) {
 }
 
 describe('one complete task declaration', () => {
+  it.each(['ref', 'digest'] as const)('rejects a bad ad hoc protected %s for the entire batch before admission', async (field) => {
+    const h = await setup(), first = h.children[0]!, input = first.contract.inputs[0]!
+    const { template: _template, ...responsibility } = first.contract
+    const contract = { ...responsibility, goal: 'Inspect a separate frozen source',
+      inputs: [{ ...input, source: { ...input.source, [field]: field === 'ref' ? 'invented-ref' : '0'.repeat(64) } }] }
+    const before = factsOf(h.medium)
+    await expect(decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId,
+      children: [first, { ...first, key: 'bad-source', contract }] }))
+      .rejects.toMatchObject({ refusal: { code: 'evidence-input-mismatch', detail: expect.stringContaining(input.name) } })
+    expect(factsOf(h.medium)).toEqual(before)
+    expect(h.dispatched).toEqual([])
+  })
+
+  it('rejects an invalid root source before admitting or assigning the Task', async () => {
+    const h = await setup(), before = factsOf(h.medium)
+    await expect(propose(h.apparatus, h.caller, 'bad-root', { contract: {
+      goal: 'Inspect an unavailable source', artifact: 'finding.txt',
+      inputs: [{ name: 'source.txt', source: { kind: 'protected', ref: 'invented-ref', digest: '0'.repeat(64) } }],
+      criteria: [{ criterionId: 'finding', statement: 'Report the observed bytes' }],
+    } })).rejects.toMatchObject({ refusal: { code: 'evidence-input-mismatch' } })
+    expect(factsOf(h.medium)).toEqual(before)
+  })
+
   it('admits explicit declarations and replays without duplicate instances or facts', async () => {
     const h = await setup(true)
     await decompose(h.apparatus, h.scheduler, h.caller, { taskId: h.parent.taskId, children: h.children })

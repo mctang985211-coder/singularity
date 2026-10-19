@@ -83,7 +83,11 @@ RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba
 
 **重启前计划一致性核对：** 对照 `c3d5456` 中第 3、5、6、8、9、15 节的规范要求，`71fe018` 未发现新增的必须修复偏差。增量 JSON 仅改变作者输入；宿主仍生成四字段完整 Method、核验实际 diff，冻结 Task/输入/源码，保留 critic → smoke → evolve 测评 → champion 验证 → 独立审核/CAS 发布。报告读取范围来自截止提交时已封存的 subject，没有扩展业务或私有集权限；审批、重试、失败和会话仍由 DSH 原生处理，没有第二状态源。重启使用新的 checkout、home、control/request/session 身份，保留原冻结 suite、模型、搜索限额和统计门槛，并核对新会话实际送达的角色、工具和 never 审批。以下 pilot 工程缺口与研究出口不因本次一致性核对而标为完成；本次重启验证修复后的业务到 RSI 流程。
 
-最新旧实验已取消、宿主停止，原记录保留。完整 pilot 仍未完成：`runExperiment` 只提交第一个 evolve 业务 root；有效候选请求 round 后才执行 split 的完整 case×trial 比较，冻结 champion 后才可能进入 validation/heldout。冻结 suite 不会自行补跑其它 pilot。每 split 一族也不足最少三族统计门，不能报告正式迁移收益。
+**2026-10-19 15:17 实跑死锁修复：** `buckyball-commandcode-rsi-20261019-151725` 的业务根已 accepted，RSI 测评中的 Review 委派了两个未声明 protected ref。宿主先持久化 child 准入/分解，再在 `startRun` 前拒绝输入，留下 ready、零 Run 的取证节点；审核会话结束 turn 后永久等它。修复复用同一作用域输入目录，在整批 child 准入前验证 ref/digest；把方法加载、绑定、输入解析纳入现有 Run 的准备失败出口；若本次启动连 Run 都未创建，则结算所属父 Run/Review 并传播失败，不能把历史失败 Run 当成本次启动。保留封存输入的后代作用域、未完成 artifact 依赖、冻结 Task 与可删模板的边界，不增加状态机、watchdog 或兼容路径。同时移除 reviewer 读取时的作者模板，明确 critic 的 before/after 与 normalized edit 投影，避免因宿主省略作者 value 而误拒合法提案。
+
+本轮与原计划第 3、5、6、8、9、15 节约束一致，未放宽验收、数据集或发布条件。反例先复现原实现的 5 项失败；修复后 `pnpm verify` 退出 0：**92 文件 / 964 测试 / 7 门禁通过**，含首次/重试被根预算拒绝、方法/绑定/输入/路由准备失败、封存附件缺失、作用域隔离与冷调度恢复。日志 `/tmp/singularity-orphan-final-verify.log`。这是离线正确性验证，尚不能声称修复后的模型行为或方法收益。
+
+上述旧实验已取消、宿主停止，原记录保留。完整 pilot 仍未完成：`runExperiment` 只提交第一个 evolve 业务 root；有效候选请求 round 后才执行 split 的完整 case×trial 比较，冻结 champion 后才可能进入 validation/heldout。冻结 suite 不会自行补跑其它 pilot。每 split 一族也不足最少三族统计门，不能报告正式迁移收益。
 
 **2026-10-18 较早 RSI 实跑故障与减量修复：** 运行目录 `/home/ROXY/singularity-next/buckyball-commandcode-20261018-172430`，只读 snapshot cutoff 131。业务根 `task-5fc54cd5510aba92` 已 accepted；RSI `improve-043d458189286ffefc4b48eb` 最终报告也已 accepted、根 RSI completed，但零提案、零评估。原生 seq208 错把 `proposal-1.json` 交给报告提交工具，driver 在检查合同路径前已写 control seq122 `rsi/search-ended insufficient-evidence`；seq209 才拒绝错误路径。之后 seq223/224、242/243 的合法提案被已结束搜索拒绝，却误报“先完成当前批次”。这不是仍在运行的锁等待，而是不可恢复的提前终结；不能把 completed 报告算作有效搜索或学习成功。
 

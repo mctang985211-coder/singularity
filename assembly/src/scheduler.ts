@@ -10,9 +10,9 @@ import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/prot
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { declareCaller, taskStateOf, type Apparatus } from './apparatus.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
+import { runIdOf } from './ids.ts'
 import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { methodContext, confirmWorkflowDelivery } from './method-run.ts'
-import { loadMethod } from './method.ts'
 import { proposalOf } from './surfaces.ts'
 import { planOutcomeOf } from './read.ts'
 import { deliverQuestions, parentContextOf, directionForRun } from './coordination.ts'
@@ -88,6 +88,27 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       catch (error) { throw new DispatchError(parentTaskId, parentTaskId, null, error) }
     }
   }
+  const failParent = async (parentTaskId: string, commandId: string, reason: string): Promise<void> => {
+    const review = reviewOf(parentTaskId)
+    if (review !== undefined) {
+      if (review.status === 'running') await createReviewCommands(apparatus.store).fail(commandId, parentTaskId, reason)
+    }
+    else {
+      const task = taskStateOf(apparatus, parentTaskId), run = Object.values(task.runs).find(run => run.status === 'running')
+      if (run === undefined) return
+      declareCaller(apparatus, task.responsibility!.agentId)
+      await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
+        commandId, taskId: parentTaskId, runId: run.runId, reason })
+    }
+  }
+  const advanceAncestor = async (parentTaskId: string): Promise<void> => {
+    const cut = apparatus.store.load()
+    const ancestor = [...cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
+      .find(task => task.decomposition?.children.some(child => child.taskId === parentTaskId))?.taskId ??
+      [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()]
+        .find(held => held.children.some(child => child.taskId === parentTaskId))?.reviewId
+    if (ancestor !== undefined) await advanceOne(ancestor)
+  }
   const terminateBranch = async (taskId: string, reason: string): Promise<void> => {
     const task = taskStateOf(apparatus, taskId)
     const registry = (seams.get === undefined ? seams.agents : seams.get('agents')) as AgentRegistry
@@ -142,14 +163,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
     if (unmet.length > 0) {
       // Publish terminal authority before the notification can wake the parent's next step.
       const reason = 'required delegated responsibilities ended without verification: ' + unmet.map(child => `${child.taskId} (${child.status})`).join(', ')
-      const review = reviewOf(parentTaskId)
-      if (review !== undefined) await createReviewCommands(apparatus.store).fail(`required-work-failed:${parentTaskId}`, parentTaskId, reason)
-      else {
-        const task = taskStateOf(apparatus, parentTaskId)
-        declareCaller(apparatus, task.responsibility!.agentId)
-        await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
-          commandId: `required-work-failed:${parentTaskId}/${runId}`, taskId: parentTaskId, runId, reason })
-      }
+      await failParent(parentTaskId, `required-work-failed:${parentTaskId}/${runId}`, reason)
     }
     try {
       await postIdentifiedMessage(seams, parent, schedulerMessage({ kind: 'singularity', purpose: 'plan-outcome',
@@ -160,14 +174,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       )
     }
     catch (error) { throw new DispatchError(parentTaskId, parentTaskId, null, error) }
-    if (unmet.length > 0) {
-      const cut = apparatus.store.load()
-      const ancestor = [...cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
-        .find(task => task.decomposition?.children.some(child => child.taskId === parentTaskId))?.taskId ??
-        [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()]
-          .find(held => held.children.some(child => child.taskId === parentTaskId))?.reviewId
-      if (ancestor !== undefined) await advanceOne(ancestor)
-    }
+    if (unmet.length > 0) await advanceAncestor(parentTaskId)
   }
   const dispatch = async (parentTaskId: string, parent: Agent, taskId: string, maxRuns: number): Promise<void> => {
     const state = taskStateOf(apparatus, taskId)
@@ -181,17 +188,17 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
     const node = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, childId)!
     const previous = Object.values(state.runs).findLast((run) => run.status !== 'running')
     const working = Object.values(state.runs).find((run) => run.status === 'running')
+    const operationId = taskId + ':attempt:' + Object.values(state.runs).length
+    const expectedRunId = working?.runId ?? runIdOf(apparatus.controlId, node.sessionId, operationId)
     let session = live.get(taskId)
     let attempt = working
     try {
       const agent = session?.agent
       const route = agent === undefined ? (previous?.bubble?.model ?? parent.session.requestHeader()?.config ?? parent.options)
         : (agent.session.requestHeader()?.config ?? agent.options)
-      if (working === undefined && (route.provider === undefined || route.model === undefined))
-        refuse('malformed-declaration', 'the dispatch agent has no model route')
       declareCaller(apparatus, childId)
       const run = (attempt ??= await startAttempt(apparatus, { agentId: childId, sessionId: node.sessionId, model: { provider: route.provider!, model: route.model! } },
-        taskId, taskId + ':attempt:' + Object.values(state.runs).length, revision, { domain: (await loadMethod(apparatus, revision)).domain, purpose: parentRun?.purpose ?? 'solve' },
+        taskId, operationId, revision, { purpose: parentRun?.purpose ?? 'solve' },
       ))
       if (run.bubble === undefined) refuse('illegal-transition', 'working Run has no prepared execution bubble')
       const workspace = workspaceOf(apparatus, taskId, run.runId)
@@ -232,14 +239,22 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
     } catch (error) {
       if (lifecycle.signal.aborted) throw error
       const failures: unknown[] = [error]
-      const run = attempt ?? Object.values(taskStateOf(apparatus, taskId).runs).at(-1)
+      const run = attempt ?? taskStateOf(apparatus, taskId).runs[expectedRunId]
       if (run !== undefined && taskStateOf(apparatus, taskId).runs[run.runId]!.status === 'running') {
         try { await apparatus.tasks.forAgent(childId).failRun({ commandId: 'dispatch-failed:' + taskId + '/' + run.runId,
           taskId, runId: run.runId, reason: 'child-runtime-failed: ' + String(error),
             }) } catch (failure) { failures.push(failure) }
       }
       if (session !== undefined) try { await release(taskId, session) } catch (failure) { failures.push(failure) }
-      try { await notify(parentTaskId, parent) } catch (failure) { failures.push(failure) }
+      try {
+        if (run === undefined) {
+          // startRun can itself be refused (for example by the frozen workflow budget).
+          // Settle the existing owner rather than leave an admitted child ready forever.
+          await failParent(parentTaskId, `dispatch-unstarted:${parentTaskId}/${taskId}`, `child could not start: ${taskId}: ${String(error)}`)
+          await advanceOne(parentTaskId)
+          await advanceAncestor(parentTaskId)
+        } else await notify(parentTaskId, parent)
+      } catch (failure) { failures.push(failure) }
       throw new DispatchError(parentTaskId, taskId, run?.runId ?? null,
         failures.length === 1 ? error : new AggregateError(failures, 'child dispatch failed: ' + String(error)),
       )

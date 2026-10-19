@@ -15,19 +15,15 @@ import { consumeMethod } from './method-run.ts'
 export const workspaceOf = (apparatus: Apparatus, taskId: string, runId: string): string =>
   join(apparatus.workspaceRoot, 'tasks', taskId, 'runs', runId)
 
-export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId: string, operationId: string, method: RevisionRef, context?: { domain: Domain; purpose: RunState['purpose']; relatedTo?: RunState['relatedTo']; case?: RunState['case'] },
+export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId: string, operationId: string, method: RevisionRef, context?: { domain?: Domain; purpose: RunState['purpose']; relatedTo?: RunState['relatedTo']; case?: RunState['case'] },
 ): Promise<RunState> {
   const stopped = stoppedExplorationOf(apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), taskId)
   if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
   const runId = runIdOf(apparatus.controlId, caller.sessionId, operationId)
   const state = taskStateOf(apparatus, taskId)
-  if (state.runs[runId]?.bubble !== undefined) return state.runs[runId]!
+  const existing = state.runs[runId]
+  if (existing !== undefined && (existing.bubble !== undefined || existing.status !== 'running')) return existing
   const contract = state.contract!
-  const loaded = await loadMethod(apparatus, method, contract.template)
-  const domain = context === undefined ? loaded.domain : { ...loaded.domain, inputs: context.domain.inputs }
-  const bindings = bindingsForContract(contract, loaded.assets)
-  const template = contract.template === undefined ? undefined : templateOf(domain, contract.template)
-  const inputs = await resolveInputs(apparatus, taskId, contract, domain)
   const commands = apparatus.tasks.forAgent(caller.agentId)
   await commands.startRun({ commandId: `start:${runId}`, taskId, runId,
     revision: method,
@@ -37,6 +33,13 @@ export async function startAttempt(apparatus: Apparatus, caller: Caller, taskId:
     })
   const workspace = workspaceOf(apparatus, taskId, runId)
   try {
+    if (!caller.model.provider || !caller.model.model)
+      refuse('malformed-declaration', 'the execution agent has no model route')
+    const loaded = await loadMethod(apparatus, method, contract.template)
+    const domain = context?.domain === undefined ? loaded.domain : { ...loaded.domain, inputs: context.domain.inputs }
+    const bindings = bindingsForContract(contract, loaded.assets)
+    const template = contract.template === undefined ? undefined : templateOf(domain, contract.template)
+    const inputs = await resolveInputs(apparatus, taskId, contract, domain)
     const frozen = await Promise.all(
       inputs.map(async (input) => ({
         name: input.name,

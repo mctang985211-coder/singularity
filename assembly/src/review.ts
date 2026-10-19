@@ -298,7 +298,7 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
         JSON.stringify({
           reviewId,
           purpose: review.target.kind,
-          ...(review.target.kind === 'proposal' ? { instruction: 'This is a method proposal screen, NOT artifact acceptance. There is no submitted-artifact. Read the exact before/after method and changes with singularity_read({kind:subject,from:0,count:8192}), then follow next byte offsets until complete. Native file read truncates long JSON string lines. Judge only changed intent/content; do not solve, run commands, fetch URLs, delegate experiments or repair the candidate. Write review.json and submit it.' } : {}),
+          ...(review.target.kind === 'proposal' ? { instruction: 'Screen the method proposal using subject.requirements and frozen nativeEvidence. Read baseline, assets and host-computed changes with singularity_read({"kind":"subject","from":0,"count":8192}), following next byte offsets until complete=true. edit.changes contains validated asset/target keys; author-only value fields are intentionally omitted. Judge changed intent/content; do not solve, run commands, fetch URLs, delegate experiments or repair the candidate. Write review.json and submit it.' } : {}),
           assignment: 'subject.json',
           criteria: review.criteria,
           subjectDigest,

@@ -10,7 +10,7 @@ import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { bindCaller, declareCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import type { DecomposeInput, PlanRecord, Proposal } from './driver.ts'
 import { taskIdOf, runIdOf } from './ids.ts'
-import { assertTemplateContract, contractFor } from './inputs.ts'
+import { assertProtectedInputs, assertTemplateContract, contractFor, protectedInputsOf } from './inputs.ts'
 import type { Scheduler } from './scheduler.ts'
 import { workspaceOf, startAttempt } from './attempt.ts'
 import { bindingsForContract, seedMethod, loadMethod, publishedMethod } from './method.ts'
@@ -42,6 +42,7 @@ export async function decompose(
     refuse('not-responsible', 'only the working owner may decompose')
   const revision = review?.method ?? run!.revision
   const { domain, assets } = await loadMethod(apparatus, revision, parent?.contract?.template)
+  const available = await protectedInputsOf(apparatus, parentId, domain)
   const existing = review?.children ?? parent!.decomposition?.children ?? []
   const standards = review?.criteria ?? parent!.contract!.criteria
   const children = input.children
@@ -69,6 +70,7 @@ export async function decompose(
         ? { ...input.source, taskId: ids.get(input.source.taskId) ?? input.source.taskId } : input.source,
     })) }
     assertTemplateContract(domain, contract)
+    assertProtectedInputs(contract, available)
     for (const input of contract.inputs)
       if (input.source.kind === 'artifact' && !dependsOn.includes(input.source.taskId) && !verified(input.source.taskId))
         refuse('malformed-declaration', 'artifact producers must be declared dependencies or verified visible evidence')
@@ -166,9 +168,8 @@ export async function propose(apparatus: Apparatus, caller: Caller, callId: stri
   context: { purpose: RunState['purpose']; relatedTo?: RunState['relatedTo']; case?: RunState['case'] } = { purpose: 'solve' },
 ): Promise<Proposal> {
   const method = input.method ?? publishedMethod(apparatus) ?? (await seedMethod(apparatus))
-  const domain = (await loadMethod(apparatus, method)).domain
+  const domain = (await loadMethod(apparatus, method, input.contract?.template)).domain
   const taskId = taskIdOf(apparatus.controlId, caller.agentId, callId)
-  await bindCaller(apparatus, caller)
   const template = apparatus.domain.rootTemplate === undefined ? undefined : (domain.templates.get(apparatus.domain.rootTemplate) ?? apparatus.domain.templates.get(apparatus.domain.rootTemplate))
   const goal = input.goal ?? input.contract?.goal ?? ''
   let requestCriterion = 'request'
@@ -178,6 +179,9 @@ export async function propose(apparatus: Apparatus, caller: Caller, callId: stri
     : { ...contractFor(domain, template, goal), criteria: [
       ...template.criteria, { criterionId: requestCriterion, statement: goal },
     ] }), 'root contract')
+  assertTemplateContract(domain, contract)
+  assertProtectedInputs(contract, await protectedInputsOf(apparatus, taskId, domain))
+  await bindCaller(apparatus, caller)
   const commands = apparatus.tasks.forAgent(caller.agentId)
   if (taskStateIf(apparatus, taskId) === undefined)
     await commands.admit({ commandId: `propose:${taskId}`,
@@ -203,7 +207,6 @@ export async function retry(apparatus: Apparatus, caller: Caller, callId: string
   const previous = Object.values(task.runs).at(-1)!
   if (previous.status !== 'failed') refuse('illegal-transition', 'only a failed Run can be retried')
   const run = await startAttempt(apparatus, caller, task.taskId, callId, previous.revision, {
-    domain: (await loadMethod(apparatus, previous.revision)).domain,
     purpose: previous.purpose,
     ...(previous.relatedTo === undefined ? {} : { relatedTo: previous.relatedTo }),
   })

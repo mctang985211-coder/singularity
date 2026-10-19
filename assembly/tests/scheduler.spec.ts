@@ -28,6 +28,7 @@ import { contractFor } from '../src/inputs.ts'
 import { loadDomain } from '../src/domain.ts'
 import { sha256 } from '../src/ids.ts'
 import { taskSessionsOf } from '../src/evaluation-cost.ts'
+import { DEFAULT_WORKFLOW_LIMITS, type WorkflowLimits } from '../../src/task/budget.ts'
 import { spawnProcess } from '../src/process.ts'
 import { fixtureReview } from './review-fixture.ts'
 import { submit, judgeAndRecord } from '../src/submission.ts'
@@ -43,7 +44,7 @@ afterEach(async () => {
 const contentOf = (message: UserMessage) => message.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n')
 
 
-async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skillContent?: string, requirements: readonly ('required' | 'exploration')[] = ['required', 'required']) {
+async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skillContent?: string, requirements: readonly ('required' | 'exploration')[] = ['required', 'required'], limits?: WorkflowLimits) {
   const root = await mkdtemp(join(tmpdir(), 'assembly-scheduler-'))
   roots.push(root)
   const domain = await loadDomain(domainDir, spawnProcess)
@@ -64,6 +65,8 @@ async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skill
     const contract = { ...contractFor(domain, template, 'count letters'), ...(skillContent === undefined ? {} : { skills: ['investigate'] }) }
     await apparatus.tasks.admit({ commandId: 'admit:' + parentTaskId, taskId: parentTaskId, contract })
     await apparatus.tasks.assign({ commandId: 'assign:' + parentTaskId, taskId: parentTaskId, agentId: holder })
+    if (limits !== undefined) await apparatus.store.emit({ commandId: 'limits:' + parentTaskId, protocol: TASK_PROTOCOL, version: TASK_VERSION,
+      kind: 'workflow/limits-frozen', subject: parentTaskId, payload: limits })
     await startAttempt(apparatus, { agentId: holder, sessionId: parentSession, model: { provider: 'test', model } }, parentTaskId, 'parent-start:' + parentTaskId,
       method,
     )
@@ -108,6 +111,62 @@ async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skill
 }
 
 describe('fact-driven child scheduling', () => {
+  it.each(['input', 'binding', 'method', 'route'] as const)('settles a parent after a child %s preparation failure, including cold recovery', async (kind) => {
+    const h = await setup(1, false, kind === 'method' ? 'Use reproducible evidence.' : undefined)
+    const contract: TaskContract = { goal: 'Inspect a narrow obligation', artifact: 'finding.txt',
+      inputs: kind === 'input' ? [{ name: 'source.txt', source: { kind: 'protected', ref: 'invented-ref', digest: '0'.repeat(64) } }] : [],
+      criteria: [{ criterionId: 'letters', statement: 'Produce a reproducible finding' }],
+      skills: kind === 'binding' ? ['missing-skill'] : [],
+    }
+    await h.addPlan('broken-parent', 'broken-holder', 'broken-session', 'broken-child', 'model-A', true, contract)
+    if (kind === 'method') {
+      const revision = Object.values(taskStateOf(h.apparatus, 'broken-parent').runs)[0]!.revision
+      const path = join(h.root, 'assets', revision.digest)
+      await rm(path, { recursive: true })
+      await writeFile(path, 'corrupt cached method asset')
+    }
+    if (kind === 'route') vi.spyOn(h.runtime.agents.get('broken-session')!.session, 'requestHeader').mockReturnValue({ config: {} } as never)
+    const scheduler = h.make()
+    await expect(scheduler.advance('broken-parent')).rejects.toMatchObject({ taskId: 'broken-child' })
+    expect(Object.values(taskStateOf(h.apparatus, 'broken-child').runs)).toMatchObject([
+      { status: 'failed', failureCause: 'runtime' },
+    ])
+    expect(Object.values(taskStateOf(h.apparatus, 'broken-child').runs)[0]!.bubble).toBeUndefined()
+    expect(Object.values(taskStateOf(h.apparatus, 'broken-parent').runs)).toMatchObject([{ status: 'failed' }])
+    expect(h.runtime.opened).toEqual([])
+    const count = factsOf(h.medium).length
+    expect(await h.make().advance('broken-parent')).toEqual([])
+    expect(factsOf(h.medium)).toHaveLength(count)
+  })
+
+  it.each(['maxRuns', 'maxNoProgress'] as const)('settles the parent when %s refuses a child before run/started', async (limit) => {
+    const h = await setup(1, false, undefined, ['required', 'required'], { ...DEFAULT_WORKFLOW_LIMITS, [limit]: 1 })
+    await expect(h.make().advance('parent-task')).rejects.toMatchObject({ taskId: 'child-task', runId: null })
+    expect(Object.keys(taskStateOf(h.apparatus, 'child-task').runs)).toEqual([])
+    expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)).toMatchObject([
+      { status: 'failed', failureReason: expect.stringContaining('workflow budget exhausted') },
+    ])
+    const count = factsOf(h.medium).length
+    expect(await h.make().advance('parent-task')).toEqual([])
+    expect(factsOf(h.medium)).toHaveLength(count)
+    expect(h.runtime.opened).toEqual([])
+  })
+
+  it.each(['maxRuns', 'maxNoProgress'] as const)('does not mistake a prior failed Run for a retry refused by %s', async (limit) => {
+    const h = await setup(2, false, undefined, ['required', 'required'], { ...DEFAULT_WORKFLOW_LIMITS, [limit]: 2 })
+    const scheduler = h.make()
+    await scheduler.advance('parent-task')
+    await h.answer('child-task', false)
+    await expect(scheduler.advance('parent-task')).rejects.toMatchObject({ taskId: 'child-task', runId: null })
+    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ status: 'failed', failureCause: 'acceptance' }])
+    expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)).toMatchObject([
+      { status: 'failed', failureReason: expect.stringContaining('workflow budget exhausted') },
+    ])
+    const count = factsOf(h.medium).length
+    expect(await h.make().advance('parent-task')).toEqual([])
+    expect(factsOf(h.medium)).toHaveLength(count)
+  })
+
   it('resolves the exact parent session and model from its responsibility before dispatch', async () => {
     const h = await setup()
     const scheduler = h.make()

@@ -68,14 +68,14 @@ async function setup(producerTemplate = 'extract-letters', verified = true) {
   return { apparatus, medium, domain, caller, contract, admit, artifact, producerRunId: run.runId }
 }
 
-async function rejectsWithoutRun(h: Awaited<ReturnType<typeof setup>>, code: string) {
+async function rejectsWithFailedRun(h: Awaited<ReturnType<typeof setup>>, code: string) {
   const before = factsOf(h.medium)
   await expect(startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(h.apparatus)),
   ).rejects.toMatchObject({
     refusal: { code },
   })
-  expect(factsOf(h.medium)).toEqual(before)
-  expect(Object.keys(taskStateOf(h.apparatus, 'consumer').runs)).toEqual([])
+  expect(factsOf(h.medium).slice(before.length).map(fact => fact.kind)).toEqual(['run/started', 'run/failed'])
+  expect(Object.values(taskStateOf(h.apparatus, 'consumer').runs)).toMatchObject([{ status: 'failed', failureCause: 'runtime' }])
 }
 
 describe('template input binding and sealed preparation', () => {
@@ -129,10 +129,10 @@ describe('template input binding and sealed preparation', () => {
     await h.apparatus.store.close()
   })
 
-  it('rejects an unverified producer without creating a revision or Run', async () => {
+  it('rejects an unverified producer with a terminal preparation failure', async () => {
     const h = await setup('extract-letters', false)
     await h.admit(h.contract)
-    await rejectsWithoutRun(h, 'illegal-transition')
+    await rejectsWithFailedRun(h, 'illegal-transition')
   })
 
   it('uses the sealed producer bytes after its editable artifact changes', async () => {
@@ -173,49 +173,49 @@ describe('template input binding and sealed preparation', () => {
     },
   )
 
-  it('rejects a verified producer of another template before creating a revision or Run', async () => {
+  it('rejects a verified producer of another template with a terminal preparation failure', async () => {
     const h = await setup('count-source')
     await h.admit(h.contract)
-    await rejectsWithoutRun(h, 'evidence-input-mismatch')
+    await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
 
-  it('rejects a contract input name different from its template before creating a revision or Run', async () => {
+  it('rejects a contract input name different from its template with a terminal preparation failure', async () => {
     const h = await setup()
     await h.admit({ ...h.contract, inputs: [{ ...h.contract.inputs[0]!, name: 'in/other.txt' }] })
-    await rejectsWithoutRun(h, 'evidence-input-mismatch')
+    await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
 
-  it('rejects protected bytes substituted for the template artifact source before creating a revision or Run', async () => {
+  it('rejects protected bytes substituted for the template artifact source with a terminal preparation failure', async () => {
     const h = await setup()
     const input = h.domain.inputs[0]!
     await h.admit({ ...h.contract, inputs: [{ name: 'in/letters.txt', source: { kind: 'protected', ref: input.ref, digest: input.digest } }],
     })
-    await rejectsWithoutRun(h, 'evidence-input-mismatch')
+    await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
 
-  it('rejects an artifact substituted for the template protected source before creating a revision or Run', async () => {
+  it('rejects an artifact substituted for the template protected source with a terminal preparation failure', async () => {
     const h = await setup()
     const root = h.domain.templates.get(h.domain.rootTemplate!)!
     const contract = contractFor(h.domain, root, root.goal)
     await h.admit({ ...contract, inputs: [{ name: root.inputs[0]!.name, source: { kind: 'artifact', taskId: 'producer' } }],
     })
-    await rejectsWithoutRun(h, 'evidence-input-mismatch')
+    await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
 
-  it('rejects protected bytes different from the template reference before creating a revision or Run', async () => {
+  it('rejects protected bytes different from the template reference with a terminal preparation failure', async () => {
     const h = await setup()
     const template = h.domain.templates.get(h.domain.rootTemplate!)!
     const contract = contractFor(h.domain, template, template.goal)
     await h.admit({ ...contract, inputs: [{ name: template.inputs[0]!.name,
       source: { kind: 'protected', ref: 'source', digest: 'a'.repeat(64) } }],
     })
-    await rejectsWithoutRun(h, 'evidence-input-mismatch')
+    await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
 
-  it('rejects another template criterion before creating a revision or Run', async () => {
+  it('rejects another template criterion with a terminal preparation failure', async () => {
     const h = await setup()
     await h.admit({ ...h.contract, criteria: h.domain.templates.get('count-source')!.criteria })
-    await rejectsWithoutRun(h, 'evidence-input-mismatch')
+    await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
 
   it('freezes additional child standards in the same contract while retaining every protected standard', async () => {

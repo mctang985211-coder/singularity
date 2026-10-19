@@ -4,6 +4,10 @@
 
 Singularity 的业务顺序是：root 最少委派 → Task 在自己的 workspace 生成产物 → submit 封存 → 宿主独立验收 → 父任务复用已验证产物。只读参考仓库不是共享工作区；补丁中的目标路径不是可写宿主路径；跨任务交接使用声明的 artifact inputs。RSI 在业务结束后读取这些冻结事实，提案由独立 critic 筛选、宿主跑新业务对照；报告通过与方法收益是两回事。
 
+取证子任务的 protected `source` 必须从当前 contract/template 或审核 dispatch 的 `evidenceInputs` 原样复制；`name` 只决定子工作区内的路径。未知 ref 或错误 digest 在整批准入前拒绝，不留下子节点，按返回的可用来源改正后重提。准入后的方法加载、输入解析和准备失败记录为失败 Run；连 `startRun` 都被预算等约束拒绝时，所属父 Run/Review 明确失败，不能等待不存在的执行。
+
+critic 收到的是宿主审核投影：`baseline` 为修改前 Method，`assets` 为修改后 Method，`changes` 为实际 diff；`edit.changes` 只保留已验证的资产键，作者字段 `value` 已应用并省略。不能按作者提交 schema 将此投影判为缺字段。proposal/report 作者模板只向 RSI 作者返回。
+
 ## 工作顺序
 
 1. 每次开始、恢复或上下文压缩后，先调用 `singularity_read({"kind":"method"})`，不带旧 `ref`。读取当前 `reference`、`nextRound`、`feedback`、`cases`、`proposal.template` 和 `reportTemplate`。当前完整基线在 `assets`；提案模板只含分析和改动，不含完整 Method。先看 `proposal.pending`：`batch` 按原 paths 恢复，`evaluation` 结束 turn 等宿主，`null` 才开始新提案。工具的 `kind` 必填，不能只传 `ref/eventSeq`。
