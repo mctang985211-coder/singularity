@@ -2,7 +2,7 @@
 
 审查日期：2026-10-17（Asia/Shanghai）。代码基线：`4314487`。
 RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba1`。
-实施更新：2026-10-19。**Task/Workflow、多任务矩阵、有界稀疏搜索和独立迁移发布已有工程链路；Buckyball 最小 C/ISA pilot 的业务根已通过独立验收。最新 CommandCode 运行的 11 次提案调用全部被静态预检拒绝，零扣槽、零 round、零候选比较或新方法发布；完整 pilot 的逐题执行入口仍未接通。本轮从 Method 删除 initial，真实源码由宿主继承；宿主落盘完整提案草稿，Agent 仅用原生 edit 填写与局部修改，并明确冻结字段和精确差异修复方式。** 当前为 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只接纳新图，不提供旧图兼容。预检通过后批次冻结 1–3 个候选、每候选一个独立机制、总计最多 6 个槽、repair=0；这是 KISS 稀疏模式，不宣称实现退火。原生 DSH 继续拥有会话、重试、用量和持久化。准确实现、验证与外部阻断见第 9 节。
+实施更新：2026-10-19。**Task/Workflow、多任务矩阵、有界稀疏搜索和独立迁移发布已有工程链路；Buckyball 最小 C/ISA pilot 的业务根已通过独立验收。最新 CommandCode 运行的六个提案槽全部在结构检查中 invalid，零 round、零候选比较、零迁移或新方法发布；完整 pilot 的逐题执行入口仍未接通。本轮将纯静态预检移到批次冻结前，并补齐错误定位与提交要求。** 当前为 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只接纳新图，不提供旧图兼容。预检通过后批次冻结 1–3 个候选、每候选一个独立机制、总计最多 6 个槽、repair=0；这是 KISS 稀疏模式，不宣称实现退火。原生 DSH 继续拥有会话、重试、用量和持久化。准确实现、验证与外部阻断见第 9 节。
 
 本版按用户最新定义收敛：Task 是 workflow 中可独立交付、验收和追责的节点；RSI 演化节点定义、分解和关系组织策略，Skill/Tool 提供配套能力。评测负责验证这种演化，而不替代产品主体。第 1、6 节给出最终对象模型和执行语义，第 9 节给出唯一施工顺序，第 13–16 节给出研究、Buckyball 和提示词的验收细则。不再另写一份相互竞争的 final-plan。
 
@@ -75,15 +75,11 @@ RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba
 
 ### 2.2 已运行的验证
 
-**2026-10-19 最新实跑与草稿修复：** 只读检查 `/home/ROXY/singularity-next/buckyball-commandcode-rsi-20261019-003416`，committed snapshot cutoff 66，冻结代码 `75aaa2c`。业务根和两个子任务均已验收，RSI `improve-a762360439ebd971f90e7c1b` 已 failed，并非仍在等待的死锁。11 次 `singularity_propose_method` 调用提交了 12 个文件条目：10 次因受保护初始源码变化被拒，1 次因实际 diff 与声明不符被拒。宿主返回的基线完整；最终候选把初始源码从 851 字节改为 849 字节，漏了 `+` 和末尾 LF。全部静态拒绝、零扣槽、零 round，无候选比较、迁移或新方法发布。报告因次数等事实不准获 partial，不能把报告结局解释为学习成功。
-
-本轮保持完整 `analysis/edit/method` 三段提案，不增加 patch 协议或候选状态。从所有 Method 模板删除 `initial`，真实源码由宿主从冻结 Task/Case 的同 ID 模板继承，不再让 Agent 重抄或修补 seed；携带旧 `initial` 明确拒绝并提示删除，不提供旧格式兼容。无 ref 的 `kind=method` 为当前工作中的 RSI 作者落盘至多三份完整草稿，以 `proposal.drafts:[{path,created}]` 返回，已有文件不覆盖；`proposal.template` 仍是当前完整内容参考。Agent 用原生 `edit` 填写元数据、只改必要 Method 字段，禁止整份重写或重抄。根模板的 `inputs/artifact/criteria/checks` 仍冻结；静态拒绝给出具体字段、差异和修复提示。零扣槽不是有效实验或死锁，报告计数必须核对真实工具记录。施工与验证结果分别记录，不能凭提示改动宣称新实跑已通过。
-
-**2026-10-19 前次实跑与提交边界复核：** 只读检查 `/home/ROXY/singularity-next/buckyball-commandcode-rsi-20261018-214154`，committed snapshot cutoff 80。业务根 `task-039780304071e184` 已验收，RSI `improve-7efa57d998fb8b97d8d7a236` 报告已验收、状态 completed，搜索结果为 insufficient-evidence。六个单槽批次全部 invalid：第 1–3 次 evidence 缺少必需的 `eventSeq`，第 4、6 次在 failure/gap/habit 三类之间重复使用同一 label，第 5 次只提供 `workflowGuidance`、缺少完整 Method 集合，实际 diff 因而包含基线模板删除，超出声明的 workflow 改动。第 5 次 workflow target 本身正确；现有事实不支持报告中将失败归因于 `rootId` 或 workflow target 宿主错误的说法。没有 proposal/publication critic、没有 measure/strategy 测评事实、没有 round 或 transfer。运行中一次原生重试恢复，六次失败的直接原因是提案结构，不能归为 provider 耗尽或 family 统计门。
+**2026-10-19 最新实跑与提交边界复核：** 只读检查 `/home/ROXY/singularity-next/buckyball-commandcode-rsi-20261018-214154`，committed snapshot cutoff 80。业务根 `task-039780304071e184` 已验收，RSI `improve-7efa57d998fb8b97d8d7a236` 报告已验收、状态 completed，搜索结果为 insufficient-evidence。六个单槽批次全部 invalid：第 1–3 次 evidence 缺少必需的 `eventSeq`，第 4、6 次在 failure/gap/habit 三类之间重复使用同一 label，第 5 次只提供 `workflowGuidance`、缺少完整 Method 集合，实际 diff 因而包含基线模板删除，超出声明的 workflow 改动。第 5 次 workflow target 本身正确；现有事实不支持报告中将失败归因于 `rootId` 或 workflow target 宿主错误的说法。没有 proposal/publication critic、没有 measure/strategy 测评事实、没有 round 或 transfer。运行中一次原生重试恢复，六次失败的直接原因是提案结构，不能归为 provider 耗尽或 family 统计门。
 
 本轮边界调整：新批次对一次读取的同一份 bytes 做 JSON、proposal schema、完整 Method、实际 diff 和冻结 evolve case/family ID 的纯静态预检；任一文件失败则整批不冻结、不扣槽，返回文件与字段位置。全部通过后才保存并冻结这些 bytes。已有 pending 批次直接从附件恢复，不重新读取工作区草稿。冻结后的证据有效性、reserved/prune、critic、duplicate 与 smoke 失败仍各自结算并扣槽，repair=0；静态预检不读取证据正文、不调用模型、不执行候选或测评，也不建立新工具或第二套状态。本轮 `pnpm verify` 退出 0：**90 文件 / 945 测试 / 7 门禁通过**，包含构建、类型检查和源码/产物摘要校验；日志 `/tmp/singularity-rsi-admission-verify.log`。最后调整嵌套字段与 diff 的解析顺序后已重新构建，相关 2 文件 / 46 项定向回归通过，日志 `/tmp/singularity-rsi-admission-followup.log`。尚未部署或用真实模型重跑，下面的历史数字保留其原有基线。
 
-**前次 RSI 提示与 JSON 合同复核：** system prompt 保留工作流程与角色边界，完整字段规则和模板按需读取；无 ref 的 `kind=method` 提供当前搜索头的 `proposal.template` 与 `reportTemplate`，完整 Method 只返回一次；审核 dispatch 按实际 digest/criteria 生成合法 `unknown` 模板。已修正公开领域知识/答案泄漏的冲突表述、报告先封存再触发 suite 私有验证的时间边界，并将工具 `read.kind` 设为必填。直接填写运行时模板的提案使用真实原生事件引用后进入独立 critic；审核从模板生成的 findings 通过实际解析器。当次 `pnpm verify` **退出 0：90 文件 / 946 测试 / 7 门禁通过**，含构建/类型检查和源码/产物摘要校验；日志 `/tmp/singularity-rsi-prompt-verify.log`。三份文档 JSON 和本地链接通过检查。随后提交为 `75aaa2c` 并部署上述新实跑；离线模板回归未防止模型重抄源码的失真，详见 [RSI agent 工作合同](rsi-agent-contract.md)。
+**随后完成 RSI 提示与 JSON 合同复核：** system prompt 保留工作流程与角色边界，完整字段规则和模板按需读取；无 ref 的 `kind=method` 提供当前搜索头的 `proposal.template` 与 `reportTemplate`，完整 Method 只返回一次；审核 dispatch 按实际 digest/criteria 生成合法 `unknown` 模板。已修正公开领域知识/答案泄漏的冲突表述、报告先封存再触发 suite 私有验证的时间边界，并将工具 `read.kind` 设为必填。直接填写运行时模板的提案使用真实原生事件引用后进入独立 critic；审核从模板生成的 findings 通过实际解析器。最新 `pnpm verify` **退出 0：90 文件 / 946 测试 / 7 门禁通过**，含构建/类型检查和源码/产物摘要校验；日志 `/tmp/singularity-rsi-prompt-verify.log`。三份文档 JSON 和本地链接通过检查。未部署或真实模型重跑，详见 [RSI agent 工作合同](rsi-agent-contract.md)。
 
 完整 pilot 仍未完成：`runExperiment` 仅提交第一个 evolve case 的业务 root；有效候选请求 round 后，driver 才执行该 split 的完整 case×trial 比较，冻结 champion 后才可能进入 validation/heldout。suite 已冻结不会自行调度其余 pilot 业务案例。每 split 仅一族是后续独立统计限制，补完 pilot 也不足以满足最少三族的正式配对门槛。
 
@@ -698,7 +694,7 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
 
 ## 9. 详细实施任务
 
-2026-10-19 本轮状态如下。工程能力与真实模型/领域证据分开验收；下文的完整目标保留，未满足出口不因离线通过而关闭。前版静态预检已部署，最新实跑暴露完整 Method 重抄失真，记录见 §2.2。本轮删除 Method initial、生成不覆盖已有编辑的草稿，并明确冻结批次恢复与测评等待；全量 90 文件/948 测试通过，最终增量构建、62 项针对回归和 7 道门禁通过。本轮尚未部署或真实模型重跑。所有事实仍归原有 control log；草稿不是搜索状态，不新增运行时或兼容桥。
+2026-10-19 本轮状态如下。工程能力与真实模型/领域证据分开验收；下文的完整目标保留，未满足出口不因离线通过而关闭。静态预检边界修复已通过本轮完整工程验证，尚未部署或真实模型重跑，记录见 §2.2。所有新增事实进入原有 control log；没有新增 workflow 运行时、旧图兼容桥或第二消息队列。
 
 | 包 | 本轮实现/确定性见证 | 剩余出口或明确边界 |
 |---|---|---|
@@ -708,19 +704,19 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
 | T03 | 闭合 suite、family/source 分组与 split 隔离、每轮独立 TrialKey、executionProfile、本地源码/bundle/preset/资源/verifier 参数及公共 provider retry/model metadata 摘要、私有验证读面 | 服务端模型 revision opaque；传递依赖与工具声明并非全面独立认证；跨 control 污染依赖实验者封存来源 |
 | T04 | 原生 case×trial 矩阵、权重/family 聚合、失败保留分母、无提交不造产物、基础设施缺失与恢复；复用根会话按准确 dispatch 与封存提交的原生投影差值计费，保留连续轨迹 | 缺 dispatch/billing sample 时比较成本 unknown；领域评分/oracle 需真实冻结 |
 | T05 | campaign+caliber 隔离的已接纳搜索头及 S*；方向反例；重复基线噪声带；family 配对质量/成本区间 | 小样本可诚实证据不足；无匹配 seed/交错执行的时漂控制证明 |
-| T06 | 唯一 paths 批次 API，1–3 槽同一 incumbent/截止；一个机制、repair=0、总 6 槽；新批次纯静态整批预检通过后冻结同一份 bytes，pending 按附件恢复；untried 保留槽、两轮停滞首槽 prune、证据检查与 critic 均在冻结后；单份槽结果；静态错误不扣槽、混合批次不部分接纳已有回归 | 本轮 initial 删除与草稿机制尚未真实模型重跑；选择 b=1 稀疏模式，不实施 2→1 退火；机制独立性由 critic 判断，非形式证明 |
+| T06 | 唯一 paths 批次 API，1–3 槽同一 incumbent/截止；一个机制、repair=0、总 6 槽；新批次纯静态整批预检通过后冻结同一份 bytes，pending 按附件恢复；untried 保留槽、两轮停滞首槽 prune、证据检查与 critic 均在冻结后；单份槽结果；静态错误不扣槽、混合批次不部分接纳已有回归 | 新边界尚未真实模型重跑；选择 b=1 稀疏模式，不实施 2→1 退火；机制独立性由 critic 判断，非形式证明 |
 | T07 | 稳定 evolve case/family 预测、配对命中/未命中/未预测退化、近 6 轮反馈与拒绝原因；逐观察节点/责任/依赖/产物关系和消费计数；全失败允许无 success_habits | 观测关联不证明因果；实际消融价值需领域实验 |
 | T08 | 冻结 H0/champion；validation/可选 heldout；已消费事实、关闭继续提案/请求评估；发布重算 exact validation 配对报告，独立 review+CAS；原始矩阵/结果可导出 | 未污染检查只在本 control 内按 suite/已见 validation 与 heldout 的 family/contract；真实迁移与跨 host 来源承诺未获证明 |
 | T09 | 在飞追加、逐子通知、根内图投影、准确 producerRunId；整图节点/规划/Run/无进展额度及 native 步数出口；持久取消及冷恢复；pilot 已有真实委派与独立验收见证 | 逐节点抢先响应、复杂任务收敛及组织效率仍需行为实验；已在途并发请求不能由事后计数撤销 |
 | T10 | 整删 provider.ts、自定义 partial/flush/exhausted 判断、整图停机/重启与侧日志；直接使用 DSH 原生重试/最终错误；Task 从 turn/end 保留原始原因；RSI/审核复用步骤出口，取消/终态失败中止在飞工作并阻止失效后发布 | 原生策略决定重试资格、预算和失败出口；raw 调用仍由原生调用方决定重试 |
 | T11 | 正式 doctor/task run/status/cancel/experiment run/report；学习开关；认证/幂等身份；移除浏览器 campaign 路径；可单独停止业务后的 RSI，taskId 精确取消不误停同会话新根 | experiment run 仅启动第一个 evolve 业务 root，完整 pilot 逐题执行入口未接通；学习失败后的真实模型恢复未验收；同请求 ID 仅用于原文恢复，变更输入须新 ID |
 | T12 | 显式私有宿主配置、版本/补丁摘要、frozen 公共依赖安装、异路径构建；NOTICE/来源/贡献/安全文档与固定权限 CI | 根项目私有 UNLICENSED；私有宿主不随仓分发；本地无 remote，远端保护/CI 执行与另一机器复现待外部环境 |
-| T13 | `75aaa2c` 基线 `pnpm verify` 退出 0，90 文件/946 测试/7 门禁通过；覆盖静态拒绝、字段定位、真实引用填写运行时模板后进入 critic、审核模板解析、read.kind 必填、冻结恢复与结算幂等；真实 JSONL 发布竞态、恢复/取消/步骤出口及既有原生 delivery/retry/用量和 Buckyball 业务验收证据保留，见 §2.2 | 该基线实跑暴露源码重抄失真；本轮减量修复通过全量 948 测试，最终构建/62 项针对回归/7 道门禁通过；不外推领域效果；较早异步等待失败的根因未定位，真实迁移未验收 |
+| T13 | 最新 `pnpm verify` 退出 0，90 文件/946 测试/7 门禁通过；覆盖静态拒绝、字段定位、真实引用填写运行时模板后进入 critic、审核模板解析、read.kind 必填、冻结恢复与结算幂等；真实 JSONL 发布竞态、恢复/取消/步骤出口及既有原生 delivery/retry/用量和 Buckyball 业务验收证据保留，见 §2.2 | 本轮尚未部署或真实模型重跑；较早异步等待失败的根因未定位，真实迁移未验收，历史故障分别记录 |
 | T14 | 冻结协议、11 篇原始摘要定位、RRSI 对照；pilot 来源、分组/split、oracle、资源与统计门已冻结 | 正式迁移需更多独立族和完成的比较；更完整硬件/compiler 相关工作与论文新颖性未完成 |
-| T15 | 四层角色/方法/方向接线、真实 round directives、冻结发布 subject、按需 workflow 元数据/历史反馈；原生首次 delivery 见证；RSI 当前头提案/报告模板与按实际 criteria 生成的审核模板；read.kind 必填 | 前版完整模板重抄在实跑失败；本轮删除 Method initial、提供落盘草稿和原生 edit 指令；pending 批次返回冻结路径、pending 测评只等待，确定性回归通过；模型是否依策略改变组织、真实效果及消融未测 |
-| T16 | 最小 C/ISA 投影及固定工具、真实 MCP/BEMU；6 题/3 族 labelled-synthetic pilot；12 个正反样本、unknown/refutation、并发取消和私有读隔离通过；真实业务根已有独立验收 | 完整 pilot 逐题运行未接通；早期学习被 HTTP 402 中断，最新运行 11 次调用全部静态拒绝、0 扣槽/0 round；正式候选比较、迁移与论文门未完成；不覆盖全仓递归依赖或 MLIR/RTL/PPA |
+| T15 | 四层角色/方法/方向接线、真实 round directives、冻结发布 subject、按需 workflow 元数据/历史反馈；原生首次 delivery 见证；RSI 当前头提案/报告模板与按实际 criteria 生成的审核模板；read.kind 必填 | 新模板尚未真实模型重跑；模型是否依策略改变组织、真实效果及消融未测 |
+| T16 | 最小 C/ISA 投影及固定工具、真实 MCP/BEMU；6 题/3 族 labelled-synthetic pilot；12 个正反样本、unknown/refutation、并发取消和私有读隔离通过；真实业务根已有独立验收 | 完整 pilot 逐题运行未接通；早期学习被 HTTP 402 中断，最新运行 6 invalid/0 round；正式候选比较、迁移与论文门未完成；不覆盖全仓递归依赖或 MLIR/RTL/PPA |
 
-**剩余证据边界：** 最小 C/ISA pilot 的环境、来源、oracle 和隔离阻断已解除，真实业务根已验收；作者树仍不是完整上游复现。本轮采用明确标注的合成缺陷，不冒充历史漏洞。早期学习因 HTTP 402 失败，较早 CommandCode 运行曾提前关闭搜索；最新运行 11 次调用全部静态拒绝、零扣槽、零 round，RSI 已 failed，未形成有效比较、迁移或新方法发布。完整 pilot 逐题执行入口未接通；T14/T16 正式迁移与 T13 领域效果保持未完成；当前每个 split 只有一族，仍未满足冻结的三族统计门。前版静态预检已部署并正确拒绝错误候选，本轮进一步删除 Method 中的 seed 并提供落盘草稿，不能仅凭修改文档宣称实跑通过。
+**剩余证据边界：** 最小 C/ISA pilot 的环境、来源、oracle 和隔离阻断已解除，真实业务根已验收；作者树仍不是完整上游复现。本轮采用明确标注的合成缺陷，不冒充历史漏洞。早期学习因 HTTP 402 失败，较早 CommandCode 运行曾提前关闭搜索；最新运行六个提案均在结构检查中 invalid，零 round。报告 accepted 不证明其宿主故障归因正确，也未形成有效比较、迁移或新方法发布。完整 pilot 逐题执行入口未接通；T14/T16 正式迁移与 T13 领域效果保持未完成；当前每个 split 只有一族，仍未满足冻结的三族统计门。本轮静态预检修复已通过完整工程验证，尚未部署或真实模型重跑。
 
 ### T00 · 固定审查基线与新合同
 
@@ -1275,10 +1271,10 @@ handoff 说明观察和假设，不偷偷增加“必须修某文件”这一验
 | root | 使用覆盖验收所需的最少责任；委派未解问题；不规定工具顺序；仅在需要时委派集成 | 必须协调、准确 direct child Run 提交、父独立验收 |
 | task/中间节点/叶子 | 围绕下一项不确定性做有界调查；选择能区分原因的检查；相关时读取 pinned method/skill | 输入保护、绑定资产、required 依赖、提交封存 |
 | review | 区分 acceptance、proposal、publication；只有 acceptance 可以按需委派取证；复制 `output.template`，保留实际 digest/criteria，以合法 `unknown` 起填 | 角色工具白名单、保护检查不可改判、subjectDigest、逐标准完整 findings |
-| improve | 开始/恢复/压缩后无 ref 读取当前头；按证据形成一个机制；从 proposal.drafts 用原生 edit 填写完整提案，仅改必要字段；Method 禁止 initial，不重抄 seed；遵守 nextRound；按工具记录写报告，未知测量用 null | 草稿不覆盖；从冻结 Task/Case 继承真实源码；根模板保护契约定位差异；静态整批拒绝不扣槽；冻结后失败扣槽；suite 私有验证/发布在报告封存后执行 |
+| improve | 开始/恢复/压缩后无 ref 读取当前头；按证据形成一个机制；复制完整 Method 提案模板，遵守 nextRound；用报告模板陈述提交前事实，未知测量用 null | 纯静态整批预检不扣槽；冻结后失败扣槽；无赢家可收尾；suite 的私有验证/发布在封存报告后由宿主执行 |
 | 父背景摘要 | 只保留相关决策理由、未决假设、排除路径；证据仅选 host 已验证引用；不复制契约/方法 | scope/source/digest/证据归属与持久化验证 |
 
-这些是提示与输出合同改动，不是领域收益证据。角色能力、事实和费用口径仍归原有运行时所有；不新增工具、候选状态机或报告解析器。`kind=method` 在响应中只以 `proposal.template.method` 展示一次完整资产，草稿返回路径和创建结果，避免重复正文。操作顺序和三份标准 JSON 统一见 [RSI agent 工作合同](rsi-agent-contract.md)。
+这些是提示与输出合同改动，不是领域收益证据。角色能力、事实和费用口径仍归原有运行时所有；不新增工具、候选状态机或报告解析器。`kind=method` 的完整资产只在 `proposal.template.method` 中出现一次，避免与 `assets` 重复。操作顺序和三份标准 JSON 统一见 [RSI agent 工作合同](rsi-agent-contract.md)。
 
 ### 15.3 目标上下文装配：只保留四层
 
@@ -1380,7 +1376,7 @@ repair methods. Approve or reject with supported findings for the supplied subje
 rejection completes the review and preserves the production method.
 ```
 
-**RSI 分析与提案者**：实际 system prompt 以 `agent.ts` 为唯一来源；本计划不再手抄另一份角色提示。提示保留“读取当前头与证据 → 原生 edit 修改宿主草稿，形成单机制提案 → 按宿主结果继续 → 无待办时报事实”的工作流程，字段类型、真实 ID 来源、冻结字段与预算要求由 `kind=method` 的 format、nextRound、drafts 和 JSON 模板按需提供，见 [RSI agent 工作合同](rsi-agent-contract.md)。无赢家可报告；报告不等待由本次提交才触发的私有验证，不预言发布结果，次数只能来自实际工具记录。
+**RSI 分析与提案者**：实际 system prompt 以 `agent.ts` 为唯一来源；本计划不再手抄另一份角色提示。提示保留“读取当前头与证据 → 单机制提案 → 按宿主结果继续 → 无待办时报事实”的工作流程，字段类型、真实 ID 来源、完整资产和预算要求由 `kind=method` 的 format、nextRound 与 JSON 模板按需提供，见 [RSI agent 工作合同](rsi-agent-contract.md)。无赢家可报告；报告不等待由本次提交才触发的私有验证，不预言发布结果。
 
 **背景摘要器**：
 
@@ -1465,7 +1461,7 @@ workflow 的短策略按第 6.5 节自动送达，解决组织方法完全未暴
 
 ### T16 · Buckyball 最小领域接入与迁移实验
 
-- 当前状态：最小 C/ISA 环境、产物、并发隔离与六题 oracle 预检通过；真实业务根已有独立验收。完整 pilot 逐题执行入口未接通，任务门中的 refutation 目前仅有 oracle 反例；早期学习因 HTTP 402 失败，最新运行 11 次调用全部静态拒绝、零扣槽、零 round。模型调查、完整候选比较、迁移与论文出口未完成，不标全包完成。
+- 当前状态：最小 C/ISA 环境、产物、并发隔离与六题 oracle 预检通过；真实业务根已有独立验收。完整 pilot 逐题执行入口未接通，任务门中的 refutation 目前仅有 oracle 反例；早期学习因 HTTP 402 失败，最新运行六个提案均结构 invalid、零 round。模型调查、完整候选比较、迁移与论文出口未完成，不标全包完成。
 - 依赖：T02/T03/T04/T09；正式搜索依赖 T01/T05–T08；设计由 T14 固定。
 - 修改入口：新增一个领域声明及少量 task/suite/评测适配，复用 inputs/workspace/measure/release。工具若已有稳定 CLI 就直接绑定，只有状态/路径/证据适配确有需要时才写 wrapper。
 - 子任务与阶段门：

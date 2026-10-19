@@ -1,5 +1,5 @@
 import { searchHistory, searchFeedback } from './rsi-history.ts'
-import { rsiProposalContract, rsiProposalTemplate, rsiProposalDrafts, RSI_REPORT_FORMAT, RSI_REPORT_TEMPLATE } from './rsi-proposal.ts'
+import { rsiProposalContract, rsiProposalTemplate, RSI_REPORT_FORMAT, RSI_REPORT_TEMPLATE } from './rsi-proposal.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { setTimeout } from 'node:timers/promises'
 import type { ChildSession } from '../../src/runtime/child-session.ts'
@@ -144,19 +144,10 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
     const source = run?.purpose === 'improve' ? tasks.get(run.relatedTo!.taskId)!.runs[run.relatedTo!.runId]!.bubble! : undefined
     // The authoring template owns the one complete asset copy; do not double its context.
     const authoring = run?.purpose === 'improve'
-    const batch = task?.search?.batches?.find(batch => !batch.settled)
-    const round = task?.rounds?.find(round => round.status === 'pending')
-    const pending = batch !== undefined ? { kind: 'batch', batchId: batch.batchId, paths: batch.slots.map(slot => slot.path),
-      instruction: 'Resume singularity_propose_method with these exact paths. The host uses frozen bytes; do not edit or replace this batch.' }
-      : round !== undefined ? { kind: 'evaluation', roundId: round.roundId,
-        instruction: 'End the turn and wait for host feedback; do not prepare another candidate or poll.' } : null
     return { reference, ...(!authoring ? { assets } : {}), format: METHOD_FORMAT, evaluation,
       ...(source === undefined ? {} : { rootExecutionContext: { model: source.model, tools: source.tools, conditions: source.conditions, inputs: source.inputs } }),
       rootCapabilities: 'Root coordinates, reads evidence, delegates and submits a verified child artifact. Root cannot execute bash, write/edit files, invoke Skills or method Tools. Implementation and integration belong to children. Candidate procedures must respect these roles.',
-      proposal: { ...rsiProposalContract, ...(authoring ? { template: rsiProposalTemplate(assets), pending,
-        drafts: pending === null && input.ref === undefined && run.status === 'running' && run.stage === 'working'
-          ? await rsiProposalDrafts(run.bubble!.workspace.ref, assets, reference.revisionId,
-            (task!.search?.batches?.length ?? 0) + 1, search?.directives.remainingSlots ?? 0) : [] } : {}) },
+      proposal: { ...rsiProposalContract, ...(authoring ? { template: rsiProposalTemplate(assets) } : {}) },
       ...(authoring ? { reportFormat: RSI_REPORT_FORMAT, reportTemplate: structuredClone(RSI_REPORT_TEMPLATE) } : {}),
       ...(search === undefined ? {} : { nextRound: search.directives, feedback: await searchFeedback(apparatus, task!),
         cases: apparatus.domain.suite?.cases.filter(c => c.split === 'evolve').map(c => ({ caseId: c.caseId, familyId: c.familyId, trials: c.trials, weight: c.weight })) ?? [] }),

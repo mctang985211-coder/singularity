@@ -51,9 +51,7 @@ export function templateDeclaration(template: TaskTemplate) {
   }
 }
 
-export async function readTemplate(dir: string, raw: unknown, verifiers: readonly DomainVerifier[], at: string,
-  inheritedInitial?: TaskTemplate['initial'],
-): Promise<TaskTemplate> {
+export async function readTemplate(dir: string, raw: unknown, verifiers: readonly DomainVerifier[], at: string): Promise<TaskTemplate> {
   const declared = record(raw, at)
   assertClosedKeys(declared, ['id', 'goal', 'artifact', 'inputs', 'criteria', 'skills', 'capabilities', 'guidance', 'applicability', 'decomposition', 'checks', 'initial'], at, 'malformed-declaration')
   const inputs: TemplateInput[] = list(declared['inputs'], `${at}.inputs`).map((raw, index) => {
@@ -97,7 +95,7 @@ export async function readTemplate(dir: string, raw: unknown, verifiers: readonl
     checks.push({ input, verifier, criterion: { ...standard, verifierRef: verifier.ref, verifierVersion: verifier.version,
       implementationDigest: verifier.implementationDigest } })
   }
-  let initial = inheritedInitial
+  let initial: TaskTemplate['initial']
   if (declared['initial'] !== undefined) {
     const source = record(declared['initial'], `${at}.initial`)
     assertClosedKeys(source, ['from', 'content'], `${at}.initial`, 'malformed-declaration')

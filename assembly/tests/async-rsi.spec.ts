@@ -530,29 +530,22 @@ it('rejects mistaken RSI submissions without closing search, then admits a legit
     .toMatchObject({ outcome: 'insufficient-evidence' })
 })
 
-it('admits an edited host draft, retains edits on re-read and prepares fresh drafts after admission', async () => {
+it('admits a filled runtime JSON template with real evidence and a complete workflow-only Method', async () => {
   const h = await fixture(), root = await h.enter('count protected letters')
   businessTurn(h, 100)
   await writeFile(join(root.workspace, root.contract.artifact), '35')
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'explicit-workflow')
-  type DraftRead = { proposal: { template: ReturnType<typeof rsiProposalTemplate>; drafts: { path: string; created: boolean }[] } }
-  const read = await scope.history({ kind: 'method' }) as DraftRead
-  expect(read.proposal.drafts).toHaveLength(3)
-  expect(read.proposal.drafts.every(draft => draft.created)).toBe(true)
-  const path = read.proposal.drafts[0]!.path
-  const template = JSON.parse(await readFile(join(request.cwd, path), 'utf8')) as ReturnType<typeof rsiProposalTemplate>
-  expect(template).toEqual(read.proposal.template)
-  const assets = template.method
+  const read = await scope.history({ kind: 'method' }) as { proposal: { template: ReturnType<typeof rsiProposalTemplate> } }
+  const template = read.proposal.template, assets = template.method
   const index = await scope.history({ kind: 'trajectory', ref: 'business' }) as { seq: number }[]
   const eventSeq = index[0]!.seq
   await scope.history({ kind: 'trajectory', ref: 'business', eventSeq })
-  const factsBefore = factsOf(h.medium)
-  await expect(scope.proposeMethod({ paths: [path] })).rejects.toThrow('eventSeq')
-  expect(factsOf(h.medium)).toEqual(factsBefore)
+  await writeFile(join(request.cwd, 'unfilled.json'), JSON.stringify(template))
+  await expect(scope.proposeMethod({ paths: ['unfilled.json'] })).rejects.toThrow('eventSeq')
   const mode = 'repeat_inspection', evidence = [{ sessionId: 'business', eventSeq, rootId: root.taskId }]
-  // Fill the on-disk draft; no hand-transcribed Method or fixture-derived diff.
+  // Fill the host's JSON directly; do not derive the Method or diff via the fixture helper.
   const proposal = { ...template,
     analysis: { ...template.analysis, failure_modes: [{ mode,
       description: 'The same frozen input can be inspected repeatedly without new evidence.',
@@ -567,21 +560,14 @@ it('admits an edited host draft, retains edits on re-read and prepares fresh dra
     method: { ...assets, workflowGuidance: 'Reuse evidence only when its frozen input identity matches.' },
   }
   expect(JSON.stringify(proposal)).not.toContain('<')
-  await writeFile(join(request.cwd, path), JSON.stringify(proposal))
-  const reread = await scope.history({ kind: 'method' }) as DraftRead
-  expect(reread.proposal.drafts).toEqual(read.proposal.drafts.map(draft => ({ ...draft, created: false })))
-  expect(JSON.parse(await readFile(join(request.cwd, path), 'utf8'))).toEqual(proposal)
-  expect(reread.proposal.template).toEqual(template)
+  await writeFile(join(request.cwd, 'workflow.json'), JSON.stringify(proposal))
   screenVerdict = 'fail'
-  const admitted = await scope.proposeMethod({ paths: [path] })
+  const admitted = await scope.proposeMethod({ paths: ['workflow.json'] })
   expect(admitted).toMatchObject({ admitted: true, slotsConsumed: 1, status: 'rejected', slots: [{ slot: 0, status: 'rejected' }] })
   expect(admitted).not.toHaveProperty('roundId')
   expect(factsOf(h.medium).filter(fact => fact.kind === 'review/started' &&
     (fact.payload as { target: { kind: string } }).target.kind === 'proposal')).toHaveLength(1)
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-slot-settled')).toHaveLength(1)
-  const next = await scope.history({ kind: 'method' }) as DraftRead
-  expect(next.proposal.drafts.every(draft => draft.created && !read.proposal.drafts.some(old => old.path === draft.path))).toBe(true)
-  expect(JSON.parse(await readFile(join(request.cwd, next.proposal.drafts[0]!.path), 'utf8'))).toEqual(template)
   expect(harness.solve).not.toHaveBeenCalled()
 })
 
@@ -605,8 +591,6 @@ it.each(['rsi/batch-slot-settled', 'rsi/batch-ended'])('recovers frozen proposal
   await h.mount()
   await driver!.activate(String(agent.id))
   const restored = h.call(agent, 'resume-screen')
-  expect(await restored.history({ kind: 'method' })).toMatchObject({ proposal: { drafts: [],
-    pending: { kind: 'batch', paths: ['candidate.json'] } } })
   await expect(restored.proposeMethod({ paths: ['a-new-proposal.json'] })).rejects.toThrow('resume the frozen batch')
   expect(await restored.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
   expect(factsOf(h.medium).filter(fact => fact.kind === 'review/started')).toEqual(before.filter(fact => fact.kind === 'review/started'))
@@ -784,8 +768,6 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   const round = await scope.proposeMethod({ paths: ['candidate.json'] }) as { roundId: string; status: string; revision: unknown }
   candidate = round.revision
   expect(round.status).toBe('pending')
-  expect(await scope.history({ kind: 'method' })).toMatchObject({ proposal: { drafts: [],
-    pending: { kind: 'evaluation', roundId: round.roundId } } })
   expect(await scope.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ roundId: round.roundId, status: 'pending' })
   expect(factsOf(h.medium).filter((f) => f.kind === 'rsi/round-requested')).toHaveLength(1)
   expect(await scope.history({ kind: 'method', ref: (candidate as { digest: string }).digest }))

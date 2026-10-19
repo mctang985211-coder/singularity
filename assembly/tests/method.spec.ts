@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { testProjections } from './seam.ts'
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
@@ -13,7 +13,7 @@ import { digestOf } from '../../src/protocol/envelope.ts'
 import { openApparatus, bindCaller, type Apparatus } from '../src/apparatus.ts'
 import { loadDomain } from '../src/domain.ts'
 import { spawnProcess } from '../src/process.ts'
-import { createMethod, loadMethod, methodEnvironment, methodTemplateDeclaration, publishedMethod, seedMethod, type MethodAssets,
+import { createMethod, loadMethod, methodEnvironment, publishedMethod, seedMethod, type MethodAssets,
 } from '../src/method.ts'
 import { templateDeclaration } from '../src/template.ts'
 import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
@@ -32,26 +32,15 @@ const dir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta
 const tool = "import {readFileSync} from 'node:fs'; process.stdout.write(String((readFileSync(process.argv[2],'utf8').match(/[A-Za-z]/g)??[]).length))"
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
-async function setup(initials: readonly Uint8Array[] = []) {
+async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'singularity-method-'))
   roots.push(root)
-  const domainDir = initials.length ? join(root, 'domain') : dir
-  if (initials.length) {
-    await cp(dir, domainDir, { recursive: true })
-    const declaration = JSON.parse(await readFile(join(domainDir, 'task.json'), 'utf8')) as { templates: Record<string, unknown>[] }
-    for (const [index, bytes] of initials.entries()) {
-      const from = `initial-${index}.bin`
-      await writeFile(join(domainDir, from), bytes)
-      declaration.templates[index]!['initial'] = { from }
-    }
-    await writeFile(join(domainDir, 'task.json'), JSON.stringify(declaration))
-  }
-  const domain = await loadDomain(domainDir, spawnProcess)
+  const domain = await loadDomain(dir, spawnProcess)
   const medium = new FakePersistence()
   const apparatus = await openApparatus('method-spec', root, domain, medium as unknown as SessionPersistence, attachmentsAt(root), testProjections,
   )
   const assets: MethodAssets = { workflowGuidance: '', templates: [...apparatus.domain.templates.values()].map((template) => ({
-    ...methodTemplateDeclaration(template), ...(template.id === apparatus.domain.rootTemplate ? { skills: ['count'] } : {}),
+    ...templateDeclaration(template), ...(template.id === apparatus.domain.rootTemplate ? { skills: ['count'] } : {}),
   })), skills: [{ name: 'count', description: 'Count letters', capabilities: ['count'], requiredTools: ['count'], content: 'Count letters using available evidence.',
       },
     ], tools: [{ name: 'count', source: tool }],
@@ -67,7 +56,7 @@ const contextFor = (apparatus: Apparatus, proposal: { taskId: string; runId: str
 it('validates an imported seed and uses the latest publication for each independent business root', async () => {
   const { apparatus, assets, caller } = await setup()
   const invalid = { ...assets, templates: assets.templates.map(raw => ({ ...raw as object, artifact: 'changed.txt' })) }
-  await expect(seedMethod(apparatus, invalid)).rejects.toThrow('method.templates[0].artifact for template "count-source"')
+  await expect(seedMethod(apparatus, invalid)).rejects.toThrow('protected input or acceptance')
   expect(publishedMethod(apparatus)).toBeUndefined()
   const seed = await seedMethod(apparatus, assets)
   const first = await propose(apparatus, caller, 'first-root', { goal: 'count letters' })
@@ -96,36 +85,6 @@ it('freezes usable candidates without a separate asset admission review', async 
       .entries()
       .filter((e) => e.protocol === 'review'),
   ).toEqual([])
-  await apparatus.store.close()
-})
-
-it('inherits exact Task/Case initial bytes without storing source in Method assets', async () => {
-  const initials = [Buffer.from('protected-source+continuation\n'), Buffer.from([0xff, 0x2b, 0xfe, 0x0a])]
-  const { apparatus, caller } = await setup(initials)
-  const seed = await seedMethod(apparatus)
-  const seeded = await loadMethod(apparatus, seed)
-  expect(JSON.stringify(seeded.assets)).not.toContain('protected-source')
-  expect(seeded.assets.templates.every(raw => !Object.hasOwn(raw as object, 'initial'))).toBe(true)
-  const manifest = apparatus.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION,
-    methodEnvironment(apparatus))!.revisions[seed.revisionId]!.manifest as MethodAssets
-  expect(manifest).toEqual(seeded.assets)
-  expect(manifest.templates.every(raw => !Object.hasOwn(raw as object, 'initial'))).toBe(true)
-  const revised = await createMethod(apparatus, { ...seeded.assets, workflowGuidance: 'Delegate one bounded responsibility.' })
-  const loaded = await loadMethod(apparatus, revised)
-  for (const [index, bytes] of initials.entries()) {
-    const original = [...apparatus.domain.templates.values()][index]!, template = loaded.domain.templates.get(original.id)!
-    expect(template.digest).toBe(original.digest)
-    expect(Buffer.from(template.initial!.bytes)).toEqual(bytes)
-    const owner = { ...caller, agentId: `seed-owner-${index}`, sessionId: `seed-owner-${index}` }
-    await bindCaller(apparatus, owner)
-    const commands = apparatus.tasks.forAgent(owner.agentId), taskId = `seed-task-${index}`
-    await commands.admit({ commandId: `admit:${taskId}`, taskId, contract: contractFor(loaded.domain, template, template.goal) })
-    await commands.assign({ commandId: `assign:${taskId}`, taskId, agentId: owner.agentId })
-    const run = await startAttempt(apparatus, owner, taskId, `run:${taskId}`, revised)
-    expect(await readFile(join(run.bubble!.workspace.ref, template.artifact))).toEqual(bytes)
-  }
-  expect(templateDeclaration(apparatus.domain.templates.get(apparatus.domain.rootTemplate!)!).initial)
-    .toEqual({ content: initials[0]!.toString('utf8') })
   await apparatus.store.close()
 })
 
@@ -234,33 +193,23 @@ it('refuses changes to protected task input or acceptance while allowing changed
   await expect(createMethod(apparatus, { ...assets, templates: changed })).resolves.toBeDefined()
   changed = structuredClone(changed)
   changed[0]!.checks[0]!.verifier = 'extract-letters'
-  await expect(createMethod(apparatus, { ...assets, templates: changed })).rejects.toThrow('method.templates[0].checks for template "count-source"')
+  await expect(createMethod(apparatus, { ...assets, templates: changed })).rejects.toThrow('acceptance')
   changed[0]!.checks[0]!.verifier = 'letters'
   changed[0]!.inputs[0]!.source.ref = 'invented-source'
   await expect(createMethod(apparatus, { ...assets, templates: changed })).rejects.toThrow()
   await apparatus.store.close()
 })
 
-it('identifies each changed protected root field and tells the author to restore it', async () => {
+it('refuses dropping a protected checker or replacing the frozen root initial content', async () => {
   const { apparatus, assets } = await setup()
-  const changes = { artifact: 'changed.txt', inputs: [{ name: 'in/source.txt', source: { kind: 'protected', ref: 'changed-source' } }],
-    criteria: [{ criterionId: 'letters', statement: 'A different acceptance condition.' }], checks: [] }
-  for (const [field, value] of Object.entries(changes))
-    await expect(createMethod(apparatus, { ...assets, templates: assets.templates.map(raw => {
-      const template = raw as { id: string }
-      return template.id === apparatus.domain.rootTemplate ? { ...template, [field]: value } : template
-    }) })).rejects.toThrow(`method.templates[0].${field} for template "count-source" is frozen by the Task/Case; restore this field`)
-  await apparatus.store.close()
-})
-
-it('rejects initial declarations on every Method template, including new templates', async () => {
-  const { apparatus, assets } = await setup()
-  const templates = [...assets.templates, { ...assets.templates[0] as object, id: 'new-template' }]
-  for (const [index, raw] of templates.entries())
-    for (const initial of [{ content: '35' }, { from: 'samples/source.txt' }, null])
-      await expect(createMethod(apparatus, { ...assets, templates: templates.map((template, at) =>
-        at === index ? { ...template as object, initial } : template) }))
-        .rejects.toThrow(`method.templates[${index}].initial for template ${JSON.stringify((raw as { id: string }).id)} is not a Method asset. Delete initial; the host supplies exact initial source bytes from the frozen Task/Case`)
+  await expect(createMethod(apparatus, { ...assets, templates: assets.templates.map(raw => {
+    const template = raw as { id: string }
+    return template.id === apparatus.domain.rootTemplate ? { ...template, checks: [] } : template
+  }) })).rejects.toThrow('acceptance')
+  await expect(createMethod(apparatus, { ...assets, templates: assets.templates.map(raw => {
+    const template = raw as { id: string }
+    return template.id === apparatus.domain.rootTemplate ? { ...template, initial: { content: '35' } } : template
+  }) })).rejects.toThrow('initial root source')
   await apparatus.store.close()
 })
 

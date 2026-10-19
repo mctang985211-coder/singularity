@@ -1,7 +1,6 @@
 import { searchHistory } from './rsi-history.ts'
 import { sealedBytes } from './sealed.ts'
-import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile } from 'node:fs/promises'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { assertClosedKeys, digestOf } from '../../src/protocol/envelope.ts'
@@ -52,7 +51,7 @@ export interface RsiProposal {
   readonly method: MethodAssets
 }
 
-export const RSI_PROPOSAL_FORMAT = `First follow proposal.pending if present: resume a frozen batch with its exact paths, or end the turn for a pending evaluation. No new drafts are prepared while either is pending. Otherwise use native edit on a proposal.drafts[].path: the host has already written the complete current proposal JSON into your workspace. created=false means your existing edits were retained, not reset; compare with proposal.template if needed. Do not retype or rewrite the full Method. Replace all <...> and null placeholders with observed data; remove unobserved finding rows.
+export const RSI_PROPOSAL_FORMAT = `Fill proposal.template and save a proposal JSON file, not a bare method. Replace all <...> and null placeholders with observed data; remove unobserved finding rows.
 {analysis:{failure_modes:FailureMode[],capability_gaps:CapabilityGap[],success_habits:SuccessHabit[]},edit:Edit,method:Method}.
 Evidence = {sessionId:string,eventSeq:integer,rootId?:string,from?:integer,count?:integer}. Read trajectory ref=sessionId to select a real index seq; copy it into REQUIRED eventSeq and read that event. from/count alone is an index range, not evidence. For historical evidence also copy rootId. The critic sees only the cited UTF-8 page (from defaults to 0, count to 8192; from>=0, count 4..8192); select sufficient bytes.
 FailureMode = {mode:string,description:string,needed_instead:string,evidence:Evidence[]}.
@@ -60,8 +59,7 @@ CapabilityGap = {gap:string,description:string,evidence:Evidence[]}.
 SuccessHabit = {habit:string,description:string,risk_if_broken:string,evidence:Evidence[]}.
 At least one evidenced finding is needed; other lists may be []. Names must be unique across all three lists; targets_mode copies one exact name. Keep mechanisms reusable; public domain knowledge with sources is allowed, task-instance details stay in evidence.
 Edit = {hypothesis:string,targets_mode:string,why_not_lower_lever:string,trigger_condition:string,changes:{asset:'workflow'|'template'|'skill'|'tool',target:string}[],predicted_affected:string[],predicted_cases?:string[],predicted_families?:string[],retroactive_check:{corrective:string,preservative:string,transfer:string},regression_risk:string}.
-ONE independent mechanism per candidate. changes must name each actual changed asset exactly once: workflow target='workflowGuidance', template target=id, skill/tool target=name. predicted_affected contains nonempty unique actual Task IDs belonging to the cited sessions, not Run/session/agent IDs. With a suite, predicted_cases and/or predicted_families must name at least one evolve ID from cases; otherwise [] is legal. Counterfactuals cover correction, preservation and unfamiliar-task transfer. Draft method is a complete replacement: edit only the necessary fields and retain unchanged assets. Empty arrays delete assets; an unchanged method is invalid. initial is NOT a Method field: the host supplies frozen Task/Case source bytes. Never copy a seed or repaired business patch into method. Root inputs/artifact/criteria/checks are read-only. Do not add undeclared fields or proposal metadata to method.
-A static refusal admits no candidate and consumes no slots. Fix the exact named field in the same draft; do not delete other fields or retry identical content. Only a returned roundId means an evaluation was requested; no round means no measured result.`
+ONE independent mechanism per candidate. changes must name each actual changed asset exactly once: workflow target='workflowGuidance', template target=id, skill/tool target=name. predicted_affected contains nonempty unique actual Task IDs belonging to the cited sessions, not Run/session/agent IDs. With a suite, predicted_cases and/or predicted_families must name at least one evolve ID from cases; otherwise [] is legal. Counterfactuals cover correction, preservation and unfamiliar-task transfer. template.method is the complete current Method: modify it, retain unchanged assets, and follow the method format in this response. Empty arrays delete assets; an unchanged method is invalid. Do not add undeclared fields, task answers or proposal metadata to method.`
 
 /** A scaffold, never invented evidence or a partial Method patch. */
 export function rsiProposalTemplate(method: MethodAssets) {
@@ -83,24 +81,7 @@ export function rsiProposalTemplate(method: MethodAssets) {
   }
 }
 
-/** Editable files avoid model transcription of assets; the control log remains the only search state. */
-export async function rsiProposalDrafts(workspace: string, method: MethodAssets, revisionId: string, batch: number, count: number) {
-  const content = JSON.stringify(rsiProposalTemplate(method), null, 2) + '\n'
-  const drafts: { path: string; created: boolean }[] = []
-  for (let slot = 1; slot <= Math.min(3, count); slot++) {
-    const path = `proposal-${revisionId}-${batch}-${slot}.json`
-    let created = true
-    try { await writeFile(join(workspace, path), content, { flag: 'wx' }) }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      created = false
-    }
-    drafts.push({ path, created })
-  }
-  return drafts
-}
-
-export const RSI_REPORT_FORMAT = `Recommended report.json structure: fill reportTemplate with facts known BEFORE submission. evidence uses the proposal Evidence shape; changes and preserved_behavior list supported mechanisms/behaviors. results contains actual {roundId,outcome,qualityDelta,costRatio,detail} records; use [] if no round ran and null for missing numbers, never zero. Distinguish static refusal, admitted candidate, critic rejection and measured no-winner. If reporting counts or causes, count actual native tool calls/results, paths, admitted slots and rounds separately; count only observed errors, not drafts or guessed attempts. A static refusal with slots remaining is a draft to correct, not an exhausted search or deadlock. State missing coverage and attribution limits. With a suite, private validation and resulting publication run after this file is sealed: transfer.status='not-tested-before-submission' is honest; final host outcomes are separate committed facts. This report is independently reviewed, not a proposal or a publication approval.`
+export const RSI_REPORT_FORMAT = `Recommended report.json structure: fill reportTemplate with facts known BEFORE submission. evidence uses the proposal Evidence shape; changes and preserved_behavior list supported mechanisms/behaviors. results contains actual {roundId,outcome,qualityDelta,costRatio,detail} records; use [] if no round ran and null for missing numbers, never zero. Distinguish structural refusal, critic rejection and measured no-winner. State missing coverage and attribution limits. With a suite, private validation and resulting publication run after this file is sealed: transfer.status='not-tested-before-submission' is honest; final host outcomes are separate committed facts. This report is independently reviewed, not a proposal or a publication approval.`
 export const RSI_REPORT_TEMPLATE = {
   summary: '<search result supported by facts known before submission>',
   evidence: [], changes: [], results: [], preserved_behavior: [], limitations: [],
