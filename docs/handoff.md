@@ -1,31 +1,19 @@
 # 接手入口
 
-更新：2026-10-19。整体审查基线 `4314487`；当前 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只用于新图。已实现与待验证出口统一维护在计划第 9 节。
+更新：2026-10-19。整体审查基线 `4314487`；当前 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，仅用于新图。
 
-按以下顺序阅读，无需重读全部历史：
+1. [Task / Workflow RSI 终局计划](task-first-domain-rsi-plan.md)：架构、T00–T16 与未完成出口，唯一施工顺序在第 9.1 节。
+2. [RSI agent 工作合同](rsi-agent-contract.md)：实际流程、标准 JSON、真实失败记录和证据边界。
+3. [context](context.md)、[blueprint](blueprint.md)、[spec-policy](spec-policy.md)：当前状态、已确认合同和验证规范。
 
-1. [Task / Workflow RSI 终局计划](task-first-domain-rsi-plan.md)：先读第 1/6 节架构和第 9.1 节施工顺序；含 20 项发现、T00–T16、研究/Buckyball 与提示词规范。
-2. [blueprint](blueprint.md)：总目标、范围、架构与文档职责。
-3. [context](context.md)：用户已确认的合同、未关闭问题与验证边界。
-4. [assembly-blueprint](assembly-blueprint.md)：现有装配边界及历史施工依据，新顺序以整体计划为准。
-5. [phase-g2-design](phase-g2-design.md)：当前任务运行合同。
-6. [spec-policy](spec-policy.md) 与 [standalone-dsh](standalone-dsh.md)：验证规范与私有环境。
+最新实跑 `buckyball-commandcode-rsi-20261019-124254` 已取消、宿主已停止，原始记录保留。root/task 的角色指导实际送达；父合同却要求写只读参考仓库，repair 已产出补丁后进入无人处理的提权审批。旧 `003416` 的 RSI 同样收到了流程，但重抄完整 Method 损坏六份冻结源码。不能把这些失败归结为“没发 system prompt”或模型无法编写修复。
 
-最新 RSI 提示与 JSON 合同统一后 `pnpm verify`：退出 0，构建/类型检查、90 文件/946 测试/7 门禁通过，日志 `/tmp/singularity-rsi-prompt-verify.log`。静态拒绝、模板填写与解析、read.kind 必填、批次附件冷恢复、取消/失败收口、步骤上限、非法 prune 和发布提交区竞态已有回归。本轮尚未部署或真实模型重跑；更早异步等待不稳定仍保留为未定位历史问题；各阶段历史验证见计划第 2.2 节。
+`02016c5` 回退 `9e655ce`，删除上一轮草稿与源码继承改造，再按实际证据修复：业务角色明确仅 workspace 可写、跨任务通过 sealed artifacts/声明输入交接、宿主独立验收；Bubble 使用原生 never 审批立即拒绝越权。RSI 提案只写 analysis 与 edit.changes，每项包含 value，宿主保留未改资产与源码。`kind=method` 返回当前 assets、pending、nextRound、feedback 和 JSON 模板；不再生成草稿文件或要求重抄完整 Method。静态拒绝定位字段、不扣槽，冻结后失败扣槽，最多 6 槽、repair=0。
 
-最新只读复核：`/home/ROXY/singularity-next/buckyball-commandcode-rsi-20261018-214154`，snapshot cutoff 80。业务根 `task-039780304071e184` 已验收；RSI 报告已验收、completed，但六个单槽批次全部 invalid，零 round、零候选比较、零 transfer 或新方法发布。第 1–3 次缺 `eventSeq`，第 4、6 次 finding label 跨三类重名，第 5 次缺完整 Method 集合；其 workflow target 本身正确。报告将失败归因于 `rootId` 或 workflow target 宿主错误的解释不成立。运行中一次 DSH 原生重试已恢复；此次无测评的直接原因是结构提交失败。
+报告审核读取提交前封存的当前根、本 search evolve 证据和已筛选提案实际引用的历史证据页；历史只开放封存字节范围，私有 split、其他 search、后续事件与未引用页面不扩权。待评估时新批次在入场前拒绝、不扣槽，原批次仍可恢复。报告通过、候选入场和实测收益分别判断。
 
-本轮采用唯一 paths 入口内的纯静态整批预检：JSON/schema、完整 Method、实际 diff、冻结 evolve case/family ID。新批次任一文件失败则整批不冻结、不扣槽；通过后冻结预检的同一份 bytes。已有 pending 只从附件恢复。冻结后的证据有效性、reserved/prune、critic、duplicate 与 smoke 失败仍扣槽，repair=0，不新建工具或候选状态机；预检不读取证据正文、不调用模型或执行候选。完整 Method 必须包含 workflowGuidance/templates/skills/tools，三类 finding label 全局唯一，错误须定位文件与字段。
+本轮验证结果见计划第 2.2 节。尚未用付费模型重跑修复版本；原生测试适配器证明指令和 schema 送达，不证明模型必然遵守。
 
-RSI 提示与输出合同已统一，见 [RSI agent 工作合同](rsi-agent-contract.md)。开始、恢复或压缩后无 `ref` 读取 `kind=method`，完整资产只在 `proposal.template.method` 中返回一次，另有 `reportTemplate`；审核 dispatch 提供真实 digest/criteria 的 `output.template`，默认 verdict 为合法 `unknown`。`singularity_read.kind` 必填；公开领域知识与题目答案泄漏分开；报告陈述提交前事实，suite 私有验证/发布在报告封存后由宿主执行。尚未用真实模型重跑新模板。
+Buckyball C/ISA+BEMU 环境、六题合成案例和独立 scalar oracle 已具备。完整 pilot 逐题入口仍未接通；experiment 只提交首个 evolve 根，有效候选才触发完整 split 测评矩阵。每 split 一族不足最少三族统计门。复杂任务收敛、迁移收益、MLIR/RTL/PPA、另一机器复现与论文出口仍未验收，T12–T16 的边界以计划为准。
 
-用户要求 provider 直接使用 DSH：已删除 `provider.ts`、partial-output veto、自定义 flush/耗尽判断、整图停机/重启和 provider 状态侧日志；失败映射只消费原生 turn/end，保留原始错误码。历史 CommandCode 的第 58/151 步无重试断流均由旧 veto 导致，原始记录保持只读。该阶段 snapshot 为 v12，部署重试阈值未变，88 文件/903 测试/7 门禁通过，日志 `/tmp/singularity-native-provider-final-verify.log`；当前协议与验证以上文为准。
-
-Task/Workflow、整图预算、case×trial 矩阵、历史 S*、有界单机制搜索、反馈，以及冻结 champion 后的独立验证/审核/CAS 已有工程实现与离线见证；T06 采用稀疏模式，不实施退火。Buckyball 最小 C/ISA 投影、6 题/3 族合成 pilot、私有独立 scalar+BEMU oracle 与隔离预检已具备。完整 pilot 逐题执行入口尚未接通：experiment run 只启动第一个 evolve 业务 root，有效候选触发 round 后才运行相应 split 的完整测评矩阵，冻结 suite 不会自动补跑其他 pilot 业务案例。
-
-较早只读检查 cutoff 247：首次业务根 `task-2d32b3cb8b21b08e` 已 `verified / accepted`；一个候选通过 critic 和加载检查，基线有效 2/4、候选有效 0/4，学习因 DeepSeek HTTP 402（余额不足）失败；未进入 transfer，也无新方法发布。完整状态保存到 `/home/ROXY/singularity-next/buckyball-pilot-20261018/progress-check-20261018.json`，保留该历史事实。
-
-真实模型策略的因果效果、复杂任务收敛和领域迁移仍未验收。pilot 每 split 只有一族，未达冻结的最少三族统计门；不覆盖全仓递归依赖、MLIR/RTL/PPA。T12 仍缺另一机器复现与公开交付条件，T14/T16 实验和 T13 领域效果保持未完成。实现基线与提交记录以 Git 为准，旧协议实验不迁移。常规实现按已授权目标推进；真正影响业务含义且无法从契约确定的歧义才询问。
-
-每包完成后更新 context 的当前状态和原计划中的出口状态，删除关联失效代码、注释和重复断言。
-历史实测按基线保留，过程解释放 Git；不追加新交接计划，不把静态绿色结果改写为产品完成。
+历史运行与冻结 checkout 不改写。`host.log` 含私有 token，不公开；provider 重试交给 DSH 原生。旧图不迁移，下一次实跑使用新 checkout 与 control。

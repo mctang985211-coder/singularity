@@ -28,6 +28,15 @@ import type { ProductionVerdict } from '../../src/verifier/production.ts'
 import { outcomesAnswered, planOutcomeOf } from './read.ts'
 import { reviewInputsOf } from './inputs.ts'
 import { searchView } from './rsi-history.ts'
+import { foldSubjects } from '../../src/protocol/fold.ts'
+import { STRATEGY_PROTOCOL, STRATEGY_VERSION, type RoundState } from '../../src/strategy/protocol.ts'
+import { MEASURE_PROTOCOL, MEASURE_VERSION, type EvaluationState } from '../../src/measure/protocol.ts'
+import { projectEvaluation } from '../../src/measure/view.ts'
+import { pairedReport } from '../../src/measure/paired.ts'
+import type { ControlSnapshot } from './snapshot.ts'
+import type { RsiEvidence } from './rsi-proposal.ts'
+import type { textPage } from './pages.ts'
+import { digestOf } from '../../src/protocol/envelope.ts'
 
 export const SUBJECT_INPUT = 'singularity-subject'
 // RRSI critic.py reviews intent/content before evaluation; it never solves a task.
@@ -58,6 +67,55 @@ export interface FrozenInputProducer {
   readonly source: NonNullable<RunState['submission']>['source']
   readonly evidence: RunState['evidence']
 }
+export interface FrozenRsiEvidence {
+  readonly cutoff: number
+  readonly rootId: string | null
+  readonly sourceTrace: FileAttachmentRef | null
+  readonly citations: readonly { readonly reference: RsiEvidence
+    readonly page: ReturnType<typeof textPage> & { readonly seq: number; readonly type: string } }[]
+  readonly rounds: readonly {
+    readonly request: NonNullable<TaskState['rounds']>[number]
+    readonly snapshot: ControlSnapshot['rounds'][number] | null
+    readonly evaluations: readonly EvaluationState[]
+  }[]
+}
+
+/** The report can cite only evidence available before its own submission, not later validation. */
+async function reportEvidence(apparatus: Apparatus, taskId: string, run: RunState): Promise<FrozenRsiEvidence> {
+  const facts = apparatus.store.load().entries()
+  const submitted = facts.find(fact => fact.subject === taskId && fact.kind === 'run/submitted' &&
+    (fact.payload as { runId: string }).runId === run.runId)
+  if (submitted === undefined) refuse('illegal-transition', 'report evidence requires a sealed submission')
+  const entries = facts.filter(fact => fact.seq <= submitted.seq)
+  const tasks = foldSubjects<TaskState>(apparatus.registry, entries, TASK_PROTOCOL, TASK_VERSION)
+  const strategies = foldSubjects<RoundState>(apparatus.registry, entries, STRATEGY_PROTOCOL, STRATEGY_VERSION)
+  const measurements = foldSubjects<EvaluationState>(apparatus.registry, entries, MEASURE_PROTOCOL, MEASURE_VERSION)
+  const reviews = foldSubjects<ReviewRun>(apparatus.registry, entries, REVIEW_PROTOCOL, REVIEW_VERSION)
+  const task = tasks.get(taskId)!, citations = new Map<string, FrozenRsiEvidence['citations'][number]>()
+  const revisions = new Set(task.search?.batches?.flatMap(batch => batch.outcomes.flatMap(outcome => outcome.revision?.digest ?? [])))
+  for (const digest of revisions) {
+    const reviewId = `review-${sha256(`${apparatus.controlId}/proposal:${taskId}:${digest}`).slice(0, 24)}`
+    const review = reviews.get(reviewId)
+    if (review?.target.kind !== 'proposal' || review.target.assetsDigest !== digest) continue
+    const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as { nativeEvidence?: FrozenRsiEvidence['citations'] }
+    for (const citation of subject.nativeEvidence ?? []) citations.set(digestOf(citation), citation)
+  }
+  const rootId = run.relatedTo?.taskId ?? null
+  return { cutoff: submitted.seq + 1, rootId, sourceTrace: rootId === null ? null : tasks.get(rootId)?.rsi?.trace ?? null,
+    citations: [...citations.values()],
+    rounds: (tasks.get(taskId)!.rounds ?? []).filter(request => request.runId === run.runId).map(request => {
+      const strategy = strategies.get(request.roundId)
+      const evaluations = [...measurements.values()].filter(state => (state.matrix === undefined || state.matrix.split === 'evolve') &&
+        (state.evaluationId === `${request.roundId}:bootstrap:evaluation` ||
+          state.evaluationId.startsWith(`${request.roundId}:`) && /^\d+:candidate:evaluation$/.test(state.evaluationId.slice(request.roundId.length + 1))))
+      const baseline = evaluations.find(state => state.evaluationId === `${request.roundId}:bootstrap:evaluation`)
+      return { request, evaluations, snapshot: strategy === undefined ? null : {
+        roundId: strategy.roundId, plan: strategy.plan, submissions: strategy.submissions, decision: strategy.decision ?? null,
+        evaluations: evaluations.map(state => ({ evaluationId: state.evaluationId, state, report: projectEvaluation(state),
+          paired: baseline?.matrix && state.matrix && state !== baseline ? pairedReport(baseline, state) : null })),
+      } }
+    }) }
+}
 export async function acceptanceSubject(apparatus: Apparatus, taskId: string, run: RunState,
   checks: readonly ProductionVerdict[],
 ) {
@@ -83,6 +141,7 @@ export async function acceptanceSubject(apparatus: Apparatus, taskId: string, ru
     checks,
     inputs: run.submission!.files.inputs,
     inputProducers,
+    ...(run.purpose === 'improve' ? { rsiEvidence: await reportEvidence(apparatus, taskId, run) } : {}),
     ...(task.search === undefined ? {} : { search: searchView(apparatus, task), rounds: task.rounds ?? [], transfer: task.transfer ?? null }),
     source: run.submission!.source,
     contributions: task.decomposition?.children.map((child) => {

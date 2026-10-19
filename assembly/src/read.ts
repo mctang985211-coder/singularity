@@ -26,7 +26,7 @@ import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { sealedBytes } from './sealed.ts'
 import { MEASURE_PROTOCOL, MEASURE_VERSION, type EvaluationState } from '../../src/measure/protocol.ts'
 import { coordinationOf, parentContextOf, parentPlan, waitingReason, readScopeOf } from './coordination.ts'
-import type { FrozenInputProducer } from './review.ts'
+import type { FrozenInputProducer, FrozenRsiEvidence } from './review.ts'
 import { readHistory } from './history.ts'
 import { trajectoryPage, textPage } from './pages.ts'
 
@@ -45,9 +45,9 @@ export interface ReadInput {
 export async function readForAgent(apparatus: Apparatus, agentId: string, input: ReadInput = {},
   evaluation?: Pick<EvolutionOptions, 'criterion' | 'metric' | 'trials' | 'weights' | 'calibration'>,
 ): Promise<unknown> {
+  if (input.kind === 'trajectory') return readTrajectory(apparatus, agentId, input.ref!, input.from, input.count, input.eventSeq, input.rootId)
   if (input.rootId !== undefined || ['roots', 'sessions', 'usage', 'steps'].includes(input.kind ?? ''))
     return readHistory(apparatus, agentId, input)
-  if (input.kind === 'trajectory') return readTrajectory(apparatus, agentId, input.ref!, input.from, input.count, input.eventSeq)
   const cut = apparatus.store.load(), tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   const task = [...tasks.values()].findLast((state) => state.responsibility?.agentId === agentId)
   const review = [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()].findLast((state) => state.agentId === agentId)
@@ -142,12 +142,15 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
   if (input.kind === 'method') {
     const { assets } = await loadMethod(apparatus, reference)
     const source = run?.purpose === 'improve' ? tasks.get(run.relatedTo!.taskId)!.runs[run.relatedTo!.runId]!.bubble! : undefined
-    // The authoring template owns the one complete asset copy; do not double its context.
     const authoring = run?.purpose === 'improve'
-    return { reference, ...(!authoring ? { assets } : {}), format: METHOD_FORMAT, evaluation,
+    const batch = task?.search?.batches?.find(batch => !batch.settled)
+    const round = task?.rounds?.find(round => round.status === 'pending')
+    const pending = batch ? { kind: 'batch', paths: batch.slots.map(slot => slot.path) }
+      : round ? { kind: 'evaluation', roundId: round.roundId } : null
+    return { reference, assets, format: METHOD_FORMAT, evaluation,
       ...(source === undefined ? {} : { rootExecutionContext: { model: source.model, tools: source.tools, conditions: source.conditions, inputs: source.inputs } }),
       rootCapabilities: 'Root coordinates, reads evidence, delegates and submits a verified child artifact. Root cannot execute bash, write/edit files, invoke Skills or method Tools. Implementation and integration belong to children. Candidate procedures must respect these roles.',
-      proposal: { ...rsiProposalContract, ...(authoring ? { template: rsiProposalTemplate(assets) } : {}) },
+      proposal: { ...rsiProposalContract, ...(authoring ? { template: rsiProposalTemplate(), pending } : {}) },
       ...(authoring ? { reportFormat: RSI_REPORT_FORMAT, reportTemplate: structuredClone(RSI_REPORT_TEMPLATE) } : {}),
       ...(search === undefined ? {} : { nextRound: search.directives, feedback: await searchFeedback(apparatus, task!),
         cases: apparatus.domain.suite?.cases.filter(c => c.split === 'evolve').map(c => ({ caseId: c.caseId, familyId: c.familyId, trials: c.trials, weight: c.weight })) ?? [] }),
@@ -156,6 +159,12 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
   }
   if (input.kind === 'round') {
     if (!audit) refuse('not-responsible', 'evaluation results belong to RSI and independent review')
+    if (review?.target.kind === 'acceptance') {
+      const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as { rsiEvidence?: FrozenRsiEvidence }
+      const frozen = subject.rsiEvidence?.rounds.find(round => round.request.roundId === input.ref)
+      if (frozen === undefined) refuse('not-responsible', 'round is outside this frozen evidence scope')
+      return { ...frozen, publication: null }
+    }
     const held = [...tasks.values()].filter((task) => visible!.has(task.taskId) && !frozenProducers.has(task.taskId)).flatMap((task) => task.rounds ?? [])
       .find((round) => round.roundId === input.ref)
     const publication = review?.target.kind === 'publication'
@@ -355,13 +364,34 @@ export async function readTrajectory(
   from = 0,
   count?: number,
   eventSeq?: number,
+  rootId?: string,
 ): Promise<unknown> {
   const cut = apparatus.store.load(),
     review = [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()].findLast(
       (r) => r.agentId === agentId,
     )
+  const task = [...cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()].findLast(
+    (state) => state.responsibility?.agentId === agentId,
+  )
+  const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
+  if (rootId !== undefined && review === undefined && (run?.purpose !== 'improve' || run.relatedTo?.taskId !== rootId))
+    return readHistory(apparatus, agentId, { kind: 'trajectory', rootId, ref: sessionId, from,
+      ...(count === undefined ? {} : { count }), ...(eventSeq === undefined ? {} : { eventSeq }) })
   let sessions: readonly { sessionId: string; events: readonly SessionEvent[] }[] = []
+  let searchTask: TaskState | undefined
   if (review !== undefined) {
+    const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8'))
+    const frozen = review.target.kind === 'acceptance' ? subject.rsiEvidence as FrozenRsiEvidence | undefined : undefined
+    const citation = frozen?.citations.find(({ reference, page }) => reference.sessionId === sessionId &&
+      reference.eventSeq === eventSeq && (rootId === undefined || reference.rootId === rootId) &&
+      from >= page.from && (from < page.next || page.complete && from === page.next))
+    if (citation !== undefined) {
+      const page = citation.page, selected = textPage(Buffer.from(page.text), from - page.from, count)
+      return { ...page, ...selected, from, next: page.from + selected.next,
+        totalBytes: page.totalBytes, complete: page.complete && selected.complete }
+    }
+    if (rootId !== undefined && frozen?.rootId !== rootId)
+      refuse('not-responsible', 'rootId is outside the frozen evidence scope')
     const evidenceIds = new Set<string>()
     const collect = (taskId: string): void => {
       evidenceIds.add(taskId)
@@ -377,8 +407,19 @@ export async function readTrajectory(
       try { return trajectoryPage((await handle.read()).events, from, count, eventSeq) }
       finally { await handle.close() }
     }
-    const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8'))
     if (review.target.kind === 'acceptance') {
+      const attachments = frozen?.sourceTrace === null || frozen?.sourceTrace === undefined ? [] : [frozen.sourceTrace]
+      for (const round of frozen?.rounds ?? []) for (const evaluation of round.evaluations)
+        for (const trial of [...evaluation.observed, ...(evaluation.failed ?? [])]) {
+          const trajectory = trial.detail === undefined ? undefined : (JSON.parse(trial.detail) as { trajectory?: FileAttachmentRef }).trajectory
+          if (trajectory !== undefined) attachments.push(trajectory)
+        }
+      for (const attachment of attachments) {
+        const trace = JSON.parse((await sealedBytes(apparatus, attachment)).toString('utf8'))
+        sessions = [...sessions, ...trace.sessions]
+      }
+      const sealed = sessions.filter(session => session.sessionId === sessionId).sort((a, b) => b.events.length - a.events.length)[0]
+      if (sealed !== undefined) return trajectoryPage(sealed.events, from, count, eventSeq)
       const sources: readonly RunSubmission['source'][] = [subject.source,
         ...subject.contributions.flatMap((child: { source?: RunSubmission['source'] }) => child.source === undefined ? [] : [child.source]),
         ...subject.inputProducers.map((producer: FrozenInputProducer) => producer.source)]
@@ -405,10 +446,6 @@ export async function readTrajectory(
         }
     }
   } else {
-    const task = [...cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()].findLast(
-      (t) => t.responsibility?.agentId === agentId,
-    )
-    const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
     if (run?.purpose !== 'improve') {
       const { visible } = await readScopeOf(apparatus, agentId, cut)
       const target = [...cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
@@ -419,17 +456,22 @@ export async function readTrajectory(
       try { return trajectoryPage((await handle.read()).events, from, count, eventSeq) }
       finally { await handle.close() }
     }
+    searchTask = task
     const root = taskStateOf(apparatus, run.relatedTo!.taskId)
     sessions = JSON.parse((await sealedBytes(apparatus, root.rsi!.trace!)).toString('utf8')).sessions
   }
-  const { visible } = await readScopeOf(apparatus, agentId, cut)
-  for (const evaluation of cut.statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION).values())
-    for (const trial of evaluation.observed) {
-      const result = JSON.parse(trial.detail!) as { taskId: string; trajectory?: FileAttachmentRef }
-      if (!visible!.has(result.taskId) || result.trajectory === undefined) continue
+  const roundIds = new Set(searchTask?.rounds?.map(round => round.roundId))
+  for (const evaluation of cut.statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION).values()) {
+    if (evaluation.matrix !== undefined && evaluation.matrix.split !== 'evolve' || ![...roundIds].some(id =>
+      evaluation.evaluationId === `${id}:bootstrap:evaluation` || evaluation.evaluationId.startsWith(`${id}:`) &&
+      /^\d+:candidate:evaluation$/.test(evaluation.evaluationId.slice(id.length + 1)))) continue
+    for (const trial of [...evaluation.observed, ...(evaluation.failed ?? [])]) {
+      const result = trial.detail === undefined ? undefined : JSON.parse(trial.detail) as { trajectory?: FileAttachmentRef }
+      if (result?.trajectory === undefined) continue
       const trace = JSON.parse((await sealedBytes(apparatus, result.trajectory)).toString('utf8'))
       sessions = [...sessions, ...trace.sessions]
     }
+  }
   const frozen = sessions.find((s) => s.sessionId === sessionId)
   if (frozen === undefined) refuse('not-responsible', 'session is outside the frozen evidence scope')
   return trajectoryPage(frozen.events, from, count, eventSeq)

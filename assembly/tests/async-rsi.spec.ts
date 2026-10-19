@@ -30,7 +30,7 @@ import { submit } from '../src/submission.ts'
 import { recordedVerdictDigest } from '../../src/task/protocol.ts'
 import { REVIEW_DIGEST, readFindings } from '../../src/review/protocol.ts'
 
-type RsiMethodRead = { reference: RevisionRef; proposal: { template: { method: MethodAssets } }; cases: { caseId: string }[] }
+type RsiMethodRead = { reference: RevisionRef; assets: MethodAssets; proposal: { template: ReturnType<typeof rsiProposalTemplate>; pending: unknown }; cases: { caseId: string }[] }
 import { openApparatus, type Apparatus } from '../src/apparatus.ts'
 import { fixtureReview } from './review-fixture.ts'
 import { agentFor, attachmentsAt, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
@@ -511,7 +511,7 @@ it('rejects mistaken RSI submissions without closing search, then admits a legit
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'mistaken-submit')
-  const { proposal: { template: { method: assets } } } = await scope.history({ kind: 'method' }) as RsiMethodRead
+  const { assets } = await scope.history({ kind: 'method' }) as RsiMethodRead
   await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(assets,
     { ...assets, workflowGuidance: 'Use a bounded evidence pass before delegation.' }, root.taskId, 'business')))
   const before = factsOf(h.medium)
@@ -530,15 +530,15 @@ it('rejects mistaken RSI submissions without closing search, then admits a legit
     .toMatchObject({ outcome: 'insufficient-evidence' })
 })
 
-it('admits a filled runtime JSON template with real evidence and a complete workflow-only Method', async () => {
+it('admits a filled runtime JSON template with real evidence and only a workflow edit, without copying frozen assets', async () => {
   const h = await fixture(), root = await h.enter('count protected letters')
   businessTurn(h, 100)
   await writeFile(join(root.workspace, root.contract.artifact), '35')
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'explicit-workflow')
-  const read = await scope.history({ kind: 'method' }) as { proposal: { template: ReturnType<typeof rsiProposalTemplate> } }
-  const template = read.proposal.template, assets = template.method
+  const read = await scope.history({ kind: 'method' }) as { assets: MethodAssets; proposal: { template: ReturnType<typeof rsiProposalTemplate> } }
+  const template = read.proposal.template
   const index = await scope.history({ kind: 'trajectory', ref: 'business' }) as { seq: number }[]
   const eventSeq = index[0]!.seq
   await scope.history({ kind: 'trajectory', ref: 'business', eventSeq })
@@ -553,11 +553,10 @@ it('admits a filled runtime JSON template with real evidence and a complete work
     edit: { ...template.edit, hypothesis: 'Matching frozen input identities makes evidence reuse safe.', targets_mode: mode,
       why_not_lower_lever: 'A conditional workflow instruction addresses the repeated inspection.',
       trigger_condition: 'An identical frozen input was already inspected.',
-      predicted_affected: [root.taskId], changes: [{ asset: 'workflow', target: 'workflowGuidance' }],
+      predicted_affected: [root.taskId], changes: [{ asset: 'workflow', target: 'workflowGuidance', value: 'Reuse evidence only when its frozen input identity matches.' }],
       retroactive_check: { corrective: 'Avoid a repeated inspection of an unchanged input.',
         preservative: 'Keep independent acceptance unchanged.', transfer: 'Identity matching applies to unfamiliar inputs.' },
       regression_risk: 'New input identities must receive a fresh inspection.' },
-    method: { ...assets, workflowGuidance: 'Reuse evidence only when its frozen input identity matches.' },
   }
   expect(JSON.stringify(proposal)).not.toContain('<')
   await writeFile(join(request.cwd, 'workflow.json'), JSON.stringify(proposal))
@@ -578,7 +577,7 @@ it.each(['rsi/batch-slot-settled', 'rsi/batch-ended'])('recovers frozen proposal
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'interrupted-screen')
-  const { proposal: { template: { method: assets } } } = await scope.history({ kind: 'method' }) as RsiMethodRead
+  const { assets } = await scope.history({ kind: 'method' }) as RsiMethodRead
   await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(assets,
     { ...assets, workflowGuidance: 'Check frozen evidence before delegating implementation.' }, root.taskId, 'business')))
   screenVerdict = 'fail'
@@ -591,8 +590,10 @@ it.each(['rsi/batch-slot-settled', 'rsi/batch-ended'])('recovers frozen proposal
   await h.mount()
   await driver!.activate(String(agent.id))
   const restored = h.call(agent, 'resume-screen')
+  expect(await restored.history({ kind: 'method' })).toMatchObject({ proposal: { pending: { kind: 'batch', paths: ['candidate.json'] } } })
   await expect(restored.proposeMethod({ paths: ['a-new-proposal.json'] })).rejects.toThrow('resume the frozen batch')
   expect(await restored.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
+  expect(await restored.history({ kind: 'method' })).toMatchObject({ proposal: { pending: null } })
   expect(factsOf(h.medium).filter(fact => fact.kind === 'review/started')).toEqual(before.filter(fact => fact.kind === 'review/started'))
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-opened')).toEqual([opened])
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-slot-settled')).toHaveLength(1)
@@ -608,9 +609,9 @@ it('rejects invented or inaccessible proposal evidence and unsupported affected 
   await h.call(h.parent, 'submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!, scope = h.call(agent, 'evidence')
   const method = await scope.history({ kind: 'method' }) as RsiMethodRead
-  const changed = structuredClone(method.proposal.template.method)
+  const changed = structuredClone(method.assets)
   ;(changed.templates[0] as { applicability: string }).applicability = 'Reuse sufficient frozen evidence.'
-  const proposal = rsiProposal(method.proposal.template.method, changed, root.taskId, 'business')
+  const proposal = rsiProposal(method.assets, changed, root.taskId, 'business')
   const before = factsOf(h.medium)
   await writeFile(join(request.cwd, 'invalid.json'), JSON.stringify({ ...proposal, analysis: { ...proposal.analysis,
     failure_modes: [{ ...proposal.analysis.failure_modes[0], evidence: [{ sessionId: 'business', eventSeq: 0, count: 8193 }] }] } }))
@@ -650,9 +651,9 @@ it('allocates campaign-local round numbers when two roots finish screening concu
     const agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
     const scope = h.call(agent, `proposal-${index}`)
     const baseline = await scope.history({ kind: 'method' }) as RsiMethodRead
-    const candidate = structuredClone(baseline.proposal.template.method)
+    const candidate = structuredClone(baseline.assets)
     ;(candidate.templates[0] as { applicability: string }).applicability = 'Inspect frozen inputs once before delegation.'
-    await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(baseline.proposal.template.method, candidate, root.taskId, 'business')))
+    await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(baseline.assets, candidate, root.taskId, 'business')))
     proposals.push({ scope, path: 'candidate.json' })
   }
   let screened = 0, release!: () => void
@@ -747,27 +748,34 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   // Access the pinned seed via the role API, then edit only an unprotected domain method field.
   const method = structuredClone(await scope.history({ kind: 'method' })) as {
     reference: never
-    proposal: { template: { method: {
+    assets: {
       workflowGuidance: string
       templates: { id: string; applicability?: string; skills: string[] }[]
       skills: { name: string; description: string; capabilities: string[]; requiredTools: string[]; content: string }[]
       tools: { name: string; source: string }[]
-    } } }
+    }
   }
-  const baselineAssets = structuredClone(method.proposal.template.method) as MethodAssets
-  const proposalBytes = () => JSON.stringify(rsiProposal(baselineAssets, method.proposal.template.method as MethodAssets, proposal.taskId, 'business'))
-  method.proposal.template.method.templates[0]!.applicability = 'Use a single pass for small literal counting tasks.'
+  const baselineAssets = structuredClone(method.assets) as MethodAssets
+  const proposalBytes = () => JSON.stringify(rsiProposal(baselineAssets, method.assets as MethodAssets, proposal.taskId, 'business'))
+  method.assets.templates[0]!.applicability = 'Use a single pass for small literal counting tasks.'
   await writeFile(join(request.cwd, 'candidate.json'), proposalBytes())
   screenVerdict = 'fail'
   expect(await scope.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ status: 'rejected', reason: expect.any(String) })
   expect(harness.solve).not.toHaveBeenCalled()
   expect(factsOf(h.medium).filter(f => f.kind === 'rsi/round-requested')).toHaveLength(0)
-  method.proposal.template.method.templates[0]!.applicability = 'Use a bounded evidence pass before delegation.'
+  method.assets.templates[0]!.applicability = 'Use a bounded evidence pass before delegation.'
   await writeFile(join(request.cwd, 'candidate.json'), proposalBytes())
   screenVerdict = 'pass'
   const round = await scope.proposeMethod({ paths: ['candidate.json'] }) as { roundId: string; status: string; revision: unknown }
   candidate = round.revision
   expect(round.status).toBe('pending')
+  expect(await scope.history({ kind: 'method' })).toMatchObject({ proposal: { pending: { kind: 'evaluation', roundId: round.roundId } } })
+  const batchFacts = () => factsOf(h.medium).filter(fact => fact.kind.startsWith('rsi/batch-'))
+  const beforeNewBatch = batchFacts()
+  const fresh = rsiProposal(baselineAssets, { ...baselineAssets, workflowGuidance: 'A fresh proposal must wait for evaluation.' }, proposal.taskId, 'business')
+  await writeFile(join(request.cwd, 'too-early.json'), JSON.stringify(fresh))
+  await expect(scope.proposeMethod({ paths: ['too-early.json'] })).rejects.toThrow('no candidate slots consumed')
+  expect(batchFacts()).toEqual(beforeNewBatch)
   expect(await scope.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ roundId: round.roundId, status: 'pending' })
   expect(factsOf(h.medium).filter((f) => f.kind === 'rsi/round-requested')).toHaveLength(1)
   expect(await scope.history({ kind: 'method', ref: (candidate as { digest: string }).digest }))
@@ -829,7 +837,7 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   }
   trialCost = 50
   publicationVerdict = rejectPublication ? 'fail' : 'pass'
-  method.proposal.template.method.templates[0]!.applicability = 'Reuse sufficient evidence and delegate one bounded implementation.'
+  method.assets.templates[0]!.applicability = 'Reuse sufficient evidence and delegate one bounded implementation.'
   await writeFile(join(request.cwd, 'repaired.json'), proposalBytes())
   let repaired = await h.call(agent, 'repair').proposeMethod({ paths: ['repaired.json'] }) as { roundId: string; revision: { digest: string } }
   if (rejectPublication) {
@@ -838,7 +846,7 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
     expect(factsOf(h.medium).filter(f => f.kind === 'pointer/switched')).toHaveLength(1)
     publicationVerdict = 'pass'
     trialCost = 25
-    method.proposal.template.method.templates[0]!.applicability = 'Reuse evidence only after confirming frozen input identity; delegate bounded implementation.'
+    method.assets.templates[0]!.applicability = 'Reuse evidence only after confirming frozen input identity; delegate bounded implementation.'
     await writeFile(join(request.cwd, 'repaired-again.json'), proposalBytes())
     repaired = await h.call(agent, 'repair-again').proposeMethod({ paths: ['repaired-again.json'] }) as typeof repaired
   }
@@ -873,7 +881,7 @@ it('records all rejected proposals within a frozen budget, resumes the same sear
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'rejected-proposals')
-  const { proposal: { template: { method: assets } } } = await scope.history({ kind: 'method' }) as RsiMethodRead
+  const { assets } = await scope.history({ kind: 'method' }) as RsiMethodRead
   screenVerdict = 'fail'
   for (let index = 0; index < 6; index++) {
     const changed = { ...assets, workflowGuidance: `Unproven mechanism ${index}.` }
@@ -903,7 +911,7 @@ it('screens a generated verifier before materializing or executing its program',
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'screen-before-code')
-  const { proposal: { template: { method: assets } } } = await scope.history({ kind: 'method' }) as RsiMethodRead
+  const { assets } = await scope.history({ kind: 'method' }) as RsiMethodRead
   const changed = { ...assets, tools: [...assets.tools, { name: 'untrusted-check', source: "throw new Error('MUST_NOT_EXECUTE_BEFORE_CRITIC')", verifier: { samples: [
     { name: 'positive', artifactContent: 'pass', inputContent: '', expected: 'pass' as const },
     { name: 'negative', artifactContent: 'fail', inputContent: '', expected: 'fail' as const },
@@ -922,7 +930,7 @@ it('settles three frozen slots once under duplicate concurrent calls and cold re
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'three-slots')
-  const { proposal: { template: { method: assets } } } = await scope.history({ kind: 'method' }) as RsiMethodRead
+  const { assets } = await scope.history({ kind: 'method' }) as RsiMethodRead
   const proposal = rsiProposal(assets, { ...assets, workflowGuidance: 'Check frozen input identity before reusing established evidence.' }, root.taskId, 'business')
   await writeFile(join(request.cwd, 'inaccessible.json'), JSON.stringify({ ...proposal, analysis: { ...proposal.analysis,
     failure_modes: [{ ...proposal.analysis.failure_modes[0], evidence: [{ sessionId: 'business', eventSeq: 99999 }] }] } }))
@@ -1023,9 +1031,9 @@ async function suiteCampaign({ heldout = true, validationRegression = false, exi
   const scope = () => h.call(agent, 'suite-analysis')
   const method = await scope().history({ kind: 'method' }) as RsiMethodRead
   expect(method.cases.map(c => c.caseId)).toEqual(['evolve-0'])
-  const changed = structuredClone(method.proposal.template.method)
+  const changed = structuredClone(method.assets)
   ;(changed as { workflowGuidance: string }).workflowGuidance = guidance
-  const candidate = rsiProposal(method.proposal.template.method, changed, root.taskId, 'business')
+  const candidate = rsiProposal(method.assets, changed, root.taskId, 'business')
   await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify({ ...candidate, edit: { ...candidate.edit,
     predicted_cases: ['evolve-0'], predicted_families: ['evolve-family-0'] } }))
   const trials: { split: string; revision: string; taskId: string; operationId: string }[] = []
@@ -1097,7 +1105,7 @@ it('freezes the suite champion and recovers after measured validation/heldout be
   await driver!.activate(String(h.agent.id))
   const restored = h.call(h.agent, 'restore-transfer')
   expect(await restored.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ roundId: h.proposal.roundId, status: 'completed' })
-  const fresh = rsiProposal(h.method.proposal.template.method, { ...h.method.proposal.template.method, workflowGuidance: 'A fresh mechanism after validation is forbidden.' }, h.assigned.taskId, 'business')
+  const fresh = rsiProposal(h.method.assets, { ...h.method.assets, workflowGuidance: 'A fresh mechanism after validation is forbidden.' }, h.assigned.taskId, 'business')
   await writeFile(join(h.request.cwd, 'after-freeze.json'), JSON.stringify({ ...fresh, edit: { ...fresh.edit,
     predicted_affected: [(factsOf(h.medium).find(fact => fact.kind === 'task/admitted')!).subject],
     predicted_cases: ['evolve-0'], predicted_families: ['evolve-family-0'] } }))
@@ -1295,7 +1303,7 @@ async function cancellableProposal() {
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const assigned = JSON.parse((request.message!.content[0] as { text: string }).text)
   const scope = h.call(agent, 'cancelled-proposal')
-  const { proposal: { template: { method: assets } } } = await scope.history({ kind: 'method' }) as RsiMethodRead
+  const { assets } = await scope.history({ kind: 'method' }) as RsiMethodRead
   await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(assets,
     { ...assets, workflowGuidance: 'Inspect input identities once before repeating an evidence pass.' }, root.taskId, 'business')))
   return { ...h, request, agent, assigned, scope }

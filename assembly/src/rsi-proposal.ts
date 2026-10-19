@@ -51,18 +51,19 @@ export interface RsiProposal {
   readonly method: MethodAssets
 }
 
-export const RSI_PROPOSAL_FORMAT = `Fill proposal.template and save a proposal JSON file, not a bare method. Replace all <...> and null placeholders with observed data; remove unobserved finding rows.
-{analysis:{failure_modes:FailureMode[],capability_gaps:CapabilityGap[],success_habits:SuccessHabit[]},edit:Edit,method:Method}.
+export const RSI_PROPOSAL_FORMAT = `Fill proposal.template and save a proposal JSON file. Replace <...> and evidence eventSeq:null with observed data; remove unobserved finding rows.
+{analysis:{failure_modes:FailureMode[],capability_gaps:CapabilityGap[],success_habits:SuccessHabit[]},edit:Edit}. There is no top-level method field: the host applies your edits to the current assets.
 Evidence = {sessionId:string,eventSeq:integer,rootId?:string,from?:integer,count?:integer}. Read trajectory ref=sessionId to select a real index seq; copy it into REQUIRED eventSeq and read that event. from/count alone is an index range, not evidence. For historical evidence also copy rootId. The critic sees only the cited UTF-8 page (from defaults to 0, count to 8192; from>=0, count 4..8192); select sufficient bytes.
 FailureMode = {mode:string,description:string,needed_instead:string,evidence:Evidence[]}.
 CapabilityGap = {gap:string,description:string,evidence:Evidence[]}.
 SuccessHabit = {habit:string,description:string,risk_if_broken:string,evidence:Evidence[]}.
 At least one evidenced finding is needed; other lists may be []. Names must be unique across all three lists; targets_mode copies one exact name. Keep mechanisms reusable; public domain knowledge with sources is allowed, task-instance details stay in evidence.
-Edit = {hypothesis:string,targets_mode:string,why_not_lower_lever:string,trigger_condition:string,changes:{asset:'workflow'|'template'|'skill'|'tool',target:string}[],predicted_affected:string[],predicted_cases?:string[],predicted_families?:string[],retroactive_check:{corrective:string,preservative:string,transfer:string},regression_risk:string}.
-ONE independent mechanism per candidate. changes must name each actual changed asset exactly once: workflow target='workflowGuidance', template target=id, skill/tool target=name. predicted_affected contains nonempty unique actual Task IDs belonging to the cited sessions, not Run/session/agent IDs. With a suite, predicted_cases and/or predicted_families must name at least one evolve ID from cases; otherwise [] is legal. Counterfactuals cover correction, preservation and unfamiliar-task transfer. template.method is the complete current Method: modify it, retain unchanged assets, and follow the method format in this response. Empty arrays delete assets; an unchanged method is invalid. Do not add undeclared fields, task answers or proposal metadata to method.`
+Edit = {hypothesis:string,targets_mode:string,why_not_lower_lever:string,trigger_condition:string,changes:{asset:'workflow'|'template'|'skill'|'tool',target:string,value:string|object|null}[],predicted_affected:string[],predicted_cases?:string[],predicted_families?:string[],retroactive_check:{corrective:string,preservative:string,transfer:string},regression_risk:string}.
+ONE independent mechanism per candidate. Each change must alter one unique asset. workflow target='workflowGuidance', value=the new string. template target=id, skill/tool target=name: value contains only changed fields, merged with the existing asset; new assets require all fields from the method format. Omitted fields/assets remain byte-for-byte unchanged; arrays within value replace that field. value:null deletes the named asset (workflow becomes empty); a null field deletes that optional field. Never include template initial: source belongs to frozen Tasks. Root inputs/artifact/criteria/checks remain frozen. Example: changes:[{asset:'template',target:'root',value:{guidance:'Delegate one bounded implementation.'}}]. A new Skill/Tool also needs a reachable contract/template binding; merely storing it does not make agents use it.
+predicted_affected contains nonempty unique actual Task IDs belonging to the cited sessions, not Run/session/agent IDs. With a suite, predicted_cases and/or predicted_families must name at least one evolve ID from cases; otherwise [] is legal. Counterfactuals cover correction, preservation and unfamiliar-task transfer. Do not add task answers or proposal metadata to method assets.`
 
-/** A scaffold, never invented evidence or a partial Method patch. */
-export function rsiProposalTemplate(method: MethodAssets) {
+/** The author supplies edits and evidence; the host owns the complete Method. */
+export function rsiProposalTemplate() {
   return {
     analysis: {
       failure_modes: [{ mode: '<unique-finding-name>', description: '<observed reusable failure mechanism>',
@@ -77,11 +78,51 @@ export function rsiProposalTemplate(method: MethodAssets) {
       retroactive_check: { corrective: '<how cited failure would change>', preservative: '<why observed successful behavior survives>',
         transfer: '<how the mechanism applies to unfamiliar tasks>' },
       regression_risk: '<counterexample or observation that would refute the hypothesis>' },
-    method: structuredClone(method),
   }
 }
 
-export const RSI_REPORT_FORMAT = `Recommended report.json structure: fill reportTemplate with facts known BEFORE submission. evidence uses the proposal Evidence shape; changes and preserved_behavior list supported mechanisms/behaviors. results contains actual {roundId,outcome,qualityDelta,costRatio,detail} records; use [] if no round ran and null for missing numbers, never zero. Distinguish structural refusal, critic rejection and measured no-winner. State missing coverage and attribution limits. With a suite, private validation and resulting publication run after this file is sealed: transfer.status='not-tested-before-submission' is honest; final host outcomes are separate committed facts. This report is independently reviewed, not a proposal or a publication approval.`
+function applyChanges(baseline: MethodAssets, changes: readonly Record<string, unknown>[]): MethodAssets {
+  const method = structuredClone(baseline) as unknown as Record<string, unknown>
+  const seen = new Set<string>()
+  for (const [index, change] of changes.entries()) {
+    const path = `edit.changes[${index}]`, asset = text(change, 'asset', path), target = text(change, 'target', path)
+    if (!['workflow', 'template', 'skill', 'tool'].includes(asset)) refuse('malformed-declaration', `${path}.asset must be workflow, template, skill or tool`)
+    if (seen.has(`${asset}:${target}`)) refuse('malformed-declaration', `${path} repeats ${asset}:${target}; edit each asset once`)
+    seen.add(`${asset}:${target}`)
+    if (!Object.hasOwn(change, 'value')) refuse('malformed-declaration', `${path}.value is required; use changed fields or explicit null for deletion`)
+    const value = change['value']
+    if (asset === 'workflow') {
+      if (target !== 'workflowGuidance' || value !== null && typeof value !== 'string')
+        refuse('malformed-declaration', `${path} workflow target must be workflowGuidance with a string or null value`)
+      method['workflowGuidance'] = value ?? ''
+      continue
+    }
+    const key = asset === 'template' ? 'id' : 'name', field = `${asset}s`
+    const assets = method[field] as Record<string, unknown>[]
+    const at = assets.findIndex(entry => entry[key] === target)
+    if (value === null) {
+      if (at < 0) refuse('malformed-declaration', `${path} cannot delete missing ${asset}:${target}`)
+      assets.splice(at, 1)
+      continue
+    }
+    const patch = record(value, `${path}.value`)
+    if (Object.hasOwn(patch, key) && patch[key] !== target)
+      refuse('malformed-declaration', `${path}.value.${key} must match target ${target}`)
+    if (asset === 'template' && Object.hasOwn(patch, 'initial'))
+      refuse('malformed-declaration', `${path}.value.initial is frozen Task source; omit it, the host preserves its exact bytes`)
+    const next = { ...(at < 0 ? {} : assets[at]), [key]: target }
+    for (const [name, content] of Object.entries(patch)) {
+      if (content === null) delete next[name]
+      else next[name] = content
+    }
+    if (at < 0) assets.push(next)
+    else assets[at] = next
+  }
+  assertMethodShape(method)
+  return method
+}
+
+export const RSI_REPORT_FORMAT = `Recommended report.json structure: fill reportTemplate with facts known BEFORE submission. evidence uses the proposal Evidence shape. Reviewers can verify the sealed current business root, this search's pre-submission evolve measurements, and exact pages already cited in its screened proposals; other history is background, not automatically readable report evidence. changes and preserved_behavior list supported mechanisms/behaviors. results contains actual {roundId,outcome,qualityDelta,costRatio,detail} records; use [] if no round ran and null for missing numbers, never zero. Distinguish structural refusal, critic rejection and measured no-winner. State missing coverage and attribution limits. With a suite, private validation and resulting publication run after this file is sealed: transfer.status='not-tested-before-submission' is honest; final host outcomes are separate committed facts. This report is independently reviewed, not a proposal or a publication approval.`
 export const RSI_REPORT_TEMPLATE = {
   summary: '<search result supported by facts known before submission>',
   evidence: [], changes: [], results: [], preserved_behavior: [], limitations: [],
@@ -118,7 +159,7 @@ function evidence(value: unknown, where: string): readonly RsiEvidence[] {
 }
 export function parseRsiProposal(raw: unknown, baseline: MethodAssets, suite?: Suite): RsiProposal {
   const proposal = record(raw, 'RSI proposal')
-  assertClosedKeys(proposal, ['analysis', 'edit', 'method'], 'RSI proposal', 'malformed-declaration')
+  assertClosedKeys(proposal, ['analysis', 'edit'], 'RSI proposal', 'malformed-declaration')
   const analysis = record(proposal['analysis'], 'analysis')
   assertClosedKeys(analysis, ['failure_modes', 'capability_gaps', 'success_habits'], 'analysis', 'malformed-declaration')
   const failure_modes = objects(analysis['failure_modes'], ['mode', 'description', 'needed_instead', 'evidence'], 'analysis.failure_modes')
@@ -143,17 +184,13 @@ export function parseRsiProposal(raw: unknown, baseline: MethodAssets, suite?: S
   assertClosedKeys(row, ['hypothesis', 'targets_mode', 'why_not_lower_lever', 'trigger_condition', 'changes', 'predicted_affected', 'predicted_cases', 'predicted_families', 'retroactive_check', 'regression_risk'], 'edit', 'malformed-declaration')
   const targets_mode = text(row, 'targets_mode', 'edit')
   if (!labels.has(targets_mode)) refuse('malformed-declaration', 'edit.targets_mode must target an evidenced mode, gap or success habit')
-  const changes = objects(row['changes'], ['asset', 'target'], 'edit.changes').map((change, index) => {
-    const path = `edit.changes[${index}]`, asset = text(change, 'asset', path)
-    if (!['workflow', 'template', 'skill', 'tool'].includes(asset)) refuse('malformed-declaration', `${path}.asset must be workflow, template, skill or tool`)
-    return { asset: asset as StructuralEdit['asset'], target: text(change, 'target', path) }
-  })
-  const method = proposal['method']
-  assertMethodShape(method)
+  const edits = objects(row['changes'], ['asset', 'target', 'value'], 'edit.changes')
+  const method = applyChanges(baseline, edits)
+  const changes = edits.map(change => ({ asset: change['asset'] as StructuralEdit['asset'], target: change['target'] as string }))
   const actual = structuralEditsOf(baseline, method)
   const keys = (edits: readonly StructuralEdit[]) => edits.map(edit => `${edit.asset}:${edit.target}`).sort()
   if (actual.length === 0 || digestOf(keys(changes)) !== digestOf(keys(actual)))
-    refuse('malformed-declaration', `edit.changes must match the actual method diff exactly; expected ${JSON.stringify(actual)}, received ${JSON.stringify(changes)}. Retain unchanged assets in the complete method; declare every changed asset once`)
+    refuse('malformed-declaration', 'edit.changes must produce a nonempty actual method diff; remove unchanged edits and change each asset once')
   const predicted_affected = list(row['predicted_affected'], 'edit.predicted_affected').map((id, index) => {
     if (typeof id !== 'string' || !id) refuse('malformed-declaration', `edit.predicted_affected[${index}] must name a Task id`)
     return id
@@ -183,8 +220,9 @@ async function parseCandidate(domain: Domain, content: string, baseline: MethodA
   const raw = record(JSON.parse(content), 'RSI proposal')
   // No assetRoot: parse declarations without materializing or executing candidate tools.
   // Validate nested fields before the diff can mistake omissions for deletions.
-  const candidate = await parseMethod(domain, raw['method'])
-  return { proposal: parseRsiProposal(raw, baseline, domain.suite), candidate }
+  const proposal = parseRsiProposal(raw, baseline, domain.suite)
+  const candidate = await parseMethod(domain, proposal.method)
+  return { proposal, candidate }
 }
 
 /** RRSI done() -> critic -> evaluation request. No parallel state store or model-controlled round ids. */
@@ -299,6 +337,9 @@ async function proposeBatch(apparatus: Apparatus, seams: ChildSessionSeams, agen
     return { batchId, ...(request === undefined ? {} : { roundId }), admitted: true, slotsConsumed: existing.slots.length,
       status: request?.status ?? existing.outcomes[0]?.status ?? 'no-candidates', revision: existing.outcomes.find(o => o.revision)?.revision, reason: existing.outcomes[0]?.detail, slots: existing.outcomes }
   }
+  const evaluating = task.rounds?.find(round => round.status === 'pending')
+  if (!pending && evaluating)
+    refuse('illegal-transition', `evaluation ${evaluating.roundId} is pending; end the turn and wait for host feedback. No new batch admitted; no candidate slots consumed`)
   const history = searchHistory(apparatus, task)
   const incumbent = existing?.incumbent ?? history.incumbent
   const round = task.rounds?.find(r => r.roundId === roundId)?.round ?? (task.rounds?.length ?? 0) + 1

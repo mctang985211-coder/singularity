@@ -2,7 +2,7 @@
 
 审查日期：2026-10-17（Asia/Shanghai）。代码基线：`4314487`。
 RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba1`。
-实施更新：2026-10-19。**Task/Workflow、多任务矩阵、有界稀疏搜索和独立迁移发布已有工程链路；Buckyball 最小 C/ISA pilot 的业务根已通过独立验收。最新 CommandCode 运行的六个提案槽全部在结构检查中 invalid，零 round、零候选比较、零迁移或新方法发布；完整 pilot 的逐题执行入口仍未接通。本轮将纯静态预检移到批次冻结前，并补齐错误定位与提交要求。** 当前为 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只接纳新图，不提供旧图兼容。预检通过后批次冻结 1–3 个候选、每候选一个独立机制、总计最多 6 个槽、repair=0；这是 KISS 稀疏模式，不宣称实现退火。原生 DSH 继续拥有会话、重试、用量和持久化。准确实现、验证与外部阻断见第 9 节。
+实施更新：2026-10-19。**Task/Workflow、多任务矩阵、有界稀疏搜索和独立迁移发布已有工程链路；Buckyball 最小 C/ISA pilot 的业务根已通过独立验收。`003416` 的 RSI 转抄损坏六个模板源码，静态拒绝且零 round；最新 `124254` 未进入 RSI，repair 被父合同要求写只读仓库后陷入审批等待。本轮回退上一版修复，改为具名增量提案、明确 workspace 边界和原生立即拒绝提权；完整 pilot 的逐题执行入口仍未接通。** 当前为 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只接纳新图，不提供旧图兼容。预检通过后批次冻结 1–3 个候选、每候选一个独立机制、总计最多 6 个槽、repair=0；这是 KISS 稀疏模式，不宣称实现退火。原生 DSH 继续拥有会话、重试、用量和持久化。准确实现、验证与外部阻断见第 9 节。
 
 本版按用户最新定义收敛：Task 是 workflow 中可独立交付、验收和追责的节点；RSI 演化节点定义、分解和关系组织策略，Skill/Tool 提供配套能力。评测负责验证这种演化，而不替代产品主体。第 1、6 节给出最终对象模型和执行语义，第 9 节给出唯一施工顺序，第 13–16 节给出研究、Buckyball 和提示词的验收细则。不再另写一份相互竞争的 final-plan。
 
@@ -75,13 +75,13 @@ RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba
 
 ### 2.2 已运行的验证
 
-**2026-10-19 最新实跑与提交边界复核：** 只读检查 `/home/ROXY/singularity-next/buckyball-commandcode-rsi-20261018-214154`，committed snapshot cutoff 80。业务根 `task-039780304071e184` 已验收，RSI `improve-7efa57d998fb8b97d8d7a236` 报告已验收、状态 completed，搜索结果为 insufficient-evidence。六个单槽批次全部 invalid：第 1–3 次 evidence 缺少必需的 `eventSeq`，第 4、6 次在 failure/gap/habit 三类之间重复使用同一 label，第 5 次只提供 `workflowGuidance`、缺少完整 Method 集合，实际 diff 因而包含基线模板删除，超出声明的 workflow 改动。第 5 次 workflow target 本身正确；现有事实不支持报告中将失败归因于 `rootId` 或 workflow target 宿主错误的说法。没有 proposal/publication critic、没有 measure/strategy 测评事实、没有 round 或 transfer。运行中一次原生重试恢复，六次失败的直接原因是提案结构，不能归为 provider 耗尽或 family 统计门。
+**2026-10-19 当前实跑复核与回退修复：** `124254` 的 root/task 原生 system seq7 均收到正确角色流程；repair 已完成源码修复、BEMU 本地验证和 change-set，却因父合同要求写只读冻结仓库，于 seq247/248 进入提权审批等待。旧 `003416` 的 RSI 也收到 improve 流程，但完整 Method 转抄损坏六个模板的源码，静态拒绝且零 round。更早 `214154` 的六批结构失败属于历史版本，不是当前冻结 suite 已执行六轮测评。真实引用与细节统一见 [RSI agent 工作合同](rsi-agent-contract.md#实跑核查与修复边界)。
 
-本轮边界调整：新批次对一次读取的同一份 bytes 做 JSON、proposal schema、完整 Method、实际 diff 和冻结 evolve case/family ID 的纯静态预检；任一文件失败则整批不冻结、不扣槽，返回文件与字段位置。全部通过后才保存并冻结这些 bytes。已有 pending 批次直接从附件恢复，不重新读取工作区草稿。冻结后的证据有效性、reserved/prune、critic、duplicate 与 smoke 失败仍各自结算并扣槽，repair=0；静态预检不读取证据正文、不调用模型、不执行候选或测评，也不建立新工具或第二套状态。本轮 `pnpm verify` 退出 0：**90 文件 / 945 测试 / 7 门禁通过**，包含构建、类型检查和源码/产物摘要校验；日志 `/tmp/singularity-rsi-admission-verify.log`。最后调整嵌套字段与 diff 的解析顺序后已重新构建，相关 2 文件 / 46 项定向回归通过，日志 `/tmp/singularity-rsi-admission-followup.log`。尚未部署或用真实模型重跑，下面的历史数字保留其原有基线。
+已用 `02016c5` 回退 `9e655ce`，重新修复业务合同边界与原生审批策略；提案改为 analysis + edit.changes，由宿主保留未改资产与冻结源码，不生成工作区草稿。纯静态整批预检继续定位文件/字段且不扣槽；冻结后证据、reserved/prune、critic、duplicate 与 smoke 失败仍扣槽。pending 直接投影冻结批次或评估；待评估时新批次在入场前拒绝、不扣槽，原批次仍可恢复。报告审核可读提交前封存的当前根、本 search evolve 证据和本 search 已筛选提案实际引用的历史证据页；历史只开放封存字节范围，私有 split、其它 search、未引用页面与后续事件不扩权。未新增工具、候选状态机或报告解析器。
 
-**随后完成 RSI 提示与 JSON 合同复核：** system prompt 保留工作流程与角色边界，完整字段规则和模板按需读取；无 ref 的 `kind=method` 提供当前搜索头的 `proposal.template` 与 `reportTemplate`，完整 Method 只返回一次；审核 dispatch 按实际 digest/criteria 生成合法 `unknown` 模板。已修正公开领域知识/答案泄漏的冲突表述、报告先封存再触发 suite 私有验证的时间边界，并将工具 `read.kind` 设为必填。直接填写运行时模板的提案使用真实原生事件引用后进入独立 critic；审核从模板生成的 findings 通过实际解析器。最新 `pnpm verify` **退出 0：90 文件 / 946 测试 / 7 门禁通过**，含构建/类型检查和源码/产物摘要校验；日志 `/tmp/singularity-rsi-prompt-verify.log`。三份文档 JSON 和本地链接通过检查。未部署或真实模型重跑，详见 [RSI agent 工作合同](rsi-agent-contract.md)。
+实际旧提案转换为具名编辑后静态检查通过，六份源码保持原样；真实原生测试适配器核对四角色 system 与工具 schema 送达，越权调用立即拒绝。最终 `pnpm verify` 退出 0：**92 文件 / 949 测试 / 7 门禁通过**，含类型检查、构建及源码/产物摘要；日志 `/tmp/singularity-rsi-rollback-final-verify2.log`。5 个更新 Markdown 入口的 5 份 JSON 与 29 个本地链接、`git diff --check` 通过。修复后尚未运行付费模型，不能据此声称遵令行为或方法收益。
 
-完整 pilot 仍未完成：`runExperiment` 仅提交第一个 evolve case 的业务 root；有效候选请求 round 后，driver 才执行该 split 的完整 case×trial 比较，冻结 champion 后才可能进入 validation/heldout。suite 已冻结不会自行调度其余 pilot 业务案例。每 split 仅一族是后续独立统计限制，补完 pilot 也不足以满足最少三族的正式配对门槛。
+最新旧实验已取消、宿主停止，原记录保留。完整 pilot 仍未完成：`runExperiment` 只提交第一个 evolve 业务 root；有效候选请求 round 后才执行 split 的完整 case×trial 比较，冻结 champion 后才可能进入 validation/heldout。冻结 suite 不会自行补跑其它 pilot。每 split 一族也不足最少三族统计门，不能报告正式迁移收益。
 
 **2026-10-18 较早 RSI 实跑故障与减量修复：** 运行目录 `/home/ROXY/singularity-next/buckyball-commandcode-20261018-172430`，只读 snapshot cutoff 131。业务根 `task-5fc54cd5510aba92` 已 accepted；RSI `improve-043d458189286ffefc4b48eb` 最终报告也已 accepted、根 RSI completed，但零提案、零评估。原生 seq208 错把 `proposal-1.json` 交给报告提交工具，driver 在检查合同路径前已写 control seq122 `rsi/search-ended insufficient-evidence`；seq209 才拒绝错误路径。之后 seq223/224、242/243 的合法提案被已结束搜索拒绝，却误报“先完成当前批次”。这不是仍在运行的锁等待，而是不可恢复的提前终结；不能把 completed 报告算作有效搜索或学习成功。
 
@@ -596,7 +596,7 @@ flowchart TD
 
 T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。candidate repair 次数另有上限，不消耗一个全新的 round 来逃避约束；失败后的重试仍是同一候选身份。
 
-当前 KISS 配置固定最多 6 个冻结候选槽，单批 1–3 槽、每槽一个独立机制、repair=0。新批次的纯静态预检覆盖 JSON/schema、完整 Method、实际 diff 和冻结 evolve case/family ID；任一文件失败整批不冻结、不扣槽。冻结后证据有效性、reserved/prune、critic、duplicate 与 smoke 失败均扣槽，不因恢复重置，不重新开放已结算候选。静态预检不提供语义审查或测评反馈。trial 数由各 case 在 suite 中冻结；正式配对判据至少需要三个独立 family、每 case 两次重复，仍不保证统计充分性。连续两轮无赢家后首槽必须删除当前资产，搜索始终受总槽数约束。调试的单题/单次输出只标 smoke。实际模型费按原生 usage 记录，不增加 token 执行闸门。
+当前 KISS 配置固定最多 6 个冻结候选槽，单批 1–3 槽、每槽一个独立机制、repair=0。新批次的纯静态预检覆盖 JSON/schema、增量编辑及宿主派生 Method、实际 diff 和冻结 evolve case/family ID；任一文件失败整批不冻结、不扣槽。冻结后证据有效性、reserved/prune、critic、duplicate 与 smoke 失败均扣槽，不因恢复重置，不重新开放已结算候选。静态预检不提供语义审查或测评反馈。trial 数由各 case 在 suite 中冻结；正式配对判据至少需要三个独立 family、每 case 两次重复，仍不保证统计充分性。连续两轮无赢家后首槽必须删除当前资产，搜索始终受总槽数约束。调试的单题/单次输出只标 smoke。实际模型费按原生 usage 记录，不增加 token 执行闸门。
 
 ### 7.2 冻结轮次与候选生产
 
@@ -716,7 +716,7 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
 | T15 | 四层角色/方法/方向接线、真实 round directives、冻结发布 subject、按需 workflow 元数据/历史反馈；原生首次 delivery 见证；RSI 当前头提案/报告模板与按实际 criteria 生成的审核模板；read.kind 必填 | 新模板尚未真实模型重跑；模型是否依策略改变组织、真实效果及消融未测 |
 | T16 | 最小 C/ISA 投影及固定工具、真实 MCP/BEMU；6 题/3 族 labelled-synthetic pilot；12 个正反样本、unknown/refutation、并发取消和私有读隔离通过；真实业务根已有独立验收 | 完整 pilot 逐题运行未接通；早期学习被 HTTP 402 中断，最新运行 6 invalid/0 round；正式候选比较、迁移与论文门未完成；不覆盖全仓递归依赖或 MLIR/RTL/PPA |
 
-**剩余证据边界：** 最小 C/ISA pilot 的环境、来源、oracle 和隔离阻断已解除，真实业务根已验收；作者树仍不是完整上游复现。本轮采用明确标注的合成缺陷，不冒充历史漏洞。早期学习因 HTTP 402 失败，较早 CommandCode 运行曾提前关闭搜索；最新运行六个提案均在结构检查中 invalid，零 round。报告 accepted 不证明其宿主故障归因正确，也未形成有效比较、迁移或新方法发布。完整 pilot 逐题执行入口未接通；T14/T16 正式迁移与 T13 领域效果保持未完成；当前每个 split 只有一族，仍未满足冻结的三族统计门。本轮静态预检修复已通过完整工程验证，尚未部署或真实模型重跑。
+**剩余证据边界：** 最小 C/ISA pilot 的环境、来源、oracle 和隔离阻断已解除，真实业务根已验收；作者树仍不是完整上游复现。本轮采用明确标注的合成缺陷，不冒充历史漏洞。早期学习因 HTTP 402 失败，较早 CommandCode 运行曾提前关闭搜索；`214154` 的六批提案结构失败，`003416` 转抄损坏冻结源码且零 round，最新 `124254` 尚未进入 RSI 就因错误子合同陷入审批等待，现已取消。报告 accepted 不证明其宿主故障归因正确，也未形成有效比较、迁移或新方法发布。完整 pilot 逐题执行入口未接通；T14/T16 正式迁移与 T13 领域效果保持未完成；当前每个 split 只有一族，仍未满足冻结的三族统计门。当前修复的工程验证见第 2.2 节，尚未用真实模型重跑。
 
 ### T00 · 固定审查基线与新合同
 
@@ -1264,17 +1264,17 @@ handoff 说明观察和假设，不偷偷增加“必须修某文件”这一验
 
 实际入口是 `assembly/src/agent.ts` 的 `guidanceFor()`、工具描述与 `assembly/src/parent-memory.ts` 的背景摘要 instruction；preset YAML 主要装配能力与上下文策略。RSI 输出模板由 `rsi-proposal.ts` 定义，经 `read.ts` 返回；审核模板由 `review.ts` 按当前 criteria 生成。只改 YAML 的 persona 并不能解决当前节点行为。
 
-本轮已作与现行协议兼容的调整：
+当前生产入口采用以下合同；旧提案格式不保留兼容：
 
 | 节点 | 修改 | 仍由运行时负责 |
 |---|---|---|
 | root | 使用覆盖验收所需的最少责任；委派未解问题；不规定工具顺序；仅在需要时委派集成 | 必须协调、准确 direct child Run 提交、父独立验收 |
 | task/中间节点/叶子 | 围绕下一项不确定性做有界调查；选择能区分原因的检查；相关时读取 pinned method/skill | 输入保护、绑定资产、required 依赖、提交封存 |
 | review | 区分 acceptance、proposal、publication；只有 acceptance 可以按需委派取证；复制 `output.template`，保留实际 digest/criteria，以合法 `unknown` 起填 | 角色工具白名单、保护检查不可改判、subjectDigest、逐标准完整 findings |
-| improve | 开始/恢复/压缩后无 ref 读取当前头；按证据形成一个机制；复制完整 Method 提案模板，遵守 nextRound；用报告模板陈述提交前事实，未知测量用 null | 纯静态整批预检不扣槽；冻结后失败扣槽；无赢家可收尾；suite 的私有验证/发布在封存报告后由宿主执行 |
+| improve | 开始/恢复/压缩后无 ref 读取当前头；按证据形成一个机制；只填写 analysis 与 edit.changes 的 value，宿主保留未改资产和冻结源码，遵守 nextRound；用报告模板陈述提交前事实，未知测量用 null | 纯静态整批预检不扣槽；冻结后失败扣槽；无赢家可收尾；suite 的私有验证/发布在封存报告后由宿主执行 |
 | 父背景摘要 | 只保留相关决策理由、未决假设、排除路径；证据仅选 host 已验证引用；不复制契约/方法 | scope/source/digest/证据归属与持久化验证 |
 
-这些是提示与输出合同改动，不是领域收益证据。角色能力、事实和费用口径仍归原有运行时所有；不新增工具、候选状态机或报告解析器。`kind=method` 的完整资产只在 `proposal.template.method` 中出现一次，避免与 `assets` 重复。操作顺序和三份标准 JSON 统一见 [RSI agent 工作合同](rsi-agent-contract.md)。
+这些是提示与输出合同改动，不是领域收益证据。角色能力、事实和费用口径仍归原有运行时所有；不新增工具、候选状态机或报告解析器。`kind=method` 的完整资产只在 `assets` 中出现一次；`proposal.template` 只含分析和修改指令，禁止顶层 Method 重抄。`proposal.pending` 直接投影冻结批次或待测 round，恢复无需猜测路径。操作顺序和三份标准 JSON 统一见 [RSI agent 工作合同](rsi-agent-contract.md)。
 
 ### 15.3 目标上下文装配：只保留四层
 
@@ -1425,7 +1425,7 @@ workflow 的短策略按第 6.5 节自动送达，解决组织方法完全未暴
 | 所有候选不改善 | T01 完成后正常收尾；原生产方法不变 | 对现行代码只改提示并声称支持 |
 | 冷恢复/历史摘要不完整 | 用准确状态和证据恢复，缺项仍为缺项 | 为流畅叙事补造事实 |
 
-本轮没有调用模型执行这些行为探针；将其作为 T15/T13 的真实验证要求，不拿离线测试数量替代。
+2026-10-19 已审查真实原生请求：root 与 task 的 system、dispatch 和工具均实际送达；124254 的阻塞是子合同要求写只读引用树，触发无应答提权审批。现已补 workspace/封存产物边界，使用原生 never 审批策略，并用真实原生模型请求适配器及工具运行验证送达、schema 和立即拒绝。003416 的 RSI 已收到流程，但完整 Method 转抄损坏冻结源码；改为仅提交具名编辑，由宿主生成完整版本。离线探针不证明模型会遵守，修复后的付费行为实验尚未运行，收益与完整 pilot 仍待验证。
 
 ## 16. 研究与提示词补充工作包
 
@@ -1461,7 +1461,7 @@ workflow 的短策略按第 6.5 节自动送达，解决组织方法完全未暴
 
 ### T16 · Buckyball 最小领域接入与迁移实验
 
-- 当前状态：最小 C/ISA 环境、产物、并发隔离与六题 oracle 预检通过；真实业务根已有独立验收。完整 pilot 逐题执行入口未接通，任务门中的 refutation 目前仅有 oracle 反例；早期学习因 HTTP 402 失败，最新运行六个提案均结构 invalid、零 round。模型调查、完整候选比较、迁移与论文出口未完成，不标全包完成。
+- 当前状态：最小 C/ISA 环境、产物、并发隔离与六题 oracle 预检通过；真实业务根已有独立验收。完整 pilot 逐题执行入口未接通，任务门中的 refutation 目前仅有 oracle 反例；早期学习因 HTTP 402 失败，`214154` 的六批提案结构失败，`003416` 转抄损坏冻结源码且零 round，最新 `124254` 未进入 RSI 即陷入审批等待并已取消。模型调查、完整候选比较、迁移与论文出口未完成，不标全包完成。
 - 依赖：T02/T03/T04/T09；正式搜索依赖 T01/T05–T08；设计由 T14 固定。
 - 修改入口：新增一个领域声明及少量 task/suite/评测适配，复用 inputs/workspace/measure/release。工具若已有稳定 CLI 就直接绑定，只有状态/路径/证据适配确有需要时才写 wrapper。
 - 子任务与阶段门：

@@ -136,7 +136,7 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
         method,
         trace: 'subject.json',
         evidenceReading:
-          'Read kind=method without ref for the current search head, proposal.template, reportTemplate and nextRound; the dispatch method is only the initial reference. Read kind=subject through complete=true for frozen evidence and native usage. trajectory ref=sessionId lists seq; read/cite it as eventSeq. Proposals use singularity_propose_method; only report.json uses singularity_submit.',
+          'Read kind=method without ref for the current search head, assets, proposal.template, proposal.pending, reportTemplate and nextRound. Resume pending batch paths or end the turn for evaluation first. Submit only analysis and edit.changes with values; the host preserves unchanged assets and frozen source. Read kind=subject through complete=true for frozen evidence and native usage. trajectory ref=sessionId lists seq; read/cite it as eventSeq. Proposals use singularity_propose_method; only report.json uses singularity_submit.',
       }),
     ),
   })

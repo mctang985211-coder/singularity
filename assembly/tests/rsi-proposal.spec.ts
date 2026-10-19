@@ -28,8 +28,9 @@ function fixture() {
 
 it('requires evidenced analysis, an attributable diff and corrective/preservative/transfer counterfactuals', () => {
   const proposal = fixture()
-  expect(parseRsiProposal(proposal, baseline)).toEqual(proposal)
-  expect(() => parseRsiProposal(proposal.method, baseline)).toThrow('RSI proposal')
+  expect(parseRsiProposal(proposal, baseline)).toMatchObject({ analysis: proposal.analysis,
+    method: { ...baseline, templates: [{ id: 'root', guidance: 'Reuse an inspection only when its frozen input identity matches.' }] } })
+  expect(() => parseRsiProposal(baseline, baseline)).toThrow('RSI proposal')
   for (const field of ['corrective', 'preservative', 'transfer'] as const) {
     const invalid = { ...proposal, edit: { ...proposal.edit,
       retroactive_check: { ...proposal.edit.retroactive_check, [field]: '' } } }
@@ -44,7 +45,31 @@ it('rejects unsupported mechanisms, missing success protection, empty evidence a
   expect(() => parseRsiProposal({ ...proposal, analysis: { ...proposal.analysis,
     failure_modes: [{ ...proposal.analysis.failure_modes[0], evidence: [] }] } }, baseline)).toThrow('native evidence')
   expect(() => parseRsiProposal({ ...proposal, edit: { ...proposal.edit, changes: [] } }, baseline)).toThrow('actual method diff')
-  expect(() => parseRsiProposal({ ...proposal, method: baseline }, baseline)).toThrow('actual method diff')
+  expect(() => parseRsiProposal({ ...proposal, method: baseline }, baseline)).toThrow('method')
+  expect(() => parseRsiProposal({ ...proposal, edit: { ...proposal.edit,
+    changes: [{ asset: 'template', target: 'root', value: { guidance: 'Inspect inputs.' } }] } }, baseline)).toThrow('actual method diff')
+})
+
+it('keeps frozen source bytes out of edits and preserves assets while adding, changing or deleting named fields', () => {
+  const source = { id: 'root', guidance: 'Inspect inputs.', initial: { content: '+ kernel\n' }, skills: ['keep'] }
+  const seed = { ...baseline, templates: [source, { id: 'unused' }] }
+  const proposal = fixture()
+  const changes = [{ asset: 'template', target: 'root', value: { guidance: 'Delegate the bounded implementation.' } },
+    { asset: 'template', target: 'unused', value: null },
+    { asset: 'skill', target: 'inspect-interface', value: { description: 'Inspect the uncertain boundary.',
+      capabilities: [], requiredTools: [], content: 'Compare the earliest divergent representation.' } }]
+  const parsed = parseRsiProposal({ ...proposal, edit: { ...proposal.edit, changes } }, seed)
+  expect(parsed.method.templates).toEqual([{ ...source, guidance: 'Delegate the bounded implementation.' }])
+  expect(seed.templates[0]).toEqual(source)
+  expect(parsed.method.skills[0]).toMatchObject({ name: 'inspect-interface' })
+  const change = (value: unknown) => ({ ...proposal, edit: { ...proposal.edit,
+    changes: [{ asset: 'template', target: 'root', value }] } })
+  expect(() => parseRsiProposal(change({ initial: { content: '+ kernel\n' } }), seed)).toThrow('value.initial is frozen')
+  expect(() => parseRsiProposal(change({ id: 'another' }), seed)).toThrow('must match target')
+  expect(parseRsiProposal(change({ guidance: null }), seed).method.templates[0]).toEqual({
+    id: 'root', initial: { content: '+ kernel\n' }, skills: ['keep'] })
+  expect(() => parseRsiProposal({ ...proposal, edit: { ...proposal.edit,
+    changes: [changes[0], changes[0]] } }, seed)).toThrow('edit each asset once')
 })
 
 it('refuses malformed batches before consuming slots, then charges a complete candidate that fails prune', async () => {
@@ -77,10 +102,7 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
     const validShape = rsiProposal(assets, { ...assets, workflowGuidance: 'Preserve independent acceptance.' }, source.taskId, parent.id)
     const proposal = { ...validShape, edit: { ...validShape.edit, predicted_cases: ['evolve-letters'] } }
     const { eventSeq: _eventSeq, ...missingSeq } = proposal.analysis.success_habits[0]!.evidence[0]!
-    const { templates: _templates, ...missingTemplates } = assets
-    const { skills: _skills, ...missingSkills } = assets
-    const { tools: _tools, ...missingTools } = assets
-    const { inputs: _inputs, ...missingInputs } = assets.templates[0] as Record<string, unknown>
+    const rootTemplate = assets.templates[0] as { id: string }
     const malformed = [
       { path: 'broken-json.json', content: '{', field: 'invalid JSON' },
       { path: 'missing-event.json', field: 'analysis.success_habits[0].evidence[0].eventSeq', raw: { ...proposal,
@@ -89,16 +111,16 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
       { path: 'duplicate-label.json', field: 'analysis.capability_gaps[0].gap', raw: { ...proposal,
         analysis: { ...proposal.analysis, capability_gaps: [{ gap: proposal.analysis.failure_modes[0]!.mode,
           description: 'Duplicated mechanism label.', evidence: proposal.analysis.failure_modes[0]!.evidence }] } } },
-      { path: 'missing-templates.json', field: 'method.templates', raw: { ...proposal, method: missingTemplates } },
-      { path: 'missing-skills.json', field: 'method.skills', raw: { ...proposal, method: missingSkills } },
-      { path: 'missing-tools.json', field: 'method.tools', raw: { ...proposal, method: missingTools } },
+      { path: 'missing-value.json', field: 'edit.changes[0].value', raw: { ...proposal,
+        edit: { ...proposal.edit, changes: [{ asset: 'workflow', target: 'workflowGuidance' }] } } },
+      { path: 'frozen-source.json', field: 'edit.changes[0].value.initial', raw: { ...proposal,
+        edit: { ...proposal.edit, changes: [{ asset: 'template', target: rootTemplate.id, value: { initial: { content: 'changed' } } }] } } },
+      { path: 'protected-artifact.json', field: '.artifact', raw: { ...proposal,
+        edit: { ...proposal.edit, changes: [{ asset: 'template', target: domain.rootTemplate, value: { artifact: 'different.txt' } }] } } },
       { path: 'missing-tool-source.json', field: 'method.tools[0].source', raw: { ...proposal,
-        method: { ...proposal.method, tools: [{ name: 'missing-source' }] },
-        edit: { ...proposal.edit, changes: [{ asset: 'workflow', target: 'workflowGuidance' }, { asset: 'tool', target: 'missing-source' }] } } },
-      { path: 'missing-template-inputs.json', field: 'method.templates[0].inputs', raw: { ...proposal,
-        method: { ...proposal.method, templates: [missingInputs, ...assets.templates.slice(1)] },
-        edit: { ...proposal.edit, changes: [{ asset: 'workflow', target: 'workflowGuidance' },
-          { asset: 'template', target: missingInputs['id'] }] } } },
+        edit: { ...proposal.edit, changes: [{ asset: 'tool', target: 'missing-source', value: {} }] } } },
+      { path: 'new-template-inputs.json', field: 'method.templates', raw: { ...proposal,
+        edit: { ...proposal.edit, changes: [{ asset: 'template', target: 'new-template', value: { goal: 'Investigate', artifact: 'notes.txt' } }] } } },
       { path: 'undeclared-diff.json', field: 'edit.changes', raw: { ...proposal, edit: { ...proposal.edit, changes: [] } } },
       { path: 'unknown-case.json', field: 'edit.predicted_cases', raw: { ...proposal, edit: { ...proposal.edit, predicted_cases: ['invented-case'] } } },
     ]

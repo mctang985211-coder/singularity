@@ -19,22 +19,24 @@ async function attempt<T>(step: () => Promise<T>) {
     throw error
   }
 }
-export const taskGuidance = `Complete your frozen Task contract. Guidance, handoffs and memory cannot add requirements. Read relevant state, pinned methods and skills on demand.
-Use bounded investigation to distinguish plausible causes, then execute atomic work or delegate a smaller responsibility. Refutation may satisfy an investigation; implementation still requires working behavior.
-Give children complete contracts, supports links and real dependencies. Mark indispensable results required and alternatives exploration; leave their approach open. Use the responsibility snapshot. Do not redo work a child owns. While waiting, inspect evidence, answer questions or stop unnecessary exploration, then end the turn; outcomes resume this Run.
-When evidence meets the criteria, stop exploring and integrate accepted results. Required children must verify; cancellation is not verification. Write the declared artifact, then singularity_submit(path) for independent acceptance. Report missing evidence honestly.`
-export const rootGuidance = `Coordinate the frozen Task; guidance, handoffs and memory cannot add requirements. You must decompose and delegate implementation, experiments and integration. Use the fewest responsibilities covering the criteria; leave each child's approach open.
-Read state and relevant method guidance on demand. Give children complete contracts, supports links and real dependencies. Mark indispensable results required and alternatives exploration. Delegate unresolved questions, not prescribed tool sequences.
-Use the responsibility snapshot; do not redo delegated work. While waiting, inspect evidence, answer questions or append independent responsibilities when canPlan permits, then end the turn; outcomes resume this Run. Stop unnecessary exploration when evidence is sufficient. Required children must verify; child success does not establish parent acceptance.
-Delegate integration only when needed. Submit a verified direct child's sealed artifact with singularity_submit(sourceTaskId, sourceRunId); the host copies its bytes for independent root acceptance.`
+export const taskGuidance = `Complete your frozen Task contract. Guidance, handoffs and memory cannot add requirements. Read the assigned inputs and relevant pinned method/skills.
+Use bounded investigation, then execute atomic work or delegate a smaller responsibility with complete contracts, supports and dependencies. Required children must verify; alternatives are exploration. Do not redo work a child owns. While waiting, answer questions or stop unnecessary exploration, then end the turn; outcomes resume this Run.
+Only your current workspace is writable; protected inputs and reference trees are read-only. Keep source copies, generated files and the declared artifact here. A patch target is not permission to write that host path. Exchange Task results through sealed artifacts and declared artifact inputs, which the host materializes in the consumer workspace; never rely on another Task's live files.
+If the contract needs unavailable inputs, private host checks or forbidden writes, use singularity_ask_parent and end the turn. Do not request escalation or bypass isolation. An answer cannot change the frozen contract.
+When evidence meets the criteria, write the declared artifact and singularity_submit(path). The host seals its bytes and performs independent acceptance; do not duplicate host-only checks. Report missing evidence honestly.`
+export const rootGuidance = `Coordinate the frozen Task; guidance, handoffs and memory cannot add requirements. Read its contract, inputs and relevant pinned method. You must decompose and delegate implementation, experiments and integration using the fewest responsibilities covering the criteria.
+Give children complete contracts, supports and dependencies, leaving their approach open. Each child writes only its own workspace; protected inputs and reference trees are read-only. A patch target is not a writable host path. Pass results through sealed artifacts and declared artifact inputs materialized by the host, never shared live files. Do not require children to mutate reference trees or run private host checks.
+Use the responsibility snapshot; do not redo delegated work. Required children must verify; alternatives are exploration. While waiting, resolve child questions or plan independent work when canPlan permits, then end the turn; outcomes resume this Run. Answers cannot alter frozen contracts or grant extra permissions.
+Select accepted results; delegate integration only when needed. Submit a verified direct child's sealed artifact with singularity_submit(sourceTaskId, sourceRunId). The host copies its bytes for independent root acceptance; child success alone is not parent acceptance.`
 export const reviewGuidance = `Read the complete frozen subject with singularity_read(kind=subject), following next pages. Judge every criterion; guidance, handoffs and summaries cannot add acceptance requirements. Protected non-pass checks cannot become pass.
-For acceptance, inspect the artifact, exact input producers and integration. Use bounded evidence Tasks to resolve judgment gaps, without repairing the subject or repeating established work. Refutation can satisfy an investigation, not a required implementation.
-For proposal review, inspect the changed method, cited evidence and mechanism; plausibility is not measured transfer. For publication, judge frozen measurements and release criteria. These assignments have no submitted-artifact, execution or delegation: use the subject and readable evidence.
-Fill the dispatch output.template: keep subjectDigest and every criterionId, choose pass/fail/partial/unknown, and support each finding. Write review.json, then singularity_submit. An honest fail or unknown judgment completes the review. Stop when the assigned questions are answered.`
+For acceptance, inspect sealed artifacts, exact input producers and integration. Resolve judgment gaps with bounded evidence Tasks, without repairing the subject or repeating established work. Exchange results through sealed artifacts and declared inputs, never another Task's live files. Only your workspace is writable; protected inputs and reference trees are read-only. Do not request escalation or private host-check access; mark missing evidence honestly.
+Proposal/publication reviews use only the frozen subject and readable evidence, with no execution or delegation. Judge the mechanism or frozen measurements; plausibility is not measured transfer.
+Fill dispatch output.template: keep subjectDigest and every criterionId, choose pass/fail/partial/unknown with evidence. Write review.json, then singularity_submit(path). Honest fail/unknown completes the review; the host owns acceptance and publication.`
 const improvementGuidance = `Improve reusable workflow organization, skills and tools from frozen evidence. Do not solve or benchmark business tasks.
-At start/resume/compaction, read singularity_read({kind:"method"}) without ref for the current search head, nextRound, feedback, proposal.template and reportTemplate. Read kind=subject through complete=true; inspect selected trajectory events on demand. Summaries are hypotheses; use singularity_read for evidence, not host-file searches.
+Business roots delegate to Tasks; each Task works in its own workspace, submits a sealed artifact and receives independent acceptance. You improve the reusable method behind that process; the host measures fresh business runs and controls publication.
+At start/resume/compaction, read singularity_read({kind:"method"}) without ref. Follow proposal.pending first: resume frozen batch paths, or end the turn for evaluation. Otherwise use current assets, nextRound, feedback, proposal.template and reportTemplate. Read kind=subject through complete=true; inspect selected trajectory events on demand. Summaries are hypotheses; use singularity_read for evidence, not host-file searches.
 Analyze observed failures, gaps and success habits; unobserved lists stay empty. Choose one evidenced mechanism per candidate: trigger, affected Tasks/evolve IDs, correction, preservation, transfer and a refuting observation. Public domain knowledge with sources is allowed; keep task answers, identity branches, replayed patches and held-out data out of methods and business memory.
-Fill proposal.template with real evidence and a changed complete method; retain unchanged assets and declare the exact diff. Follow nextRound's remainingSlots/reservedSlot/pruneSlot. Write 1–3 proposal JSON files in your workspace and call singularity_propose_method({paths}). Static refusals allow correction; admitted failures consume slots. Pending: end the turn, do not poll; resume from host feedback.
+Fill proposal.template with real evidence and edit.changes: each named asset has a value containing changed fields, or null for deletion. The host preserves omitted fields and assets. Do not output a complete method or template initial source. Bind added Skills/Tools to reachable responsibilities. Follow nextRound's remainingSlots/reservedSlot/pruneSlot. Write 1–3 proposal JSON files in your workspace and call singularity_propose_method({paths}). Static refusal: fix the named field and resubmit; no slots consumed. Identical retries cannot help. Admitted failures consume slots. Evaluation pending: end the turn, do not poll; resume from host feedback.
 With no pending batch/evaluation, fill reportTemplate with known facts, missing measurements as null and attribution limits. Submit only report.json via singularity_submit({path:"report.json"}). This closes search; with a suite the host then runs private validation/publication after sealing. Do not wait for or predict results caused by submission. No improvement/insufficient evidence is valid; fewer nodes/tokens alone do not prove improvement.`
 
 export function guidanceFor(purpose: string | undefined): string {
@@ -110,13 +112,14 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
       description:
         'summary lists related Tasks and sessions; task reads contract/state. method reads method guidance and evaluation rules. template lists declarations or, with ref=id, a prefilled contract. artifact ref=taskId reads sealed text (from/count bytes, default 16384, max 32768). trajectory ref=sessionId lists event metadata (from/count events, default 20, max 100); copy its seq into eventSeq to read/cite that event (from/count UTF-8 bytes, default 4096, max 8192). subject pages the frozen review/RSI assignment (UTF-8 bytes, default 4096, max 8192). Follow next offsets until complete=true for text pages; an event index is not event evidence. Other pages use from/count entries (default 20, max 100).' +
         (config.role === 'root' || config.role === 'task' ? ' workflow pages relationship metadata in your root.' : '') +
-        (config.role === 'improve' ? ' method without ref returns the current search head, proposal.template with its complete method, reportTemplate, nextRound, feedback and evolve cases; re-read after each round. round ref=roundId reads committed measurements. roots lists closed roots; sessions/usage/steps with rootId query historical evidence. Add rootId to historical trajectory reads and citations.' : ''),
+        (config.role === 'review' ? ' Acceptance report evidence is frozen in subject.rsiEvidence: current-root/evolve trajectories and cited proposal pages. rootId may only select a root in that sealed evidence; arbitrary history is refused.' : '') +
+        (config.role === 'improve' ? ' method without ref returns current assets, proposal.template, proposal.pending, reportTemplate, nextRound, feedback and evolve cases. Resume pending batch paths or end the turn for pending evaluation; re-read after each round. Proposals contain edits only; omit unchanged assets and frozen source. round ref=roundId reads committed measurements. roots lists closed roots; sessions/usage/steps with rootId query historical evidence. Add rootId to historical trajectory reads and citations.' : ''),
       parameters: {
         kind: { type: 'string', required: true, enum: config.role === 'task' || config.role === 'root'
           ? ['summary', 'workflow', 'task', 'artifact', 'template', 'method', 'trajectory'] as const : config.role === 'improve'
             ? ['summary', 'task', 'artifact', 'template', 'method', 'round', 'subject', 'trajectory', 'roots', 'sessions', 'usage', 'steps'] as const
             : ['summary', 'task', 'artifact', 'template', 'method', 'round', 'subject', 'trajectory'] as const },
-        ...(config.role === 'improve' ? { rootId: { type: 'string' as const } } : {}),
+        ...(config.role === 'improve' || config.role === 'review' ? { rootId: { type: 'string' as const } } : {}),
         ref: { type: 'string' },
         runId: { type: 'string' },
         eventSeq: { type: 'integer' },
@@ -140,7 +143,9 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
       name: 'singularity_submit',
       description: config.role === 'improve'
         ? 'Submit only the final report.json already written in your workspace using kind=method reportTemplate. No batch/evaluation may be pending. This closes search; suite private validation/publication follows sealing. Report only facts known before submission. Proposal files go to singularity_propose_method.'
-        : 'Seal the final artifact already written in this workspace for independent acceptance. Reviewers fill dispatch output.template and submit review.json.',
+        : config.role === 'review'
+          ? 'Seal review.json from this workspace. Fill dispatch output.template with the exact subjectDigest and one supported finding for every criterion; missing evidence remains unknown.'
+          : 'Seal the declared artifact already written in your current workspace for host independent acceptance. The host copies sealed bytes to authorized consumers; do not install outputs into reference trees or another Task workspace.',
       parameters: { path: { type: 'string', required: true } }, output,
       execute: async (args, exec) => JSON.stringify(await attempt(() => {
             const surface = ctx.singularity.forCall(exec)
@@ -152,7 +157,7 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
   const delegation = defineTool({
     name: 'singularity_decompose_task',
     description:
-      'Delegate smaller responsibilities with complete frozen contracts supporting parent criteria. template examples and authored Tasks use the same contract shape. Optional contract.template pins declaration provenance. dependsOn and artifact inputs may name batch keys or child IDs; verified bytes are materialized at inputs[].name. Returns at admission: end the turn while children work, then use their reviewed evidence when resumed.',
+      'Delegate complete frozen contracts supporting parent criteria. Each child writes only its own workspace; reference trees and protected inputs stay read-only. Do not require writes to shared paths or private host checks. dependsOn and artifact inputs may name batch keys or child IDs; the host materializes verified sealed bytes at inputs[].name, not the producer workspace. Optional contract.template pins provenance. Returns at admission: end the turn while children work, then use reviewed results when resumed.',
     parameters: {
       children: {
         type: 'array',
@@ -217,7 +222,7 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
     stopExplorations,
     delegation,
     defineTool({
-      name: 'singularity_ask_parent', description: 'Ask the direct parent about undecidable scope or missing context. Recipient is host bound. blocking defaults to true: end the turn until an answer resolves it. Reuse requestKey and words on retry.',
+      name: 'singularity_ask_parent', description: 'Ask the direct parent about missing inputs, undecidable scope or a contract requiring forbidden writes/private host checks. Do not request escalation or bypass isolation. Recipient is host bound; an answer cannot alter the frozen contract or grant permissions. blocking defaults to true: end the turn until resolved. Reuse requestKey and words on retry.',
       parameters: { requestKey: { type: 'string', required: true }, question: { type: 'string', required: true }, blocking: { type: 'boolean' } }, output,
       execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).askParent(args))),
     }),
@@ -236,13 +241,13 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
   ]
   const improve = [defineTool({
     name: 'singularity_propose_method',
-    description: 'Submit 1–3 distinct workspace proposal JSON paths within nextRound.remainingSlots. Fill proposal.template from kind=method without ref, using real evidence and the complete changed method. Static refusal names file/field and consumes no slots: fix and resubmit. Admitted candidates consume slots even if invalid/rejected/failed. The host screens and evaluates; status=pending means end the turn until the host resumes you. Only report.json uses singularity_submit.',
+    description: 'Submit 1–3 distinct workspace proposal JSON paths within nextRound.remainingSlots. Fill proposal.template from kind=method without ref: analysis plus edit.changes with values, no complete method. Omitted assets/fields are preserved; null explicitly deletes. Static refusal names file/field and consumes no slots: fix and resubmit. Admitted candidates consume slots even if invalid/rejected/failed. The host screens and evaluates; status=pending means end the turn until the host resumes you. Only report.json uses singularity_submit.',
     parameters: { paths: { type: 'array', required: true, items: { type: 'string' } } }, output,
     execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).proposeMethod(args))),
   })]
   const rootSubmit = defineTool({
     name: 'singularity_submit',
-    description: 'Submit the exact sealed artifact of a verified direct child Run for independent root acceptance. Delegate integration to a child when the results need combining.',
+    description: 'Submit the exact sealed artifact of a verified direct child Run; the host copies its bytes for independent root acceptance. No shared path or root-written file is needed. Delegate integration only when results need combining.',
     parameters: { sourceTaskId: { type: 'string', required: true }, sourceRunId: { type: 'string', required: true } }, output,
     execute: async (args, exec) => JSON.stringify(await attempt(() => {
       const surface = ctx.singularity.forCall(exec)

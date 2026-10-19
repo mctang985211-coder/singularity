@@ -8,6 +8,7 @@ import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import * as ToolFsSearch from '@deepseek-ai/dsh-tool-fs-search'
 import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
+import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 
 export interface BubbleWorld {
   readonly root: string
@@ -34,7 +35,7 @@ class BubbleFs extends FileSystem {
   readonly current: () => BubbleWorld
   readonly defaultCwd: string
   constructor(ctx: Context, base: FileSystem, current: () => BubbleWorld, defaultCwd: string) { super(ctx); this.base = base; this.current = current; this.defaultCwd = defaultCwd }
-  override get sandboxMode() { return 'workspace-write' as const }
+  override get sandboxMode() { return this.current().writable ? 'workspace-write' as const : 'read-only' as const }
   private check(target: FsTarget, write = false): void {
     const path = this.base.processPath(target)
     const world = this.current()
@@ -97,6 +98,7 @@ class BubbleSubprocess extends SubprocessRuntime {
   override spawnTerminal(_spec: SubprocessTerminalSpawnSpec): never { throw new Error('Bubble uses managed process execution') }
 }
 export async function mountBubbleWorld(agent: Agent, current: () => BubbleWorld, readOnly = false): Promise<void> {
+  setApprovalPolicy(agent.session, 'never')
   const original = current, rgPath = await ToolFsSearch.resolveRgPath()
   current = () => {
     const world = original()

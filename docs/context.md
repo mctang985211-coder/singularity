@@ -3,30 +3,17 @@
 本页在每轮结束时**替换当前状态**，只保留未关闭问题、已批准合同索引和证据边界。
 历史解释从固定基线实测记录与 Git 查证；剩余施工顺序在 [Task 优先的领域 RSI 计划](task-first-domain-rsi-plan.md) 维护。
 
-2026-10-18：当前 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，仅用于新图。已接通完整契约、可选模板、workflow 策略与方向、在飞构图与整图预算、持久取消/学习开关；suite case×trial、失败计分、历史 S*、配对区间、最多 6 槽的稀疏搜索及反馈；冻结 champion 后独立 validation/heldout 与审核/CAS；CLI 和私有宿主便携配置。原生 delivery、retry/用量和隔离有离线见证。完整状态和局限见[计划第 9 节](task-first-domain-rsi-plan.md#9-详细实施任务)。
+2026-10-19：当前 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，仅用于新图。既有 Task/workflow、固定方法、独立验收、case×trial、稀疏搜索和 champion 验证使用同一事实底座；实现与实验出口统一见计划第 9 节。
 
-最新 CommandCode 只读检查（cutoff 131）：`/home/ROXY/singularity-next/buckyball-commandcode-20261018-172430` 的业务根 `task-5fc54cd5510aba92` 已 accepted。RSI `improve-043d458189286ffefc4b48eb` 最终报告也通过，但零提案、零评估；不能称为有效搜索。原生 seq208 把候选文件误交报告提交工具，driver 预检前先写 control seq122 search-ended，随后 seq209 才拒绝路径；后续合法提案被永久封死且误报批次未结束。完整因果与历史事件见计划 §2.2。
+最新 `124254` 实跑已取消，宿主 PID 3346913 已停止。原生记录确认角色 prompt 实际送达；父合同错误要求写只读参考仓库，repair 在完成修复和补丁后进入未应答审批。旧 `003416` RSI 转抄完整方法损坏冻结源码。回退提交 `02016c5` 撤销 `9e655ce`，重新以短业务边界、原生 never 审批和具名增量提案修复。指令、输出和真实事件说明统一见 [RSI agent 工作合同](rsi-agent-contract.md)，不复制一套新合同。
 
-本次删除独立 search-ended 与 proposal started/settled 镜像状态，Run 提交是唯一搜索关闭边界。正确路径、文件、输入和附件封存先于迁移验证；批次冷恢复使用封存候选字节；非法 Method 先纯解析再 prune；测量缺失/未知成本/不足样本投影为证据不足。首次启动失败可显式恢复，终态 analysis 和取消不复活；默认步骤上限覆盖 RSI/审核。取消或分析失败会中止在飞筛选、评估、验证和后代；发布在现有串行提交区重查 Run 与根 RSI，终止事实先入队时不能发布。取消支持精确 taskId，旧 root 不会误停同会话的新 root。业务已验收结果保留。
+报告审核使用提交前封存的当前根、本搜索 evolve 证据和已筛选提案引用的封存历史页；历史只开放已引用字节范围，私有/其它搜索/后续事件不扩权。测试覆盖四角色实际 native 请求与 schema、原生拒绝无审批悬挂、静态及待评估新批次拒绝不扣槽、冻结批次恢复及报告证据隔离。全量验证结果见计划第 2.2 节；本轮未启动付费模型。原始运行和 checkout 保留，host.log 中的凭据不输出。
 
-最终 `pnpm verify` **退出 0：90 文件 / 944 测试 / 7 门禁通过**，日志 `/tmp/singularity-rsi-state-final-verify.log`；`pnpm run doctor`、`git diff --check` 通过。两个子代理完成恢复/取消与实跑/发布交叉审查；本次覆盖范围和有限证据见计划 §2.2。
-
-上一轮已删除 `provider.ts`、provider 侧日志、整图停机/重启 API/UI 与 `DSH_AGENT_ERROR` 包装；DSH 原生负责重试和最终失败。历史 partial-output veto 断流、HTTP 402/QUOTA 与本次提前结束搜索是不同故障。历史运行与冻结 checkout 不改写，本次只修复和离线验证主仓，未重载宿主或调用付费模型。完整验证记录保留在计划 §2.2；更早异步等待不稳定仍无根因证明。
-
-Buckyball 收尾已完成：独立冻结 C/ISA 源码投影、真实 stdio MCP 配置/BEMU 构建、6 题/3 族明确标注的合成案例、私有独立 scalar+BEMU oracle。12 个正反样本、工具漂移 unknown、错误假设驳回、worker 读隔离及两个 verifier 并发取消均符合预期。仅支持 C/ISA+BEMU 功能；不是全仓/MLIR/RTL/PPA 复现。每个 split 只有一族，不满足冻结的最少三族门槛，不得声称迁移提升；oracle 反例也不是模型调查 Task。
-
-**较早只读检查首次真实 pilot（cutoff 247）。** 运行目录 `/home/ROXY/singularity-next/buckyball-pilot-20261018`，UI `http://127.0.0.1:7340`，control `singularity-buckyball-pilot-20261018`，根 `task-2d32b3cb8b21b08e`，模型 `deepseek/deepseek-flash`。首次业务根已 `verified / accepted`，`behavior` 与 `isa-and-scope` 均为 pass；一个方法候选通过 critic 和加载检查，基线矩阵有效完成 2/4、候选有效 0/4，余额不足 HTTP 402 及其连带失败使学习 Task/根 RSI 为 failed。未进入迁移验证，也无新方法发布；不将有效测量缺失解释为候选成功率零或无改善。`progress-check-20261018.json` 保存本次完整观测，当时 119 个生产文件与实跑冻结 checkout 内容一致。本次未重启或调用模型。
-
-`launch.json` 汇总启动 PID、身份与证据；`experiment-spec.json` 冻结规则；`startup-report.json` 保存启动时状态。检查或取消用：
-
-```sh
-node /home/ROXY/singularity-next/buckyball-commandcode-20261018-172430/control.mjs status
-node /home/ROXY/singularity-next/buckyball-commandcode-20261018-172430/control.mjs cancel
-```
-
-`host.log` 含私有 launch token，不公开。作者脏树和旧实验保持原状。模型服务端 revision opaque，验证集未污染不具有跨 control 的全局证明。
+尚未验收：修复后模型行为、完整 pilot、复杂任务收敛和迁移收益。Buckyball 具备六题/三族合成 C/ISA+BEMU 案例及独立 oracle；逐题 pilot 入口未接通，experiment 只启首个 evolve 根，每 split 一族不足三族统计门。不覆盖全仓递归依赖、MLIR/RTL/PPA，也无另一机器复现或论文级收益结论。下一次实跑应新建 checkout/control，旧图不迁移。
 
 ## 18. G1/G2 接手审核与用户裁定（2026-10-11，基线 `35b0c7c`）
+
+以下保留历史合同与验证记录；其中完整 Method 提交、批次拒绝等旧行为，以本页当前状态和终局计划为准。
 
 ### 18.1 用户裁定与长期约束
 

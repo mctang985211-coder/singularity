@@ -49,7 +49,7 @@ export interface MethodAssets {
   readonly tools: readonly MethodTool[]
 }
 export const METHOD_FORMAT = `Complete Method JSON: {workflowGuidance:string, templates:Template[], skills:Skill[], tools:Tool[]}.
-All four fields are required. RSI proposal.template.method contains the complete current Method: edit it and retain every unchanged asset. This is a complete replacement, not a partial patch. Empty arrays explicitly remove their assets.
+All four fields are required in a stored Method. RSI reads current assets but submits only edit.changes; the host derives the complete replacement. Do not retype unchanged assets or frozen source in proposals.
 workflowGuidance is explicit reusable workflow advice, empty or at most 8192 UTF-8 bytes. Templates are optional patterns; an empty array is legal. Task contracts own goals, inputs and acceptance.
 Skill: {name:kebab-case, description:string, capabilities:string[], requiredTools:string[], content:string}.
 Tool: {name:kebab-case, source:string, verifier?:{samples:{name:string, artifactContent:string, inputContent:string, expected:'pass'|'fail'}[]}}.
@@ -58,7 +58,7 @@ Template: {id:string, goal:string, artifact:string, inputs:{name:string,source:{
 goal defines responsibility; guidance gives optional procedure. Template reads return prefilled contracts with concrete input identities; decomposition submits that contract shape with optional template:{id,digest} provenance.
 contract.skills and matching capabilities select Skills; capability names and selected Skills' requiredTools bind Tools. Binding happens at Run admission, even if no tool is called.
 Each comparison freezes a caliber: model, bound tool names/versions/content digests, conditions and inputs, plus metric, weights, trials and judgement. Adding, removing or editing a root-bound tool changes caliber and excludes that candidate; unchanged tools retain their identity across method revisions. Keep root bindings unchanged for this comparison; helpers may be bound to delegated Tasks. A rejected candidate does not fail the round or replace the incumbent. Retrying it unchanged cannot help.
-Root inputs, artifact, criteria, protected checks and initial source remain frozen.`
+Root inputs, artifact, criteria, protected checks and initial source remain frozen. A new Skill/Tool must also be selected by a reachable contract/template; its mere presence does not imply delivery or use.`
 export interface MethodBindings {
   readonly skills: readonly { readonly name: string; readonly digest: string }[]
   readonly tools: readonly { readonly name: string; readonly digest: string }[]
@@ -108,7 +108,7 @@ export function assertMethodShape(raw: unknown): asserts raw is MethodAssets {
   const content = record(raw, 'method')
   assertClosedKeys(content, ['workflowGuidance', 'templates', 'skills', 'tools'], 'method', 'malformed-declaration')
   const missing = ['workflowGuidance', 'templates', 'skills', 'tools'].filter(key => !Object.hasOwn(content, key))
-  if (missing.length) refuse('malformed-declaration', `Missing ${missing.map(key => `method.${key}`).join(', ')}. method must be a complete replacement; copy kind=method proposal.template.method and retain unchanged fields`)
+  if (missing.length) refuse('malformed-declaration', `Missing ${missing.map(key => `method.${key}`).join(', ')} in stored Method. RSI proposals submit analysis and edit.changes; the host preserves the remaining assets`)
   if (typeof content['workflowGuidance'] !== 'string' || Buffer.byteLength(content['workflowGuidance']) > 8192)
     refuse('malformed-declaration', 'method.workflowGuidance must be an explicit string of at most 8192 UTF-8 bytes')
   for (const field of ['templates', 'skills', 'tools']) list(content[field], `method.${field}`)
@@ -202,10 +202,11 @@ export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: stri
     if (templates.has(template.id)) refuse('malformed-declaration', 'Revision repeats template ' + template.id)
     const original = domain.templates.get(template.id)
     if (template.id === domain.rootTemplate && original !== undefined) {
-      if (digestOf(original.inputs) !== digestOf(template.inputs) || digestOf(original.criteria) !== digestOf(template.criteria) ||
-        digestOf(original.checks.map(({ criterion, input }) => ({ criterion, input }))) !== digestOf(template.checks.map(({ criterion, input }) => ({ criterion, input }))) ||
-        original.artifact !== template.artifact)
-        refuse('malformed-declaration', 'Revision cannot change protected input or acceptance')
+      for (const field of ['inputs', 'criteria', 'artifact'] as const)
+        if (digestOf(original[field]) !== digestOf(template[field]))
+          refuse('malformed-declaration', `${path}.${field}: Revision cannot change protected input or acceptance for template ${template.id}; keep the frozen value`)
+      if (digestOf(original.checks.map(({ criterion, input }) => ({ criterion, input }))) !== digestOf(template.checks.map(({ criterion, input }) => ({ criterion, input }))))
+        refuse('malformed-declaration', `${path}.checks: Revision cannot change protected input or acceptance for template ${template.id}`)
       if ((template.initial === undefined ? null : sha256(template.initial.bytes)) !==
         (original.initial === undefined ? null : sha256(original.initial.bytes)))
         refuse('malformed-declaration', 'Revision cannot replace the protected initial root source')

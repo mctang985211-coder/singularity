@@ -56,7 +56,7 @@ describe('small role interfaces', () => {
     }).kind.enum
     expect(kinds).toContain('method')
     expect(kinds.includes('roots')).toBe(role === 'improve')
-    expect(Object.hasOwn(s.tools.find(tool => tool.name === 'singularity_read')!.parameters.properties!, 'rootId')).toBe(role === 'improve')
+    expect(Object.hasOwn(s.tools.find(tool => tool.name === 'singularity_read')!.parameters.properties!, 'rootId')).toBe(role === 'improve' || role === 'review')
     if (role === 'task' || role === 'root') expect(kinds).not.toContain('round')
     for (const tool of s.tools) {
       const keys = Object.keys(tool.parameters.properties ?? {})
