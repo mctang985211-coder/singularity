@@ -99,6 +99,12 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
         method: { ...proposal.method, templates: [missingInputs, ...assets.templates.slice(1)] },
         edit: { ...proposal.edit, changes: [{ asset: 'workflow', target: 'workflowGuidance' },
           { asset: 'template', target: missingInputs['id'] }] } } },
+      { path: 'copied-initial.json', field: 'method.templates[0].initial', raw: { ...proposal,
+        method: { ...proposal.method, templates: [{ ...assets.templates[0] as object,
+          initial: { content: '+immutable seed\n' } }, ...assets.templates.slice(1)] } } },
+      { path: 'changed-acceptance.json', field: 'method.templates[0].criteria', raw: { ...proposal,
+        method: { ...proposal.method, templates: [{ ...assets.templates[0] as object,
+          criteria: [{ criterionId: 'letters', statement: 'accept anything' }] }, ...assets.templates.slice(1)] } } },
       { path: 'undeclared-diff.json', field: 'edit.changes', raw: { ...proposal, edit: { ...proposal.edit, changes: [] } } },
       { path: 'unknown-case.json', field: 'edit.predicted_cases', raw: { ...proposal, edit: { ...proposal.edit, predicted_cases: ['invented-case'] } } },
     ]

@@ -48,17 +48,22 @@ export interface MethodAssets {
   readonly skills: readonly MethodSkill[]
   readonly tools: readonly MethodTool[]
 }
+/** Task/Case source bytes belong to the host, never to a reusable Method. */
+export function methodTemplateDeclaration(template: TaskTemplate) {
+  const { initial: _initial, ...declaration } = templateDeclaration(template)
+  return declaration
+}
 export const METHOD_FORMAT = `Complete Method JSON: {workflowGuidance:string, templates:Template[], skills:Skill[], tools:Tool[]}.
-All four fields are required. RSI proposal.template.method contains the complete current Method: edit it and retain every unchanged asset. This is a complete replacement, not a partial patch. Empty arrays explicitly remove their assets.
+All four fields are required. For RSI authoring, start from a host-written proposal.drafts file and use native edit to change only the necessary fields; do not retype unchanged assets. proposal.template.method is the canonical reference. The method is a complete replacement; empty arrays explicitly remove their assets.
 workflowGuidance is explicit reusable workflow advice, empty or at most 8192 UTF-8 bytes. Templates are optional patterns; an empty array is legal. Task contracts own goals, inputs and acceptance.
 Skill: {name:kebab-case, description:string, capabilities:string[], requiredTools:string[], content:string}.
 Tool: {name:kebab-case, source:string, verifier?:{samples:{name:string, artifactContent:string, inputContent:string, expected:'pass'|'fail'}[]}}.
 Tool source is a Node ESM program: frozen input paths appear in contract order starting at argv[2], followed by the candidate path when supplied; stdout is the returned artifact text. singularity_run_method takes {tool,candidatePath?}, with candidatePath naming an existing workspace file. A verifier Tool receives the candidate path at argv[2] followed by frozen input paths, exiting 0 for pass or 1 for fail. Verifier samples and template checks each bind one named input, with both positive and negative samples required.
-Template: {id:string, goal:string, artifact:string, inputs:{name:string,source:{kind:'protected',ref:string}|{kind:'artifact',template:string}}[], criteria:{criterionId:string,statement:string}[], skills:string[], capabilities:string[], guidance?:string, applicability?:string, decomposition?:{children:{key:string,template:string,dependsOn:string[],supports:string[],maxRuns:number,requirement:'required'|'exploration'}[]}, checks:{criterionId:string,verifier:string,input:string}[], initial?:{content:string}}.
+Template: {id:string, goal:string, artifact:string, inputs:{name:string,source:{kind:'protected',ref:string}|{kind:'artifact',template:string}}[], criteria:{criterionId:string,statement:string}[], skills:string[], capabilities:string[], guidance?:string, applicability?:string, decomposition?:{children:{key:string,template:string,dependsOn:string[],supports:string[],maxRuns:number,requirement:'required'|'exploration'}[]}, checks:{criterionId:string,verifier:string,input:string}[]}.
 goal defines responsibility; guidance gives optional procedure. Template reads return prefilled contracts with concrete input identities; decomposition submits that contract shape with optional template:{id,digest} provenance.
 contract.skills and matching capabilities select Skills; capability names and selected Skills' requiredTools bind Tools. Binding happens at Run admission, even if no tool is called.
 Each comparison freezes a caliber: model, bound tool names/versions/content digests, conditions and inputs, plus metric, weights, trials and judgement. Adding, removing or editing a root-bound tool changes caliber and excludes that candidate; unchanged tools retain their identity across method revisions. Keep root bindings unchanged for this comparison; helpers may be bound to delegated Tasks. A rejected candidate does not fail the round or replace the incumbent. Retrying it unchanged cannot help.
-Root inputs, artifact, criteria, protected checks and initial source remain frozen.`
+Root inputs, artifact, criteria and protected checks remain frozen. Templates must not contain initial: the host supplies exact initial source bytes from the frozen Task/Case.`
 export interface MethodBindings {
   readonly skills: readonly { readonly name: string; readonly digest: string }[]
   readonly tools: readonly { readonly name: string; readonly digest: string }[]
@@ -108,7 +113,7 @@ export function assertMethodShape(raw: unknown): asserts raw is MethodAssets {
   const content = record(raw, 'method')
   assertClosedKeys(content, ['workflowGuidance', 'templates', 'skills', 'tools'], 'method', 'malformed-declaration')
   const missing = ['workflowGuidance', 'templates', 'skills', 'tools'].filter(key => !Object.hasOwn(content, key))
-  if (missing.length) refuse('malformed-declaration', `Missing ${missing.map(key => `method.${key}`).join(', ')}. method must be a complete replacement; copy kind=method proposal.template.method and retain unchanged fields`)
+  if (missing.length) refuse('malformed-declaration', `Missing ${missing.map(key => `method.${key}`).join(', ')}. method must be a complete replacement; restore missing fields with native edit on proposal.drafts[].path, using kind=method proposal.template.method as the canonical reference`)
   if (typeof content['workflowGuidance'] !== 'string' || Buffer.byteLength(content['workflowGuidance']) > 8192)
     refuse('malformed-declaration', 'method.workflowGuidance must be an explicit string of at most 8192 UTF-8 bytes')
   for (const field of ['templates', 'skills', 'tools']) list(content[field], `method.${field}`)
@@ -193,27 +198,25 @@ export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: stri
       )
     }
   }
-  const templates = new Map<string, TaskTemplate>()
+  const templates = new Map<string, TaskTemplate>(), originals = domain.contractTemplates ?? domain.templates
   for (const [index, rawTemplate] of assets.templates.entries()) {
     const path = `method.templates[${index}]`, declared = record(rawTemplate, path)
-    if (declared['initial'] !== undefined && record(declared['initial'], 'template initial')['from'] !== undefined)
-      refuse('malformed-declaration', 'Revision initial source must be frozen as initial.content')
-    const template = await readTemplate(domain.dir, rawTemplate, verifiers, path)
+    const id = text(declared, 'id', path), original = originals.get(id)
+    if (Object.hasOwn(declared, 'initial'))
+      refuse('malformed-declaration', `${path}.initial for template ${JSON.stringify(id)} is not a Method asset. Delete initial; the host supplies exact initial source bytes from the frozen Task/Case`)
+    const template = await readTemplate(domain.dir, rawTemplate, verifiers, path, original?.initial)
     if (templates.has(template.id)) refuse('malformed-declaration', 'Revision repeats template ' + template.id)
-    const original = domain.templates.get(template.id)
     if (template.id === domain.rootTemplate && original !== undefined) {
-      if (digestOf(original.inputs) !== digestOf(template.inputs) || digestOf(original.criteria) !== digestOf(template.criteria) ||
-        digestOf(original.checks.map(({ criterion, input }) => ({ criterion, input }))) !== digestOf(template.checks.map(({ criterion, input }) => ({ criterion, input }))) ||
-        original.artifact !== template.artifact)
-        refuse('malformed-declaration', 'Revision cannot change protected input or acceptance')
-      if ((template.initial === undefined ? null : sha256(template.initial.bytes)) !==
-        (original.initial === undefined ? null : sha256(original.initial.bytes)))
-        refuse('malformed-declaration', 'Revision cannot replace the protected initial root source')
+      const changed = (['inputs', 'artifact', 'criteria'] as const).find(field => digestOf(original[field]) !== digestOf(template[field]))
+        ?? (digestOf(original.checks.map(({ criterion, input }) => ({ criterion, input }))) !==
+          digestOf(template.checks.map(({ criterion, input }) => ({ criterion, input }))) ? 'checks' : undefined)
+      if (changed !== undefined)
+        refuse('malformed-declaration', `${path}.${changed} for template ${JSON.stringify(id)} is frozen by the Task/Case; restore this field from kind=method proposal.template.method`)
     }
     for (const skill of template.skills) if (!skills.some((asset) => asset.name === skill)) refuse('malformed-declaration', `template ${template.id} requires missing Skill ${skill}`)
     templates.set(template.id, template)
   }
-  const loaded: Domain = { ...domain, contractTemplates: domain.templates, templates, verifiers,
+  const loaded: Domain = { ...domain, contractTemplates: originals, templates, verifiers,
   }
   assertTemplateSources(loaded)
   return { assets, domain: loaded }
@@ -246,7 +249,7 @@ export async function seedMethod(apparatus: Apparatus, initial?: unknown): Promi
   const published = publishedMethod(apparatus)
   if (published !== undefined) return published
   const seed = await createMethod(apparatus, initial ?? { workflowGuidance: '',
-    templates: [...apparatus.domain.templates.values()].map(templateDeclaration), skills: [], tools: [],
+    templates: [...apparatus.domain.templates.values()].map(methodTemplateDeclaration), skills: [], tools: [],
   })
   if (publishedMethod(apparatus) === undefined)
     await apparatus.store.emit({
