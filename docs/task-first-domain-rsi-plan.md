@@ -81,6 +81,8 @@ RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba
 
 实际旧提案转换为具名编辑后静态检查通过，六份源码保持原样；真实原生测试适配器核对四角色 system 与工具 schema 送达，越权调用立即拒绝。最终 `pnpm verify` 退出 0：**92 文件 / 949 测试 / 7 门禁通过**，含类型检查、构建及源码/产物摘要；日志 `/tmp/singularity-rsi-rollback-final-verify2.log`。5 个更新 Markdown 入口的 5 份 JSON 与 29 个本地链接、`git diff --check` 通过。修复后尚未运行付费模型，不能据此声称遵令行为或方法收益。
 
+**重启前计划一致性核对：** 对照 `c3d5456` 中第 3、5、6、8、9、15 节的规范要求，`71fe018` 未发现新增的必须修复偏差。增量 JSON 仅改变作者输入；宿主仍生成四字段完整 Method、核验实际 diff，冻结 Task/输入/源码，保留 critic → smoke → evolve 测评 → champion 验证 → 独立审核/CAS 发布。报告读取范围来自截止提交时已封存的 subject，没有扩展业务或私有集权限；审批、重试、失败和会话仍由 DSH 原生处理，没有第二状态源。重启使用新的 checkout、home、control/request/session 身份，保留原冻结 suite、模型、搜索限额和统计门槛，并核对新会话实际送达的角色、工具和 never 审批。以下 pilot 工程缺口与研究出口不因本次一致性核对而标为完成；本次重启验证修复后的业务到 RSI 流程。
+
 最新旧实验已取消、宿主停止，原记录保留。完整 pilot 仍未完成：`runExperiment` 只提交第一个 evolve 业务 root；有效候选请求 round 后才执行 split 的完整 case×trial 比较，冻结 champion 后才可能进入 validation/heldout。冻结 suite 不会自行补跑其它 pilot。每 split 一族也不足最少三族统计门，不能报告正式迁移收益。
 
 **2026-10-18 较早 RSI 实跑故障与减量修复：** 运行目录 `/home/ROXY/singularity-next/buckyball-commandcode-20261018-172430`，只读 snapshot cutoff 131。业务根 `task-5fc54cd5510aba92` 已 accepted；RSI `improve-043d458189286ffefc4b48eb` 最终报告也已 accepted、根 RSI completed，但零提案、零评估。原生 seq208 错把 `proposal-1.json` 交给报告提交工具，driver 在检查合同路径前已写 control seq122 `rsi/search-ended insufficient-evidence`；seq209 才拒绝错误路径。之后 seq223/224、242/243 的合法提案被已结束搜索拒绝，却误报“先完成当前批次”。这不是仍在运行的锁等待，而是不可恢复的提前终结；不能把 completed 报告算作有效搜索或学习成功。
