@@ -218,7 +218,11 @@ it('keeps validation and heldout Tasks outside proposer reads and prepared memor
         case: { caseId: split, familyId: split, split } })
     const request = readForAgent(h.apparatus, 'analysis', { kind: 'task', ref: trial.taskId })
     if (split === 'evolve') await expect(request).resolves.toMatchObject({ taskId: trial.taskId })
-    else await expect(request).rejects.toThrow('outside this evidence scope')
+    else {
+      await expect(request).rejects.toThrow('outside this evidence scope')
+      await expect(readForAgent(h.apparatus, 'analysis', { kind: 'trajectory', rootId: trial.taskId,
+        ref: `trial-${split}` })).rejects.toThrow('closed subject')
+    }
     await expect(readForAgent(h.apparatus, `trial-${split}`, { kind: 'task', ref: trial.taskId })).resolves.toMatchObject({ taskId: trial.taskId })
   }
   await h.apparatus.store.close()

@@ -200,7 +200,13 @@ export interface BuckyballVerificationInput {
   readonly immutableFiles: readonly { readonly path: string; readonly digest: string }[]
 }
 
-/** The Task's protected input freezes oracle/tool bytes as well as command lines and source. */
+/** Public work specification. The opaque digest binds the host-only verification manifest. */
+export function buckyballTaskInput(input: BuckyballVerificationInput) {
+  return { version: 1 as const, repository: input.repository, source: input.source, policy: input.policy,
+    verificationDigest: sha256(JSON.stringify(input)) }
+}
+
+/** Host-only manifest freezes oracle/tool bytes as well as command lines and source. */
 export async function verifyBuckyballChangeSet(raw: string, input: BuckyballVerificationInput, trial: string,
   runProcess: (invocation: VerifierInvocation, signal?: AbortSignal, cwd?: string, world?: BubbleWorld) => ReturnType<typeof spawnProcess>, signal?: AbortSignal) {
   if (input.version !== 1 || !input.repository.startsWith('/') || !input.immutableFiles.length || !input.checks.length) throw new Error('Incomplete frozen Buckyball verification input')

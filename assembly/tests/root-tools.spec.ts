@@ -217,16 +217,19 @@ try {
   const systemText = request => request.messages.filter(message => message.role === 'system')
     .flatMap(message => message.content.filter(block => block.type === 'text').map(block => block.text)).join('\\n')
   assert(systemText(parentRequest).includes(rootProtocol), 'Root protocol was assembled but not delivered to the model')
+  assert(systemText(parentRequest).includes('host-owned template checks run after artifact sealing, not as child commands or extra child criteria'), 'Root lacks the host-check delegation boundary')
   assert(systemText(childRequest).includes(childProtocol), 'Task protocol was assembled but not delivered to the model')
   assert(systemText(reviewRequest).includes(reviewProtocol), 'Review protocol was assembled but not delivered to the model')
   assert(systemText(improveRequest).includes(improveProtocol), 'RSI protocol was assembled but not delivered to the model')
+  assert(systemText(improveRequest).includes('Business roots only read, delegate and submit verified child artifacts.'), 'RSI author lacks the business root capability boundary')
+  assert(systemText(improveRequest).includes('Keep commands, implementation and integration in delegated Tasks'), 'RSI author lacks the executable delegation route')
   let flowOffset = 0
   for (const [phase, pattern] of [
-    ['current method', /singularity_read[^\\n]*method/i],
+    ['search state', /singularity_read[^\\n]*search/i],
     ['frozen evidence', /subject[\\s\\S]*?trajectory/i],
     ['edits', /edit\\.changes/],
-    ['host evaluation', /evaluat[\\s\\S]*?host/i],
-    ['final report', /reportTemplate[\\s\\S]*?singularity_submit/i],
+    ['host handoff', /singularity_propose_method[\\s\\S]*?admission returns immediately[\\s\\S]*?end the turn/i],
+    ['final report', /search\\.authoring\\.report[\\s\\S]*?singularity_submit/i],
   ]) {
     const match = pattern.exec(improveProtocol.slice(flowOffset))
     assert(match, 'RSI system lacks the ordered ' + phase + ' stage')
@@ -243,10 +246,10 @@ try {
   assert.equal(improveTool('singularity_propose_method').parameters.properties.paths.items.type, 'string')
   assert(improveTool('singularity_propose_method').description.includes('edit.changes'))
   const improveRead = improveTool('singularity_read').parameters.properties
-  for (const kind of ['method', 'subject', 'trajectory', 'round', 'roots', 'sessions', 'usage', 'steps']) assert(improveRead.kind.enum.includes(kind), kind)
+  for (const kind of ['search', 'method', 'subject', 'trajectory', 'round', 'roots', 'sessions', 'usage', 'steps']) assert(improveRead.kind.enum.includes(kind), kind)
   assert.equal(improveRead.rootId.type, 'string')
   assert.equal(improveRead.eventSeq.type, 'integer')
-  assert(improveTool('singularity_read').description.includes('proposal.pending'))
+  assert(improveTool('singularity_read').description.includes('phase'))
   assert(!systemText(childRequest).includes(rootProtocol), 'Child inherited root-only coordination instructions')
   const submitFields = request => Object.keys(request.tools.find(tool => tool.name === 'singularity_submit').parameters.properties).sort()
   assert.deepEqual(submitFields(parentRequest), ['sourceRunId', 'sourceTaskId'])

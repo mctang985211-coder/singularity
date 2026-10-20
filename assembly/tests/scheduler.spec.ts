@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { postIdentifiedMessage } from '../../src/runtime/identified-message.ts'
 import { createReviewCommands } from '../../src/review/commands.ts'
-import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
+import { REVIEW_PROTOCOL, REVIEW_VERSION, type Finding, type ReviewRun } from '../../src/review/protocol.ts'
 import { projectTree, taskWaitingReason } from '../../src/task/tree.ts'
 import { TASK_PROTOCOL, TASK_VERSION, TASK_KINDS, type TaskState } from '../../src/task/protocol.ts'
 import type { TaskContract } from '../../src/task/contract.ts'
@@ -93,7 +93,7 @@ async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skill
     schedulers.push(scheduler)
     return scheduler
   }
-  const answer = async (taskId: string, pass: boolean) => {
+  const answer = async (taskId: string, pass: boolean, verdict: Finding['verdict'] = 'pass') => {
     const id = String(agentSessionIdOf(taskId))
     const child = runtime.agents.get(id)!
     const run = Object.values(taskStateOf(apparatus, taskId).runs).at(-1)!
@@ -104,7 +104,7 @@ async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skill
     return await submit(apparatus, fakeExecution(() => undefined), { agentId: id, sessionId: id, model: { provider: 'test', model: 'model-A' } },
       execFor(child, 'submit:' + run.runId), { taskId, path: taskStateOf(apparatus, taskId).contract!.artifact },
       new AbortController().signal,
-      fixtureReview(apparatus),
+      fixtureReview(apparatus, verdict),
     )
   }
   return { apparatus, parent, medium, root, runtime, make, answer, addPlan }
@@ -267,11 +267,12 @@ describe('fact-driven child scheduling', () => {
     expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)!.status).toBe('running')
   })
 
-  it.each(['exhausted', 'runtime'] as const)('stops %s work and notifies the accurate parent once with terminal provenance', async (cause) => {
-    const h = await setup(cause === 'runtime' ? 3 : 1, true)
+  it.each(['exhausted', 'unknown', 'runtime'] as const)('stops %s work and notifies the accurate parent once with terminal provenance', async (cause) => {
+    const h = await setup(cause === 'exhausted' ? 1 : 3, true)
     const scheduler = h.make()
     await scheduler.advance('parent-task')
     if (cause === 'exhausted') await h.answer('child-task', false)
+    else if (cause === 'unknown') await h.answer('child-task', true, 'unknown')
     else {
       const run = Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]!
       await h.apparatus.tasks.forAgent(String(agentSessionIdOf('child-task'))).failRun({ commandId: 'runtime', taskId: 'child-task', runId: run.runId, reason: 'provider unavailable' })
@@ -285,10 +286,10 @@ describe('fact-driven child scheduling', () => {
       )!
     expect(notice.source).toMatchObject({ kind: 'singularity', purpose: 'plan-outcome', parentTaskId: 'parent-task', taskId: 'child-task', factSeq: terminal.seq,
       })
-    expect(contentOf(notice)).toContain(cause === 'runtime' ? 'provider unavailable' : 'budget exhausted')
+    expect(contentOf(notice)).toContain(cause === 'runtime' ? 'provider unavailable' : cause === 'unknown' ? 'verification evidence is insufficient' : 'budget exhausted')
     expect(contentOf(notice)).toContain('child-task-dependent')
     expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)).toMatchObject({
-      status: 'failed', failureCause: 'runtime', failureReason: expect.stringContaining('required delegated responsibilities ended without verification') })
+      status: 'failed', failureCause: cause === 'runtime' ? 'runtime' : 'business', failureReason: expect.stringContaining('required delegated responsibilities ended without verification') })
     expect(h.runtime.delivered.filter((entry) => entry.sessionId !== 'parent-session')).toHaveLength(1)
   },
   )

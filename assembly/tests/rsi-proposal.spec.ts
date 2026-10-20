@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it, vi } from 'vitest'
-import { parseRsiProposal, proposeRsiMethod } from '../src/rsi-proposal.ts'
+import { parseRsiProposal, proposeRsiMethod, advanceRsiBatch } from '../src/rsi-proposal.ts'
 import type { MethodAssets } from '../src/method.ts'
 import { loadMethod } from '../src/method.ts'
 import { callerOf, openApparatus, taskStateOf } from '../src/apparatus.ts'
@@ -84,6 +84,11 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
   try {
     const parent = agentFor('business', 'business')
     const source = await propose(apparatus, callerOf(parent), 'root', { goal: 'inspect protected letters' })
+    const commands = apparatus.tasks.forAgent(parent.id)
+    for (const taskId of ['downstream', 'unrelated'])
+      await commands.admit({ commandId: `admit:${taskId}`, taskId, contract: source.contract })
+    await commands.decompose({ commandId: 'business-plan', parentTaskId: source.taskId,
+      children: [{ taskId: 'downstream', dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' }] })
     await apparatus.tasks.forAgent(parent.id).failRun({ commandId: 'business-ended', taskId: source.taskId,
       runId: source.runId, cause: 'business', reason: 'fixture stopped without an answer' })
     await apparatus.store.emit({ commandId: 'close-business', protocol: TASK_PROTOCOL, version: TASK_VERSION,
@@ -124,7 +129,13 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
       { path: 'undeclared-diff.json', field: 'edit.changes', raw: { ...proposal, edit: { ...proposal.edit, changes: [] } } },
       { path: 'unknown-case.json', field: 'edit.predicted_cases', raw: { ...proposal, edit: { ...proposal.edit, predicted_cases: ['invented-case'] } } },
     ]
-    const call = (paths: readonly string[]) => proposeRsiMethod(apparatus, {}, agent, agent.id, { paths }, new AbortController().signal)
+    const call = (paths: readonly string[]) => (async () => {
+      const signal = new AbortController().signal
+      const admitted = await proposeRsiMethod(apparatus, agent.id, { paths }, signal)
+      await advanceRsiBatch(apparatus, {}, agent, analysis.taskId, signal)
+      const outcome = taskStateOf(apparatus, analysis.taskId).search!.batches!.at(-1)!.outcomes[0]!
+      return { ...admitted, status: outcome.status, reason: outcome.detail }
+    })()
     const before = factsOf(medium)
     for (const invalid of malformed) {
       await writeFile(join(analysis.workspace, invalid.path), invalid.content ?? JSON.stringify(invalid.raw))
@@ -148,6 +159,24 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
     expect(batches).toHaveLength(1)
     expect(batches.every(batch => batch.settled && batch.outcomes.length === 1 && batch.outcomes[0]!.status === 'invalid')).toBe(true)
     expect(factsOf(medium).some(fact => fact.kind === 'review/started')).toBe(false)
+    // The root's native evidence supports predictions about its never-started child,
+    // but cannot support an unrelated Task. Neither child has an Agent/session.
+    const trace = await apparatus.attachments.saveFile({ name: 'trajectory.json', data: Buffer.from(JSON.stringify({
+      sessions: [{ sessionId: parent.id, events: [{ type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } }] }],
+    })) })
+    for (const status of ['pending', 'running'] as const)
+      await apparatus.store.emit({ commandId: `rsi:${status}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
+        kind: 'rsi/status', subject: source.taskId, payload: { status, detail: 'frozen fixture', ...(status === 'running' ? { trace } : {}) } })
+    history.read.mockReturnValue({ incumbent: run.revision,
+      directives: { historyCutoff: apparatus.store.load().entries().length, untried: [], prune: false } })
+    for (const taskId of ['unrelated', 'downstream']) {
+      await writeFile(join(analysis.workspace, `${taskId}.json`), JSON.stringify({ ...proposal,
+        edit: { ...proposal.edit, predicted_affected: [taskId] } }))
+      const result = await call([`${taskId}.json`])
+      if (taskId === 'unrelated') expect(result).toMatchObject({ status: 'invalid', reason: expect.stringContaining('Allowed Task IDs') })
+      else expect(result.status).toBe('screen-failed') // Passed evidence checks; this unit fixture has no native reviewer host.
+    }
+    expect(factsOf(medium).filter(fact => fact.kind === 'review/started')).toHaveLength(1)
   } finally {
     history.read.mockReset()
     await apparatus.store.close()

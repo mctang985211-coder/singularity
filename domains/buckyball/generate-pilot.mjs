@@ -22,7 +22,7 @@ assert(bemuArgv[0] === bemu && bemuArgv.includes('{elf}') && bemuArgv.includes('
   'BEMU command must use its frozen binary, candidate ELF and isolated log directory')
 assert(bemuArgv.includes('--itrace'), 'BEMU must emit the completed-instruction trace')
 await import(pathToFileURL(join(core, 'scripts/dsh-control-runtime.mjs')).href)
-const [{ freezeBuckyballSource }, { loadDomain }, { contractFor }, { spawnProcess }, { runVerifierCommand }] = await Promise.all([
+const [{ buckyballTaskInput, freezeBuckyballSource }, { loadDomain }, { contractFor }, { spawnProcess }, { runVerifierCommand }] = await Promise.all([
   import(pathToFileURL(join(core, 'assembly/src/buckyball.ts')).href),
   import(pathToFileURL(join(core, 'assembly/src/domain.ts')).href),
   import(pathToFileURL(join(core, 'assembly/src/inputs.ts')).href),
@@ -32,7 +32,8 @@ const [{ freezeBuckyballSource }, { loadDomain }, { contractFor }, { spawnProces
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const json = value => JSON.stringify(value, null, 2) + '\n'
 const domain = join(output, 'domain'), privateDir = join(output, 'private-oracle'), publicDir = join(output, 'public')
-for (const dir of [domain, privateDir, publicDir, join(domain, 'inputs'), join(domain, 'samples')]) await mkdir(dir, { recursive: true })
+const manifests = join(privateDir, 'manifests')
+for (const dir of [domain, manifests, publicDir, join(domain, 'inputs'), join(domain, 'samples')]) await mkdir(dir, { recursive: true })
 const source = await freezeBuckyballSource(repository, tools.sourceCommit ?? 'HEAD')
 const generatedFiles = []
 async function visit(directory) {
@@ -59,6 +60,7 @@ const here = dirname(fileURLToPath(import.meta.url)), oracle = join(privateDir, 
 await copyFile(join(here, 'pilot-oracle.mjs'), oracle)
 const wrapper = (await readFile(join(core, 'domains/buckyball/verifier.mjs'), 'utf8'))
   .replace("'../../assembly/src/buckyball.ts'", JSON.stringify(pathToFileURL(join(core, 'assembly/src/buckyball.ts')).href))
+  .replace("'../../assembly/src/ids.ts'", JSON.stringify(pathToFileURL(join(core, 'assembly/src/ids.ts')).href))
 await writeFile(join(domain, 'verifier.mjs'), wrapper)
 const immutable = async paths => Promise.all([...new Set(paths)].map(async path => ({ path, digest: hash(await readFile(path)) })))
 const commonFiles = [process.execPath, oracle, riscvGcc, hostCompiler,
@@ -85,7 +87,9 @@ for (const c of cases) {
   const verification = { version: 1, repository, source, policy: { allowed: [c.target], protected: ['stack', 'bebop', 'examples', 'arch'] },
     checks: [{ id: 'independent-scalar-and-bemu', argv: [process.execPath, oracle, configPath] }],
     immutableFiles: await immutable([...commonFiles, configPath, harness, reference]) }
-  await writeFile(join(domain, 'inputs', c.id + '.json'), json(verification))
+  const taskInput = buckyballTaskInput(verification)
+  await writeFile(join(manifests, taskInput.verificationDigest + '.json'), JSON.stringify(verification))
+  await writeFile(join(domain, 'inputs', c.id + '.json'), json(taskInput))
   await writeFile(join(domain, 'inputs', c.id + '.c'), c.bad)
   inputs.push({ ref: c.id + '-verification', from: 'inputs/' + c.id + '.json' }, { ref: c.id + '-starter', from: 'inputs/' + c.id + '.c' })
   for (const [kind, text] of [['pass', c.good], ['fail', c.bad]]) {
@@ -117,7 +121,7 @@ const path = input.policy.allowed[0], lines = text.slice(0, -1).split('\\n')
 const patch = 'diff --git a/' + path + ' b/' + path + '\\nnew file mode 100644\\n--- /dev/null\\n+++ b/' + path + '\\n@@ -0,0 +1,' + lines.length + ' @@\\n' + lines.map(line => '+' + line).join('\\n') + '\\n'
 await writeFile(outputPath, JSON.stringify({ baseCommit: input.source.baseCommit, inputTreeDigest: input.source.inputTreeDigest, patch }, null, 2) + '\\n')
 `)
-await writeFile(join(publicDir, 'WORKFLOW.md'), `# Buckyball C/ISA pilot\n\nEach Task receives only its own synthetic starter and frozen verification input. Repair the starter in a writable copy, retain its ABI, and package it with change-set.mjs. All six starters are authored synthetic defects; none is claimed as historical upstream failure.\n\nThe source reference is ${repository}, frozen at ${source.baseCommit}. Compiler: ${riscvGcc}. Generated ISA headers: ${generatedIsa}. BEMU: ${bemu}. Compile with -O2 -march=rv64gc -mabi=lp64d -static, the source runtime/ISA includes and stack/runtime/src/dma.c. Put generated outputs in the current Task workspace. Derive geometry from params.h; the pilot explicitly requires 128-bit banks and a bank depth divisible by 64.\n\nThe independent oracle compiles scalar C separately for the host and compares its complete outputs with an actual BEMU RISC-V execution. Agent tests supplement it. BEMU completed-instruction traces must contain the requested DMA/operator instructions. This demonstrates those operations executed, while independent review still checks that the candidate did not substitute CPU computation for the requested operator. No MLIR/RTL/PPA or transfer claim follows from this pilot.\n`)
+await writeFile(join(publicDir, 'WORKFLOW.md'), `# Buckyball C/ISA pilot\n\nEach Task receives only its own synthetic starter and frozen verification input. Repair the starter in a writable copy, retain its ABI, and package it with change-set.mjs. All six starters are authored synthetic defects; none is claimed as historical upstream failure.\n\nThe source reference is ${repository}, frozen at ${source.baseCommit}. Compiler: ${riscvGcc}. Generated ISA headers: ${generatedIsa}. BEMU: ${bemu}. Compile with -O2 -march=rv64gc -mabi=lp64d -static, the source runtime/ISA includes and stack/runtime/src/dma.c. Put generated outputs in the current Task workspace. Derive geometry from params.h; the pilot explicitly requires 128-bit banks and a bank depth divisible by 64.\n\ninputs/verification.json declares repository/source/policy and an opaque verificationDigest. It contains no private check command. Host-owned oracle checks run on sealed submissions; their manifests and programs are not mounted for workers. Do not turn them into child commands or require children to attest files they cannot read. Child criteria must be achievable with their declared inputs and public tools.\n\nThe independent oracle compiles scalar C separately for the host and compares its complete outputs with an actual BEMU RISC-V execution. Agent tests supplement it. BEMU completed-instruction traces must contain the requested DMA/operator instructions. This demonstrates those operations executed, while independent review still checks that the candidate did not substitute CPU computation for the requested operator. No MLIR/RTL/PPA or transfer claim follows from this pilot.\n`)
 const references = [...new Set([repository, publicDir, generatedIsa, ...bemuArgv.filter(arg => arg.startsWith('/') && !arg.includes('{')), ...(tools.references ?? [])])]
 const declaration = { rootTemplate: cases[0].id, inputs, templates,
   verifiers: [{ ref: 'buckyball-c-isa-pilot', version: '1', program: 'verifier.mjs', args: ['{artifact}', '{input}'], selftest: samples }],
@@ -150,11 +154,14 @@ for (const verifier of admitted.verifiers) for (const sample of verifier.selftes
 const probeDir = join(privateDir, 'probes')
 await mkdir(probeDir, { recursive: true })
 const first = cases[0], verificationPath = join(domain, 'inputs', first.id + '.json')
-const verification = JSON.parse(await readFile(verificationPath, 'utf8'))
+const taskInput = JSON.parse(await readFile(verificationPath, 'utf8'))
+const verification = JSON.parse(await readFile(join(manifests, taskInput.verificationDigest + '.json'), 'utf8'))
 const drifted = structuredClone(verification)
 drifted.immutableFiles.find(file => file.path === riscvGcc).digest = '0'.repeat(64)
 const driftPath = join(probeDir, 'pin-drift.json')
-await writeFile(driftPath, json(drifted))
+const driftInput = buckyballTaskInput(drifted)
+await writeFile(join(manifests, driftInput.verificationDigest + '.json'), JSON.stringify(drifted))
+await writeFile(driftPath, json(driftInput))
 const hypothesisPath = join(probeDir, 'wrong-stride-hypothesis.json')
 await writeFile(hypothesisPath, json({ baseCommit: source.baseCommit, inputTreeDigest: source.inputTreeDigest,
   patch: patch(first.target, first.good.replace('0, rows, output_stride)', '0, rows, output_stride - 1)')) }))

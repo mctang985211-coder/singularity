@@ -25,15 +25,15 @@ dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
 
 从原生界面提交领域目标和自然语言验收要求，不续发阶段指令。执行节点复用相关方法或直接声明一次性任务，提交工作区产物；独立 ReviewRun 逐条判断标准，必要时创建取证 Task。所有节点使用公开 create/resume 的普通主 agent 会话，Bubble 保护输入、验收程序和其他任务历史。
 
-root 必须委派实现，普通子节点自行决定是否继续分解。委派显式区分必须 verified 的 `required` 与可择优、可停止的 `exploration`；可用证据足够时，父停止未选探索并进入集成，停止本身不算验收通过。父背景默认尝试生成，摘要失败在 memory 目录明确标记且不阻断 Task；运行时失败的 Run 不再发出自动模型请求，节点通过 `singularity_memory` 分页发现可读分支的 checkpoint 并按 ref 选读；root 看整树，独立审核仅看自己的取证分支，目录不触发新摘要。单会话压缩使用 DSH 原生 BasicCompaction。当前协议为 Task v17、Review v4、snapshot v9。
+root 必须委派实现，普通子节点自行决定是否继续分解。委派显式区分必须 verified 的 `required` 与可择优、可停止的 `exploration`；可用证据足够时，父停止未选探索并进入集成，停止本身不算验收通过。父背景默认尝试生成，摘要失败在 memory 目录明确标记且不阻断 Task；运行时失败的 Run 不再发出自动模型请求，节点通过 `singularity_memory` 分页发现可读分支的 checkpoint 并按 ref 选读；root 看整树，独立审核仅看自己的取证分支，目录不触发新摘要。单会话压缩使用 DSH 原生 BasicCompaction。当前协议为 Task v23、Strategy v9、Measure v5、Review v5、snapshot v13。
 
 依据准确会话、committed snapshot、封存附件与正式 receipt 定位问题；不得伪造模型流程。恢复使用原会话、原 Run 与冻结目录，已冻结的检查结果、审核、trial 和发布决定复用。图、依赖、能力缺口、验收及 RSI 记录取同一状态前缀，节点直接连接自己的原生会话。
 
 ## Method 进化与原生发布验收
 
-部署 seed 初始化唯一方法指针。每个 Run 直接固定方法 Revision 和 Bubble 执行快照；临时契约不创建 Revision。根任务关闭后，后台等待原生会话结束并封存完整轨迹，再创建 RSI 节点；evaluation 根不再次触发 RSI。RSI 按路径提交含原生证据、分析、可归因编辑与完整方法的 TS 提案契约，经结构、绑定及六项独立审查后进入冷启动候选测评；基线复用封存业务 root。审查附件只携带宿主按 RSI 权限验证的引用片段，不授予审查者跨轮 history 或 memory 权限。测评请求立即返回持久引用，宿主从 measure、strategy、release 事实恢复；最终发布仍要求独立 ReviewRun 和准确 expected head。
+部署 seed 初始化唯一方法指针。每个 Run 直接固定方法 Revision 和 Bubble 执行快照；临时契约不创建 Revision。根任务关闭后，后台等待原生会话结束并封存完整轨迹，再创建 RSI 节点；evaluation 根不再次触发 RSI。RSI 按路径提交含原生证据、分析和具名增量编辑的 JSON 提案契约，经结构、绑定及六项独立审查后进入冷启动候选测评；基线复用封存业务 root。审查附件只携带宿主按 RSI 权限验证的引用片段，不授予审查者跨轮 history 或 memory 权限。提案准入即冻结附件并立即返回 screening 引用，宿主自动继续 critic/selftest/测评；作者不重发路径、不轮询。搜索状态从 Task 事实派生，kind=search 读取，长资产/规则/反馈分开分页；宿主从 measure、strategy、release 事实恢复；最终发布仍要求独立 ReviewRun 和准确 expected head。
 
-先以 letters 取得真实“候选→独立测评→决定”记录，再以 CPU PolyBench/C 3mm 快速观察自主分解与验收；SHA256 用于较长的领域验证。无赢家或发布被拒时，当前 RSI 必须继续修订；只有本轮赢家批准并切换指针后才能提交完成报告。真实发布并且后续 Run 实际消费该版本，才能证明方法更新生效；领域迁移仍需陌生任务证据。中断检查分别覆盖提交、独立审核、测评、发布；恢复必须复用同一对象和已完成事实，不要求模型重发长调用。历史实验只读，新实验采用新协议。
+先以 letters 取得真实“候选→独立测评→决定”记录，再以 CPU PolyBench/C 3mm 快速观察自主分解与验收；SHA256 用于较长的领域验证。无待处理批次或评估时，当前 RSI 可以继续修订，也可如实提交无改进或证据不足报告；不能把发布赢家作为正常结束的前提。真实发布并且后续 Run 实际消费该版本，才能证明方法更新生效；领域迁移仍需陌生任务证据。中断检查分别覆盖提交、独立审核、测评、发布；恢复必须复用同一对象和已完成事实，不要求模型重发长调用。历史实验只读，新实验采用新协议。
 
 ## 证据边界
 

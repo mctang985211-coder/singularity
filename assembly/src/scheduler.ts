@@ -88,7 +88,8 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       catch (error) { throw new DispatchError(parentTaskId, parentTaskId, null, error) }
     }
   }
-  const failParent = async (parentTaskId: string, commandId: string, reason: string): Promise<void> => {
+  const failParent = async (parentTaskId: string, commandId: string, reason: string,
+    cause: 'business' | 'runtime' = 'runtime'): Promise<void> => {
     const review = reviewOf(parentTaskId)
     if (review !== undefined) {
       if (review.status === 'running') await createReviewCommands(apparatus.store).fail(commandId, parentTaskId, reason)
@@ -98,7 +99,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       if (run === undefined) return
       declareCaller(apparatus, task.responsibility!.agentId)
       await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
-        commandId, taskId: parentTaskId, runId: run.runId, reason })
+        commandId, taskId: parentTaskId, runId: run.runId, reason, cause })
     }
   }
   const advanceAncestor = async (parentTaskId: string): Promise<void> => {
@@ -163,7 +164,11 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
     if (unmet.length > 0) {
       // Publish terminal authority before the notification can wake the parent's next step.
       const reason = 'required delegated responsibilities ended without verification: ' + unmet.map(child => `${child.taskId} (${child.status})`).join(', ')
-      await failParent(parentTaskId, `required-work-failed:${parentTaskId}/${runId}`, reason)
+      const infrastructure = unmet.some(child => {
+        const run = Object.values(taskStateOf(apparatus, child.taskId).runs).at(-1)
+        return run?.failureCause === 'runtime' || run?.failureCause === 'cancelled'
+      })
+      await failParent(parentTaskId, `required-work-failed:${parentTaskId}/${runId}`, reason, infrastructure ? 'runtime' : 'business')
     }
     try {
       await postIdentifiedMessage(seams, parent, schedulerMessage({ kind: 'singularity', purpose: 'plan-outcome',

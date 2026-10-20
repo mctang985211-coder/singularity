@@ -2,15 +2,23 @@ import { execFile } from 'node:child_process'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { BuckyballChangeError, verifyBuckyballChangeSet } from '../../assembly/src/buckyball.ts'
+import { isDeepStrictEqual } from 'node:util'
+import { BuckyballChangeError, buckyballTaskInput, verifyBuckyballChangeSet } from '../../assembly/src/buckyball.ts'
+import { sha256 } from '../../assembly/src/ids.ts'
 
 // This program is invoked by the normal sealed-submission verifier inside its Bubble.
 // Its /tmp is private and its parent owns timeout, cancellation and process-group cleanup.
 const temporary = await mkdtemp(join(tmpdir(), 'buckyball-verifier-'))
 try {
   const [artifact, inputPath] = process.argv.slice(2)
-  if (artifact === undefined || inputPath === undefined) throw new Error('Expected change-set.json and frozen verification input')
-  const result = await verifyBuckyballChangeSet(await readFile(artifact, 'utf8'), JSON.parse(await readFile(inputPath, 'utf8')),
+  if (artifact === undefined || inputPath === undefined) throw new Error('Expected change-set.json and public Task input')
+  const taskInput = JSON.parse(await readFile(inputPath, 'utf8'))
+  if (!/^[a-f0-9]{64}$/.test(taskInput.verificationDigest)) throw new Error('Invalid host verification digest')
+  const manifest = await readFile(new URL('../private-oracle/manifests/' + taskInput.verificationDigest + '.json', import.meta.url), 'utf8')
+  if (sha256(manifest) !== taskInput.verificationDigest) throw new Error('Frozen verification manifest differs')
+  const verification = JSON.parse(manifest)
+  if (!isDeepStrictEqual(taskInput, buckyballTaskInput(verification))) throw new Error('Task input differs from frozen verification manifest')
+  const result = await verifyBuckyballChangeSet(await readFile(artifact, 'utf8'), verification,
     join(temporary, 'trial'), (invocation, signal, cwd) => new Promise(resolve => {
       if (invocation.shell) throw new Error('Buckyball checks require argv')
       execFile(invocation.argv[0], invocation.argv.slice(1), {

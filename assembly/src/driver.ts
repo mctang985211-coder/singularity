@@ -37,7 +37,8 @@ import { mountMethodSkills, runMethodTool, methodContext, confirmWorkflowDeliver
 import { taskSessionsOf, taskDispatchStart } from './evaluation-cost.ts'
 import { acceptanceSubject, reviewSubject, reviewOf, submitReview, methodReviewTools, type ReviewWitness } from './review.ts'
 import { explorationOf, startImprovement, improvementTools, improvementTaskId } from './improvement.ts'
-import { proposeRsiMethod } from './rsi-proposal.ts'
+import { proposeRsiMethod, advanceRsiBatch } from './rsi-proposal.ts'
+import { rsiState, rsiToolReason } from './rsi-state.ts'
 import { executionProfile } from './execution-profile.ts'
 import { createEvolution, type EvolutionOptions } from './evolution.ts'
 import { createNativeSolve, observeSolve } from './native-solve.ts'
@@ -114,6 +115,7 @@ export interface DriverOptions {
   readonly execution: (admission: Admission, onTurnFailure: TurnFailureHandler) => Execution
 }
 export interface TaskDriver extends TaskService {
+  rsiState(agentId: string): ReturnType<typeof rsiState>
   prepareMemory(agent: Agent): Promise<void>
   failed(agentId: string): boolean
   reviewTarget(agentId: string): ReviewRun['target'] | undefined
@@ -348,6 +350,10 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
     if (run?.purpose === 'improve' && !improvementTools.has(exec.name))
       return 'RSI only reads evidence, edits candidate/report files, proposes and submits; execution belongs to the runtime'
+    if (run?.purpose === 'improve') {
+      const reason = rsiToolReason(task!, exec.name)
+      if (reason !== undefined) return reason
+    }
     if (exec.name.startsWith('singularity_')) return undefined
     if (review !== undefined) return review.status === 'running' ? ['read', 'read_image', 'glob', 'grep'].includes(exec.name) ? undefined : waitingReason(apparatus, review.reviewId) : 'review Run has settled'
     if (['read', 'read_image', 'glob', 'grep'].includes(exec.name)) return undefined
@@ -645,9 +651,30 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
             await rsiStatus(task.taskId, { status: 'failed', detail: String(error) })
           } finally { await stopRsiWork(task.taskId) }
         })
+      if (last?.purpose === 'improve' && last.status === 'running' && last.stage === 'working') {
+        for (const batch of task.search?.batches ?? []) {
+          if (!batch.settled) startJob(`batch:${task.taskId}:${batch.batchId}`, async () => {
+            const signal = taskSignal(task.taskId)
+            try { await advanceRsiBatch(apparatus, options.seams, parent, task.taskId, signal) }
+            catch (error) { if (signal.aborted) return; throw error }
+            schedule()
+          })
+          else if (!batch.outcomes.some(outcome => outcome.status === 'evaluation-requested'))
+            startJob(`batch-notify:${task.taskId}:${batch.batchId}`, async () => {
+              const fact = apparatus.store.committedOf(`rsi/batch-ended:${task.taskId}:${batch.batchId}`)!
+              await postIdentifiedMessage(options.seams, parent, schedulerMessage({
+                kind: 'singularity', purpose: 'plan-outcome', controlId: apparatus.controlId,
+                parentTaskId: task.taskId, taskId: task.taskId, runId: last.runId, factSeq: fact.seq,
+              }, JSON.stringify({ batchId: batch.batchId, status: 'screened',
+                outcomes: batch.outcomes.map(({ slot, status, revision }) => ({ slot, status, revision })),
+                next: 'Read singularity_read({kind:"search"}) for the current state and feedback.' })))
+            })
+        }
+      }
       for (const request of task.rounds ?? [])
         if (task.runs[request.runId]!.status === 'running')
           startJob(`round:${request.roundId}`, async () => {
+            if (task.search?.batches?.some(batch => !batch.settled)) return
             const signal = taskSignal(task.taskId)
             try {
               if (!signal.aborted)
@@ -935,7 +962,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
           }),
         proposeMethod: (input) => work(async () => {
           try {
-            const result = await proposeRsiMethod(apparatus, options.seams, agent, caller.agentId, input, signal)
+            const result = await proposeRsiMethod(apparatus, caller.agentId, input, signal)
             schedule()
             return result
           } finally {
@@ -952,6 +979,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
         }),
         submit: (input) =>
           work(async () => {
+            signal.throwIfAborted()
             assertActive(apparatus, current())
             if (review !== undefined) {
               if (!('path' in input)) refuse('not-responsible', 'reviewers submit their own review.json')
@@ -960,6 +988,8 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
               finally { release() }
             }
             const task = owner(caller.agentId)!
+            const reason = rsiToolReason(task, 'singularity_submit')
+            if (reason !== undefined) refuse('illegal-transition', reason)
             try {
               return await submit(
                 apparatus,
@@ -969,12 +999,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
                 { ...input, taskId: task.taskId },
                 signal,
                 acceptanceFor(agent),
-                async () => {
-                  const state = taskStateOf(apparatus, task.taskId)
-                  if (state.search?.batches?.some(batch => !batch.settled) || state.rounds?.some(round => round.status === 'pending'))
-                    refuse('illegal-transition', 'wait for the committed proposal and evaluation outcomes before submitting the RSI report')
-                  await validateChampion(state, agent, signal)
-                },
+                () => validateChampion(taskStateOf(apparatus, task.taskId), agent, signal),
               )
             } finally {
               const root = rsiRootOf(task.taskId)
@@ -993,6 +1018,10 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     read: async () => {
       if (backgroundErrors.length) throw new AggregateError(backgroundErrors, 'background RSI delivery failed')
       return snapshotOf(apparatus)
+    },
+    rsiState: (agentId) => {
+      const task = owner(agentId)
+      return task === undefined ? undefined : rsiState(task)
     },
     mountSkills: (agent) => mountMethodSkills(apparatus, agent),
     memoryContext: (agentId) => memoryContextOf(apparatus, agentId),
@@ -1029,7 +1058,9 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
         scheduler.stop()
         const results = await Promise.allSettled([execution.close(), scheduler.close(), ...jobs.values(), ...active])
         await apparatus.store.close()
+        const cancellations = new Set([controller.signal.reason, ...[...rsiControllers.values()].filter(c => c.signal.aborted).map(c => c.signal.reason)])
         const errors = [...backgroundErrors, ...results.flatMap((r) => (r.status === 'rejected' ? [r.reason] : []))]
+          .filter(error => !cancellations.has(error))
         if (errors.length) throw new AggregateError(errors, 'driver unload failed')
       })()),
   }

@@ -1,20 +1,33 @@
 # RSI agent 工作合同
 
-更新：2026-10-19。本文说明现有提案、审核与报告入口，不新增工具、报告解析器或候选状态机。解析边界以 [rsi-proposal.ts](../assembly/src/rsi-proposal.ts)、[method.ts](../assembly/src/method.ts)、[review.ts](../assembly/src/review.ts) 为准。
+更新：2026-10-20。本文说明现有提案、审核与报告入口。`kind=search` 是已有 read 工具的短投影；状态仅从既有 Task/Run/batch/round 事实派生，不新增状态库。解析边界以 [rsi-proposal.ts](../assembly/src/rsi-proposal.ts)、[method.ts](../assembly/src/method.ts)、[review.ts](../assembly/src/review.ts) 为准。
 
 Singularity 的业务顺序是：root 最少委派 → Task 在自己的 workspace 生成产物 → submit 封存 → 宿主独立验收 → 父任务复用已验证产物。只读参考仓库不是共享工作区；补丁中的目标路径不是可写宿主路径；跨任务交接使用声明的 artifact inputs。RSI 在业务结束后读取这些冻结事实，提案由独立 critic 筛选、宿主跑新业务对照；报告通过与方法收益是两回事。
 
+root 只能把子节点凭其声明输入与工具可履行的责任冻结进子合同。宿主私有检查在封存提交后执行，不是要求子 Agent 执行的命令或额外证明标准。Buckyball 公开输入只给 repository/source/policy 与不透明摘要；完整检查清单只向 verifier 挂载。必需子任务因验收或业务未达标导致父失败时保留业务原因，测评记为失败观察；实际 runtime/取消继续记为基础设施缺测。不能因一条不可执行的子标准，把候选的 workflow 失败隐藏成环境故障。
+
 取证子任务的 protected `source` 必须从当前 contract/template 或审核 dispatch 的 `evidenceInputs` 原样复制；`name` 只决定子工作区内的路径。未知 ref 或错误 digest 在整批准入前拒绝，不留下子节点，按返回的可用来源改正后重提。准入后的方法加载、输入解析和准备失败记录为失败 Run；连 `startRun` 都被预算等约束拒绝时，所属父 Run/Review 明确失败，不能等待不存在的执行。
 
-critic 收到的是宿主审核投影：`baseline` 为修改前 Method，`assets` 为修改后 Method，`changes` 为实际 diff；`edit.changes` 只保留已验证的资产键，作者字段 `value` 已应用并省略。不能按作者提交 schema 将此投影判为缺字段。proposal/report 作者模板只向 RSI 作者返回。
+critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字段的 before/after，`baseline` 为修改前 Method，`assets` 为修改后 Method，`changes` 为实际 diff；`edit.changes` 只保留已验证的资产键，作者字段 `value` 已应用并省略。不能按作者提交 schema 将此投影判为缺字段。proposal/report 作者模板只向 RSI 作者返回。
 
 ## 工作顺序
 
-1. 每次开始、恢复或上下文压缩后，先调用 `singularity_read({"kind":"method"})`，不带旧 `ref`。读取当前 `reference`、`nextRound`、`feedback`、`cases`、`proposal.template` 和 `reportTemplate`。当前完整基线在 `assets`；提案模板只含分析和改动，不含完整 Method。先看 `proposal.pending`：`batch` 按原 paths 恢复，`evaluation` 结束 turn 等宿主，`null` 才开始新提案。工具的 `kind` 必填，不能只传 `ref/eventSeq`。
-2. 用 `singularity_read({"kind":"subject"})` 读取冻结任务，沿返回的 `next` 字节偏移直到 `complete=true`。按需读取 `trajectory` 索引，复制真实 `sessionId` 与索引条目的 `seq`，再带 `eventSeq` 读取对应事件正文；正文同样按字节分页。摘要是线索，不代替原始证据。
-3. 从可核查发现提出一个独立机制。保留有证据的成功行为，写出可观察触发条件、反例和迁移假设。一个机制可有相互依赖的多处改动；允许有来源的公开领域接口、常量、工具路径和参数化方法，不把旧题答案、任务 ID、输出或按题分支写入 Method。
-4. 填写运行时提案模板，只在 `edit.changes` 写需要改的字段；宿主保留其他资产和冻结源码，不生成草稿文件，不要求转抄基线。一次写入 1–3 份 JSON，再调用 `singularity_propose_method({"paths":["proposal.json"]})`。服从 `nextRound` 的剩余槽、探索槽与 prune 要求。全批静态拒绝不冻结、不扣槽，按文件和字段纠正；入场后的证据无效、拒绝、重复或执行失败仍扣槽，`repair=0`。
-5. 返回真实 `roundId` 且结果待定时结束当前 turn，等待宿主恢复，不轮询或自行执行业务实验。恢复后重读当前 Method 与反馈。没有批次或评估待定时，按实际事实写 `report.json`，再调用 `singularity_submit({"path":"report.json"})`。没有改进和证据不足都可如实结束。
+1. 每次开始、恢复或压缩后，先调用 `singularity_read({"kind":"search"})`。短结果给出 `phase`、`next`、`pending`、剩余槽、`nextRound`、evolve `cases`、反馈摘要和 `authoring.proposal/report` 模板。`screening/evaluating/reporting` 时结束 turn，宿主负责推进；`ready` 才能提出新机制或提交报告。工具 `kind` 必填。
+2. 读取 `kind=subject`，沿 `next` 字节偏移直到 `complete=true`。按需读 `trajectory` 索引，复制真实 sessionId 与 seq，再带 `eventSeq` 读事件正文；索引和摘要不能代替原生正文。`kind=method` 读当前资产，带 `from/count` 可按 UTF-8 字节分页；其中不再混入搜索状态、提案模板与完整反馈。
+3. 第一次编辑前读取 `kind=search,ref=authoring` 的全部页面，其中有 proposal/report 规则和 Method 格式。从可核查发现提出一个独立机制，保留已证成功行为，写出可观察触发条件、反例与迁移假设。允许带来源的公开领域知识和参数化程序；旧题答案、任务 ID、输出与按题分支留在证据中。
+4. 填写 `search.authoring.proposal`，只在 `edit.changes` 写需要改的字段；宿主保留其它资产与冻结源码。保存 1–3 份 JSON，调用 `singularity_propose_method({"paths":["proposal.json"]})`。服从 `nextRound` 的剩余槽、探索槽和 prune 要求。整批静态拒绝不冻结、不扣槽；入场后的无效、拒绝、重复或执行失败仍扣槽，`repair=0`。
+5. 准入仅冻结通过预检的 bytes，立即返回 `status=screening` 和 `batchId`，不等待 critic 或测评。随后结束 turn；宿主从附件执行 critic → selftest → evaluation，并以已提交事实恢复作者。重启同样继续冻结批次，不需要模型重发 paths；改写或删除原提案文件不影响已冻结工作。待定期间模型不可新写文件、提案或交报告。
+6. 恢复后重读 search；用 `kind=search,ref=feedback` 分页读取具体拒绝、审核发现和测量，用 `kind=round,ref=roundId` 检查结果。只有无待办时才按实际事实填写 `search.authoring.report`，写 report.json 后 `singularity_submit({"path":"report.json"})`。无赢家和证据不足均可如实结束，不要求搜到成功。
+
+| 派生 phase | 事实依据 | 下一步由谁执行 |
+|---|---|---|
+| ready | Run working，且没有未结批次/轮次 | 作者取证、编辑、提案或报告 |
+| screening | 存在未结冻结批次 | 宿主独立 critic 与 selftest |
+| evaluating | 存在 pending round | 宿主冷启动业务对照与决定 |
+| reporting | 已封存报告，Run 尚未结束 | 宿主按条件验证 champion、发布与报告验收 |
+| completed / failed | Run 已 verified / failed | 终局，不重新开放作者写入 |
+
+准入、工具 schema、动态上下文和调度使用同一派生状态。proposal-safe 判断候选是否值得安全地测试，不能在评测前要求已测迁移；最终发布仍必须经过原有测量和独立审核。
 
 ## Proposal JSON
 
@@ -40,7 +53,7 @@ critic 收到的是宿主审核投影：`baseline` 为修改前 Method，`assets
     "why_not_lower_lever": "<为何这一改动层级足够或必要>",
     "trigger_condition": "<可观察的适用条件>",
     "changes": [{ "asset": "workflow", "target": "workflowGuidance", "value": "<通用workflow策略>" }],
-    "predicted_affected": ["<引文session对应的真实taskId>"],
+    "predicted_affected": ["<引文所在workflow的真实taskId>"],
     "predicted_cases": ["<从cases复制的evolve caseId>"],
     "predicted_families": [],
     "retroactive_check": {
@@ -56,7 +69,7 @@ critic 收到的是宿主审核投影：`baseline` 为修改前 Method，`assets
 提交前核对：
 
 - 三类 finding 的 `mode` / `gap` / `habit` 全局唯一；`targets_mode` 精确引用其中一个。每条 finding 至少一个真实事件引用；未观察到成功时 `success_habits` 可为空，不能虚构。
-- `eventSeq` 是原生事件 `seq`，不能用步骤号或仅有 `from/count` 的索引范围代替。`from` 是 UTF-8 字节边界，`count` 为 4–8192；复制足够正文，长证据可列多个页面。历史跨根证据须加真实 `rootId`，当前根引用也允许该字段。`predicted_affected` 是被引 session 对应的 Task ID，不是 run、agent 或 session ID。
+- `eventSeq` 是原生事件 `seq`，不能用步骤号或仅有 `from/count` 的索引范围代替。`from` 是 UTF-8 字节边界，`count` 为 4–8192；复制足够正文，长证据可列多个页面。历史跨根证据须加真实 `rootId`，当前根引用也允许该字段。`predicted_affected` 是被引 workflow 内的实际 Task ID，可包含尚未启动的下游节点；不是 run、agent 或 session ID。无效时错误返回允许的 Task ID，避免盲猜。
 - `changes` 中每项必须实际改变一个唯一资产；其余内容由宿主保留。Workflow target 为 `workflowGuidance`，模板为 `id`，Skill/Tool 为 `name`。上例只适用于实际仅改 workflow 的候选。
 - 有 suite 时，`predicted_cases` / `predicted_families` 至少一个非空，只选当前 `cases` 中的 evolve ID；没有 suite 时两者可为空。不猜测私有 validation/heldout 内容。
 - 增加 Skill/Tool 时同时说明可达的 contract/template 如何绑定；只入库并不会自动使用。
@@ -74,7 +87,7 @@ critic 收到的是宿主审核投影：`baseline` 为修改前 Method，`assets
 
 ## Report JSON
 
-这是推荐结构，由冻结的 `improvement-reported` 标准进行独立验收；没有新增专用 report parser。从运行时 `reportTemplate` 开始填写。`results` 只记实际 round 事实与可核查数字，无 round 时用 `[]`，未测数字用 `null`；区分草稿静态拒绝、已扣槽失败、已测未选中和真实发布，不把报告通过说成改进成功。
+这是推荐结构，由冻结的 `improvement-reported` 标准进行独立验收；没有新增专用 report parser。从运行时 `search.authoring.report` 开始填写。`results` 只记实际 round 事实与可核查数字，无 round 时用 `[]`，未测数字用 `null`；区分草稿静态拒绝、已扣槽失败、已测未选中和真实发布，不把报告通过说成改进成功。
 
 ```json
 {
@@ -121,4 +134,5 @@ Acceptance、proposal critic 与 publication 使用同一输出形状。复制�
 
 - `20261019-124254`：root、repair Task 的原生 `system/message` seq7 均收到对应角色指导。repair seq8 的子合同却要求写冻结 repository；seq238 已产出补丁，seq243 已核对源码一致，seq247 尝试提权 write，seq248 等待审批直到取消。问题是父合同与只读边界冲突，审批等待让错误无法及时返回。现在角色合同明确边界，Bubble 用原生 `never` 立即拒绝提权。
 - `20261019-003416`：RSI seq7 收到 improve 流程，但完整 Method 转抄损坏六个模板的冻结源码。用实际提案重放增量编辑后，静态检查通过且六份源码保持原样；这只证明格式修复，不证明机制有效或收益。
-- 报告审核可读封存的当前业务轨迹、本 search 提交前的 evolve 测量，以及本 search 已筛选提案中实际引用的封存证据页。历史证据只开放已引用页及页内分页；其它 search、私有 split、未引用页面和后续事件不扩权。修复后模型行为与完整 pilot 的效果仍需新实验验证。
+- `20261019-184556`：业务根失败；RSI 报告通过，但六槽零评测。前三槽及第六槽被“预测节点必须拥有被引用 session”的错误前置条件阻断；两个 critic 拒绝中包含评测前要求迁移证明。具体原生引用、异步状态修复和新实跑证据见 [RSI 修复取证](rsi-repair-evidence.md)。
+- 报告审核可读封存的当前业务轨迹、本 search 提交前的 evolve 测量，以及本 search 已筛选提案中实际引用的封存证据页。历史证据只开放已引用页及页内分页；其它 search、私有 split、未引用页面和后续事件不扩权。修复后 letters 已实际走通两轮测评、发布、恢复和最终报告验收；这不代替完整领域 pilot 与迁移验证，边界见取证文档。

@@ -9,7 +9,7 @@ import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/prot
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { openApparatus, callerOf, taskStateOf } from '../src/apparatus.ts'
 import { loadDomain } from '../src/domain.ts'
-import { createNativeSolve } from '../src/native-solve.ts'
+import { createNativeSolve, observeSolve } from '../src/native-solve.ts'
 import { explorationOf } from '../src/improvement.ts'
 import { spawnProcess } from '../src/process.ts'
 import { propose } from '../src/surfaces.ts'
@@ -25,6 +25,25 @@ vi.mock('../../src/runtime/child-session.ts', async original => ({
 }))
 let cleanup: (() => Promise<void>) | undefined
 afterEach(async () => { await cleanup?.(); vi.restoreAllMocks(); harness.open.mockReset() })
+
+it.each(['business', 'runtime', 'cancelled'] as const)('counts a %s failure according to its committed cause, retaining its sealed trace', async cause => {
+  const directory = await mkdtemp(join(tmpdir(), 'native-failure-'))
+  const apparatus = await openApparatus('native-failure', directory,
+    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    new FakePersistence() as never, attachmentsAt(directory), testProjections)
+  cleanup = async () => { await apparatus.store.close(); await rm(directory, { recursive: true, force: true }) }
+  const business = agentFor('business', 'business-session')
+  const task = await propose(apparatus, callerOf(business), 'root', { goal: 'count' })
+  await apparatus.tasks.forAgent('business').failRun({ commandId: 'failed', taskId: task.taskId, runId: task.runId,
+    cause, reason: cause === 'business' ? 'required child did not meet its contract' : 'execution unavailable' })
+  vi.spyOn(apparatus.persistence, 'open').mockImplementation(async id => ({
+    header: { id, version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false }, inheritedEventCount: SessionLogOffset(0),
+    read: async () => ({ events: nativeTurn(17) }), close: async () => undefined,
+  }) as never)
+  const result = await observeSolve(apparatus, task.taskId, task.runId, new AbortController().signal)
+  expect(result).toMatchObject({ status: cause === 'business' ? 'no-submission' : 'infrastructure-failure',
+    taskId: task.taskId, runId: task.runId, trajectory: { attachmentId: expect.stringMatching(/^sha256:/) } })
+})
 
 it.each([
   { complete: true, reused: false }, { complete: false, reused: false },

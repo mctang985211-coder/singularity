@@ -41,7 +41,7 @@ function fixture() {
   const apparatus = { projections: testProjections, store: { load: () => ({
     statesOf: (protocol: string) => protocol === TASK_PROTOCOL ? tasks : protocol === AGENT_PROTOCOL ? agents
       : protocol === REVIEW_PROTOCOL ? reviews : new Map(),
-    stateOf: (_protocol: string, _version: number, id: string) => agents.get(id),
+    stateOf: (protocol: string, _version: number, id: string) => protocol === TASK_PROTOCOL ? tasks.get(id) : agents.get(id),
     entries: () => ['old', 'other'].map(id => ({ kind: 'release/drafted', payload: {
       draftDigest: `${id}-draft`, basis: { kind: 'decision', roundId: `round-${id}` },
     } })),

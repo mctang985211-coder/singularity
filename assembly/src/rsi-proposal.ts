@@ -9,6 +9,8 @@ import { structuralEditsOf, structuralEditDetailsOf } from '../../src/strategy/e
 import type { StructuralEdit } from '../../src/strategy/protocol.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
+import { taskRelations } from '../../src/task/tree.ts'
+import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import type { Apparatus } from './apparatus.ts'
 import type { Domain } from './domain.ts'
 import { taskStateOf } from './apparatus.ts'
@@ -51,7 +53,7 @@ export interface RsiProposal {
   readonly method: MethodAssets
 }
 
-export const RSI_PROPOSAL_FORMAT = `Fill proposal.template and save a proposal JSON file. Replace <...> and evidence eventSeq:null with observed data; remove unobserved finding rows.
+export const RSI_PROPOSAL_FORMAT = `Fill search.authoring.proposal and save a proposal JSON file. Replace <...> and evidence eventSeq:null with observed data; remove unobserved finding rows.
 {analysis:{failure_modes:FailureMode[],capability_gaps:CapabilityGap[],success_habits:SuccessHabit[]},edit:Edit}. There is no top-level method field: the host applies your edits to the current assets.
 Evidence = {sessionId:string,eventSeq:integer,rootId?:string,from?:integer,count?:integer}. Read trajectory ref=sessionId to select a real index seq; copy it into REQUIRED eventSeq and read that event. from/count alone is an index range, not evidence. For historical evidence also copy rootId. The critic sees only the cited UTF-8 page (from defaults to 0, count to 8192; from>=0, count 4..8192); select sufficient bytes.
 FailureMode = {mode:string,description:string,needed_instead:string,evidence:Evidence[]}.
@@ -60,7 +62,7 @@ SuccessHabit = {habit:string,description:string,risk_if_broken:string,evidence:E
 At least one evidenced finding is needed; other lists may be []. Names must be unique across all three lists; targets_mode copies one exact name. Keep mechanisms reusable; public domain knowledge with sources is allowed, task-instance details stay in evidence.
 Edit = {hypothesis:string,targets_mode:string,why_not_lower_lever:string,trigger_condition:string,changes:{asset:'workflow'|'template'|'skill'|'tool',target:string,value:string|object|null}[],predicted_affected:string[],predicted_cases?:string[],predicted_families?:string[],retroactive_check:{corrective:string,preservative:string,transfer:string},regression_risk:string}.
 ONE independent mechanism per candidate. Each change must alter one unique asset. workflow target='workflowGuidance', value=the new string. template target=id, skill/tool target=name: value contains only changed fields, merged with the existing asset; new assets require all fields from the method format. Omitted fields/assets remain byte-for-byte unchanged; arrays within value replace that field. value:null deletes the named asset (workflow becomes empty); a null field deletes that optional field. Never include template initial: source belongs to frozen Tasks. Root inputs/artifact/criteria/checks remain frozen. Example: changes:[{asset:'template',target:'root',value:{guidance:'Delegate one bounded implementation.'}}]. A new Skill/Tool also needs a reachable contract/template binding; merely storing it does not make agents use it.
-predicted_affected contains nonempty unique actual Task IDs belonging to the cited sessions, not Run/session/agent IDs. With a suite, predicted_cases and/or predicted_families must name at least one evolve ID from cases; otherwise [] is legal. Counterfactuals cover correction, preservation and unfamiliar-task transfer. Do not add task answers or proposal metadata to method assets.`
+predicted_affected contains nonempty unique actual Task IDs in the cited workflow, not Run/session/agent IDs. A downstream Task need not have started or have its own cited session. With a suite, predicted_cases and/or predicted_families must name at least one evolve ID from search.cases; otherwise [] is legal. Counterfactuals cover correction, preservation and unfamiliar-task transfer. Do not add task answers or proposal metadata to method assets.`
 
 /** The author supplies edits and evidence; the host owns the complete Method. */
 export function rsiProposalTemplate() {
@@ -74,7 +76,7 @@ export function rsiProposalTemplate() {
     edit: { hypothesis: '<one attributable mechanism>', targets_mode: '<unique-finding-name>',
       why_not_lower_lever: '<why this instruction/implementation is sufficient>',
       trigger_condition: '<observable condition>', changes: [],
-      predicted_affected: ['<actual Task ID of a cited session>'], predicted_cases: [], predicted_families: [],
+      predicted_affected: ['<actual Task ID in the cited workflow>'], predicted_cases: [], predicted_families: [],
       retroactive_check: { corrective: '<how cited failure would change>', preservative: '<why observed successful behavior survives>',
         transfer: '<how the mechanism applies to unfamiliar tasks>' },
       regression_risk: '<counterexample or observation that would refute the hypothesis>' },
@@ -122,7 +124,7 @@ function applyChanges(baseline: MethodAssets, changes: readonly Record<string, u
   return method
 }
 
-export const RSI_REPORT_FORMAT = `Recommended report.json structure: fill reportTemplate with facts known BEFORE submission. evidence uses the proposal Evidence shape. Reviewers can verify the sealed current business root, this search's pre-submission evolve measurements, and exact pages already cited in its screened proposals; other history is background, not automatically readable report evidence. changes and preserved_behavior list supported mechanisms/behaviors. results contains actual {roundId,outcome,qualityDelta,costRatio,detail} records; use [] if no round ran and null for missing numbers, never zero. Distinguish structural refusal, critic rejection and measured no-winner. State missing coverage and attribution limits. With a suite, private validation and resulting publication run after this file is sealed: transfer.status='not-tested-before-submission' is honest; final host outcomes are separate committed facts. This report is independently reviewed, not a proposal or a publication approval.`
+export const RSI_REPORT_FORMAT = `Recommended report.json structure: fill search.authoring.report with facts known BEFORE submission. evidence uses the proposal Evidence shape. Reviewers can verify the sealed current business root, this search's pre-submission evolve measurements, and exact pages already cited in its screened proposals; other history is background, not automatically readable report evidence. changes and preserved_behavior list supported mechanisms/behaviors. results contains actual {roundId,outcome,qualityDelta,costRatio,detail} records; use [] if no round ran and null for missing numbers, never zero. Distinguish structural refusal, critic rejection and measured no-winner. State missing coverage and attribution limits. With a suite, private validation and resulting publication run after this file is sealed: transfer.status='not-tested-before-submission' is honest; final host outcomes are separate committed facts. This report is independently reviewed, not a proposal or a publication approval.`
 export const RSI_REPORT_TEMPLATE = {
   summary: '<search result supported by facts known before submission>',
   evidence: [], changes: [], results: [], preserved_behavior: [], limitations: [],
@@ -132,6 +134,19 @@ export const RSI_REPORT_TEMPLATE = {
 export const rsiProposalContract = { designReference: rsiDesignReference, format: RSI_PROPOSAL_FORMAT,
   analysisRules: rsiAnalysisRules, proposalRules: rsiProposalRules,
   adaptation: 'One RSI agent performs analysis and proposal, with one independent mechanism per candidate. Asset changes replace upstream source-component tags. history and previous-RSI memory are RSI-only, optional reads. Runtime owns screening, cold candidate solve, selection and approved publication.' }
+
+function comparisonOf(before: MethodAssets, after: MethodAssets) {
+  return structuralEditsOf(before, after).map(edit => {
+    if (edit.asset === 'workflow') return { ...edit, before: before.workflowGuidance, after: after.workflowGuidance }
+    const field = `${edit.asset}s` as 'templates' | 'skills' | 'tools', key = edit.asset === 'template' ? 'id' : 'name'
+    const find = (assets: MethodAssets) => assets[field].find(raw => (raw as Record<string, unknown>)[key] === edit.target) as Record<string, unknown> | undefined
+    const a = find(before), b = find(after)
+    const fields = [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])]
+      .filter(name => digestOf(a?.[name] ?? null) !== digestOf(b?.[name] ?? null))
+    const select = (asset: typeof a) => asset === undefined ? null : Object.fromEntries(fields.map(name => [name, asset[name] ?? null]))
+    return { ...edit, before: select(a), after: select(b) }
+  })
+}
 
 function objects(value: unknown, fields: readonly string[], where: string) {
   return list(value, where).map((raw, index) => {
@@ -254,11 +269,16 @@ async function screenRsiMethod(apparatus: Apparatus, seams: ChildSessionSeams, a
       from: ref.from ?? 0, count: ref.count ?? 8192, ...(ref.rootId === undefined ? {} : { rootId: ref.rootId }) })
     nativeEvidence.push({ reference: ref, page })
   }
-  for (const taskId of proposal.edit.predicted_affected) {
-    const predicted = tasks.get(taskId)
-    const node = predicted?.responsibility === undefined ? undefined : agents.get(predicted.responsibility.agentId)
-    if (node === undefined || !sources.some(ref => node.sessionId === ref.sessionId)) refuse('evidence-input-mismatch', 'predicted_affected must name Tasks with cited native evidence')
-  }
+  const graph = taskRelations(tasks), citedSessions = new Set(sources.map(ref => ref.sessionId))
+  const citedTasks = [...tasks.values()].filter(task => task.responsibility !== undefined &&
+    citedSessions.has(agents.get(task.responsibility.agentId)?.sessionId ?? '')).map(task => task.taskId)
+  for (const review of cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values())
+    if (review.target.kind === 'acceptance' && citedSessions.has(review.sessionId)) citedTasks.push(review.target.taskId)
+  const citedRoots = new Set(citedTasks.map(id => graph.rootOf(id)))
+  const affected = [...tasks.keys()].filter(id => citedRoots.has(graph.rootOf(id)))
+  for (const taskId of proposal.edit.predicted_affected)
+    if (!affected.includes(taskId)) refuse('evidence-input-mismatch',
+      `edit.predicted_affected includes ${JSON.stringify(taskId)} outside the workflow of cited native evidence. Allowed Task IDs: ${JSON.stringify(affected)}`)
   const digest = digestOf(candidate.assets)
   const revision = { environmentId: methodEnvironment(apparatus), revisionId: `method-${digest.slice(0, 24)}`, digest }
   const current = taskStateOf(apparatus, task.taskId)
@@ -273,7 +293,8 @@ async function screenRsiMethod(apparatus: Apparatus, seams: ChildSessionSeams, a
     refuse('caliber-mismatch', 'proposal changes root-bound Tools; bind helpers only to delegated Tasks')
   let screen: import('./review.ts').ReviewWitness
   try { screen = await reviewSubject(apparatus, seams, agent, `proposal:${task.taskId}:${digest}`, {
-    purpose: 'proposal', designReference: rsiDesignReference, baseline: baseline.assets, assets: candidate.assets,
+    purpose: 'proposal', comparison: comparisonOf(baseline.assets, candidate.assets),
+    designReference: rsiDesignReference, baseline: baseline.assets, assets: candidate.assets,
     analysis: proposal.analysis, edit: proposal.edit, nativeEvidence,
     changes: structuralEditDetailsOf(baseline.assets, candidate.assets),
     requirements: rsiCriticRequirements,
@@ -300,18 +321,18 @@ async function screenRsiMethod(apparatus: Apparatus, seams: ChildSessionSeams, a
 
 
 const proposalQueues = new WeakMap<Apparatus, Map<string, Promise<unknown>>>()
-export function proposeRsiMethod(apparatus: Apparatus, seams: ChildSessionSeams, agent: Agent,
+export function proposeRsiMethod(apparatus: Apparatus,
   agentId: string, input: { readonly paths: readonly string[] }, signal: AbortSignal) {
   let queue = proposalQueues.get(apparatus)
   if (!queue) { queue = new Map(); proposalQueues.set(apparatus, queue) }
   const pending = (queue.get(agentId) ?? Promise.resolve()).catch(() => undefined)
-    .then(() => proposeBatch(apparatus, seams, agent, agentId, input, signal))
+    .then(() => admitBatch(apparatus, agentId, input, signal))
   queue.set(agentId, pending)
   return pending
 }
 
 /** One bounded batch is one round. Slot failures remain facts and never become extra draws. */
-async function proposeBatch(apparatus: Apparatus, seams: ChildSessionSeams, agent: Agent,
+async function admitBatch(apparatus: Apparatus,
   agentId: string, input: { readonly paths: readonly string[] }, signal: AbortSignal) {
   assertImprovementOwner(apparatus, agentId)
   if (!Array.isArray(input.paths) || input.paths.length < 1 || input.paths.length > 3 || new Set(input.paths).size !== input.paths.length)
@@ -320,16 +341,16 @@ async function proposeBatch(apparatus: Apparatus, seams: ChildSessionSeams, agen
   const run = Object.values(task.runs).at(-1)!, workspace = run.bubble!.workspace.ref
   // An interrupted batch owns immutable proposal bytes, even if its workspace files changed.
   const pending = task.search?.batches?.find(batch => !batch.settled)
-  if (pending && digestOf(pending.slots.map(slot => slot.path)) !== digestOf(input.paths))
-    refuse('illegal-transition', `resume the frozen batch with paths ${JSON.stringify(pending.slots.map(slot => slot.path))}`)
-  const slots = pending ? [...pending.slots] : []
+  if (pending) return { admitted: true, status: 'screening', batchId: pending.batchId,
+    slotsConsumed: pending.slots.length, next: 'End the turn; the host resumes the frozen batch without another tool call.' }
+  const slots: { path: string; contentDigest: string; proposal: import('@deepseek-ai/dsh-attachment').FileAttachmentRef }[] = []
   const drafts: { path: string; bytes: Buffer; contentDigest: string }[] = []
-  if (!pending) for (const path of input.paths) {
+  for (const path of input.paths) {
     await assertRunFile(workspace, path)
     const bytes = await readFile(inside(workspace, path, 'proposal path'))
     drafts.push({ path, bytes, contentDigest: sha256(bytes) })
   }
-  const batchId = pending?.batchId ?? `batch-${digestOf(drafts.map(s => s.contentDigest)).slice(0, 24)}`
+  const batchId = `batch-${digestOf(drafts.map(s => s.contentDigest)).slice(0, 24)}`
   const existing = task.search?.batches?.find(b => b.batchId === batchId)
   const roundId = `round-${sha256(`${task.taskId}/${batchId}`).slice(0, 24)}`
   if (existing?.settled) {
@@ -338,14 +359,13 @@ async function proposeBatch(apparatus: Apparatus, seams: ChildSessionSeams, agen
       status: request?.status ?? existing.outcomes[0]?.status ?? 'no-candidates', revision: existing.outcomes.find(o => o.revision)?.revision, reason: existing.outcomes[0]?.detail, slots: existing.outcomes }
   }
   const evaluating = task.rounds?.find(round => round.status === 'pending')
-  if (!pending && evaluating)
+  if (evaluating)
     refuse('illegal-transition', `evaluation ${evaluating.roundId} is pending; end the turn and wait for host feedback. No new batch admitted; no candidate slots consumed`)
   const history = searchHistory(apparatus, task)
   const incumbent = existing?.incumbent ?? history.incumbent
-  const round = task.rounds?.find(r => r.roundId === roundId)?.round ?? (task.rounds?.length ?? 0) + 1
   const untried = existing?.untried ?? history.directives.untried
   const prune = existing?.prune ?? history.directives.prune
-  if (!pending) {
+  {
     const baseline = await loadMethod(apparatus, incumbent)
     // Static draft checks reveal no evidence, critic or trial outcome. Check the whole
     // batch before admitting any slot, then freeze exactly the bytes that passed.
@@ -365,6 +385,21 @@ async function proposeBatch(apparatus: Apparatus, seams: ChildSessionSeams, agen
   }
   if (!existing) await searchFact(apparatus, task, 'rsi/batch-opened', { batchId, incumbent, editBudget: 1, slots,
     historyCutoff: history.directives.historyCutoff, untried, prune }, batchId)
+  return { batchId, admitted: true, status: 'screening', slotsConsumed: slots.length,
+    next: 'End the turn. The host screens these frozen bytes and evaluates approved candidates; it will resume you.' }
+}
+
+/** Runtime-owned continuation. Recovery needs only the committed batch, never an author retry. */
+export async function advanceRsiBatch(apparatus: Apparatus, seams: ChildSessionSeams, agent: Agent,
+  taskId: string, signal: AbortSignal): Promise<void> {
+  const task = taskStateOf(apparatus, taskId), agentId = task.responsibility!.agentId
+  assertImprovementOwner(apparatus, agentId)
+  const pending = task.search?.batches?.find(batch => !batch.settled)
+  if (pending === undefined) return
+  const { batchId, slots, incumbent, untried, prune } = pending
+  const run = Object.values(task.runs).at(-1)!
+  const roundId = `round-${sha256(`${task.taskId}/${batchId}`).slice(0, 24)}`
+  const round = task.rounds?.find(r => r.roundId === roundId)?.round ?? (task.rounds?.length ?? 0) + 1
   for (const [slot, held] of slots.entries()) {
     if (taskStateOf(apparatus, task.taskId).search!.batches!.find(b => b.batchId === batchId)!.outcomes.some(o => o.slot === slot)) continue
     let outcome: { status: string; revision?: import('../../src/task/protocol.ts').RevisionRef; reason?: string | undefined; reviewId?: string }
@@ -376,7 +411,8 @@ async function proposeBatch(apparatus: Apparatus, seams: ChildSessionSeams, agen
       signal.throwIfAborted()
       if (error instanceof SyntaxError) outcome = { status: 'invalid', reason: `invalid proposal JSON: ${error.message}` }
       else if (error instanceof ProtocolRefusal && error.refusal.code !== 'write-not-durable') outcome = { status: 'invalid', reason: error.refusal.detail }
-      else throw error
+      else if (error instanceof ProtocolRefusal && error.refusal.code === 'write-not-durable') throw error
+      else outcome = { status: 'screen-failed', reason: String(error) }
     }
     signal.throwIfAborted()
     await searchFact(apparatus, task, 'rsi/batch-slot-settled', { batchId, slot, status: outcome.status,
@@ -391,9 +427,6 @@ async function proposeBatch(apparatus: Apparatus, seams: ChildSessionSeams, agen
       as: `agent:${agentId}`, payload: { roundId, round, incumbent, candidates, runId: run.runId } }, () => assertActive(apparatus, task.taskId))
   }
   await searchFact(apparatus, task, 'rsi/batch-ended', { batchId }, batchId)
-  const request = taskStateOf(apparatus, task.taskId).rounds?.find(r => r.roundId === roundId)
-  return { batchId, ...(request === undefined ? {} : { roundId }), admitted: true, slotsConsumed: batch.slots.length,
-    status: request?.status ?? batch.outcomes[0]?.status ?? 'no-candidates', revision: batch.outcomes.find(o => o.revision)?.revision, reason: batch.outcomes[0]?.detail, slots: batch.outcomes }
 }
 
 

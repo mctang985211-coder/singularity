@@ -1,15 +1,14 @@
 # context.md —— 当前接手状态
 
-本页在每轮结束时**替换当前状态**，只保留未关闭问题、已批准合同索引和证据边界。
-历史解释从固定基线实测记录与 Git 查证；剩余施工顺序在 [Task 优先的领域 RSI 计划](task-first-domain-rsi-plan.md) 维护。
+本页替换当前状态；历史证据从 Git 查证，施工顺序只在 [终局计划](task-first-domain-rsi-plan.md) 维护。
 
-2026-10-19：当前 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，仅用于新图。既有 Task/workflow、固定方法、独立验收、case×trial、稀疏搜索和 champion 验证使用同一事实底座；实现与实验出口统一见计划第 9 节。
+2026-10-20：Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13。流程修复起点 `7bd91bb`，未回退 Git；保留现有 Task/workflow、冻结输入、独立验收、case×trial、取消与 champion 验证底座。
 
-最新 `124254` 实跑已取消，宿主 PID 3346913 已停止。原生记录确认角色 prompt 实际送达；父合同错误要求写只读参考仓库，repair 在完成修复和补丁后进入未应答审批。旧 `003416` RSI 转抄完整方法损坏冻结源码。回退提交 `02016c5` 撤销 `9e655ce`，重新以短业务边界、原生 never 审批和具名增量提案修复。指令、输出和真实事件说明统一见 [RSI agent 工作合同](rsi-agent-contract.md)，不复制一套新合同。
+`184556` 的 RSI 报告通过但六槽零评测。已按原生事件修复预测下游节点必须有被引 session 的错误条件、critic 入场前索要迁移证明与混淆 before/after、acceptance 用途提示，以及提案同步等待与依赖作者重发恢复。`kind=search` 提供派生 phase/next/预算与作者模板；资产、规则、反馈分页。提案冻结后立即返回，由宿主继续筛选/测评、幂等恢复作者；待办期间关闭作者写入与新模型 step。没有新增持久状态源。当前搜索的 evolve 评测 rootId 读取已修正，并保留跨根/私有集隔离。
 
-报告审核使用提交前封存的当前根、本搜索 evolve 证据和已筛选提案引用的封存历史页；历史只开放已引用字节范围，私有/其它搜索/后续事件不扩权。测试覆盖四角色实际 native 请求与 schema、原生拒绝无审批悬挂、静态及待评估新批次拒绝不扣槽、冻结批次恢复及报告证据隔离。全量验证结果见计划第 2.2 节；本轮未启动付费模型。原始运行和 checkout 保留，host.log 中的凭据不输出。
+实际 letters 已自主完成两轮筛选、测评、独立发布和作者自动恢复；最终报告通过独立验收，源根 RSI completed，后续业务根实际消费发布方法并 accepted。不能将单输入单次成本下降解释为迁移。Buckyball 在 cutoff551 已 completed：两候选、一轮测评、报告 accepted，outcome=insufficient-evidence，无发布。候选 A 质量不变、成本增加 43.66%；B 因 root 将公开清单中的私有检查冻结进子标准，丢失一次观察，且子业务失败被错记 runtime。现已把公开任务输入与 verifier-only manifest 分离，明确委派职责，保留子失败原因；969 项回归、7 gates 和新生成六题真实 RISC-V/BEMU 正反例均通过。本次未新跑模型 RSI。准确 native seq、日志和证据见 [RSI 修复取证](rsi-repair-evidence.md)。工作合同统一见 [RSI agent 工作合同](rsi-agent-contract.md)。原始运行与冻结 checkout 保留，host.log 凭据不输出。
 
-尚未验收：修复后模型行为、完整 pilot、复杂任务收敛和迁移收益。Buckyball 具备六题/三族合成 C/ISA+BEMU 案例及独立 oracle；逐题 pilot 入口未接通，experiment 只启首个 evolve 根，每 split 一族不足三族统计门。不覆盖全仓递归依赖、MLIR/RTL/PPA，也无另一机器复现或论文级收益结论。下一次实跑应新建 checkout/control，旧图不迁移。
+尚未验收：Buckyball 完整逐题 pilot、复杂任务稳定收敛和陌生任务迁移。六题合成 suite 每 split 一族不足三族统计门；不覆盖 MLIR/RTL/PPA，无另一机器复现或论文级收益结论。报告 accepted、测评轮次、发布与领域收益严格区分。
 
 ## 18. G1/G2 接手审核与用户裁定（2026-10-11，基线 `35b0c7c`）
 

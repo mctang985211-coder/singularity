@@ -90,8 +90,25 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
       const reviewTarget = driver.reviewTarget(String(context.agent.id))
       if (reviewTarget !== undefined && reviewTarget.kind !== 'acceptance')
         prompt.tools = prompt.tools.filter(tool => methodReviewTools.has(tool.name))
+      if (reviewTarget !== undefined) prompt.contexts.push({ name: 'singularity:review-purpose', text: JSON.stringify({
+        purpose: reviewTarget.kind,
+        instruction: reviewTarget.kind === 'acceptance'
+          ? 'This is acceptance. Read the sealed producer trajectory for execution evidence using singularity_read(kind=trajectory). Loose workspace files are not sealed artifacts, but the sealed source transcript is readable. If necessary, delegate an independent evidence Task using dispatch.evidenceInputs; never call a private host oracle.'
+          : reviewTarget.kind === 'proposal'
+            ? 'This is a pre-execution proposal screen. Decide whether the changed mechanism is supported and safe to TEST. Transfer and performance are hypotheses here; missing experiment results are not a reason to reject. Compare before and after explicitly; no execution or delegation.'
+            : 'This is publication. Judge the frozen independent measurements and release conditions; no execution or delegation.',
+      }) })
       if (ctx.agentPresets.serviceFor(context.agent, 'singularityAgentRole') === 'improve')
         prompt.tools = prompt.tools.filter(tool => improvementTools.has(tool.name))
+      const search = driver.rsiState(String(context.agent.id))
+      if (search !== undefined) {
+        prompt.contexts.push({ name: 'singularity:rsi-state', text: JSON.stringify(search) })
+        const writable = new Set(['write', 'edit'])
+        prompt.tools = prompt.tools.filter(tool =>
+          (tool.name !== 'singularity_propose_method' || search.canPropose) &&
+          (tool.name !== 'singularity_submit' || search.canSubmit) &&
+          (!writable.has(tool.name) || search.phase === 'ready'))
+      }
       if (responsibility !== undefined) {
         prompt.contexts.push({ name: 'singularity:responsibility', text: JSON.stringify(responsibility) })
         if (responsibility.waiting !== null) {
@@ -137,6 +154,8 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     if (!(await ctx.sessions.flush(agent.session))) refuse('write-not-durable', 'native root session has no durability listener')
     const assignment = await driver.enter(agent, decision.messages, route)
     if (driver.failed(String(agent.id))) return { kind: 'reject' }
+    const search = driver.rsiState(String(agent.id))
+    if (search !== undefined && search.phase !== 'ready') return { kind: 'reject' }
     return assignment === undefined ? decision : { ...decision, messages: [...decision.messages, assignment] }
   })
   mountCampaignMemory(ctx)

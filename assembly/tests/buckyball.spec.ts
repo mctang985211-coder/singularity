@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { checkBuckyballTrial, freezeBuckyballSource, parseBuckyballChangeSet, prepareBuckyballTrial, verifyBuckyballChangeSet, type BuckyballPatchPolicy, type BuckyballVerificationInput } from '../src/buckyball.ts'
+import { buckyballTaskInput, checkBuckyballTrial, freezeBuckyballSource, parseBuckyballChangeSet, prepareBuckyballTrial, verifyBuckyballChangeSet, type BuckyballPatchPolicy, type BuckyballVerificationInput } from '../src/buckyball.ts'
 import { sha256 } from '../src/ids.ts'
 import { loadDomain } from '../src/domain.ts'
 import { runVerifierSelftest } from '../../src/verifier/implementation.ts'
@@ -152,7 +152,14 @@ describe('frozen Buckyball text changes', () => {
       checks: [{ id: 'independent-semantics', argv: [process.execPath, oracle] }],
       immutableFiles: await Promise.all([process.execPath, oracle, adapter, ids].map(async path => ({ path, digest: sha256(await readFile(path)) }))),
     }
-    await writeFile(join(domain, 'frozen.json'), JSON.stringify(input))
+    const manifests = join(root, 'private-oracle/manifests')
+    await mkdir(manifests, { recursive: true })
+    const taskInput = buckyballTaskInput(input), manifest = join(manifests, taskInput.verificationDigest + '.json')
+    await writeFile(manifest, JSON.stringify(input))
+    await writeFile(join(domain, 'frozen.json'), JSON.stringify(taskInput))
+    expect(taskInput).not.toHaveProperty('checks')
+    expect(taskInput).not.toHaveProperty('immutableFiles')
+    expect(JSON.stringify(taskInput)).not.toContain(oracle)
     await writeFile(join(domain, 'pass.json'), JSON.stringify(change))
     await writeFile(join(domain, 'fail.json'), JSON.stringify({ ...change, patch: patch.replace('+return 1;', '+return 2;') }))
     const invalidSubmissions = {
@@ -163,8 +170,8 @@ describe('frozen Buckyball text changes', () => {
     }
     for (const [name, content] of Object.entries(invalidSubmissions)) await writeFile(join(domain, `${name}.json`), content)
     await writeFile(join(domain, 'verifier.mjs'), (await readFile(fileURLToPath(new URL('../../domains/buckyball/verifier.mjs', import.meta.url)), 'utf8'))
-      .replace('../../assembly/src/buckyball.ts', adapter))
-    await writeFile(join(domain, 'task.json'), JSON.stringify({ references: [], verifierReferences: [repository, oracle, fileURLToPath(new URL('../src', import.meta.url))],
+      .replace('../../assembly/src/buckyball.ts', adapter).replace('../../assembly/src/ids.ts', ids))
+    await writeFile(join(domain, 'task.json'), JSON.stringify({ references: [], verifierReferences: [repository, oracle, manifests, fileURLToPath(new URL('../src', import.meta.url))],
       inputs: [{ ref: 'frozen', from: 'frozen.json' }], templates: [],
       verifiers: [{ ref: 'buckyball', version: '1', program: 'verifier.mjs', args: ['{artifact}', '{input}'], selftest: [
         { name: 'accepts-correct', expected: 'pass', artifact: 'pass.json', argv: ['pass.json', 'frozen.json'] },
@@ -178,6 +185,16 @@ describe('frozen Buckyball text changes', () => {
     const worker = await spawnProcess({ shell: false, argv: [process.execPath, '-e', `require('node:fs').readFileSync(${JSON.stringify(oracle)})`] }, undefined,
       domain, { root: domain, writable: false, protected: [], references: loaded.references })
     expect(worker.exitCode).not.toBe(0)
+    const workerManifest = await spawnProcess({ shell: false, argv: [process.execPath, '-e', `require('node:fs').readFileSync(${JSON.stringify(manifest)})`] }, undefined,
+      domain, { root: domain, writable: false, protected: [], references: loaded.references })
+    expect(workerManifest.exitCode).not.toBe(0)
+    const check = () => spawnProcess({ shell: false, argv: [process.execPath, join(domain, 'verifier.mjs'), join(domain, 'pass.json'), join(domain, 'frozen.json')] }, undefined,
+      domain, { root: domain, writable: false, protected: [], references: loaded.verifierReferences! })
+    await writeFile(join(domain, 'frozen.json'), JSON.stringify({ ...taskInput, policy: { ...policy, allowed: ['other'] } }))
+    expect((await check()).stderr).toContain('Task input differs from frozen verification manifest')
+    await writeFile(join(domain, 'frozen.json'), JSON.stringify(taskInput))
+    await writeFile(manifest, JSON.stringify({ ...input, checks: [] }))
+    expect((await check()).stderr).toContain('Frozen verification manifest differs')
     await writeFile(oracle, 'process.exit(0)\n')
     await expect(verifyBuckyballChangeSet(JSON.stringify(change), input, join(root, 'drift'), spawnProcess)).rejects.toThrow('Frozen oracle/tool content differs')
     await expect(readFile(join(root, 'drift/arch/source.c'))).rejects.toMatchObject({ code: 'ENOENT' })

@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url'
 import { rsiProposal } from './rsi-fixture.ts'
 import type { MethodAssets } from '../src/method.ts'
 import type { rsiProposalTemplate } from '../src/rsi-proposal.ts'
+import { sha256 } from '../src/ids.ts'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { testProjections } from './seam.ts'
 import { join } from 'node:path'
@@ -20,7 +21,7 @@ import { TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from '.
 import { DEFAULT_WORKFLOW_LIMITS } from '../../src/task/budget.ts'
 import { parseSuite } from '../../src/measure/suite.ts'
 import type { EvolutionOptions } from '../src/evolution.ts'
-import { openDriver, type TaskDriver } from '../src/driver.ts'
+import { openDriver, type TaskDriver, type AgentTaskSurface } from '../src/driver.ts'
 import { loadDomain } from '../src/domain.ts'
 import { contractFor } from '../src/inputs.ts'
 import { spawnProcess } from '../src/process.ts'
@@ -31,7 +32,7 @@ import { submit } from '../src/submission.ts'
 import { recordedVerdictDigest } from '../../src/task/protocol.ts'
 import { REVIEW_DIGEST, readFindings } from '../../src/review/protocol.ts'
 
-type RsiMethodRead = { reference: RevisionRef; assets: MethodAssets; proposal: { template: ReturnType<typeof rsiProposalTemplate>; pending: unknown }; cases: { caseId: string }[] }
+type RsiMethodRead = { reference: RevisionRef; assets: MethodAssets }
 import { openApparatus, type Apparatus } from '../src/apparatus.ts'
 import { fixtureReview } from './review-fixture.ts'
 import { agentFor, attachmentsAt, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
@@ -253,7 +254,29 @@ async function fixture({ suite = false, heldout = true } = {}) {
     return dispatch === undefined ? undefined : JSON.parse((dispatch.content[0] as { text: string }).text).assigned
   }
   const call = (agent: Agent, id: string) => driver!.forCall(execFor(agent, id))
-  return { root, medium, logs, agents, parent, call, enter, mount, reportFailure, domain, dispatches, attachments }
+  return { root, medium, logs, agents, parent, call, enter, mount, reportFailure, domain, dispatches, attachments,
+    admission: (name: string, agent: Agent) => admission({ name, agent } as never) }
+}
+/** Drive the runtime continuation explicitly; production admission returns before any critic. */
+async function screened(scope: AgentTaskSurface, input: { paths: readonly string[] }) {
+  const admitted = await scope.proposeMethod(input) as { batchId: string }
+  return settledBatch(scope, admitted.batchId)
+}
+async function settledBatch(scope: AgentTaskSurface, batchId: string) {
+  let task!: Awaited<ReturnType<TaskDriver['read']>>['tasks'][number]
+  await vi.waitFor(async () => {
+    let snapshot
+    try { snapshot = await driver!.read() }
+    catch (error) { throw error instanceof AggregateError ? error.errors[0] : error }
+    task = snapshot.tasks.find(task => task.taskId === scope.current())!
+    expect(task.search?.batches?.find(batch => batch.batchId === batchId)?.settled).toBe(true)
+  }, { timeout: 15000 })
+  const batch = task.search!.batches!.find(batch => batch.batchId === batchId)!
+  const roundId = `round-${sha256(`${task.taskId}/${batch.batchId}`).slice(0, 24)}`
+  const request = task.requests.find(request => request.roundId === roundId)
+  return { batchId: batch.batchId, ...(request === undefined ? {} : { roundId }), admitted: true, slotsConsumed: batch.slots.length,
+    status: request?.status ?? batch.outcomes[0]?.status ?? 'no-candidates', revision: batch.outcomes.find(o => o.revision)?.revision,
+    reason: batch.outcomes[0]?.detail, slots: batch.outcomes }
 }
 const business = (h: Awaited<ReturnType<typeof fixture>>) =>
   factsOf(h.medium).find((f) => f.kind === 'task/admitted')!.subject
@@ -528,7 +551,7 @@ it('rejects mistaken RSI submissions without closing search, then admits a legit
     phase: 'running', search: { maxProposals: 6 }, transfer: null,
   })
   screenVerdict = 'fail'
-  expect(await scope.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
+  expect(await screened(scope, { paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
   await writeFile(join(request.cwd, 'report.json'), '{}')
   expect(await h.call(agent, 'correct-report').submit({ taskId: request.agentId, path: 'report.json' }))
     .toMatchObject({ phase: 'verified' })
@@ -543,13 +566,13 @@ it('admits a filled runtime JSON template with real evidence and only a workflow
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'explicit-workflow')
-  const read = await scope.history({ kind: 'method' }) as { assets: MethodAssets; proposal: { template: ReturnType<typeof rsiProposalTemplate> } }
-  const template = read.proposal.template
+  const read = await scope.history({ kind: 'search' }) as { authoring: { proposal: ReturnType<typeof rsiProposalTemplate> } }
+  const template = read.authoring.proposal
   const index = await scope.history({ kind: 'trajectory', ref: 'business' }) as { seq: number }[]
   const eventSeq = index[0]!.seq
   await scope.history({ kind: 'trajectory', ref: 'business', eventSeq })
   await writeFile(join(request.cwd, 'unfilled.json'), JSON.stringify(template))
-  await expect(scope.proposeMethod({ paths: ['unfilled.json'] })).rejects.toThrow('eventSeq')
+  await expect(screened(scope, { paths: ['unfilled.json'] })).rejects.toThrow('eventSeq')
   const mode = 'repeat_inspection', evidence = [{ sessionId: 'business', eventSeq, rootId: root.taskId }]
   // Fill the host's JSON directly; do not derive the Method or diff via the fixture helper.
   const proposal = { ...template,
@@ -567,13 +590,45 @@ it('admits a filled runtime JSON template with real evidence and only a workflow
   expect(JSON.stringify(proposal)).not.toContain('<')
   await writeFile(join(request.cwd, 'workflow.json'), JSON.stringify(proposal))
   screenVerdict = 'fail'
-  const admitted = await scope.proposeMethod({ paths: ['workflow.json'] })
+  const admitted = await screened(scope, { paths: ['workflow.json'] })
   expect(admitted).toMatchObject({ admitted: true, slotsConsumed: 1, status: 'rejected', slots: [{ slot: 0, status: 'rejected' }] })
   expect(admitted).not.toHaveProperty('roundId')
   expect(factsOf(h.medium).filter(fact => fact.kind === 'review/started' &&
     (fact.payload as { target: { kind: string } }).target.kind === 'proposal')).toHaveLength(1)
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-slot-settled')).toHaveLength(1)
   expect(harness.solve).not.toHaveBeenCalled()
+})
+
+it('returns before screening, closes authoring while the host works, and resumes a rejected batch without a retry', async () => {
+  const h = await cancellableProposal()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  beforeProposalJudgment = () => gate
+  screenVerdict = 'fail'
+  const admitted = await h.scope.proposeMethod({ paths: ['candidate.json'] }) as { batchId: string }
+  expect(admitted).toMatchObject({ status: 'screening', admitted: true, slotsConsumed: 1 })
+  expect(driver!.rsiState(String(h.agent.id))).toMatchObject({ phase: 'screening', canPropose: false, canSubmit: false })
+  for (const name of ['write', 'edit', 'singularity_propose_method', 'singularity_submit'])
+    expect(h.admission(name, h.agent)).toContain('RSI screening')
+  expect(h.admission('singularity_read', h.agent)).toBeUndefined()
+  const state = await h.scope.history({ kind: 'search' }) as { phase: string; authoring: unknown }
+  expect(state.phase).toBe('screening')
+  expect(Buffer.byteLength(JSON.stringify(state))).toBeLessThan(8192)
+  await writeFile(join(h.request.cwd, 'report.json'), '{}')
+  const frozen = factsOf(h.medium)
+  await expect(h.scope.submit({ taskId: h.assigned.taskId, path: 'report.json' })).rejects.toThrow('RSI screening')
+  expect(factsOf(h.medium)).toEqual(frozen)
+  release()
+  await settledBatch(h.scope, admitted.batchId)
+  expect(driver!.rsiState(String(h.agent.id))).toMatchObject({ phase: 'ready', canPropose: true, canSubmit: true })
+  const feedback = await h.scope.history({ kind: 'search', ref: 'feedback' }) as { text: string; complete: boolean }
+  expect(JSON.parse(feedback.text)).toMatchObject({ rejected: [{ status: 'rejected' }] })
+  await vi.waitFor(() => expect(h.logs.get(String(h.agent.id))!.some(event => event.type === 'agent/inbox/spliced' &&
+    event.data.inserted.some(message => message.source.kind === 'singularity' && message.source.purpose === 'plan-outcome'))).toBe(true))
+  expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-opened')).toHaveLength(1)
+  await writeFile(join(h.request.cwd, 'report.json'), JSON.stringify({ summary: 'Proposal rejected; no measurements.' }))
+  await h.scope.submit({ taskId: h.assigned.taskId, path: 'report.json' })
+  expect(driver!.rsiState(String(h.agent.id))).toMatchObject({ phase: 'completed', canPropose: false, canSubmit: false })
 })
 
 it.each(['rsi/batch-slot-settled', 'rsi/batch-ended'])('recovers frozen proposal bytes after interrupted %s without relying on mutable files', async failKind => {
@@ -588,18 +643,17 @@ it.each(['rsi/batch-slot-settled', 'rsi/batch-ended'])('recovers frozen proposal
     { ...assets, workflowGuidance: 'Check frozen evidence before delegating implementation.' }, root.taskId, 'business')))
   screenVerdict = 'fail'
   h.medium.failAppendOf(failKind)
-  await expect(scope.proposeMethod({ paths: ['candidate.json'] })).rejects.toThrow('write-not-durable')
+  const admission = await scope.proposeMethod({ paths: ['candidate.json'] }) as { batchId: string }
+  await vi.waitFor(async () => { await expect(driver!.read()).rejects.toThrow('background RSI delivery failed') })
   const before = factsOf(h.medium), opened = before.find(fact => fact.kind === 'rsi/batch-opened')!
   expect(opened.payload).toMatchObject({ slots: [{ proposal: { attachmentId: expect.stringMatching(/^sha256:/) } }] })
   await rm(join(request.cwd, 'candidate.json'))
-  await driver!.close(); driver = undefined
+  await expect(driver!.close()).rejects.toThrow('driver unload failed'); driver = undefined
   await h.mount()
   await driver!.activate(String(agent.id))
   const restored = h.call(agent, 'resume-screen')
-  expect(await restored.history({ kind: 'method' })).toMatchObject({ proposal: { pending: { kind: 'batch', paths: ['candidate.json'] } } })
-  await expect(restored.proposeMethod({ paths: ['a-new-proposal.json'] })).rejects.toThrow('resume the frozen batch')
-  expect(await restored.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
-  expect(await restored.history({ kind: 'method' })).toMatchObject({ proposal: { pending: null } })
+  expect(await settledBatch(restored, admission.batchId)).toMatchObject({ status: 'rejected' })
+  expect(await restored.history({ kind: 'search' })).toMatchObject({ phase: 'ready', pending: null })
   expect(factsOf(h.medium).filter(fact => fact.kind === 'review/started')).toEqual(before.filter(fact => fact.kind === 'review/started'))
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-opened')).toEqual([opened])
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-slot-settled')).toHaveLength(1)
@@ -621,7 +675,7 @@ it('rejects invented or inaccessible proposal evidence and unsupported affected 
   const before = factsOf(h.medium)
   await writeFile(join(request.cwd, 'invalid.json'), JSON.stringify({ ...proposal, analysis: { ...proposal.analysis,
     failure_modes: [{ ...proposal.analysis.failure_modes[0], evidence: [{ sessionId: 'business', eventSeq: 0, count: 8193 }] }] } }))
-  await expect(scope.proposeMethod({ paths: ['invalid.json'] })).rejects.toThrow('analysis.failure_modes[0].evidence[0].count')
+  await expect(screened(scope, { paths: ['invalid.json'] })).rejects.toThrow('analysis.failure_modes[0].evidence[0].count')
   expect(factsOf(h.medium)).toEqual(before)
   for (const [reference, error] of [
     [{ sessionId: 'business', eventSeq: 99999 }, 'outside this readable trajectory'],
@@ -631,10 +685,10 @@ it('rejects invented or inaccessible proposal evidence and unsupported affected 
     const invalid = { ...proposal, analysis: { ...proposal.analysis,
       failure_modes: [{ ...proposal.analysis.failure_modes[0], evidence: [reference] }] } }
     await writeFile(join(request.cwd, 'invalid.json'), JSON.stringify(invalid))
-    expect(await scope.proposeMethod({ paths: ['invalid.json'] })).toMatchObject({ status: 'invalid', reason: expect.stringContaining(error) })
+    expect(await screened(scope, { paths: ['invalid.json'] })).toMatchObject({ status: 'invalid', reason: expect.stringContaining(error) })
   }
   await writeFile(join(request.cwd, 'invalid.json'), JSON.stringify({ ...proposal, edit: { ...proposal.edit, predicted_affected: ['invented-task'] } }))
-  expect(await scope.proposeMethod({ paths: ['invalid.json'] })).toMatchObject({ status: 'invalid', reason: expect.stringContaining('Tasks with cited native evidence') })
+  expect(await screened(scope, { paths: ['invalid.json'] })).toMatchObject({ status: 'invalid', reason: expect.stringContaining('Allowed Task IDs') })
   const assigned = JSON.parse((request.message!.content[0] as { text: string }).text)
   await writeFile(join(request.cwd, 'report.json'), '{}')
   await expect(scope.submit({ taskId: assigned.taskId, path: 'report.json' })).resolves.toMatchObject({ phase: 'verified' })
@@ -662,16 +716,16 @@ it('allocates campaign-local round numbers when two roots finish screening concu
     await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(baseline.assets, candidate, root.taskId, 'business')))
     proposals.push({ scope, path: 'candidate.json' })
   }
-  let screened = 0, release!: () => void
+  let screenedCount = 0, release!: () => void
   const ready = new Promise<void>(resolve => { release = resolve })
-  beforeProposalJudgment = async () => { if (++screened === 2) release(); await ready }
+  beforeProposalJudgment = async () => { if (++screenedCount === 2) release(); await ready }
   harness.solve.mockRejectedValue(new Error('test ends after round admission'))
-  const results = await Promise.all(proposals.map(({ scope, path }) => scope.proposeMethod({ paths: [path] })))
+  const results = await Promise.all(proposals.map(({ scope, path }) => screened(scope, { paths: [path] })))
   const requests = factsOf(h.medium).filter(fact => fact.kind === 'rsi/round-requested')
   expect(requests.map(fact => (fact.payload as { round: number }).round)).toEqual([1, 1])
   expect(new Set(requests.map(fact => (fact.payload as { roundId: string }).roundId)).size).toBe(2)
   await vi.waitFor(() => expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/round-settled')).toHaveLength(2))
-  expect(await proposals[0]!.scope.proposeMethod({ paths: [proposals[0]!.path] }))
+  expect(await screened(proposals[0]!.scope, { paths: [proposals[0]!.path] }))
     .toMatchObject({ roundId: (results[0] as { roundId: string }).roundId, status: 'failed' })
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/round-requested')).toEqual(requests)
 })
@@ -733,9 +787,13 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
       const run = state().runs[trial.runId]!,
         artifactDigest = run.submission!.artifactDigest,
         criterionId = state().contract!.criteria[0]!.criterionId
+      const trajectory = await apparatus.attachments.saveFile({ name: 'trajectory.json', data: Buffer.from(JSON.stringify({
+        sessions: [{ sessionId: id, events: h.logs.get(id)! }],
+      })) })
       return {
         taskId: trial.taskId,
         runId: trial.runId,
+        trajectory,
         quality: 1,
         met: true,
         cost: revisionCosts.get(revisionDigest)!,
@@ -766,23 +824,23 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   method.assets.templates[0]!.applicability = 'Use a single pass for small literal counting tasks.'
   await writeFile(join(request.cwd, 'candidate.json'), proposalBytes())
   screenVerdict = 'fail'
-  expect(await scope.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ status: 'rejected', reason: expect.any(String) })
+  expect(await screened(scope, { paths: ['candidate.json'] })).toMatchObject({ status: 'rejected', reason: expect.any(String) })
   expect(harness.solve).not.toHaveBeenCalled()
   expect(factsOf(h.medium).filter(f => f.kind === 'rsi/round-requested')).toHaveLength(0)
   method.assets.templates[0]!.applicability = 'Use a bounded evidence pass before delegation.'
   await writeFile(join(request.cwd, 'candidate.json'), proposalBytes())
   screenVerdict = 'pass'
-  const round = await scope.proposeMethod({ paths: ['candidate.json'] }) as { roundId: string; status: string; revision: unknown }
+  const round = await screened(scope, { paths: ['candidate.json'] }) as { roundId: string; status: string; revision: unknown }
   candidate = round.revision
   expect(round.status).toBe('pending')
-  expect(await scope.history({ kind: 'method' })).toMatchObject({ proposal: { pending: { kind: 'evaluation', roundId: round.roundId } } })
+  expect(await scope.history({ kind: 'search' })).toMatchObject({ phase: 'evaluating', pending: { kind: 'evaluation', roundId: round.roundId } })
   const batchFacts = () => factsOf(h.medium).filter(fact => fact.kind.startsWith('rsi/batch-'))
   const beforeNewBatch = batchFacts()
   const fresh = rsiProposal(baselineAssets, { ...baselineAssets, workflowGuidance: 'A fresh proposal must wait for evaluation.' }, proposal.taskId, 'business')
   await writeFile(join(request.cwd, 'too-early.json'), JSON.stringify(fresh))
-  await expect(scope.proposeMethod({ paths: ['too-early.json'] })).rejects.toThrow('no candidate slots consumed')
+  await expect(screened(scope, { paths: ['too-early.json'] })).rejects.toThrow('no candidate slots consumed')
   expect(batchFacts()).toEqual(beforeNewBatch)
-  expect(await scope.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ roundId: round.roundId, status: 'pending' })
+  expect(await screened(scope, { paths: ['candidate.json'] })).toMatchObject({ roundId: round.roundId, status: 'pending' })
   expect(factsOf(h.medium).filter((f) => f.kind === 'rsi/round-requested')).toHaveLength(1)
   expect(await scope.history({ kind: 'method', ref: (candidate as { digest: string }).digest }))
     .toMatchObject({ reference: candidate })
@@ -794,9 +852,9 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   expect(factsOf(h.medium).some((f) => f.kind === 'round/decided')).toBe(false)
   releaseSolve!()
   allowDelivery = false
-  await vi.waitFor(() => expect(factsOf(h.medium).some((f) => f.kind === 'rsi/round-settled')).toBe(true))
+  await vi.waitFor(() => expect(factsOf(h.medium).some((f) => f.kind === 'rsi/round-settled')).toBe(true), { timeout: 15000 })
   expect(factsOf(h.medium).find(fact => fact.kind === 'rsi/round-settled')!.payload).toMatchObject({ status: 'completed' })
-  expect(await scope.history({ kind: 'method' })).toMatchObject({
+  expect(await scope.history({ kind: 'search' })).toMatchObject({
     reference: method.reference,
     nextRound: { editBudget: 1, remainingSlots: 4, maxBatchSlots: 3, repairsPerSlot: 0,
       untried: ['workflow', 'skill', 'tool'], prune: false, pruneSlot: null,
@@ -814,7 +872,11 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   for (const evaluation of result.evaluations) {
     if (evaluation.observed.length === 0) continue
     const trial = JSON.parse(evaluation.observed[0]!.detail)
-    expect(await scope.history({ kind: 'task', ref: trial.taskId })).toMatchObject({ taskId: trial.taskId })
+    const task = await scope.history({ kind: 'task', ref: trial.taskId }) as { taskId: string; sessionId: string }
+    expect(task.taskId).toBe(trial.taskId)
+    expect(await scope.history({ kind: 'trajectory', rootId: trial.taskId, ref: task.sessionId })).toEqual(expect.any(Array))
+    if (trial.taskId !== proposal.taskId)
+      await expect(scope.history({ kind: 'trajectory', rootId: trial.taskId, ref: 'business' })).rejects.toThrow('frozen evidence scope')
   }
   expect(factsOf(h.medium).filter((f) => f.kind === 'rsi/status' && f.subject !== business(h))).toHaveLength(0)
   await expect(driver!.close()).rejects.toThrow('driver unload failed')
@@ -845,7 +907,7 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   publicationVerdict = rejectPublication ? 'fail' : 'pass'
   method.assets.templates[0]!.applicability = 'Reuse sufficient evidence and delegate one bounded implementation.'
   await writeFile(join(request.cwd, 'repaired.json'), proposalBytes())
-  let repaired = await h.call(agent, 'repair').proposeMethod({ paths: ['repaired.json'] }) as { roundId: string; revision: { digest: string } }
+  let repaired = await screened(h.call(agent, 'repair'), { paths: ['repaired.json'] }) as { roundId: string; revision: { digest: string } }
   if (rejectPublication) {
     await vi.waitFor(() => expect(factsOf(h.medium).filter(f => f.kind === 'rsi/round-settled')).toHaveLength(2), { timeout: 5_000 })
     expect(factsOf(h.medium).findLast(f => f.kind === 'rsi/round-settled')!.payload).toMatchObject({ status: 'failed' })
@@ -854,7 +916,7 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
     trialCost = 25
     method.assets.templates[0]!.applicability = 'Reuse evidence only after confirming frozen input identity; delegate bounded implementation.'
     await writeFile(join(request.cwd, 'repaired-again.json'), proposalBytes())
-    repaired = await h.call(agent, 'repair-again').proposeMethod({ paths: ['repaired-again.json'] }) as typeof repaired
+    repaired = await screened(h.call(agent, 'repair-again'), { paths: ['repaired-again.json'] }) as typeof repaired
   }
   await vi.waitFor(() => expect(factsOf(h.medium).filter(f => f.kind === 'rsi/round-settled'))
     .toHaveLength(rejectPublication ? 3 : 2), { timeout: 5_000 })
@@ -892,7 +954,7 @@ it('records all rejected proposals within a frozen budget, resumes the same sear
   for (let index = 0; index < 6; index++) {
     const changed = { ...assets, workflowGuidance: `Unproven mechanism ${index}.` }
     await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(assets, changed, root.taskId, 'business')))
-    expect(await scope.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
+    expect(await screened(scope, { paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
   }
   await driver!.close(); driver = undefined
   await h.mount()
@@ -900,7 +962,7 @@ it('records all rejected proposals within a frozen budget, resumes the same sear
   const restored = h.call(agent, 'restored')
   const changed = { ...assets, workflowGuidance: 'A seventh mechanism.' }
   await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(assets, changed, root.taskId, 'business')))
-  await expect(restored.proposeMethod({ paths: ['candidate.json'] })).rejects.toThrow('budget exhausted')
+  await expect(screened(restored, { paths: ['candidate.json'] })).rejects.toThrow('budget exhausted')
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-slot-settled')).toHaveLength(6)
   expect(harness.solve).not.toHaveBeenCalled()
   const assigned = JSON.parse((request.message!.content[0] as { text: string }).text)
@@ -924,7 +986,7 @@ it('screens a generated verifier before materializing or executing its program',
   ] } }] }
   screenVerdict = 'fail'
   await writeFile(join(request.cwd, 'candidate.json'), JSON.stringify(rsiProposal(assets, changed, root.taskId, 'business')))
-  expect(await scope.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
+  expect(await screened(scope, { paths: ['candidate.json'] })).toMatchObject({ status: 'rejected' })
   expect(factsOf(h.medium).filter(fact => fact.kind === 'revision/created')).toHaveLength(1)
   expect(harness.solve).not.toHaveBeenCalled()
 })
@@ -949,7 +1011,7 @@ it('settles three frozen slots once under duplicate concurrent calls and cold re
   let release!: () => void
   const critic = new Promise<void>(resolve => { release = resolve })
   beforeProposalJudgment = () => critic
-  const pending = [scope.proposeMethod(input), scope.proposeMethod(input)]
+  const pending = [screened(scope, input), screened(scope, input)]
   await vi.waitFor(() => expect(factsOf(h.medium).filter(fact => fact.kind === 'review/started' &&
     (fact.payload as { target: { kind: string } }).target.kind === 'proposal')).toHaveLength(1))
   release()
@@ -966,11 +1028,11 @@ it('settles three frozen slots once under duplicate concurrent calls and cold re
   ])
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/batch-slot-settled')).toHaveLength(3)
   const reviewCount = factsOf(h.medium).filter(fact => fact.kind === 'review/started').length
-  expect(await scope.proposeMethod(input)).toEqual(first)
+  expect(await screened(scope, input)).toEqual(first)
   await driver!.close(); driver = undefined
   await h.mount()
   await driver!.activate(String(agent.id))
-  expect(await h.call(agent, 'restored-batch').proposeMethod(input)).toEqual(first)
+  expect(await screened(h.call(agent, 'restored-batch'), input)).toEqual(first)
   expect(batchFacts()).toEqual(settled)
   expect(factsOf(h.medium).filter(fact => fact.kind === 'review/started')).toHaveLength(reviewCount)
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/round-requested')).toHaveLength(0)
@@ -1036,7 +1098,8 @@ async function suiteCampaign({ heldout = true, validationRegression = false, exi
   const assigned = JSON.parse((request.message!.content[0] as { text: string }).text) as { taskId: string; runId: string }
   const scope = () => h.call(agent, 'suite-analysis')
   const method = await scope().history({ kind: 'method' }) as RsiMethodRead
-  expect(method.cases.map(c => c.caseId)).toEqual(['evolve-0'])
+  const search = await scope().history({ kind: 'search' }) as { cases: { caseId: string }[] }
+  expect(search.cases.map(c => c.caseId)).toEqual(['evolve-0'])
   const changed = structuredClone(method.assets)
   ;(changed as { workflowGuidance: string }).workflowGuidance = guidance
   const candidate = rsiProposal(method.assets, changed, root.taskId, 'business')
@@ -1067,7 +1130,7 @@ async function suiteCampaign({ heldout = true, validationRegression = false, exi
       artifactDigest: run.submission!.artifactDigest, inputDigests: run.submission!.inputDigests,
       implementationDigest: REVIEW_DIGEST, acceptanceDigest: REVIEW_DIGEST, guardsMet: true }
   })
-  const proposal = await scope().proposeMethod({ paths: ['candidate.json'] }) as { roundId: string; revision: RevisionRef }
+  const proposal = await screened(scope(), { paths: ['candidate.json'] }) as { roundId: string; revision: RevisionRef }
   expect(proposal).toMatchObject({ status: 'pending', roundId: expect.any(String), revision: expect.any(Object) })
   await vi.waitFor(() => expect(factsOf(h.medium).find(fact => fact.kind === 'rsi/round-settled' && fact.subject === assigned.taskId)).toBeDefined(), { timeout: 10_000 })
   const settled = factsOf(h.medium).find(fact => fact.kind === 'rsi/round-settled' && fact.subject === assigned.taskId)!.payload
@@ -1110,12 +1173,12 @@ it('freezes the suite champion and recovers after measured validation/heldout be
   await h.mount()
   await driver!.activate(String(h.agent.id))
   const restored = h.call(h.agent, 'restore-transfer')
-  expect(await restored.proposeMethod({ paths: ['candidate.json'] })).toMatchObject({ roundId: h.proposal.roundId, status: 'completed' })
+  expect(await screened(restored, { paths: ['candidate.json'] })).toMatchObject({ roundId: h.proposal.roundId, status: 'completed' })
   const fresh = rsiProposal(h.method.assets, { ...h.method.assets, workflowGuidance: 'A fresh mechanism after validation is forbidden.' }, h.assigned.taskId, 'business')
   await writeFile(join(h.request.cwd, 'after-freeze.json'), JSON.stringify({ ...fresh, edit: { ...fresh.edit,
     predicted_affected: [(factsOf(h.medium).find(fact => fact.kind === 'task/admitted')!).subject],
     predicted_cases: ['evolve-0'], predicted_families: ['evolve-family-0'] } }))
-  await expect(restored.proposeMethod({ paths: ['after-freeze.json'] })).rejects.toThrow(/search ended|frozen|finish/)
+  await expect(screened(restored, { paths: ['after-freeze.json'] })).rejects.toThrow(/search ended|frozen|finish/)
   await expect(restored.history({ kind: 'round', ref: validationId })).rejects.toThrow('frozen evidence scope')
   await expect(restored.history({ kind: 'round', ref: heldoutId })).rejects.toThrow('frozen evidence scope')
   for (const split of ['validation', 'heldout']) {
@@ -1320,11 +1383,11 @@ it('cancels an active proposal review without materializing its method or evalua
   const gate = new Promise<void>(resolve => { releaseSolve = resolve })
   let reviewing = false
   beforeProposalJudgment = () => { reviewing = true; return gate }
-  const pending = h.scope.proposeMethod({ paths: ['candidate.json'] }).then(value => ({ value }), error => ({ error }))
+  const pending = screened(h.scope, { paths: ['candidate.json'] }).then(value => ({ value }), error => ({ error }))
   await vi.waitFor(() => expect(reviewing).toBe(true))
   await driver!.cancel({ sessionId: 'business' })
   releaseSolve!()
-  expect(await pending).toHaveProperty('error')
+  expect(await pending).toMatchObject({ value: { status: 'cancelled' } })
   const snapshot = await driver!.read()
   expect(snapshot.reviews.filter(review => review.target.kind === 'proposal')).toMatchObject([{ status: 'failed', failure: 'RSI cancelled by user' }])
   expect(snapshot.methods).toHaveLength(1)
@@ -1370,7 +1433,7 @@ it.each([['evaluation', 'cancelled'], ['validation', 'cancelled'], ['evaluation'
     pending = (h.scope as () => ReturnType<typeof h.call>)().submit({ taskId: assigned.taskId, path: 'report.json' })
       .then(value => ({ value }), error => ({ error }))
   } else {
-    await (h.scope as ReturnType<typeof h.call>).proposeMethod({ paths: ['candidate.json'] })
+    await screened(h.scope as ReturnType<typeof h.call>, { paths: ['candidate.json'] })
   }
   await vi.waitFor(() => expect(childTaskId, harness.solve.mock.settledResults.map(result => String(result.value)).join('\n')).toBeDefined())
   if (ending === 'cancelled') await driver!.cancel({ sessionId: 'business' })
@@ -1417,7 +1480,7 @@ it('bounds an independent proposal critic by native steps and records its failur
       log.push({ seq: SessionSeq(log.length), time: log.length, type: 'step/start', data: { turn: 1, step: index + 1 } })
     await gate
   }
-  const pending = h.scope.proposeMethod({ paths: ['candidate.json'] })
+  const pending = screened(h.scope, { paths: ['candidate.json'] })
   await vi.waitFor(() => expect(critic).toBeDefined())
   const cancel = vi.spyOn(critic, 'cancel')
   await driver!.enter(critic, [], { provider: 'test', model: 'model-under-test' })

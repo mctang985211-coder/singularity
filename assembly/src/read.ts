@@ -19,6 +19,7 @@ import { contractFor } from './inputs.ts'
 import type { EvolutionOptions } from './evolution.ts'
 import { RELEASE_PROTOCOL, RELEASE_VERSION, type ReleaseState } from '../../src/release/protocol.ts'
 import { snapshotOf } from './snapshot.ts'
+import { rsiState } from './rsi-state.ts'
 
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -31,7 +32,7 @@ import { readHistory } from './history.ts'
 import { trajectoryPage, textPage } from './pages.ts'
 
 export interface ReadInput {
-  readonly kind?: 'summary' | 'workflow' | 'task' | 'artifact' | 'template' | 'method' | 'round' | 'subject' | 'trajectory' | 'roots' | 'sessions' | 'usage' | 'steps'
+  readonly kind?: 'summary' | 'workflow' | 'task' | 'artifact' | 'template' | 'method' | 'search' | 'round' | 'subject' | 'trajectory' | 'roots' | 'sessions' | 'usage' | 'steps'
   readonly rootId?: string
   readonly ref?: string
   readonly runId?: string
@@ -54,6 +55,26 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
   const { visible, audit, frozenProducers } = await readScopeOf(apparatus, agentId, cut)
   const run = task === undefined ? undefined : Object.values(task.runs).at(-1)!
   const current = review?.reviewId ?? task!.taskId
+  if (input.kind === 'search') {
+    if (review !== undefined || run?.purpose !== 'improve' || task?.search === undefined)
+      refuse('not-responsible', 'search state belongs to its RSI author')
+    const history = searchHistory(apparatus, task)
+    const feedback = await searchFeedback(apparatus, task)
+    if (input.ref === 'feedback') return textPage(Buffer.from(JSON.stringify(feedback, null, 2)), input.from, input.count)
+    if (input.ref === 'authoring') return textPage(Buffer.from(JSON.stringify({
+      proposal: rsiProposalContract, method: METHOD_FORMAT, report: RSI_REPORT_FORMAT,
+    }, null, 2)), input.from, input.count)
+    if (input.ref !== undefined) refuse('malformed-declaration', 'search ref must be authoring or feedback')
+    return { ...rsiState(task), reference: history.incumbent, nextRound: history.directives,
+      cases: apparatus.domain.suite?.cases.filter(c => c.split === 'evolve').map(c => ({ caseId: c.caseId, familyId: c.familyId })) ?? [],
+      feedback: { edits: feedback.edits.map(edit => ({ roundId: edit.roundId, outcome: edit.outcome, revision: edit.revision })),
+        rejected: feedback.rejected.map(({ batchId, slot, status }) => ({ batchId, slot, status })) },
+      authoring: { proposal: rsiProposalTemplate(), report: structuredClone(RSI_REPORT_TEMPLATE),
+        instructions: 'Read kind=search with ref=authoring and from/count for proposal and report rules.',
+        assets: 'Read kind=method for the current assets; kind=method with from/count pages its JSON as UTF-8 bytes.',
+        feedback: 'Read kind=search with ref=feedback and from/count for full rejection details and measurements.' },
+    }
+  }
   if (input.kind === 'workflow') {
     if (review !== undefined || audit || task === undefined) refuse('not-responsible', 'workflow metadata belongs to business Tasks')
     const graph = taskRelations(tasks), rootId = graph.rootOf(task.taskId)
@@ -141,19 +162,13 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
   }
   if (input.kind === 'method') {
     const { assets } = await loadMethod(apparatus, reference)
+    if (input.from !== undefined || input.count !== undefined)
+      return { reference, ...textPage(Buffer.from(JSON.stringify(assets, null, 2)), input.from, input.count) }
+    if (review !== undefined) return { reference, assets }
     const source = run?.purpose === 'improve' ? tasks.get(run.relatedTo!.taskId)!.runs[run.relatedTo!.runId]!.bubble! : undefined
-    const authoring = run?.purpose === 'improve'
-    const batch = task?.search?.batches?.find(batch => !batch.settled)
-    const round = task?.rounds?.find(round => round.status === 'pending')
-    const pending = batch ? { kind: 'batch', paths: batch.slots.map(slot => slot.path) }
-      : round ? { kind: 'evaluation', roundId: round.roundId } : null
     return { reference, assets, format: METHOD_FORMAT, evaluation,
       ...(source === undefined ? {} : { rootExecutionContext: { model: source.model, tools: source.tools, conditions: source.conditions, inputs: source.inputs } }),
       rootCapabilities: 'Root coordinates, reads evidence, delegates and submits a verified child artifact. Root cannot execute bash, write/edit files, invoke Skills or method Tools. Implementation and integration belong to children. Candidate procedures must respect these roles.',
-      ...(authoring ? { proposal: { ...rsiProposalContract, template: rsiProposalTemplate(), pending },
-        reportFormat: RSI_REPORT_FORMAT, reportTemplate: structuredClone(RSI_REPORT_TEMPLATE) } : {}),
-      ...(search === undefined ? {} : { nextRound: search.directives, feedback: await searchFeedback(apparatus, task!),
-        cases: apparatus.domain.suite?.cases.filter(c => c.split === 'evolve').map(c => ({ caseId: c.caseId, familyId: c.familyId, trials: c.trials, weight: c.weight })) ?? [] }),
       costAccounting: 'Compare native token-meter/tokenUsage for one fresh business root, its delegated work and independent acceptance through submission. RSI analysis, proposal, evaluation orchestration and publication review usage never enters any comparison. Candidate cost must be at most 125% of baseline; no quality gain permits no cost increase.',
     }
   }
@@ -339,12 +354,15 @@ export async function waitForTask(apparatus: Apparatus, taskId: string, session:
       .find((plan) => plan.parentTaskId === taskId)
     if (tree?.children.some((child) => child.status === 'missing'))
       refuse('illegal-transition', 'delegated work has no admitted contract')
-    if (waitingReason(apparatus, taskId) !== undefined || task.rounds?.some((r) => r.status === 'pending')) {
+    if (waitingReason(apparatus, taskId) !== undefined || task.search?.batches?.some(batch => !batch.settled) || task.rounds?.some((r) => r.status === 'pending')) {
       await setTimeout(100, undefined, { signal })
       continue
     }
     const answers = (task.questions ?? []).filter((q) => q.runId === run.runId).flatMap((q) => q.answers.map((a) => a.seq))
     const outcomes = (task.rounds ?? []).map((r) => apparatus.store.committedOf(`round-settled:${r.roundId}`)!.seq)
+    for (const batch of task.search?.batches ?? [])
+      if (batch.settled && !batch.outcomes.some(outcome => outcome.status === 'evaluation-requested'))
+        outcomes.push(apparatus.store.committedOf(`rsi/batch-ended:${taskId}:${batch.batchId}`)!.seq)
     if (tree !== undefined) outcomes.push(planOutcomeOf(apparatus, tree)!.seq)
     if (await outcomesAnswered(apparatus, session.sessionId, taskId, answers, 'answer') &&
       await outcomesAnswered(apparatus, session.sessionId, taskId, outcomes)) {
@@ -374,7 +392,12 @@ export async function readTrajectory(
     (state) => state.responsibility?.agentId === agentId,
   )
   const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
-  if (rootId !== undefined && review === undefined && (run?.purpose !== 'improve' || run.relatedTo?.taskId !== rootId))
+  const evaluationRoot = rootId === undefined ? undefined : cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, rootId)
+  const ownEvaluation = run?.purpose === 'improve' && evaluationRoot !== undefined &&
+    Object.values(evaluationRoot.runs).some(held => held.purpose === 'evaluation' && held.relatedTo?.taskId === task!.taskId &&
+      (held.case === undefined || held.case.split === 'evolve'))
+  if (rootId !== undefined && review === undefined &&
+    (run?.purpose !== 'improve' || run.relatedTo?.taskId !== rootId && !ownEvaluation))
     return readHistory(apparatus, agentId, { kind: 'trajectory', rootId, ref: sessionId, from,
       ...(count === undefined ? {} : { count }), ...(eventSeq === undefined ? {} : { eventSeq }) })
   let sessions: readonly { sessionId: string; events: readonly SessionEvent[] }[] = []
@@ -458,7 +481,7 @@ export async function readTrajectory(
     }
     searchTask = task
     const root = taskStateOf(apparatus, run.relatedTo!.taskId)
-    sessions = JSON.parse((await sealedBytes(apparatus, root.rsi!.trace!)).toString('utf8')).sessions
+    if (!ownEvaluation) sessions = JSON.parse((await sealedBytes(apparatus, root.rsi!.trace!)).toString('utf8')).sessions
   }
   const roundIds = new Set(searchTask?.rounds?.map(round => round.roundId))
   for (const evaluation of cut.statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION).values()) {
@@ -466,8 +489,8 @@ export async function readTrajectory(
       evaluation.evaluationId === `${id}:bootstrap:evaluation` || evaluation.evaluationId.startsWith(`${id}:`) &&
       /^\d+:candidate:evaluation$/.test(evaluation.evaluationId.slice(id.length + 1)))) continue
     for (const trial of [...evaluation.observed, ...(evaluation.failed ?? [])]) {
-      const result = trial.detail === undefined ? undefined : JSON.parse(trial.detail) as { trajectory?: FileAttachmentRef }
-      if (result?.trajectory === undefined) continue
+      const result = trial.detail === undefined ? undefined : JSON.parse(trial.detail) as { taskId: string; trajectory?: FileAttachmentRef }
+      if (result?.trajectory === undefined || ownEvaluation && result.taskId !== rootId) continue
       const trace = JSON.parse((await sealedBytes(apparatus, result.trajectory)).toString('utf8'))
       sessions = [...sessions, ...trace.sessions]
     }
