@@ -94,7 +94,7 @@ export function coordinationOf(apparatus: Apparatus, id: string, cut: ControlRea
       criteriaToAccept: criteria.map(criterion => criterion.criterionId),
       delegated: children.map(child => ({
         ...child, contractDigest: states.get(child.taskId)!.contractDigest!,
-        goal: states.get(child.taskId)!.contract!.goal, artifact: states.get(child.taskId)!.contract!.artifact,
+        artifact: states.get(child.taskId)!.contract!.artifact,
       })),
       requiredUnverified: children.filter(child => child.requirement === 'required' && child.status !== 'verified').map(child => child.taskId),
       activeExploration: children.filter(child => child.requirement === 'exploration' && !childSettled(child)).map(child => child.taskId),
@@ -308,20 +308,21 @@ export function workflowDirection(states: ReadonlyMap<string, TaskState>, id: st
     ...task.contract!.inputs.flatMap(input => input.source.kind === 'artifact' ? [input.source.taskId] : []),
     ...(graph.consumers.get(id) ?? []),
   ])
-  return { cutoff, root: { taskId: rootId, goal: root.contract!.goal, contractDigest: root.contractDigest },
+  return { cutoff, root: { taskId: rootId, goal: root.contract!.goal.slice(0, 512),
+      goalComplete: root.contract!.goal.length <= 512, contractDigest: root.contractDigest },
     supportPath: path.map(taskId => {
       const state = states.get(taskId)!, parentId = graph.parents.get(taskId)
       const edge = parentId === undefined ? undefined : states.get(parentId)!.decomposition!.children.find(child => child.taskId === taskId)
-      return { taskId, goal: state.contract!.goal, contractDigest: state.contractDigest, parentId: parentId ?? null,
+      return { taskId, contractDigest: state.contractDigest, parentId: parentId ?? null,
         supports: edge?.supports ?? [] }
     }),
     interfaces: [...neighbors].filter(taskId => taskId !== id && graph.rootOf(taskId) === rootId).map(taskId => {
       const state = states.get(taskId)!, run = Object.values(state.runs).at(-1)
-      return { taskId, goal: state.contract!.goal, contractDigest: state.contractDigest,
+      return { taskId, contractDigest: state.contractDigest,
         artifact: state.contract!.artifact, status: run?.status ?? 'pending',
         consumesMyOutput: graph.consumers.get(id)?.includes(taskId) ?? false }
     }),
     consumers: graph.consumers.get(id) ?? [],
-    boundary: 'The root explains purpose; only your frozen contract defines acceptance. Full bodies require separate evidence authorization.',
+    boundary: 'Only your frozen contract defines acceptance. Read workflow pages for relationships and task ref=taskId for authorized full contracts.',
   }
 }

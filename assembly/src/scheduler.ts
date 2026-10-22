@@ -83,8 +83,8 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
       try { await postIdentifiedMessage(seams, parent, schedulerMessage({ kind: 'singularity', purpose: 'branch-outcome',
         controlId: apparatus.controlId, parentTaskId, taskId: task.taskId, runId: parentRunId, factSeq: fact.seq,
       }, JSON.stringify({ taskId: task.taskId, runId: run.runId, status: run.status,
-        artifactDigest: run.submission?.artifactDigest, verdicts: run.evidence.map(({ criterionId, verdict, detail }) => ({ criterionId, verdict, detail })),
-        instruction: 'Assess whether the available evidence is sufficient. You may stop unselected exploration branches, then integrate; required work still must verify. Child acceptance never replaces parent acceptance.' }))) }
+        artifactDigest: run.submission?.artifactDigest,
+        verdicts: run.evidence.map(({ criterionId, verdict }) => ({ criterionId, verdict })) }))) }
       catch (error) { throw new DispatchError(parentTaskId, parentTaskId, null, error) }
     }
   }
@@ -153,14 +153,8 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
     const instruction = unmet.length === 0
       ? 'Continue your existing parent Run, integrate accepted work and independently validate your final artifact.'
       : 'Required work ended without verification. This parent Run fails; report the recorded failure.'
-    const text = `Delegated work for Task ${parentTaskId} settled. Required children must verify before final submission. ${instruction} Use singularity_read kind=artifact ref=taskId for sealed text pages; reuse the evidence before doing new work. Child support is not a parent verdict.\n` +
-      JSON.stringify(plan.children.map((child) => {
-        const state = taskStateOf(apparatus, child.taskId),
-          run = Object.values(state.runs).findLast((r) => r.status === 'verified') ?? Object.values(state.runs).at(-1)
-        return { ...child, goal: state.contract!.goal, runId: run?.runId ?? null, artifact: run?.submission?.files.artifact,
-          artifactDigest: run?.submission?.artifactDigest,
-          verdicts: run?.evidence.map((e) => ({ criterionId: e.criterionId, verdict: e.verdict, reviewId: e.reviewId, detail: e.detail })) ?? [] }
-      }))
+    const text = JSON.stringify({ parentTaskId, complete: true, completed: plan.children.length, requiredFailures: unmet.length,
+      instruction: `${instruction} Read singularity_read kind=summary for Task and artifact references, then kind=task or kind=artifact for selected evidence. Child support is not a parent verdict.` })
     if (unmet.length > 0) {
       // Publish terminal authority before the notification can wake the parent's next step.
       const reason = 'required delegated responsibilities ended without verification: ' + unmet.map(child => `${child.taskId} (${child.status})`).join(', ')

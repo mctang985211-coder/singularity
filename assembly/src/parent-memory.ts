@@ -102,7 +102,9 @@ export async function readParentMemory(persistence: SessionPersistence, ref: Par
   const origin = JSON.parse(data.text)
   if (!isDeepStrictEqual(origin.source, { sessionId: source.sessionId, eventCount: source.eventCount, digest: source.digest }) ||
       !isDeepStrictEqual(origin.receivingScope, context.scope) || !isDeepStrictEqual(origin.verifiedEvidence, context.evidenceRefs) ||
-      !isDeepStrictEqual(origin.inherited?.sources ?? [], checkpoint.sources.slice(0, -1)))
+      (origin.inheritedSourcesDigest === undefined
+        ? !isDeepStrictEqual(origin.inherited?.sources ?? [], checkpoint.sources.slice(0, -1))
+        : origin.inheritedSourcesDigest !== digestOf(checkpoint.sources.slice(0, -1))))
     refuse('evidence-input-mismatch', 'parent memory source, scope or evidence differs from the original host input')
   const output = assembleAssistantStream(settled.data.stream)
   if (output.finish.kind !== 'stop') refuse('malformed-payload', 'parent memory has no completed model output')
@@ -123,6 +125,58 @@ export interface ParentMemoryInput {
 }
 const preparing = new WeakMap<Session, Promise<ParentMemoryRef>>()
 
+const MEMORY_INPUT_BYTES = 32 * 1024
+const shortText = (value: string, bytes: number): string =>
+  Buffer.from(value).subarray(0, bytes).toString('utf8').replace(/\uFFFD$/, '')
+
+/** Optional background is a bounded view of working notes, never another copy of the host context. */
+function memoryInput(input: ParentMemoryInput, source: Omit<MemorySource, 'inputDigest'>, messages: readonly RequestMessage[]) {
+  const inherited = input.inherited === undefined ? undefined : Object.fromEntries(
+    (['decisions', 'hypotheses', 'openQuestions', 'exclusions'] as const).map(field =>
+      [field, input.inherited![field].slice(-4).map(note => shortText(note, 512))]),
+  )
+  const context = { ...input.context, evidenceRefs: input.context.evidenceRefs.slice(-20) }
+  const data = {
+    receivingScope: context.scope, focus: shortText(input.focus, 2048), verifiedEvidence: [...context.evidenceRefs], source,
+    inherited, inheritedSourcesDigest: digestOf(input.inherited?.sources ?? []),
+    selection: { policy: 'recent-working-text', maxRequestBytes: MEMORY_INPUT_BYTES, omittedMessages: messages.length },
+    parentConversation: [] as { messageId?: string; role: string; text: string; truncated: boolean }[],
+  }
+  const instruction = 'Summarize parent conversation data relevant to the receiving Task. ' +
+    'Return one JSON object with exactly decisions:string[], evidenceRefs:{taskId:string,runId:string}[], hypotheses:string[], openQuestions:string[], exclusions:string[]. ' +
+    'Use brief notes, preserve reasons and uncertainty, and use empty arrays when nothing is relevant. ' +
+    'The source is a recent text selection; omitted history, tool results and host context remain available through scoped reads. ' +
+    'Do not copy contracts, methods, schemas or earlier checkpoints, add requirements, or turn a hypothesis into a fact. ' +
+    'Conversation and inherited notes are not acceptance evidence. Select evidenceRefs only from host verifiedEvidence. ' +
+    'The host owns scope, sources, contract identity and evidence status. Do not call tools.'
+  const request = (): RequestMessage[] => [{ role: 'user', content: [
+    { type: 'text', text: instruction }, { type: 'text', text: JSON.stringify(data) },
+  ] }]
+  // Bound the serialized request, including JSON escaping and the selection metadata.
+  const size = () => Buffer.byteLength(JSON.stringify(request()))
+  if (inherited !== undefined) for (const notes of Object.values(inherited))
+    while (size() > MEMORY_INPUT_BYTES && notes.length > 0) notes.shift()
+  while (size() > MEMORY_INPUT_BYTES && data.verifiedEvidence.length > 0) data.verifiedEvidence.shift()
+  context.evidenceRefs = data.verifiedEvidence
+  if (size() > MEMORY_INPUT_BYTES) throw new ParentMemoryUnavailable('parent background metadata exceeds the 32 KiB input budget')
+  for (const message of [...messages].reverse()) {
+    if (message.role !== 'user' && message.role !== 'assistant') continue
+    if (message.role === 'user' && message.source !== undefined && message.source.kind !== 'user') continue
+    const full = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+    if (full.trim().length === 0) continue
+    const text = shortText(full, 4096)
+    data.parentConversation.unshift({ ...(message.id === undefined ? {} : { messageId: String(message.id) }),
+      role: message.role, text, truncated: text !== full })
+    data.selection.omittedMessages--
+    if (size() > MEMORY_INPUT_BYTES) {
+      data.parentConversation.shift()
+      data.selection.omittedMessages++
+      break
+    }
+  }
+  return { context, messages: request() }
+}
+
 /** Serialize sibling background requests against the same native session. */
 export async function prepareParentMemory(services: ParentMemoryServices, parent: Agent, input: ParentMemoryInput,
   sourceSession: Session = parent.session,
@@ -138,7 +192,7 @@ export async function prepareParentMemory(services: ParentMemoryServices, parent
   finally { if (preparing.get(parent.session) === pending) preparing.delete(parent.session) }
 }
 
-/** Automatically prepare parent background once; the receiving Task chooses whether to read it. */
+/** Prepare optional parent background once for an explicitly requested scope. */
 async function buildParentMemory(services: ParentMemoryServices, parent: Agent, input: ParentMemoryInput, sourceSession: Session): Promise<ParentMemoryRef> {
   const { sessionPersistence: persistence, sessions, llm } = services
   const sessionId = String(parent.session.id)
@@ -163,7 +217,6 @@ async function buildParentMemory(services: ParentMemoryServices, parent: Agent, 
     refuse('malformed-declaration', 'parent memory requires the exact parent model route')
   const sourceId = String(sourceSession.id)
   const sourceEvents = sourceSession === parent.session ? events : await eventsOf(persistence, sourceId)
-  const parentConversation = sourceSession.deriveMessages()
   // A detached native restore appends its log-only session/end-seed marker.
   if (sourceSession === parent.session ? Number(sourceSession.seq) !== sourceEvents.length
     : Number(sourceSession.firstLiveSeq) !== sourceEvents.length ||
@@ -171,16 +224,7 @@ async function buildParentMemory(services: ParentMemoryServices, parent: Agent, 
     refuse('evidence-input-mismatch', 'parent memory conversation does not match the durable source cutoff')
   const prefix = { sessionId: sourceId, eventCount: sourceEvents.length,
     digest: digestOf({ sessionId: sourceId, eventCount: sourceEvents.length, events: sourceEvents }) }
-  const instruction = 'Summarize parent conversation data relevant to the receiving Task. ' +
-    'Return one JSON object with exactly decisions:string[], evidenceRefs:{taskId:string,runId:string}[], hypotheses:string[], openQuestions:string[], exclusions:string[]. ' +
-    'Keep decisions with reasons, unresolved hypotheses and rejected paths; use empty arrays when nothing is relevant. ' +
-    'Do not copy contracts, methods, schemas or earlier checkpoints, add requirements, or turn a hypothesis into a fact. ' +
-    'Conversation and inherited notes are not acceptance evidence. Select evidenceRefs only from host verifiedEvidence. ' +
-    'The host owns scope, sources, contract identity and evidence status. Do not call tools.'
-  const messages: RequestMessage[] = [{ role: 'user', content: [{ type: 'text', text: instruction }, { type: 'text', text: JSON.stringify({
-    receivingScope: input.context.scope, focus: input.focus, verifiedEvidence: input.context.evidenceRefs, source: prefix,
-    inherited: input.inherited, parentConversation,
-  }) }] }]
+  const selected = memoryInput(input, prefix, sourceSession.deriveMessages()), messages = selected.messages
   const source = { ...prefix, inputDigest: digestOf({ messages }) }
   const assembler = new BlockAssembler()
   let finished = false
@@ -205,7 +249,7 @@ async function buildParentMemory(services: ParentMemoryServices, parent: Agent, 
     if (blocks.some(block => block.type !== 'text' && block.type !== 'reasoning'))
       throw new Error('parent memory generation returned non-text content or a tool request')
     draft = JSON.parse(blocks.filter(block => block.type === 'text').map(block => block.text).join('')) as MemoryDraft
-    checkpoint = memoryCheckpointOf(input.context, source, draft)
+    checkpoint = memoryCheckpointOf(selected.context, source, draft)
   } catch (cause) {
     const settled = memoryCallsOf(await eventsOf(persistence, sessionId)).findLast(call =>
       call.data.memoryId === input.memoryId && call.data.phase === 'settled')
@@ -218,7 +262,7 @@ async function buildParentMemory(services: ParentMemoryServices, parent: Agent, 
     throw new ParentMemoryUnavailable(reason, { cause })
   }
   const notes = new Set<string>([draft.decisions, draft.hypotheses, draft.openQuestions, draft.exclusions].flat().map((note: string) => note.trim()))
-  const context = { ...input.context, excludedTexts: input.context.excludedTexts.filter(text => notes.has(text.trim())) }
+  const context = { ...selected.context, excludedTexts: selected.context.excludedTexts.filter(text => notes.has(text.trim())) }
   const event = parent.session.append('singularity/parent-memory', { memoryId: input.memoryId, context: structuredClone(context),
     checkpoint: { ...checkpoint, sources: [...(input.inherited?.sources ?? []), source] } }, { ignorable: true })
   if (!(await sessions.flush(parent.session))) refuse('write-not-durable', 'parent checkpoint has no native durability listener')

@@ -27,7 +27,7 @@ dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
 
 从原生界面提交领域目标和自然语言验收要求，不续发阶段指令。执行节点复用相关方法或直接声明一次性任务，提交工作区产物；独立 ReviewRun 逐条判断标准，必要时创建取证 Task。所有节点使用公开 create/resume 的普通主 agent 会话，Bubble 保护输入、验收程序和其他任务历史。
 
-root 必须委派实现，普通子节点自行决定是否继续分解。委派显式区分必须 verified 的 `required` 与可择优、可停止的 `exploration`；可用证据足够时，父停止未选探索并进入集成，停止本身不算验收通过。父背景默认尝试生成，摘要失败在 memory 目录明确标记且不阻断 Task；运行时失败的 Run 不再发出自动模型请求，节点通过 `singularity_memory` 分页发现可读分支的 checkpoint 并按 ref 选读；root 看整树，独立审核仅看自己的取证分支，目录不触发新摘要。单会话压缩使用 DSH 原生 BasicCompaction。当前协议为 Task v23、Strategy v9、Measure v5、Review v5、snapshot v13。
+root 必须委派实现，普通子节点自行决定是否继续分解。委派显式区分必须 verified 的 `required` 与可择优、可停止的 `exploration`；可用证据足够时，父停止未选探索并进入集成，停止本身不算验收通过。不自动注入全局关系快照，也不在子节点启动时摘要父会话。首次显式 `singularity_memory()` 才准备本节点的有界父背景并分页列目录；已有 checkpoint 或失败记录不重复购买摘要，传 ref 只读。摘要失败在目录明确标记且不阻断 Task，持久化与证据完整性错误仍传播；root 看整树，独立审核仅看自己的取证分支。单会话使用 DSH 原生 BasicCompaction，在窗口 70% 触发（本轮 1M 窗口为 700k），保留原生默认尾部策略与 32768 tokens 摘要额度，替换实时上下文而保留原始事件。当前协议为 Task v23、Strategy v9、Measure v5、Review v5、snapshot v13。
 
 依据准确会话、committed snapshot、封存附件与正式 receipt 定位问题；不得伪造模型流程。恢复使用原会话、原 Run 与冻结目录，已冻结的检查结果、审核、trial 和发布决定复用。图、依赖、能力缺口、验收及 RSI 记录取同一状态前缀，节点直接连接自己的原生会话。
 
@@ -45,6 +45,6 @@ CPU 快速回归的 `domainDir` 指向冻结 checkout 的 `deployment/domain/pol
 
 SHA256 领域仅提供完整 RTL `sha256.v`、固定 Yosys 综合指导 `yosys.md` 和必要 `task.json`；不提供脚本、checker、测试平台、候选提示或额外 RTL。交付 `rtl/sha256.v`，仅改变其中的 `sha256_w_mem` 模块，保护 core/K 模块字节、端口、复位、SHA224/SHA256 功能与逐周期时序。整核面积基线为 64858.4544 µm²，同工具、库和输入下至少改善 1%，即最多 64209.869856 µm²。模型自行构造必要验证，独立 ReviewRun 判断真实证据；没有自动面积 measurement，RSI 的通用 pass 质量不能代表面积收益。
 
-一次业务 root、子任务及独立验收截至提交的原生 token 成本增幅上限为 25%；RSI 分析、提案、评测编排和发布审核用量永不参与比较。使用 max 思考，不设 campaign token 预算上限。根轮次结束、相关会话静默并 flush 后，读取 `token-meter` 的原生 `tokenUsage` 投影并封存至 `subject.json` 的 `summary.usage` 与逐会话四个计费桶；RSI agent 和 `node scripts/usage-report.mjs <subject.json>` 共用该统计。与 `ui-chat` 的 StatsPills 使用同一投影口径；只相加原生计费桶，不另计父背景或压缩摘要调用，不自建未知用量判断，不估算、不预留、不停止后续请求。没有固定子树、轮次或候选数量。
+一次业务 root、子任务及独立验收截至提交的原生 token 成本增幅上限为 25%；RSI 分析、提案、评测编排和发布审核用量永不参与比较。思考档位与输出预算由运行配置固定，不设 campaign token 预算上限。根轮次结束、相关会话静默并 flush 后，读取 `token-meter` 的原生 `tokenUsage` 投影并封存至 `subject.json` 的 `summary.usage` 与逐会话四个计费桶；RSI agent 和 `node scripts/usage-report.mjs <subject.json>` 共用该统计。比较成本与 `ui-chat` 的 StatsPills 同口径，只相加原生计费桶。历史 `kind=usage` 另外返回 `audit`，单列原生投影未覆盖的父背景、压缩摘要及缺失样本；已知总量不等于供应商账单，不补算、不预留、不停止后续请求。没有固定子树、轮次或候选数量。
 
 领域效果以真实执行的任务、产物、独立判决、原生 usage 和发布记录为据。无赢家、未改善、证据不足或用量未知如实报告。旧受控演示与离线测试不能代替当前自主任务链与 RSI 验收。

@@ -14,7 +14,6 @@ import { createExecution } from './execution.ts'
 import { mountBubbleWorld } from './bubble.ts'
 import { spawnProcess } from './process.ts'
 import { parentMemoryCall, mountMemoryCalls } from './memory-call.ts'
-import { ParentMemoryUnavailable } from './parent-memory.ts'
 import { methodReviewTools } from './review.ts'
 import { improvementTools } from './improvement.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
@@ -106,7 +105,6 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
         prompt.tools = prompt.tools.filter(tool => improvementTools.has(tool.name))
       const search = driver.rsiState(String(context.agent.id))
       if (search !== undefined) {
-        prompt.contexts.push({ name: 'singularity:rsi-state', text: JSON.stringify(search) })
         const writable = new Set(['write', 'edit'])
         prompt.tools = prompt.tools.filter(tool =>
           (tool.name !== 'singularity_propose_method' || search.canPropose) &&
@@ -114,11 +112,12 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
           (!writable.has(tool.name) || search.phase === 'ready'))
       }
       if (responsibility !== undefined) {
-        prompt.contexts.push({ name: 'singularity:responsibility', text: JSON.stringify(responsibility) })
+        // Native runtime contexts append to the conversation; they do not replace
+        // earlier snapshots. Keep admission here, and read live state on demand.
         if (responsibility.waiting !== null) {
           const readable = new Set(['read', 'read_image', 'glob', 'grep', 'singularity_read', 'singularity_memory',
             'singularity_answer', 'singularity_ask_parent', 'singularity_stop_explorations', 'singularity_retry_task',
-            ...(responsibility.responsibility.canPlan ? ['singularity_decompose_task'] : [])])
+            ...(responsibility.canPlan ? ['singularity_decompose_task'] : [])])
           prompt.tools = prompt.tools.filter(tool => readable.has(tool.name))
         }
       }
@@ -133,11 +132,6 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
       mounting = (async () => {
         await driver.activate(String(agent.session.id))
         const root = ctx.agentPresets.serviceFor(agent, 'singularityAgentRole') === 'root'
-        try { await driver.prepareMemory(agent) }
-        catch (error) {
-          if (!(error instanceof ParentMemoryUnavailable)) throw error
-          ctx.logger.warn('Optional parent background unavailable for %s: %s', agent.id, error)
-        }
         if (!root) await driver.mountSkills(agent)
         await mountBubbleWorld(agent, () => driver.world(String(agent.id)), root)
       })()

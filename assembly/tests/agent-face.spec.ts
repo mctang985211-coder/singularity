@@ -168,7 +168,7 @@ describe('small role interfaces', () => {
       expect(calls).toEqual([{}, { from: 20, count: 10 }, { ref: 'checkpoint-id' }])
       expect(Object.keys(memory.parameters.properties!)).toEqual(['ref', 'from', 'count'])
       await expect(memory.execute({ ref: { sessionId: 'other-session' } }, exec)).rejects.toBeInstanceOf(ToolArgsError)
-      expect(guidanceFor(role).match(/Use singularity_memory on demand/g)).toHaveLength(1)
+      expect(guidanceFor(role).match(/Use singularity_memory only when parent background is needed/g)).toHaveLength(1)
     }
   })
   it('submits an existing file path and propagates unexpected errors', async () => {

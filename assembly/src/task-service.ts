@@ -11,7 +11,7 @@ type RevisionRef
 import type { TaskView } from '../../src/task/view.ts'
 import { type Apparatus } from './apparatus.ts'
 import type { BubbleWorld } from './bubble.ts'
-import { coordinationOf, type AnswerChild, type AskParent } from './coordination.ts'
+import { type AnswerChild, type AskParent } from './coordination.ts'
 import type { Domain } from './domain.ts'
 import type { Admission, Execution, TurnFailureHandler } from './execution.ts'
 import { type MemoryReadInput } from './memory-view.ts'
@@ -88,7 +88,7 @@ export interface TaskDriver extends TaskService {
   prepareMemory(agent: Agent): Promise<void>
   failed(agentId: string): boolean
   reviewTarget(agentId: string): ReviewRun['target'] | undefined
-  responsibility(agentId: string): ReturnType<typeof coordinationOf> | undefined
+  responsibility(agentId: string): { readonly waiting: string | null; readonly canPlan: boolean } | undefined
   enter(agent: Agent, messages: readonly UserMessage[], model: { provider: string; model: string },
   ): Promise<UserMessage | undefined>
   activate(sessionId: string): Promise<void>

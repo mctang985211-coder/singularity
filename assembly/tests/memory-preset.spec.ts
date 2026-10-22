@@ -49,14 +49,16 @@ await writeFile(config, yaml.dump(declarations, { schema: entryListSchema, noRef
 const summary = 'A native DSH summary of this session investigation.'
 class MockModel extends LlmAdapter {
   requests = []
-  async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 200000 } } }
+  async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 1000000 } } }
   async *stream(options) {
     this.requests.push(options)
     const text = options.purpose === 'compaction' ? summary : 'A provisional observation.'
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text }
     yield { type: 'block-end', index: 0, block: { type: 'text', text } }
-    const inputTokens = options.model === 'truncated-summary' && options.purpose !== 'compaction' ? 170000 : 30
+    const inputTokens = options.purpose === 'compaction' ? 30
+      : options.model === 'below-threshold' ? 690000
+      : ['truncated-summary', 'threshold-pressure'].includes(options.model) ? 730000 : 30
     yield { type: 'usage', usage: { inputTokens, outputTokens: 10, totalTokens: inputTokens + 10 } }
     yield { type: 'finish', reason: { kind: options.model === 'truncated-summary' && options.purpose === 'compaction' ? 'max-tokens' : 'stop' } }
   }
@@ -122,12 +124,44 @@ try {
   assert.equal(ctx.get('compaction'), undefined)
   assert.equal(ctx.get('toolResultPruner'), undefined)
   assert.equal(model.requests.filter(request => request.purpose === 'compaction').length, 4)
+  const { agent: below } = await ctx.agents.create({ sessionId: SessionId('below-threshold-compaction'), meta: { cwd: root },
+    agentOptions: { provider: 'preset-mock', model: 'below-threshold', maxTokens: 196608 },
+    setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-next') } })
+  for (const label of ['first finding', 'second finding', 'continue']) {
+    below.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: label + ': ' + 'bounded investigation '.repeat(label === 'first finding' ? 30000 : 1) }] }))
+    await below.whenIdle()
+  }
+  assert(!model.requests.some(request => request.sessionId === below.session.id && request.purpose === 'compaction'),
+    'A 690k-token input must not compact before the requested 700k threshold')
+  const { agent: pressure } = await ctx.agents.create({ sessionId: SessionId('threshold-pressure-compaction'), meta: { cwd: root },
+    agentOptions: { provider: 'preset-mock', model: 'threshold-pressure', maxTokens: 196608 },
+    setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-next') } })
+  for (const label of ['obsolete working detail', 'recent finding', 'continue']) {
+    pressure.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: label + ': ' + 'bounded investigation '.repeat(30000) }] }))
+    await pressure.whenIdle()
+  }
+  assert(await ctx.sessions.flush(pressure.session))
+  const pressureHandle = await ctx.sessionPersistence.open(pressure.session.id, 'read')
+  try {
+    const events = (await pressureHandle.read()).events
+    assert(events.some(event => event.type === 'compaction/summary'), JSON.stringify({
+      expected: 'Automatic compaction must run above the configured 700k-token threshold',
+      pressure: ctx.tokenMeter.measure(pressure.session),
+      ends: events.filter(event => event.type === 'turn/end' || event.type === 'compaction/end').map(event => event.data),
+      requests: model.requests.filter(request => request.sessionId === pressure.session.id).map(request => ({ purpose: request.purpose, maxTokens: request.maxTokens })),
+    }))
+    assert(events.some(event => event.surfaceOp?.op === 'replace'), 'Compaction must replace the live surface, not append notes')
+    assert(!JSON.stringify(pressure.session.deriveMessages()).includes('obsolete working detail'), 'The old surface must leave model context')
+    assert(events.some(event => event.type === 'user/message' && JSON.stringify(event.data).includes('obsolete working detail')), 'The durable source must remain auditable')
+    assert(model.requests.filter(request => request.sessionId === pressure.session.id && request.purpose === 'compaction')
+      .every(request => request.maxTokens === 32768))
+  } finally { await pressureHandle.close() }
   const { agent: failed } = await ctx.agents.create({ sessionId: SessionId('failed-pressure-compaction'), meta: { cwd: root },
     agentOptions: { provider: 'preset-mock', model: 'truncated-summary', maxTokens: 256 },
     setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-next') } })
-  failed.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'A finding awaiting summary. '.repeat(8000) }] }))
+  failed.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'A finding awaiting summary. '.repeat(40000) }] }))
   await failed.whenIdle()
-  failed.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'A newer finding kept in the recent tail. '.repeat(8000) }] }))
+  failed.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'A newer finding kept in the recent tail. '.repeat(40000) }] }))
   await failed.whenIdle()
   failed.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue from the newer finding.' }] }))
   await failed.whenIdle()

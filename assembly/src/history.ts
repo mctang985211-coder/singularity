@@ -7,7 +7,7 @@ import { RELEASE_KINDS, type ReleaseDraft } from '../../src/release/protocol.ts'
 import type { Apparatus } from './apparatus.ts'
 import type { ReadInput } from './read.ts'
 import { trajectoryPage } from './pages.ts'
-import { billedTokens, projectedTokenUsage, taskSessionsOf } from './evaluation-cost.ts'
+import { billedTokens, projectedTokenUsage, sessionUsageAudit, taskSessionsOf } from './evaluation-cost.ts'
 
 /** Historical reads are explicit RSI queries; business workers and reviewers keep their existing scopes. */
 export async function readHistory(apparatus: Apparatus, agentId: string, input: ReadInput): Promise<unknown> {
@@ -62,7 +62,8 @@ export async function readHistory(apparatus: Apparatus, agentId: string, input: 
       }
       else if (input.kind === 'usage') {
         const tokenUsage = projectedTokenUsage(apparatus, handle, events)
-        rows.push({ sessionId, source: 'token-meter/tokenUsage', tokenUsage, tokens: billedTokens(tokenUsage) })
+        rows.push({ sessionId, source: 'token-meter/tokenUsage', tokenUsage, tokens: billedTokens(tokenUsage),
+          audit: sessionUsageAudit(events, tokenUsage) })
       } else if (input.kind === 'steps') rows.push({ sessionId,
         steps: events.filter(event => event.type === 'step/start').length,
         turns: events.filter(event => event.type === 'turn/start').length,

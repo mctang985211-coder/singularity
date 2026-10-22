@@ -12,7 +12,7 @@ import { DEFAULT_WORKFLOW_LIMITS } from '../../src/task/budget.ts'
 import type { TaskContract } from '../../src/task/contract.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { callerOf, declareCaller, taskStateOf } from './apparatus.ts'
-import { answerChild, askParent, assertActive, coordinationOf, directionForRun, parentPlan, waitingReason } from './coordination.ts'
+import { answerChild, askParent, assertActive, directionForRun, parentPlan, waitingReason } from './coordination.ts'
 import { taskDispatchStart, taskSessionsOf } from './evaluation-cost.ts'
 import type { Admission } from './execution.ts'
 import { sha256, taskIdOf } from './ids.ts'
@@ -21,7 +21,7 @@ import { parentMemorySessionsOf, readMemoryForAgent } from './memory-view.ts'
 import { memoryContextOf } from './memory.ts'
 import { confirmWorkflowDelivery, methodContext, mountMethodSkills, runMethodTool } from './method-run.ts'
 import { methodToolReferences } from './method.ts'
-import { parentMemoryRefOf, prepareParentMemory, readParentMemory, type ParentMemoryRef } from './parent-memory.ts'
+import { ParentMemoryUnavailable, parentMemoryRefOf, prepareParentMemory, readParentMemory, type ParentMemoryRef } from './parent-memory.ts'
 import { readForAgent } from './read.ts'
 import { repair } from './repair.ts'
 import { methodReviewTools, reviewOf, submitReview } from './review.ts'
@@ -212,7 +212,12 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
     reviewTarget: agentId => reviewOf(apparatus, agentId)?.target,
     responsibility: (agentId) => {
       const task = owner(agentId), review = reviewOf(apparatus, agentId)
-      return task === undefined && review === undefined ? undefined : coordinationOf(apparatus, review?.reviewId ?? task!.taskId)
+      if (task === undefined && review === undefined) return undefined
+      const id = review?.reviewId ?? task!.taskId
+      const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
+      const working = review === undefined ? run?.status === 'running' && run.stage === 'working' : review.status === 'running'
+      return { waiting: waitingReason(apparatus, id) ?? null,
+        canPlan: working && waitingReason(apparatus, id, apparatus.store.load(), 'plan') === undefined }
     },
     enter: (agent, messages, model) =>
       work(async () => {
@@ -342,7 +347,13 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
         review?.reviewId ?? task?.taskId ?? refuse('not-responsible', 'caller has no assigned responsibility')
       return {
         current,
-        memory: (input) => work(() => readMemoryForAgent(apparatus, caller.agentId, input)),
+        memory: (input) => work(async () => {
+          if (input?.ref === undefined) {
+            try { await service.prepareMemory(agent) }
+            catch (error) { if (!(error instanceof ParentMemoryUnavailable)) throw error }
+          }
+          return readMemoryForAgent(apparatus, caller.agentId, input)
+        }),
         stopExplorations: (input) => work(async () => {
           if (!input.requestKey) refuse('malformed-declaration', 'stop exploration requires a stable requestKey')
           if (review !== undefined) refuse('not-responsible', 'independent reviews delegate only required evidence Tasks')

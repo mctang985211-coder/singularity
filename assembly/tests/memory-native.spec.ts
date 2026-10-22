@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { createUserMessage, LlmAdapter, LlmError, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, LlmAdapter, LlmError, ReasoningEffortId, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -47,6 +47,7 @@ class MemoryAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
   response: string = JSON.stringify(draft)
   toolOutput = false
+  businessToolOutput = false
   summaryFinish = true
   summaryUsage = true
   summaryError = false
@@ -66,7 +67,8 @@ class MemoryAdapter extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'error', failure: { code: 'PI_AI_ERROR', message: 'upstream_error: stream_read_error' } } }
       return
     }
-    if (summary && this.toolOutput) {
+    if (summary && this.toolOutput || !summary && this.businessToolOutput) {
+      this.businessToolOutput = false
       const id = ToolCallId('forged-memory-tool-call')
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index: 0, id, name: 'memory_fixture_write', argumentsDelta: '{}' }
@@ -128,7 +130,20 @@ async function prepare(h: Awaited<ReturnType<typeof fixture>>, context = h.conte
     ...(inherited === undefined ? {} : { inherited }) })
 }
 
-it('automatically prepares optional parent background without compressing or injecting the child conversation', async () => {
+it('preserves the source reasoning effort for requested background', async () => {
+  const h = await fixture()
+  h.adapter.resolveModel = async (provider, model) => ({ provider, id: model, name: model,
+    context: { contextWindow: 200_000 }, reasoning: { efforts: [{ id: ReasoningEffortId('max'), name: 'Maximum' }] } })
+  const agent = await h.ctx.agentLoop.create(SessionId('max-effort-parent'), {
+    provider: 'memory-test', model: 'max-effort', reasoningEffort: ReasoningEffortId('max'), maxTokens: 256,
+  }, { cwd: h.root })
+  agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Preserve the rationale for delegation.' }] }))
+  await agent.whenIdle()
+  await prepare({ ...h, agent })
+  expect(h.adapter.requests.at(-1)!.reasoningEffort).toBe('max')
+})
+
+it('prepares requested optional parent background without compressing or injecting the child conversation', async () => {
   const h = await fixture(), before = await durableEvents(h.ctx, h.agent), surface = h.agent.session.deriveMessages()
   const ref = await prepare(h), events = await durableEvents(h.ctx, h.agent)
   const checkpoint = await readParentMemory(h.ctx.sessionPersistence, ref)
@@ -143,10 +158,40 @@ it('automatically prepares optional parent background without compressing or inj
   expect(request.purpose).toBeUndefined()
   expect(request.tools).toBeUndefined()
   expect(request.messages).toHaveLength(1)
+  expect(request.reasoningEffort).toBeUndefined()
   expect(h.execute).not.toHaveBeenCalled()
   expect(parentMemoryRefOf(String(h.agent.session.id), events, scope)).toEqual(ref)
   expect(await prepare(h)).toEqual(ref)
   expect(h.adapter.requests).toHaveLength(3)
+})
+
+it('bounds background requests and excludes host context, tool output and old text while retaining full source provenance', async () => {
+  const h = await fixture()
+  h.execute.mockResolvedValueOnce('EDA_BUILD_OUTPUT '.repeat(30_000))
+  h.adapter.businessToolOutput = true
+  await h.send('read the measured tool observation')
+  h.agent.session.append('user/message', createUserMessage({ source: { kind: 'system-prompt' },
+    content: [{ type: 'text', text: 'HOST_RELATION_SNAPSHOT '.repeat(30_000) }] }), { surfaceOp: 'append' })
+  for (let index = 0; index < 20; index++) h.agent.session.append('user/message', createUserMessage({ source: { kind: 'user' },
+    content: [{ type: 'text', text: `working-note-${index}: ${'路径\\\"数据\n'.repeat(3000)}` }] }), { surfaceOp: 'append' })
+  h.agent.session.append('user/message', createUserMessage({ source: { kind: 'user' },
+    content: [{ type: 'text', text: 'NEWEST_FINDING: keep the reusable arithmetic interface.' }] }), { surfaceOp: 'append' })
+  await h.ctx.sessions.flush(h.agent.session)
+  const before = await durableEvents(h.ctx, h.agent), ref = await prepare(h)
+  const request = h.adapter.requests.at(-1)!, serialized = JSON.stringify(request.messages)
+  expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(32 * 1024)
+  expect(serialized).toContain('NEWEST_FINDING')
+  expect(serialized).not.toContain('HOST_RELATION_SNAPSHOT')
+  expect(serialized).not.toContain('EDA_BUILD_OUTPUT')
+  expect(serialized).not.toContain('working-note-0:')
+  const content = request.messages[0]!.content[1]!
+  const selected = JSON.parse(content.type === 'text' ? content.text : '')
+  expect(selected.selection).toMatchObject({ policy: 'recent-working-text', maxRequestBytes: 32768 })
+  expect(selected.selection.omittedMessages).toBeGreaterThan(0)
+  expect((await readParentMemory(h.ctx.sessionPersistence, ref)).sources.at(-1)).toMatchObject({
+    eventCount: before.length,
+    digest: digestOf({ sessionId: String(h.agent.session.id), eventCount: before.length, events: before }),
+  })
 })
 
 it('carries ancestor background into the next summary even when the parent never reads it', async () => {
@@ -157,13 +202,37 @@ it('carries ancestor background into the next summary even when the parent never
   expect(checkpoint.scope).toEqual(next.scope)
   expect(checkpoint.sources).toHaveLength(2)
   const request = h.adapter.requests.at(-1)!, data = request.messages[0]!.content[1]!
-  expect(data.type === 'text' ? JSON.parse(data.text).inherited : null).toEqual(inherited)
+  const selected = data.type === 'text' ? JSON.parse(data.text) : null
+  expect(selected.inherited).toEqual({ decisions: inherited.decisions, hypotheses: inherited.hypotheses,
+    openQuestions: inherited.openQuestions, exclusions: inherited.exclusions })
+  expect(selected.inheritedSourcesDigest).toBe(digestOf(inherited.sources))
   expect(h.agent.session.deriveMessages().some(message => JSON.stringify(message).includes('formatVersion'))).toBe(false)
   const forged = structuredClone(await durableEvents(h.ctx, h.agent)), event = forged[ref.eventSeq]!
   if (event.type !== 'singularity/parent-memory') throw new Error('missing descendant checkpoint')
   Object.assign(event.data.checkpoint, { sources: event.data.checkpoint.sources.slice(1) })
   const persistence = { open: async () => ({ read: async () => ({ events: forged }), close: async () => undefined }) } as unknown as Context['sessionPersistence']
   await expect(readParentMemory(persistence, ref)).rejects.toThrow('differs from the original host input')
+})
+
+it('continues to verify legacy checkpoints whose input carried inherited sources in full', async () => {
+  const h = await fixture(), prior = await prepare(h), inherited = await readParentMemory(h.ctx.sessionPersistence, prior)
+  const context: MemoryContext = { ...h.context, scope: { ...scope, kind: 'task', taskId: 'legacy-child', runId: 'legacy-run' } }
+  const ref = await prepare(h, context, inherited), events = structuredClone(await durableEvents(h.ctx, h.agent))
+  const started = memoryCallsOf(events).find(event => event.data.memoryId === ref.memoryId && event.data.phase === 'started')!
+  if (started.data.phase !== 'started') throw new Error('missing memory call')
+  const instruction = structuredClone(started.data.instruction), content = instruction.content[1]!
+  if (content.type !== 'text') throw new Error('missing original input')
+  const input = JSON.parse(content.text)
+  delete input.inheritedSourcesDigest
+  input.inherited = inherited
+  Object.assign(content, { text: JSON.stringify(input) })
+  const inputDigest = digestOf({ messages: [instruction] })
+  Object.assign(started.data, { instruction, inputDigest })
+  const checkpointEvent = events[ref.eventSeq]!
+  if (checkpointEvent.type !== 'singularity/parent-memory') throw new Error('missing checkpoint')
+  Object.assign(checkpointEvent.data.checkpoint.sources.at(-1)!, { inputDigest })
+  const persistence = { open: async () => ({ read: async () => ({ events }), close: async () => undefined }) } as unknown as Context['sessionPersistence']
+  expect((await readParentMemory(persistence, ref)).scope).toEqual(context.scope)
 })
 
 it.each([

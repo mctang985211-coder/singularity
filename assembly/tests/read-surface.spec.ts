@@ -227,3 +227,40 @@ it('keeps validation and heldout Tasks outside proposer reads and prepared memor
   }
   await h.apparatus.store.close()
 })
+
+it('pages related Task indexes without replaying contracts, verdicts or historical Run bodies', async () => {
+  const h = await setup()
+  const oldRun = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!
+  const failure = 'Old diagnostic evidence. '.repeat(1000)
+  await h.apparatus.tasks.forAgent(h.caller.agentId).failRun({ commandId: 'old-failure', taskId: h.proposal.taskId,
+    runId: oldRun.runId, reason: failure })
+  const current = await startAttempt(h.apparatus, h.caller, h.proposal.taskId, 'retry', oldRun.revision)
+  const goal = 'Detailed local investigation context. '.repeat(200)
+  await decompose(h.apparatus, { advance: async () => [] }, h.caller, { taskId: h.proposal.taskId,
+    children: Array.from({ length: 25 }, (_, index) => ({ key: 'child-' + index,
+      contract: { goal: `${index}: ${goal}`, artifact: 'finding.txt', inputs: [],
+        criteria: [{ criterionId: 'finding', statement: 'A reproducible finding' }] },
+      dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const })) })
+  type Summary = { total: number; from: number; next: number | null;
+    tasks: { taskId: string; parentId: string | null; sessionId: string; runs: { runId: string; status: string }[] }[] }
+  const first = await readForAgent(h.apparatus, h.caller.agentId) as Summary
+  expect(first).toMatchObject({ total: 26, from: 0, next: 20 })
+  expect(first.tasks).toHaveLength(20)
+  expect(first.tasks.find(task => task.taskId === h.proposal.taskId)!.runs)
+    .toEqual([{ runId: current.runId, status: 'running', stage: 'working', artifactDigest: undefined }])
+  const second = await readForAgent(h.apparatus, h.caller.agentId, { kind: 'summary', from: first.next! }) as Summary
+  expect(second).toMatchObject({ total: 26, from: 20, next: null })
+  expect(second.tasks).toHaveLength(6)
+  expect(new Set([...first.tasks, ...second.tasks].map(task => task.taskId)).size).toBe(26)
+  const text = JSON.stringify([...first.tasks, ...second.tasks])
+  expect(text.length).toBeLessThan(12_000)
+  for (const excluded of [goal, failure, 'contractDigest', 'source', 'verdicts']) expect(text).not.toContain(excluded)
+  const childId = second.tasks[0]!.taskId
+  expect(await readForAgent(h.apparatus, h.caller.agentId, { kind: 'task', ref: childId }))
+    .toMatchObject({ contract: { goal: expect.stringContaining(goal) } })
+  expect((await readForAgent(h.apparatus, h.caller.agentId, { kind: 'summary', count: 100 }) as Summary).tasks)
+    .toHaveLength(26)
+  for (const range of [{ from: -1 }, { count: 0 }, { count: 101 }, { from: 0.5 }])
+    await expect(readForAgent(h.apparatus, h.caller.agentId, { kind: 'summary', ...range })).rejects.toThrow('summary range')
+  await h.apparatus.store.close()
+})

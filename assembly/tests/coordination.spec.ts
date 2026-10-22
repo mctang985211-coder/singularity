@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { openApparatus, callerOf, declareCaller, taskStateOf } from '../src/apparatus.ts'
-import { askParent, answerChild, assertActive, coordinationOf, waitingReason, readScopeOf } from '../src/coordination.ts'
+import { askParent, answerChild, assertActive, coordinationOf, waitingReason, readScopeOf, workflowDirection } from '../src/coordination.ts'
 import { loadDomain } from '../src/domain.ts'
 import { contractFor } from '../src/inputs.ts'
 import { openDriver } from '../src/driver.ts'
@@ -78,6 +78,20 @@ it('dispatches one contract with scoped handoff and leaves parent responsibiliti
   await h.scheduler.close(); await h.apparatus.store.close()
 })
 
+it('keeps dispatch direction independent of ancestor and sibling contract body length', async () => {
+  const h = await setup()
+  try {
+    const states = new Map([...h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)]
+      .map(([id, state]) => [id, { ...state, contract: { ...state.contract!, goal: `${id}:` + 'long private contract detail '.repeat(2000) } }]))
+    const direction = workflowDirection(states, h.child.taskId, 10)
+    expect(direction.root.goal).toHaveLength(512)
+    expect(direction.root.goalComplete).toBe(false)
+    expect(direction.supportPath.every(node => !('goal' in node))).toBe(true)
+    expect(direction.interfaces.every(node => !('goal' in node))).toBe(true)
+    expect(JSON.stringify(direction).length).toBeLessThan(2500)
+  } finally { await h.scheduler.close(); await h.apparatus.store.close() }
+})
+
 it('pins questions to the direct parent, blocks execution, and rejects self/peer/foreign answers', async () => {
   const h = await setup()
   const ask = { requestKey: 'scope', question: 'Does punctuation change the count?' }
@@ -92,9 +106,10 @@ it('pins questions to the direct parent, blocks execution, and rejects self/peer
     executionMode: 'coordinate', canExecute: false, canSubmit: false,
   })
   expect(parentCoordination.responsibility.delegated).toMatchObject([
-    { taskId: h.child.taskId, goal: h.child.contract!.goal, requirement: 'required', supports: ['letters'] },
-    { taskId: h.peer.taskId, goal: h.peer.contract!.goal, requirement: 'required', supports: ['letters'] },
+    { taskId: h.child.taskId, requirement: 'required', supports: ['letters'] },
+    { taskId: h.peer.taskId, requirement: 'required', supports: ['letters'] },
   ])
+  expect(parentCoordination.responsibility.delegated.every(child => !('goal' in child))).toBe(true)
   expect(coordinationOf(h.apparatus, h.child.taskId).responsibility).toMatchObject({
     authority: { kind: 'task', taskId: h.child.taskId, runId: h.run.runId },
     delegated: [], canExecute: false, canSubmit: false,

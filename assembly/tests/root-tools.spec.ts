@@ -204,9 +204,7 @@ try {
   let parentEvents
   try { parentEvents = (await handle.read()).events } finally { await handle.close() }
   const checkpoints = parentEvents.filter(event => event.type === 'singularity/parent-memory')
-  assert.equal(checkpoints.length, 1, 'Child dispatch must automatically prepare background')
-  assert.equal(checkpoints[0].data.checkpoint.scope.taskId, childTask.taskId)
-  assert.equal(checkpoints[0].ignorable, true)
+  assert.equal(checkpoints.length, 0, 'Child dispatch must not buy an unsolicited background summary')
   assert.equal(parentEvents.filter(event => event.type.startsWith('compaction/')).length, 0)
   const childRequest = requests.find(request => request.sessionId === assigned.session.id)
   assert(childRequest, 'The child did not begin its native model request')
@@ -278,6 +276,11 @@ try {
   const index = JSON.parse(directory.value)
   assert.equal(index.total, 1)
   assert.equal(index.inherited, index.entries[0].ref)
+  const summaryRequests = () => requests.filter(request => request.messages[0]?.content.some(block =>
+    block.type === 'text' && block.text.startsWith('Summarize parent conversation data')))
+  assert.equal(summaryRequests().length, 1, 'Only an explicit memory request generates background')
+  await ctx.tools.execute({ name: 'singularity_memory', agent: assigned, arguments: {}, callId: 'optional-memory-again', signal: new AbortController().signal })
+  assert.equal(summaryRequests().length, 1, 'Repeated reads reuse the durable checkpoint')
   const rootDirectory = await ctx.tools.execute({ name: 'singularity_memory', agent: parent, arguments: {}, callId: 'root-memory-index', signal: new AbortController().signal })
   assert(!rootDirectory.isError, JSON.stringify(rootDirectory))
   assert.equal(JSON.parse(rootDirectory.value).inherited, null)
@@ -285,8 +288,9 @@ try {
   const background = await ctx.tools.execute({ name: 'singularity_memory', agent: assigned, arguments: { ref: index.inherited }, callId: 'optional-memory-read', signal: new AbortController().signal })
   assert(!background.isError && JSON.stringify(background).includes(inheritedDecision), JSON.stringify(background))
   const pendingPrompt = await ctx.systemPrompt.assemble({ scope: parent, agent: parent })
-  assert(pendingPrompt.contexts.some(context => context.name === 'singularity:responsibility'))
-  const responsibility = JSON.parse(pendingPrompt.contexts.find(context => context.name === 'singularity:responsibility').text)
+  assert(!pendingPrompt.contexts.some(context => ['singularity:responsibility', 'singularity:rsi-state'].includes(context.name)))
+  const liveSummary = await ctx.tools.execute({ name: 'singularity_read', agent: parent, arguments: { kind: 'summary' }, callId: 'explicit-responsibility', signal: new AbortController().signal })
+  const responsibility = JSON.parse(liveSummary.value).coordination
   assert(responsibility.waiting !== null)
   assert(!pendingPrompt.sections.some(section => section.text.includes(parentGoal)), 'Task goals must not enter system instructions')
   const pendingAllowed = new Set(['read', 'read_image', 'glob', 'grep', 'singularity_read', 'singularity_memory', 'singularity_answer', 'singularity_ask_parent', 'singularity_stop_explorations', 'singularity_retry_task', 'singularity_decompose_task'])
@@ -315,7 +319,14 @@ try {
   await Promise.all(ctx.agents.list().map(agent => agent.whenIdle()))
   assert.equal(retryWaits, 0)
   assert.equal(requests.filter(request => request.model === 'failed-summary' && request.messages[0]?.content.some(block =>
-    block.type === 'text' && block.text.startsWith('Summarize parent conversation data'))).length, 1)
+    block.type === 'text' && block.text.startsWith('Summarize parent conversation data'))).length, 0)
+  const beforeProviderFailure = await ctx.singularity.read()
+  assert(beforeProviderFailure.tasks.every(task => task.phase !== 'failed' && task.rsi === null), JSON.stringify(beforeProviderFailure))
+  const backgroundChild = beforeProviderFailure.tasks.find(task => task.goal === 'Investigate provider-child')
+  assert(requests.some(request => request.sessionId === backgroundChild.sessionId), 'Business execution must start without a background call')
+  const failedMemory = await ctx.tools.execute({ name: 'singularity_memory', agent: ctx.agents.get(SessionId(backgroundChild.sessionId)),
+    arguments: {}, callId: 'failed-background-index', signal: new AbortController().signal })
+  assert(!failedMemory.isError, JSON.stringify(failedMemory))
   const summaryLog = await ctx.sessionPersistence.open(brokenParent.session.id, 'read')
   try {
     const events = (await summaryLog.read()).events
@@ -325,13 +336,6 @@ try {
     assert.equal(events.filter(event => event.type === 'singularity/parent-memory-failed').length, 1)
     assert.equal(events.filter(event => event.type === 'llm/retry').length, 0)
   } finally { await summaryLog.close() }
-  const beforeProviderFailure = await ctx.singularity.read()
-  assert(beforeProviderFailure.tasks.every(task => task.phase !== 'failed' && task.rsi === null), JSON.stringify(beforeProviderFailure))
-  const backgroundChild = beforeProviderFailure.tasks.find(task => task.goal === 'Investigate provider-child')
-  assert(requests.some(request => request.sessionId === backgroundChild.sessionId), 'An optional summary failure prevented business execution')
-  const failedMemory = await ctx.tools.execute({ name: 'singularity_memory', agent: ctx.agents.get(SessionId(backgroundChild.sessionId)),
-    arguments: {}, callId: 'failed-background-index', signal: new AbortController().signal })
-  assert(!failedMemory.isError, JSON.stringify(failedMemory))
   const failedDirectory = JSON.parse(failedMemory.value)
   assert(failedDirectory.entries.some(entry => entry.ref === failedDirectory.inherited && entry.status === 'failed' && entry.error.includes('temporarily unavailable')),
     JSON.stringify(failedDirectory))
@@ -385,7 +389,7 @@ try {
   assert.equal(healthy.session.snapshotEvents().findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
   globalThis.setTimeout = nativeTimeout
   assert(!('budget' in ctx.singularity), 'The host must not install a campaign budget gate')
-  console.log('all four role protocols and RSI schemas delivered; root confined reads pass; own mutations denied; child execution retained; automatic optional parent memory and pending responsibility pass')
+  console.log('all four role protocols and RSI schemas delivered; root confined reads pass; own mutations denied; child execution retained; on-demand optional parent memory and pending responsibility pass')
 } finally { await ctx.fiber.dispose() }
 `
 
@@ -397,6 +401,6 @@ it('delivers all four native role protocols and RSI schemas with root restrictio
     const script = join(root, 'host.mjs')
     await writeFile(script, smoke)
     const { stdout } = await run(process.execPath, [script, checkout, root], { timeout: 20_000 })
-    expect(stdout.trim()).toBe('all four role protocols and RSI schemas delivered; root confined reads pass; own mutations denied; child execution retained; automatic optional parent memory and pending responsibility pass')
+    expect(stdout.trim()).toBe('all four role protocols and RSI schemas delivered; root confined reads pass; own mutations denied; child execution retained; on-demand optional parent memory and pending responsibility pass')
   } finally { await rm(root, { recursive: true, force: true }) }
 }, 25_000)

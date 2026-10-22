@@ -286,8 +286,9 @@ describe('fact-driven child scheduling', () => {
       )!
     expect(notice.source).toMatchObject({ kind: 'singularity', purpose: 'plan-outcome', parentTaskId: 'parent-task', taskId: 'child-task', factSeq: terminal.seq,
       })
-    expect(contentOf(notice)).toContain(cause === 'runtime' ? 'provider unavailable' : cause === 'unknown' ? 'verification evidence is insufficient' : 'budget exhausted')
-    expect(contentOf(notice)).toContain('child-task-dependent')
+    expect(JSON.parse(contentOf(notice))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
+      completed: 2, requiredFailures: 2, instruction: expect.stringContaining('kind=summary') })
+    expect(contentOf(notice)).not.toContain('child-task-dependent')
     expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)).toMatchObject({
       status: 'failed', failureCause: cause === 'runtime' ? 'runtime' : 'business', failureReason: expect.stringContaining('required delegated responsibilities ended without verification') })
     expect(h.runtime.delivered.filter((entry) => entry.sessionId !== 'parent-session')).toHaveLength(1)
@@ -303,6 +304,8 @@ describe('fact-driven child scheduling', () => {
     expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
     const notice = h.runtime.delivered.find((entry) => entry.sessionId === 'parent-session')!.message
     expect(contentOf(notice)).toContain('independent')
+    expect(JSON.parse(contentOf(notice))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
+      completed: 1, requiredFailures: 0 })
     expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)[0]).toMatchObject({ status: 'running', evidence: [],
     })
     await scheduler.advance('parent-task')
@@ -317,15 +320,38 @@ describe('fact-driven child scheduling', () => {
       runId: run.runId, reason: 'provider unavailable' })
     await scheduler.advance('parent-task')
     expect(h.runtime.delivered.filter((e) => e.sessionId === 'parent-session')).toMatchObject([{ message: { source: { purpose: 'branch-outcome', taskId: 'child-task' } } }])
+    const branch = JSON.parse(contentOf(h.runtime.delivered.find((entry) => entry.sessionId === 'parent-session')!.message))
+    expect(branch).toMatchObject({ taskId: 'child-task', runId: run.runId, status: 'failed', verdicts: [] })
+    expect(Object.keys(branch)).toEqual(['taskId', 'runId', 'status', 'verdicts'])
     await h.answer('child-task-sibling', true)
     await scheduler.advance('parent-task')
     await scheduler.advance('parent-task')
     const notices = h.runtime.delivered.filter((e) => e.sessionId === 'parent-session' && e.message.source.kind === 'singularity' && e.message.source.purpose === 'plan-outcome')
     expect(notices).toHaveLength(1)
     expect(notices[0]!.message.source).toMatchObject({ taskId: 'child-task-sibling' })
-    expect(contentOf(notices[0]!.message)).toContain('provider unavailable')
-    expect(contentOf(notices[0]!.message)).toContain('artifactDigest')
-    expect(contentOf(notices[0]!.message)).toContain('child-task')
+    expect(JSON.parse(contentOf(notices[0]!.message))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
+      completed: 2, requiredFailures: 1, instruction: expect.stringContaining('kind=summary') })
+    expect(contentOf(notices[0]!.message)).not.toContain('provider unavailable')
+    expect(contentOf(notices[0]!.message)).not.toContain('artifactDigest')
+  })
+
+  it('keeps notifications independent of long child contracts and leaves evidence in explicit reads', async () => {
+    const h = await setup(), scheduler = h.make()
+    const goal = 'Detailed scoped design obligation. '.repeat(500)
+    await h.addPlan('large-parent', 'large-holder', 'large-session', 'large-child', 'model-A', true,
+      { goal, artifact: 'finding.txt', inputs: [], criteria: [{ criterionId: 'finding', statement: 'Return a verified finding' }] })
+    await scheduler.advance('large-parent')
+    await h.answer('large-child', true)
+    await scheduler.advance('large-parent')
+    const notice = h.runtime.delivered.find((entry) => entry.sessionId === 'large-session')!.message
+    expect(JSON.parse(contentOf(notice))).toMatchObject({ parentTaskId: 'large-parent', complete: true,
+      completed: 1, requiredFailures: 0 })
+    expect(contentOf(notice).length).toBeLessThan(600)
+    expect(contentOf(notice)).not.toContain(goal)
+    expect(contentOf(notice)).not.toContain('Independent fixture judgment')
+    expect(taskStateOf(h.apparatus, 'large-child').contract!.goal).toBe(goal)
+    expect(Object.values(taskStateOf(h.apparatus, 'large-child').runs)[0]!.evidence[0]!.detail)
+      .toContain('Independent fixture judgment')
   })
 
 
@@ -337,6 +363,10 @@ describe('fact-driven child scheduling', () => {
     expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toMatchObject([
       { message: { source: { purpose: 'branch-outcome', taskId: 'child-task' } } },
     ])
+    const outcome = JSON.parse(contentOf(h.runtime.delivered.find(entry => entry.sessionId === 'parent-session')!.message))
+    expect(outcome).toMatchObject({ taskId: 'child-task', status: 'verified', artifactDigest: expect.any(String),
+      verdicts: [expect.objectContaining({ criterionId: 'letters', verdict: 'pass' })] })
+    expect(outcome.verdicts.every((finding: Record<string, unknown>) => !Object.hasOwn(finding, 'detail'))).toBe(true)
     const tasks = () => h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
     expect(taskWaitingReason(tasks(), 'parent-task')).toContain('pending')
     const stop = { commandId: 'select-winner', parentTaskId: 'parent-task', taskIds: ['child-task-sibling'], reason: 'accepted candidate is sufficient' }

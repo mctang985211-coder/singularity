@@ -195,22 +195,24 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
           (state.evaluationId.startsWith(`${input.ref}:`) && /^\d+:candidate:evaluation$/.test(state.evaluationId.slice(input.ref!.length + 1)))),
     }
   }
+  const from = input.from ?? 0, count = input.count ?? 20
+  if (!Number.isSafeInteger(from) || from < 0 || !Number.isSafeInteger(count) || count < 1 || count > 100)
+    refuse('malformed-declaration', 'summary range must use a nonnegative offset and 1 to 100 entries')
+  const related = [...tasks.values()].filter((state) => visible!.has(state.taskId))
   return { coordination: coordinationOf(apparatus, current), method: reference,
-    tasks: [...tasks.values()].filter((state) => visible!.has(state.taskId)).map((state) => {
+    total: related.length, from, next: from + count < related.length ? from + count : null,
+    tasks: related.slice(from, from + count).map((state) => {
       const producers = frozenProducers.get(state.taskId)
-      if (producers !== undefined) return { taskId: state.taskId, goal: producers[0]!.contract.goal, parentId: null,
+      if (producers !== undefined) return { taskId: state.taskId, parentId: null,
         sessionId: producers[0]!.source.sessionId, children: [], runs: producers.map((producer) => ({
-          runId: producer.runId, status: producer.status, verdicts: producer.evidence.map(({ criterionId, verdict, reviewId }) => ({ criterionId, verdict, reviewId })),
-          artifact: producer.artifact, source: producer.source })) }
+          runId: producer.runId, status: producer.status, artifactDigest: producer.artifactDigest })) }
+      const run = Object.values(state.runs).at(-1)
       return { taskId: state.taskId,
-        goal: state.contract!.goal, parentId: parentPlan(apparatus, state.taskId)?.id ?? null,
+        parentId: parentPlan(apparatus, state.taskId)?.id ?? null,
         sessionId: cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, state.responsibility!.agentId)!.sessionId,
         children: state.decomposition?.children.map(({ taskId }) => taskId) ?? [],
-        runs: Object.values(state.runs).map((run) => ({ runId: run.runId, status: run.status, stage: run.stage,
-          failureCause: run.failureCause, failureReason: run.failureReason,
-          verdicts: run.evidence.map(({ criterionId, verdict, reviewId }) => ({ criterionId, verdict, reviewId })),
-          artifact: run.submission?.files.artifact, source: run.submission?.source,
-        })),
+        runs: run === undefined ? [] : [{ runId: run.runId, status: run.status, stage: run.stage,
+          artifactDigest: run.submission?.artifactDigest }],
       }
     }),
   }

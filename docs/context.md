@@ -54,9 +54,9 @@ Run 直接固定方法版本，Bubble 冻结输入附件、artifact 输入的 pr
 
 父仍须完成集成与独立验收，保留证据如何影响选择。handoff 区分决策、假设、排除路径及已验证证据，父会话历史不整体复制。RSI 的 subject.json 仅含冻结摘要，完整轨迹通过 singularity_read 分页读取。模型只用 singularity_propose_method 提交完整方法；宿主绑定 incumbent/round，先审查、再复用封存业务基线并冷启动候选，决策后独立审核发布。提案与发布审核仅暴露文件读写、封存材料读取和判断提交，不提供执行、网页或委派工具；无赢家或发布被拒时恢复原 RSI 会话，可在剩余额度内修订或如实结束。
 
-结构化 memory 是给子 Task 的父背景，默认在子执行前尝试生成；摘要失败以原生 log-only 事件保存原因，目录标记 ready/failed，失败背景不阻断业务 Task，持久化和来源完整性错误仍传播；不把摘要直接注入子 system prompt。`singularity_memory()` 提供可读分支的统一分页目录（from/count 默认 20、最大 100），inherited 标出本节点继承引用，传 ref 才读完整 checkpoint。root 看整棵树，普通节点按现有任务可见范围且不跨根，独立审核及其取证后代仅看同一审核分支，RSI 可读关联执行分支。目录只投影原生 checkpoint 的身份、适用 Task/Run、来源截止位置与当前 Run 状态，不生成新摘要；历史 Run 与当前 Run 分开标记。checkpoint 固定 formatVersion、scope、sources、decisions、evidenceRefs、hypotheses、openQuestions、exclusions。模型按子责任筛选父会话与继承背景中的决定、依据、假设、疑问和排除路径；宿主从事实投影合同/方法身份、来源前缀及精确 verified Run 的证据身份与状态。checkpoint 和模型调用写入原生 log-only 事件，读取/恢复校验来源摘要、原始输入/输出和证据范围；不另建 memory store。JSON schema 不保证叙述语义保真，父声称 verified 不能提升为验收事实，其他分支的摘要不能增加本节点责任。
+结构化 memory 是给子 Task 的可选父背景，不在启动时自动生成。首次显式 `singularity_memory()` 准备本节点背景再列目录，已有 checkpoint 或失败记录不重试购买摘要；传 ref 只读。序列化输入最多 32 KiB，只选近期 user/assistant 正文，排除 reasoning、工具结果与宿主快照；输出额度保留 32768 tokens，思考强度继承源会话设置。摘要失败以原生 log-only 事件保存原因，目录标记 ready/failed，失败背景不阻断业务 Task，持久化和来源完整性错误仍传播；不把摘要直接注入子 system prompt。目录分页默认 20、最大 100，inherited 标出本节点继承引用。root 看整棵树，普通节点按现有任务可见范围且不跨根，独立审核及其取证后代仅看同一审核分支，RSI 可读关联执行分支。目录只投影 checkpoint 身份、适用 Task/Run、来源截止位置与当前 Run 状态，历史 Run 分开标记。checkpoint 固定 formatVersion、scope、sources、decisions、evidenceRefs、hypotheses、openQuestions、exclusions。宿主绑定完整原始来源前缀摘要并校验读取/恢复，不另建 memory store。JSON schema 不保证叙述语义保真，父声称 verified 不能提升为验收事实，其他分支的摘要不能增加本节点责任。
 
-单 Session 达到上下文阈值的压缩全权归 DSH 原生 BasicCompaction，四个 preset 使用原生摘要、范围选择、工具配对、替换与恢复，assembly 不定制其内容或 JSON 格式。
+单 Session 压缩归 DSH 原生 BasicCompaction，四个 preset 显式设窗口 70% 触发（本轮 1M 窗口为 700k），保留原生默认尾部策略与 32768 tokens 摘要额度；使用原生范围选择、工具配对、替换与恢复，assembly 不定制摘要内容或 JSON 格式。全局关系及 RSI 动态状态不自动追加到 prompt，准入仍读取实时事实；完整合同和关系按需读取。2026-10-22 两次真实运行的膨胀根因与修复边界见 [审计](runtime-context-audit-20261022.md)，18.2 中默认摘要和动态注入的测试结论仅是历史记录。
 
 ### 18.4 终局、异步推进与恢复
 
@@ -68,7 +68,7 @@ Run 失败不立即等于 Task 关闭：根 agent 可在当前回合重试；静
 
 ### 18.5 不要重建的基础
 
-底层协议拥有 Task 合同、依赖图、责任、状态迁移、探索停止和验收事实；assembly 负责领域声明装载、输入物化、DSH 工具/会话接线、调度和只读投影。DSH 管理单会话压缩事务和持久化；assembly 默认生成可按需读取的结构化父背景并校验引用，handoff 只传当前委派需要的上下文。保留单一信封、ControlSessionStore、append 队列、fold、闭合 schema、版本门、身份检查、不可变附件与证据绑定。内存仅管理资源，不代表业务进度；前端读取同一 committed projection。Web 根借用宿主会话，自建会话 disposer 归创建者，卸载可中断后台等待。
+底层协议拥有 Task 合同、依赖图、责任、状态迁移、探索停止和验收事实；assembly 负责领域声明装载、输入物化、DSH 工具/会话接线、调度和只读投影。DSH 管理单会话压缩事务和持久化；assembly 按显式请求生成有界父背景并校验引用，handoff 只传当前委派需要的上下文。保留单一信封、ControlSessionStore、append 队列、fold、闭合 schema、版本门、身份检查、不可变附件与证据绑定。内存仅管理资源，不代表业务进度；前端读取同一 committed projection。Web 根借用宿主会话，自建会话 disposer 归创建者，卸载可中断后台等待。
 
 部署 seed 直接初始化当前方法。候选只做结构、绑定、工具样例和受保护边界检查；任务审核与最终发布审核独立保留。发布要求 committed 决定、独立见证、实际方法消费、成本上限及匹配 expected pointer。
 

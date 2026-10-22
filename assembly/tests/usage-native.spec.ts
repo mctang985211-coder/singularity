@@ -12,7 +12,8 @@ import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { afterEach, expect, it, vi } from 'vitest'
 import { mountCampaignMemory } from '../src/index.ts'
-import { projectedTokenUsage, taskTokenUsage, taskExecutionWindow, completeUsage, billedTokens } from '../src/evaluation-cost.ts'
+import { projectedTokenUsage, taskTokenUsage, taskExecutionWindow, completeUsage, billedTokens, sessionUsageAudit } from '../src/evaluation-cost.ts'
+import { parentMemoryCall } from '../src/memory-call.ts'
 import type { Apparatus } from '../src/apparatus.ts'
 import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
@@ -140,6 +141,82 @@ it('uses the ui-chat total across native cache buckets and counts reasoning only
   await h.send()
   expect(h.usage()).toEqual({ uncachedInputTokens: 20, cacheReadTokens: 70, cacheWriteTokens: 10, outputTokens: 5 })
   expect(billedTokens(h.usage())).toBe(105)
+})
+
+it('discloses memory and compaction usage separately without changing frozen native comparison costs', async () => {
+  const h = await fixture()
+  h.adapter.reportUsage = true
+  h.adapter.sample = { inputTokens: 20, cacheReadTokens: 70, cacheWriteTokens: 10, outputTokens: 5, reasoningTokens: 4, totalTokens: 105 }
+  await h.send()
+  await parentMemoryCall.run('audit-memory', async () => {
+    for await (const _ of h.ctx.llm.stream({ provider: 'usage-test', model: 'test', sessionId: h.root.session.id,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Summarize bounded working notes.' }] }] })) {}
+  })
+  await h.root.ctx.plugin(BasicCompaction, { retainTokens: 0 })
+  await (h.root.ctx.get('compaction') as Context['compaction']).compactNow(h.root, new AbortController().signal)
+  const events = await h.events(), nativeUsage = h.usage(), audit = sessionUsageAudit(events, nativeUsage)
+  expect(nativeUsage).toEqual({ uncachedInputTokens: 20, cacheReadTokens: 70, cacheWriteTokens: 10, outputTokens: 5 })
+  expect(audit.native).toEqual({ tokenUsage: nativeUsage, knownTokens: 105, zeroUsageAttempts: 0, complete: true })
+  for (const auxiliary of Object.values(audit.auxiliary)) expect(auxiliary).toEqual({
+    calls: 1, missingUsage: 0, tokenUsage: nativeUsage, knownTokens: 105, complete: true,
+  })
+  expect(audit.knownTokens).toBe(315)
+  expect(audit.complete).toBe(true)
+  const handle = await h.ctx.sessionPersistence.open(h.root.session.id, 'read')
+  try { expect(projectedTokenUsage({ projections: h.ctx.sessionProjections } as Apparatus, handle, events)).toEqual(nativeUsage) }
+  finally { await handle.close() }
+})
+
+it('discloses zero-usage failed attempts as uncertain without changing native totals', async () => {
+  const h = await fixture(), original = h.adapter.stream.bind(h.adapter)
+  h.adapter.reportUsage = true
+  let attempt = 0
+  h.adapter.stream = async function* (options) {
+    if (attempt++ === 0) {
+      yield { type: 'usage', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', message: 'response lost before metering' } } }
+    } else yield* original(options)
+  }
+  await h.send()
+  const events = await h.events(), audit = sessionUsageAudit(events, h.usage())
+  expect(completeUsage(events)).toBe(true)
+  expect(audit.native).toMatchObject({ knownTokens: 105, zeroUsageAttempts: 1, complete: false })
+  expect(audit.complete).toBe(false)
+})
+
+it('marks missing auxiliary usage unknown and preserves the known native total', async () => {
+  const h = await fixture()
+  h.adapter.reportUsage = true
+  await h.send()
+  h.adapter.reportUsage = false
+  await parentMemoryCall.run('audit-missing', async () => {
+    for await (const _ of h.ctx.llm.stream({ provider: 'usage-test', model: 'test', sessionId: h.root.session.id,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Summarize bounded working notes.' }] }] })) {}
+  })
+  await h.root.ctx.plugin(BasicCompaction, { retainTokens: 0 })
+  await (h.root.ctx.get('compaction') as Context['compaction']).compactNow(h.root, new AbortController().signal)
+  const audit = sessionUsageAudit(await h.events(), h.usage())
+  expect(audit.complete).toBe(false)
+  expect(audit.knownTokens).toBe(105)
+  expect(audit.native.complete).toBe(true)
+  expect(audit.auxiliary.memory).toMatchObject({ calls: 1, missingUsage: 1, knownTokens: 0, complete: false })
+  expect(audit.auxiliary.compaction).toMatchObject({ calls: 1, missingUsage: 1, knownTokens: 0, complete: false })
+})
+
+it('reports an unsuccessful compaction as unknown rather than declaring a zero cost', async () => {
+  const h = await fixture()
+  h.adapter.reportUsage = true
+  await h.send()
+  const original = h.adapter.stream.bind(h.adapter)
+  h.adapter.stream = async function* (options) {
+    if (options.purpose !== 'compaction') return yield* original(options)
+    yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', message: 'summary response was lost' } } }
+  }
+  await h.root.ctx.plugin(BasicCompaction, { retainTokens: 0 })
+  await expect((h.root.ctx.get('compaction') as Context['compaction']).compactNow(h.root, new AbortController().signal)).rejects.toThrow('manual compaction')
+  const audit = sessionUsageAudit(await h.events(), h.usage())
+  expect(audit.auxiliary.compaction).toMatchObject({ calls: 1, missingUsage: 1, knownTokens: 0, complete: false })
+  expect(audit.complete).toBe(false)
 })
 
 it('bounds a reused root by its own dispatch and submission, including failed or undispatched Tasks', async () => {
