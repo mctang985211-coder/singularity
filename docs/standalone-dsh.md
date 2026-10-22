@@ -31,10 +31,14 @@ export DSH_HOME=/path/to/private-home
 export DSH_CONTROL_INSTALLED=/path/to/private-dsh/node_modules/@deepseek-ai
 pnpm build
 node scripts/deploy.mjs
-/path/to/private-dsh/node_modules/.bin/dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
+node scripts/host-runtime.mjs --host 127.0.0.1 --port 7331 --no-open
 ```
 
 `deploy.mjs` 在构建摘要验证通过后重建该 home 下的 `profiles/singularity-next-web/`，把插件链接到当前 checkout。模型路由和领域目录来自 `deployment/profile/cordis.patch.yml`；凭据只进入私有 home。换机器时先调整领域的外部参考和工具路径，`doctor --domain` 会指出不可读的资料。
+
+`host-runtime.mjs` 仍启动同一原生 DSH 宿主，默认使用 `singularity-next-web`；额外的 `--patch`、端口等参数继续传给 DSH。它把 `TMPDIR/TMP/TEMP` 指向 `$DSH_HOME/.singularity-runtime/tmp-*`，用 Linux `flock` 防止同一 home 同时启动两个受管宿主。正常或失败退出后清理临时目录；启动器被强制终止时，锁由仍在运行的原生宿主持有，直到宿主退出，下次启动再清理遗留临时目录。会话、封存产物、测量与审核记录不在清理范围内。
+
+启动器最后追加 `deployment/runtime.patch.yml`，关闭网页编辑器的整仓库 Git 快照；Singularity 使用自己的封存产物和原生持久化证据。Git ceiling 同时覆盖启动目录、home 及其父目录，防止独立运行目录误识别用户主目录的 Git 仓库。原生子会话传递 parent/origin/delegationDepth，以保持 DSH 的生命周期所有权和子会话行为。不要通过直接运行旧宿主命令绕过这套临时目录管理。
 
 模型启动后使用 `pnpm run doctor --host` 检查原生模型目录及 snapshot。必须保留 `run`，因为 `pnpm doctor` 是 pnpm 自带命令。项目诊断不会调用模型。没有 route、凭据不可用、401/403 或领域缺项会给出具体失败；CLI 不自动重试鉴权或配置错误。
 

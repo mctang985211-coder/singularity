@@ -25,13 +25,24 @@ pnpm verify
 
 `setup:host` 只验证并生成被 Git 忽略的 `.singularity/` 本地解析配置；checkout 和用户目录可以改变。`pnpm verify` 执行离线 build、测试和 gates，不调用模型。生产效果必须依据[原生实跑证据](docs/e2e-testing.md)。
 
+复杂领域可以先交给一个普通 DSH session 准备环境、Task/suite、初始方法和评分计算器，再审核实际文件：
+
+```sh
+export DSH_HOME=/path/to/private-setup-home
+node scripts/singularity.mjs env setup ./environment-request.md \
+  --workspace /path/to/new-staging --patch /path/to/model-route-only.yml
+node scripts/singularity.mjs env approve /path/to/new-staging --reviewer your-name
+```
+
+该入口使用原生 headless profile，不创建 Singularity Task、Bubble 或 RSI，准备完成即退出等待一次审核。模型路由补丁不能挂载 Singularity。配置清单、审核与冻结摘要见[环境准备说明](docs/env-setup.md)。
+
 部署前在 `deployment/profile/cordis.patch.yml` 配置模型路由、领域和控制标识，并在独立 DSH home 配置凭据。领域外部工具与只读参考路径也必须在本机存在。
 
 ```sh
 export DSH_HOME=/path/to/private-home
 export DSH_CONTROL_INSTALLED=/path/to/private-dsh/node_modules/@deepseek-ai
 node scripts/deploy.mjs
-/path/to/private-dsh/node_modules/.bin/dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
+node scripts/host-runtime.mjs --host 127.0.0.1 --port 7331 --no-open
 ```
 
 CLI 使用与网页相同的原生服务和认证。把宿主启动时提供的 token 放在 `SINGULARITY_TOKEN`，不要写进命令或报告；也可以使用 `SINGULARITY_COOKIE`。CLI 不读取 host.log，不启动浏览器。
@@ -63,6 +74,12 @@ node scripts/singularity.mjs experiment report <task-or-session-id> --output ./r
 ```
 
 实验要求 suite 与已部署领域的冻结 suite 摘要完全一致。当前 CLI 只启动第一个 evolve case 的业务 root；有效候选请求 round 后，原生 driver 才执行 evolve 的完整 case×trial 比较，冻结 champion 后再验证 validation/heldout。完整 pilot 逐题执行入口尚未接通，冻结 suite 不会自动补跑其他业务案例。validation/heldout 契约不会随 CLI 提案输入公开。报告从 committed snapshot 导出 suite、campaign 终局、逐轮测量及证据，不维护第二套实验真相。suite 配置与隔离边界见[终局计划](docs/task-first-domain-rsi-plan.md)。
+
+`singularity-assembly.evaluationParallelism` 默认 1，可在新实验中设为 4，使固定 suite 内的独立 trial 并行；轮次和发布仍按序推进。并行度进入 execution profile，改变后应开始新实验。同一 search 内相同方法、矩阵、profile 和计分口径的完整 incumbent 证据可复用，保留原 Task/Run 来源；私有验证重新执行。领域 measurement 可以返回 `{quality, metrics: {name: {value, unit}}, detail}`，公式及系数由领域模块定义并随实现摘要固定，各项原始指标保留在 trial 记录和 RSI 反馈。需要标准通过比例时可选 `suite.scoring: "criteria"`，与自定义 measurement 互斥。
+
+[局部芯片推理示例](domains/chip-inference/README.md)使用模型配置导出的点积 workload、模块级 Verilator、Yosys 和 OpenSTA，提供连续面积/延迟评分。它不运行全芯片仿真或 bebop-p2e；功耗未进入得分，算子结果不能代表端到端模型推理表现。
+
+Git 回退后应重新执行 `pnpm build`，再部署到独立 home/controlId 并检查最终配置。旧日志、旧运行补丁和旧 bundle 不能自动组成一次可恢复的新实验；例如历史草案的 `environmentApproval` 不是当前插件配置字段，审核摘要在启动前核对，不应把该字段继续传给插件。
 
 在原生界面提交完整 TaskContract JSON，或提交自然语言要求：后者作为一条明确的 `request` criterion，与领域可选默认模板的标准一同冻结，不自动拆解或改写含义。没有默认模板时使用 `result.txt`。agent 自主探索、声明子契约并逐层独立验收；简单根任务允许一次完整责任委派。根成功或失败后先返回业务结果，再封存轨迹，异步分析和评估方法候选。通过独立审核的测评赢家可切换唯一方法指针，后续任务固定使用该版本。Singularity map 与右侧 DSH 会话面板读取同一 committed snapshot。模型请求没有 campaign token 预算闸门；成本仅统计一次业务 root、子任务及独立验收截至提交的轨迹，RSI 分析、提案及发布审核用量不参与比较；读取 `token-meter` 的原生 `tokenUsage` 投影，封存至 `subject.json` 的 `summary.usage` 和逐会话 `tokenUsage`，RSI 与 `node scripts/usage-report.mjs <subject.json>` 读取同一统计，口径与 `ui-chat` 的 StatsPills 一致。缺失 usage 遵循原生投影语义，不补算，也不停止模型请求。
 

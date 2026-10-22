@@ -23,13 +23,14 @@ export const name = 'singularity-assembly'
 
 export const inject = ['agents', 'tools', 'sessions', 'sessionPersistence', 'sessionProjections', 'tokenMeter', 'attachments', 'agentPresets', 'llm']
 
-const CONFIG_MEMBERS = ['controlId', 'domainDir', 'workspaceRoot', 'methodFile'] as const
+const CONFIG_MEMBERS = ['controlId', 'domainDir', 'workspaceRoot', 'methodFile', 'evaluationParallelism'] as const
 
 export const Config = z.object({
   controlId: z.string().required(),
   domainDir: z.string().required(),
   workspaceRoot: z.string().required(),
   methodFile: z.string(),
+  evaluationParallelism: z.number().min(1).step(1).default(1),
 })
 
 export interface Config {
@@ -40,6 +41,8 @@ export interface Config {
   /** Where task workspaces are built. Named by the deployment, never guessed from the cwd. */
   readonly workspaceRoot: string
   readonly methodFile?: string
+  /** Maximum independent suite trials evaluated at once; part of the frozen comparison profile. */
+  readonly evaluationParallelism?: number
 }
 
 export function mountCampaignMemory(ctx: Context): void {
@@ -57,6 +60,7 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     initialMethod,
     controlId: config.controlId,
     workspaceRoot: config.workspaceRoot,
+    evaluationParallelism: config.evaluationParallelism ?? 1,
     domain,
     persistence: ctx.sessionPersistence,
     projections: ctx.sessionProjections,

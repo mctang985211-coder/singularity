@@ -1,0 +1,4 @@
+# Singularity seals artifacts and records its own durable task evidence. The web
+# editor's whole-repository Git snapshots are redundant for these managed sessions.
+- id: workspace-changes
+  disabled: true

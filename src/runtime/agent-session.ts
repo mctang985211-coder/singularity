@@ -13,6 +13,7 @@ interface RuntimeSeams {
 export interface AgentSessionRequest {
   readonly agentId: string
   readonly resume: boolean
+  readonly parent?: Agent
   readonly cwd?: string
   readonly preset?: string
   readonly agentOptions?: AgentOptions
@@ -49,6 +50,7 @@ export async function openAgentSession(ctx: RuntimeSeams, request: AgentSessionR
   let handle: AgentHandle
   try {
     const options = {
+      ...(request.parent === undefined ? {} : { parentAgent: request.parent }),
       ...(request.setup === undefined ? {} : { setup: request.setup }),
       ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
     }
@@ -57,6 +59,9 @@ export async function openAgentSession(ctx: RuntimeSeams, request: AgentSessionR
       : await registry.create({ sessionId, ...options, meta: {
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
         ...(request.preset === undefined ? {} : { agentPreset: request.preset }),
+        // Native lineage also keeps DSH's top-level Git snapshot recorder off managed children.
+        ...(request.parent === undefined ? {} : { parentSession: request.parent.session.id, origin: 'subagent' as const,
+          delegationDepth: (request.parent.session.header.delegationDepth ?? 0) + 1 }),
       } })
   } catch (error) {
     if (error instanceof SessionAlreadyOwnedError) refuse('concurrent-writer', error.message)

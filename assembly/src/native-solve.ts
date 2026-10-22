@@ -19,6 +19,7 @@ import { sha256 } from './ids.ts'
 import { waitForTask } from './read.ts'
 import { sealedBytes } from './sealed.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
+import type { DomainMeasurementContext, DomainMeasurementReport, DomainMeasurementOutcome } from './domain-measurement.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
 import {
   taskSessionsOf,
@@ -32,7 +33,7 @@ import {
 
 export interface SolveMeasurement {
   readonly digest: string
-  measure(source: string, signal: AbortSignal): Promise<number>
+  measure(source: string, signal: AbortSignal, context?: DomainMeasurementContext): Promise<DomainMeasurementOutcome>
 }
 
 export function createNativeSolve(apparatus: Apparatus, seams: ChildSessionSeams, parent: Agent, signal: AbortSignal,
@@ -108,7 +109,8 @@ export function createNativeSolve(apparatus: Apparatus, seams: ChildSessionSeams
         runId = run.runId
       }
       if (run.status === 'running') refuse('illegal-transition', 'the native solve stopped without submitting its working Run')
-      return observeSolve(apparatus, taskId, runId, signal, measurement, taskCase?.hardGuards)
+      return observeSolve(apparatus, taskId, runId, signal, measurement, taskCase?.hardGuards,
+        taskCase === undefined ? undefined : apparatus.domain.suite?.scoring)
     } catch (error) {
       if (
         !signal.aborted &&
@@ -128,6 +130,7 @@ export function createNativeSolve(apparatus: Apparatus, seams: ChildSessionSeams
 export async function observeSolve(apparatus: Apparatus, taskId: string, runId: string, signal: AbortSignal,
   measurement?: SolveMeasurement,
   hardGuards?: readonly string[],
+  scoring?: 'criteria',
 ): Promise<SolveObservation> {
   const task = taskStateOf(apparatus, taskId), run = task.runs[runId]!
   const sessions = taskSessionsOf(apparatus, taskId)
@@ -163,25 +166,43 @@ export async function observeSolve(apparatus: Apparatus, taskId: string, runId: 
       status: run.failureCause === 'runtime' || run.failureCause === 'cancelled' ? 'infrastructure-failure' : 'no-submission',
       reason: `${run.status}: ${run.failureReason ?? 'no artifact was submitted'}` }
   const artifactDigest = submission.artifactDigest
-  const evidenceDigest = recordedVerdictDigest(task, 'native method solve', { runId, criterionId, artifactDigest })
+  const verdicts = task.contract!.criteria.map(c => ({ criterionId: c.criterionId,
+    verdict: run.evidence.find(e => e.criterionId === c.criterionId && e.artifactDigest === artifactDigest)?.verdict ?? 'unknown',
+    hardGuard: hardGuards?.includes(c.criterionId) ?? false }))
+  const unavailable = verdicts.filter(c => c.verdict === 'unknown')
+  if (unavailable.length > 0) return { taskId, runId, trajectory, costBasis, cost,
+    status: 'infrastructure-failure',
+    reason: `acceptance review evidence is unavailable for criteria: ${unavailable.map(c => c.criterionId).join(', ')}` }
   const evidence = run.evidence.find(
     (entry) => entry.criterionId === criterionId && entry.artifactDigest === artifactDigest,
   )!
+  const evidenceDigest = recordedVerdictDigest(task, 'native method solve', { runId, criterionId, artifactDigest })
   let quality: number
-  try { quality =
-    measurement === undefined
-      ? run.status === 'verified'
-        ? 1
-        : 0
-      : await measurement.measure((await sealedBytes(apparatus, submission.files.artifact)).toString('utf8'), signal,
-        ) } catch (error) {
+  let measured: DomainMeasurementReport | undefined
+  const criteria = scoring === 'criteria' ? verdicts.filter(c => !c.hardGuard) : undefined
+  if (criteria?.length === 0) refuse('malformed-declaration', 'criteria scoring requires a non-guard criterion')
+  try {
+    if (measurement === undefined) quality = criteria === undefined ? Number(run.status === 'verified')
+      : criteria.filter(c => c.verdict === 'pass').length / criteria.length
+    else {
+      const report = await measurement.measure((await sealedBytes(apparatus, submission.files.artifact)).toString('utf8'), signal,
+        { taskId, runId, contract: task.contract! })
+      if (typeof report === 'number') quality = report
+      else if ('status' in report) return { taskId, runId, trajectory, costBasis, cost,
+        status: 'business-failure', reason: report.reason,
+        measurementArtifact: { artifactDigest, inputDigests: submission.inputDigests, implementationDigest: measurement.digest,
+          acceptanceDigest: evidence.implementationDigest, verdict: { criterionId, evidenceDigest, artifactDigest } } }
+      else { measured = report; quality = report.quality }
+    }
+  } catch (error) {
     signal.throwIfAborted()
     return { taskId, runId, trajectory, costBasis, cost, status: 'infrastructure-failure', reason: `measurement failed: ${String(error)}` }
   }
   const met = run.status === 'verified'
   return { taskId, runId, quality, met, cost,
     ...(hardGuards === undefined ? {} : { guardsMet: hardGuards.every(id => run.evidence.some(e => e.criterionId === id && e.artifactDigest === artifactDigest && e.verdict === 'pass')) }),
-    trajectory, costBasis,
+    trajectory, costBasis, criteria: verdicts,
+    ...(measured === undefined ? {} : { measurement: measured }),
     artifactDigest, inputDigests: submission.inputDigests,
     implementationDigest: measurement?.digest ?? evidence.implementationDigest, acceptanceDigest: evidence.implementationDigest,
     verdict: { criterionId, evidenceDigest, artifactDigest },

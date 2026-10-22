@@ -11,6 +11,14 @@ const sample = () => ({ version: 1, suiteId: 'fixture-v1', failureQuality: 0, ca
   { caseId: 'unseen', familyId: 'unseen-family', sourceId: 'source-c', split: 'heldout', weight: 1, trials: 1, contract: contract('unseen request'), hardGuards: [] },
 ] })
 describe('frozen suite identity and denominator', () => {
+  it('freezes an opt-in criteria rubric and keeps hard guards outside its score', () => {
+    const raw = sample(), pass = parseSuite(raw), rubric = parseSuite({ ...raw, scoring: 'criteria' })
+    expect(rubric.scoring).toBe('criteria')
+    expect(digestOf(rubric)).not.toBe(digestOf(pass))
+    expect(() => parseSuite({ ...raw, scoring: 'judge-impression' })).toThrow('scoring')
+    const guarded = { ...raw, cases: raw.cases.map((c, i) => ({ ...c, hardGuards: i === 0 ? ['correct'] : [] })) }
+    expect(() => parseSuite({ ...guarded, scoring: 'criteria' })).toThrow('non-guard criterion')
+  })
   it('rejects source/family leakage, duplicate cases and mutable upstream artifacts', () => {
     for (const key of ['familyId', 'sourceId'] as const) {
       const raw = sample(); raw.cases[2]![key] = raw.cases[0]![key]
@@ -41,6 +49,9 @@ describe('frozen suite identity and denominator', () => {
     expect(view).toMatchObject({ denominator: 3, observed: 3, cost: 40, admissible: true, missing: [] })
     expect(view.quality).toBeCloseTo(.4)
     expect(view.families).toEqual([{ familyId: 'arithmetic', quality: 0, planned: 1, observed: 1 }, { familyId: 'parsing', quality: 1.2, planned: 2, observed: 2 }])
+    expect(view.cases).toEqual([
+      { caseId: 'a', familyId: 'parsing', quality: 1.2, planned: 2, observed: 2, cost: 20, guardsMet: true },
+      { caseId: 'b', familyId: 'arithmetic', quality: 0, planned: 1, observed: 1, cost: 20, guardsMet: true }])
     expect(projectEvaluation({ ...state, failed: [], missed: [{ slot: 2, reason: 'provider unavailable', verifierRef: 'oracle', verifierVersion: '1' }] })).toMatchObject({ admissible: false })
     expect(projectEvaluation({ ...state, observed: [{ ...trial, guardsMet: false }, { ...trial, slot: 1 }] }).admissible).toBe(false)
     expect(digestOf(matrix)).toHaveLength(64)

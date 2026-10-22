@@ -12,6 +12,7 @@ import type { RsiProposal } from './rsi-proposal.ts'
 import { RELEASE_PROTOCOL, RELEASE_VERSION, type ReleaseDraft } from '../../src/release/protocol.ts'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION } from '../../src/environment/protocol.ts'
 import { methodEnvironment } from './method.ts'
+import type { SolveResult } from './evolution.ts'
 
 /** Submission already closes search admission. Its outcome is a view of committed results. */
 export function searchView(apparatus: Apparatus, task: TaskState, cut = apparatus.store.load()) {
@@ -82,6 +83,7 @@ export async function searchFeedback(apparatus: Apparatus, task: TaskState) {
   const reviews = apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION)
   const tasks = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   const workflow = (evaluation: EvaluationState) => [...evaluation.observed, ...(evaluation.failed ?? [])].map(observation => {
+    const detail = observation.detail === undefined ? undefined : JSON.parse(observation.detail) as Partial<SolveResult>
     const seen = new Set<string>(), nodes: TaskState[] = []
     const visit = (id: string) => {
       const node = tasks.get(id)
@@ -93,6 +95,12 @@ export async function searchFeedback(apparatus: Apparatus, task: TaskState) {
     const runs = nodes.flatMap(n => Object.values(n.runs))
     return { slot: observation.slot, caseId: evaluation.matrix?.slots[observation.slot]?.caseId ?? null,
       familyId: evaluation.matrix?.slots[observation.slot]?.familyId ?? null, source: observation.run ?? null,
+      measurement: detail?.measurement === undefined ? null : {
+        quality: detail.measurement.quality,
+        metrics: Object.fromEntries(Object.entries(detail.measurement.metrics).slice(0, 32)),
+        metricCount: Object.keys(detail.measurement.metrics).length,
+        ...(detail.measurement.detail === undefined ? {} : { detail: detail.measurement.detail.slice(0, 2048) }),
+      }, criteria: detail?.criteria ?? null,
       nodes: nodes.length, responsibilityEdges: nodes.reduce((n, node) => n + (node.decomposition?.children.length ?? 0), 0),
       dependencyEdges: nodes.flatMap(n => n.decomposition?.children ?? []).reduce((n, edge) => n + edge.dependsOn.length, 0),
       artifactInputs: nodes.flatMap(n => n.contract?.inputs ?? []).filter(i => i.source.kind === 'artifact').length,
@@ -111,6 +119,7 @@ export async function searchFeedback(apparatus: Apparatus, task: TaskState) {
     result.push({ roundId: round.roundId, revision: candidate.revision, edits: candidate.edits,
       hypothesis: proposal?.edit.hypothesis ?? null, reviewId: review?.reviewId ?? null,
       outcome: round.decision === undefined ? 'pending' : round.decision.winner === candidate.slot ? 'accepted' : 'not-selected',
+      baseline: baseline === undefined ? null : projectEvaluation(baseline),
       measured: observed === undefined ? null : projectEvaluation(observed),
       workflow: baseline && observed ? { baseline: workflow(baseline), candidate: workflow(observed),
         interpretation: 'organization and consumption observations; fewer nodes alone do not establish improvement or causality' } : null,

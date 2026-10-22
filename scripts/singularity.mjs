@@ -159,6 +159,7 @@ export async function doctor({ domain, input, workspace, host = false } = {}) {
     return 'pinned package versions and patched host artifacts verified'
   })
   await check('bubblewrap', () => execFileSync('bwrap', ['--version'], { encoding: 'utf8', timeout: 10_000 }).trim())
+  await check('host lifetime lock', () => execFileSync('flock', ['--version'], { encoding: 'utf8', timeout: 10_000 }).trim())
   if (input) await check('Task input', async () => {
     const text = await readFile(resolve(input), 'utf8')
     if (!text.trim()) throw new Error('Task input is empty')
@@ -196,7 +197,7 @@ function parseOptions(args) {
     const arg = args[i]
     if (!arg.startsWith('--')) { positional.push(arg); continue }
     const key = arg.slice(2)
-    if (!['wait', 'wait-learning', 'host', 'json', 'domain', 'input', 'workspace', 'request-id', 'cwd', 'learning', 'output'].includes(key))
+    if (!['wait', 'wait-learning', 'host', 'json', 'domain', 'input', 'workspace', 'request-id', 'cwd', 'learning', 'output', 'patch', 'reviewer'].includes(key))
       throw new Error(`Unknown option ${arg}`)
     if (['wait', 'wait-learning', 'host', 'json'].includes(key)) options[key] = true
     else { if (!args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`${arg} requires a value`); options[key] = args[++i] }
@@ -205,14 +206,30 @@ function parseOptions(args) {
 }
 
 export async function main(args = process.argv.slice(2)) {
+  if (args.includes('--help') || args.includes('-h')) args = ['help']
   const { positional: [kind, action, file], options } = parseOptions(args)
   if (!kind || kind === 'help') {
-    console.log('singularity doctor [--domain DIR] [--input FILE] [--workspace DIR] [--host]\nsingularity task run FILE [--request-id ID] [--cwd DIR] [--learning on|off] [--wait] [--wait-learning]\nsingularity task status ID\nsingularity task cancel SESSION-ID\nsingularity experiment run SUITE [--request-id ID] [--cwd DIR] [--wait]\nsingularity experiment report TASK-OR-SESSION-ID [--output FILE]\nHost: SINGULARITY_URL and SINGULARITY_TOKEN (or SINGULARITY_COOKIE).')
+    console.log('singularity env setup REQUEST --workspace DIR [--patch MODEL-ROUTE.yml]\nsingularity env approve DIR [--reviewer NAME]\nsingularity doctor [--domain DIR] [--input FILE] [--workspace DIR] [--host]\nsingularity task run FILE [--request-id ID] [--cwd DIR] [--learning on|off] [--wait] [--wait-learning]\nsingularity task status ID\nsingularity task cancel SESSION-ID\nsingularity experiment run SUITE [--request-id ID] [--cwd DIR] [--wait]\nsingularity experiment report TASK-OR-SESSION-ID [--output FILE]\nHost: SINGULARITY_URL and SINGULARITY_TOKEN (or SINGULARITY_COOKIE). Environment setup uses native headless DSH and an explicit DSH_HOME.')
     return
   }
   if (kind === 'doctor') {
     const report = await doctor({ domain: options.domain, input: options.input, workspace: options.workspace, host: options.host })
     console.log(JSON.stringify(report, null, 2)); if (!report.ok) process.exitCode = 1; return
+  }
+  if (kind === 'env') {
+    if (!file) throw new Error('env setup requires a request file; env approve requires the staging directory')
+    const { runEnvironmentSetup, approveEnvironmentSetup } = await import('./env-setup.mjs')
+    if (action === 'setup') {
+      const result = await runEnvironmentSetup({ request: await readFile(resolve(file), 'utf8'), workspace: options.workspace, patch: options.patch })
+      console.log(JSON.stringify(result, null, 2))
+      console.error(`Review ${result.review}, then run singularity env approve ${result.workspace}. No RSI task has started.`)
+      return
+    }
+    if (action === 'approve') {
+      console.log(JSON.stringify(await approveEnvironmentSetup(file, { reviewer: options.reviewer }), null, 2))
+      return
+    }
+    throw new Error('Unknown environment command; use env setup or env approve')
   }
   if (!file) throw new Error('A Task file, suite file or Task/session identity is required; run singularity help')
   const host = await connectHost()

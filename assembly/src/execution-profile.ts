@@ -27,7 +27,7 @@ async function treeDigest(roots: readonly string[]): Promise<string> {
 }
 
 /** Hash actual local implementations and mounted declarations; an opaque server revision stays opaque. */
-export async function executionProfile(parent: Agent, seams: ChildSessionSeams, domain: Domain) {
+export async function executionProfile(parent: Agent, seams: ChildSessionSeams, domain: Domain, evaluationParallelism = 1) {
   const missing: string[] = []
   const capture = async <T>(name: string, action: () => Promise<T>): Promise<T | null> => {
     try { return await action() } catch { missing.push(name); return null }
@@ -70,7 +70,7 @@ export async function executionProfile(parent: Agent, seams: ChildSessionSeams, 
   })
   const runtimeDir = dirname(fileURLToPath(import.meta.url))
   const profile = {
-    version: 1, config, provider,
+    version: 1, config, provider, evaluationParallelism,
     presets, implementations,
     // The agent is a separate bundle. Source probes must also include the core, not just this module.
     runtimeDigest: await capture('assembly implementation', () => treeDigest(runtimeDir.endsWith('/src')
@@ -85,6 +85,7 @@ export async function executionProfile(parent: Agent, seams: ChildSessionSeams, 
     measurement: domain.measurement === undefined ? null : { criterion: domain.measurement.criterion,
       baseline: domain.measurement.baseline, unit: domain.measurement.unit, direction: domain.measurement.direction,
       implementation: await capture('measurement module', async () => sha256(await readFile(domain.measurement!.module))),
+      parameters: domain.measurement.parameters ?? null, evaluation: domain.measurement.evaluation ?? null,
       tools: domain.measurement.tools, conditions: domain.measurement.conditions },
     verifiers: domain.verifiers.map(v => ({ ref: v.ref, version: v.version, digest: v.implementationDigest,
       program: v.program, args: v.args })),

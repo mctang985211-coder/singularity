@@ -20,6 +20,8 @@ export interface Suite {
   readonly suiteId: string
   readonly cases: readonly TaskCase[]
   readonly failureQuality: number
+  /** Opt in to passed non-guard criteria / planned non-guard criteria. Default: whole-task pass. */
+  readonly scoring?: 'criteria'
 }
 export interface TrialSlot {
   readonly caseId: string
@@ -41,7 +43,10 @@ const label = (value: unknown, name: string): string => {
 export function parseSuite(raw: unknown): Suite {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) refuse('malformed-declaration', 'suite must be an object')
   const row = raw as Record<string, unknown>
-  assertClosedKeys(row, ['version', 'suiteId', 'cases', 'failureQuality'], 'suite', 'malformed-declaration')
+  assertClosedKeys(row, ['version', 'suiteId', 'cases', 'failureQuality', 'scoring'], 'suite', 'malformed-declaration')
+  if (row.scoring !== undefined && row.scoring !== 'criteria') refuse('malformed-declaration', 'unknown suite scoring')
+  if (row.scoring === 'criteria' && row.failureQuality !== 0)
+    refuse('malformed-declaration', 'criteria scoring requires failureQuality 0')
   if (row.version !== 1 || !Array.isArray(row.cases) || row.cases.length === 0 || typeof row.failureQuality !== 'number' || !Number.isFinite(row.failureQuality))
     refuse('malformed-declaration', 'suite requires version 1, cases and a finite failureQuality')
   const cases = row.cases.map((raw, i): TaskCase => {
@@ -55,6 +60,8 @@ export function parseSuite(raw: unknown): Suite {
     if (contract.inputs.some(input => input.source.kind !== 'protected')) refuse('malformed-declaration', 'suite cases require frozen protected inputs')
     if (!Array.isArray(c.hardGuards) || c.hardGuards.some(id => typeof id !== 'string' || !contract.criteria.some(criterion => criterion.criterionId === id)) || new Set(c.hardGuards).size !== c.hardGuards.length)
       refuse('malformed-declaration', 'hardGuards must name unique contract criteria')
+    if (row.scoring === 'criteria' && contract.criteria.every(criterion => (c.hardGuards as string[]).includes(criterion.criterionId)))
+      refuse('malformed-declaration', 'criteria scoring requires a non-guard criterion in every case')
     return { caseId: label(c.caseId, 'caseId'), familyId: label(c.familyId, 'familyId'), sourceId: label(c.sourceId, 'sourceId'),
       split: c.split as Split, weight: c.weight, trials: c.trials as number, contract, hardGuards: c.hardGuards as string[] }
   })
@@ -68,7 +75,8 @@ export function parseSuite(raw: unknown): Suite {
     }
   }
   // A returned suite is a value, never a mutable caller-owned experiment specification.
-  return JSON.parse(JSON.stringify({ version: 1, suiteId: label(row.suiteId, 'suiteId'), failureQuality: row.failureQuality, cases })) as Suite
+  return JSON.parse(JSON.stringify({ version: 1, suiteId: label(row.suiteId, 'suiteId'), failureQuality: row.failureQuality,
+    ...(row.scoring === undefined ? {} : { scoring: row.scoring }), cases })) as Suite
 }
 export function matrixOf(suite: Suite, split: Split, executionProfileDigest: string): EvaluationMatrix {
   if (!/^[a-f0-9]{64}$/.test(executionProfileDigest)) refuse('malformed-declaration', 'executionProfileDigest must be sha256')

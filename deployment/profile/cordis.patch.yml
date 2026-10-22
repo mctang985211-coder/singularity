@@ -16,6 +16,10 @@
     domainDir: '@@CHECKOUT@@/deployment/domain/sha256'
     workspaceRoot: '@@DSH_HOME@@/workspaces/singularity'
 
+# Sealed Task artifacts and native evidence replace editor-wide Git snapshots.
+- id: workspace-changes
+  disabled: true
+
 # The deployment's model route, because the base layer mounts `llm-pi-ai` with no providers and
 # defaults every agent to `deepseek-official`, for which this machine holds no credential: a profile
 # that names no route composes a session in which no model call can happen. The route names an

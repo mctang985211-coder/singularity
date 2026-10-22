@@ -95,6 +95,8 @@ export async function loadDomain(dir: string, runProcess: (invocation: VerifierI
     for (const ref of references) if (containsPath(await realpath(ref), canonical))
       refuse('malformed-declaration', 'private suite must not be mounted as a worker reference')
     suite = parseSuite(JSON.parse((await readBytes(path, 'suite')).toString('utf8')))
+    if (suite.scoring !== undefined && measurement !== undefined)
+      refuse('malformed-declaration', 'choose criteria scoring or a domain measurement, not both')
     if (measurement === undefined ? suite.failureQuality !== 0 : measurement.direction === 'lower' && suite.failureQuality <= 0)
       refuse('malformed-declaration', 'failureQuality must be 0 for pass scoring and a positive worst-case penalty for lower-is-better measurements')
     for (const c of suite.cases) for (const input of c.contract.inputs) {

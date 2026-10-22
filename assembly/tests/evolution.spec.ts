@@ -5,6 +5,7 @@ import { ControlSessionStore } from '../../src/control/session-store.ts'
 import { createEnvironmentCommands } from '../../src/environment/commands.ts'
 import { declareEnvironmentProtocol } from '../../src/environment/protocol.ts'
 import { createMeasureCommands } from '../../src/measure/commands.ts'
+import { projectEvaluation } from '../../src/measure/view.ts'
 import { declareMeasureProtocol, MEASURE_PROTOCOL, MEASURE_VERSION, type EvaluationState,
 } from '../../src/measure/protocol.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
@@ -107,6 +108,143 @@ async function fixture() {
 }
 
 describe('method evolution', () => {
+  const suiteFor = () => parseSuite({ version: 1, suiteId: 'reuse-and-parallel', failureQuality: 0,
+    cases: ['parse', 'calculate'].map(id => ({ caseId: id, familyId: id, sourceId: id, split: 'evolve',
+      weight: 1, trials: 2, hardGuards: [], contract: { goal: id, artifact: 'artifact.json',
+        inputs: [{ name: inputs[0]!.name, source: { kind: 'protected', ref: 'letters', digest: inputs[0]!.digest } }],
+        criteria: [{ criterionId: 'correct', statement: id }] } })) })
+
+  it('reuses complete incumbent evidence only within the same search, suite, metric and execution profile', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 1),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check boundaries' }, 1)
+    const options = { ...live.options, suite: suiteFor(), executionProfileDigest: 'e'.repeat(64) }
+    const request = { campaignId: 'reuse', roundId: 'reuse-r1', round: 1, incumbent, candidates: [candidate] }
+    await createEvolution(options).runRound(request)
+    expect(live.calls).toHaveLength(8)
+    await createEvolution(options).runRound({ ...request, roundId: 'reuse-r2', round: 2 })
+    expect(live.calls).toHaveLength(12)
+    const reused = live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'reuse-r2:bootstrap:evaluation')!
+    expect(reused.observed.every(t => JSON.parse(t.detail!).reusedFrom.evaluationId === 'reuse-r1:bootstrap:evaluation')).toBe(true)
+    await expect(createEvolution({ ...options, executionProfileDigest: 'f'.repeat(64) })
+      .runRound({ ...request, roundId: 'reuse-r3', round: 3 })).rejects.toThrow('frozen suite or execution caliber')
+    expect(live.calls).toHaveLength(16)
+    await createEvolution(options).runRound({ ...request, campaignId: 'other', roundId: 'other-r1' })
+    expect(live.calls).toHaveLength(24)
+    await expect(createEvolution({ ...options, weights: { quality: 2, cost: 0 } })
+      .runRound({ ...request, roundId: 'reuse-r4', round: 4 })).rejects.toThrow('frozen suite or execution caliber')
+    expect(live.calls).toHaveLength(28)
+    await expect(createEvolution({ ...options, executionProfileDigest: 'f'.repeat(64) })
+      .runRound({ ...request, roundId: 'reuse-r2', round: 2 })).resolves.toMatchObject({ decided: true })
+  })
+
+  it('reuses an accepted candidate as the next incumbent without executing it again', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 0),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check boundaries' }, 1),
+      next = await live.revision('h2', { ...initial, workflowGuidance: 'check interfaces' }, 1)
+    const options = { ...live.options, suite: suiteFor(), executionProfileDigest: 'e'.repeat(64) }
+    expect((await createEvolution(options).runRound({ campaignId: 'reuse-winner', roundId: 'winner-r1', round: 1,
+      incumbent, candidates: [candidate] })).winner).toBe(0)
+    await createEvolution(options).runRound({ campaignId: 'reuse-winner', roundId: 'winner-r2', round: 2,
+      incumbent: candidate, candidates: [next] })
+    expect(live.calls.map(c => c.revision.revisionId)).toEqual([
+      ...Array(4).fill('h0'), ...Array(4).fill('h1'), ...Array(4).fill('h2')])
+  })
+
+  it('remeasures an incumbent when its previous cost evidence was unavailable', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 1),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check boundaries' }, 1)
+    const options = { ...live.options, suite: suiteFor(), executionProfileDigest: 'e'.repeat(64),
+      baseline: async (request: Parameters<EvolutionOptions['solve']>[0]) => ({ ...await live.solve(request), cost: null }) }
+    const request = { campaignId: 'incomplete-cost', roundId: 'incomplete-cost-r1', round: 1, incumbent, candidates: [candidate] }
+    await createEvolution(options).runRound(request)
+    await createEvolution(options).runRound({ ...request, roundId: 'incomplete-cost-r2', round: 2 })
+    expect(live.calls).toHaveLength(16)
+  })
+
+  it('freezes slot zero before concurrent trials start without waiting for its completion', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 1),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check boundaries' }, 1)
+    let admit!: () => void, finish!: () => void, entered!: () => void, concurrent!: () => void
+    const admission = new Promise<void>(resolve => { admit = resolve }), completion = new Promise<void>(resolve => { finish = resolve }),
+      firstEntered = new Promise<void>(resolve => { entered = resolve }), secondEntered = new Promise<void>(resolve => { concurrent = resolve })
+    let count = 0, active = 0, peak = 0
+    const solve: EvolutionOptions['solve'] = async request => {
+      const index = count++
+      active++; peak = Math.max(peak, active)
+      try {
+        if (index === 0) { entered(); await admission }
+        else concurrent()
+        const result = await live.solve(request)
+        if (index === 0) await completion
+        return result
+      } finally { active-- }
+    }
+    const pending = createEvolution({ ...live.options, suite: suiteFor(), executionProfileDigest: 'e'.repeat(64), parallelism: 2,
+      baseline: solve, solve }).runRound({ campaignId: 'freeze', roundId: 'freeze-r1', round: 1, incumbent, candidates: [candidate] })
+    try {
+      await firstEntered
+      expect(count).toBe(1)
+      expect(live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'freeze-r1:bootstrap:evaluation')).toBeUndefined()
+      admit()
+      await secondEntered
+      const frozen = live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'freeze-r1:bootstrap:evaluation')!
+      expect(frozen.run).toBeDefined()
+      expect(frozen.observed.some(trial => trial.slot === 0)).toBe(false)
+      expect(peak).toBe(2)
+    } finally { admit(); finish() }
+    await pending
+    expect(active).toBe(0)
+    expect(peak).toBe(2)
+    expect(count).toBe(8)
+  })
+
+  it('bounds concurrent trials, records out-of-order completions and drains failures before recovery', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 1),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check boundaries' }, 1)
+    let active = 0, peak = 0, failed = false
+    const solve: EvolutionOptions['solve'] = async request => {
+      active++; peak = Math.max(peak, active)
+      try {
+        const result = await live.solve(request)
+        await new Promise(resolve => setTimeout(resolve, request.case?.caseId === 'parse' ? 12 : 2))
+        if (request.revision.digest === candidate.digest && !failed) { failed = true; throw Error('trial interrupted') }
+        return result
+      } finally { active-- }
+    }
+    const options = { ...live.options, suite: suiteFor(), executionProfileDigest: 'e'.repeat(64), parallelism: 2,
+      baseline: solve, solve }
+    const request = { campaignId: 'parallel', roundId: 'parallel-r1', round: 1, incumbent, candidates: [candidate] }
+    await expect(createEvolution(options).runRound(request)).rejects.toThrow('trial interrupted')
+    expect(peak).toBe(2)
+    expect(active).toBe(0)
+    const before = live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'parallel-r1:0:candidate:evaluation')!
+    const committed = before.observed.map(t => t.run!.taskId)
+    const calls = live.calls.length
+    await expect(createEvolution({ ...options, executionProfileDigest: 'f'.repeat(64) }).runRound(request))
+      .rejects.toThrow('recovery changed its frozen')
+    expect(live.calls).toHaveLength(calls)
+    await createEvolution(options).runRound(request)
+    expect(active).toBe(0)
+    expect(live.calls.filter(c => committed.includes(`${c.operationId}:task`))).toHaveLength(committed.length)
+    const complete = live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'parallel-r1:0:candidate:evaluation')!
+    expect(complete.observed.map(t => t.slot).sort()).toEqual([0, 1, 2, 3])
+  })
+
+  it('preserves partial rubric scores while rejecting a failed hard guard', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 0),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check boundaries' }, 1)
+    const suite = parseSuite({ ...suiteFor(), scoring: 'criteria' })
+    const solve: EvolutionOptions['solve'] = async request => ({ ...await live.solve(request),
+      quality: request.revision.digest === incumbent.digest ? .25 : .75, met: false, guardsMet: true })
+    const options = { ...live.options, suite, executionProfileDigest: 'e'.repeat(64), baseline: solve, solve }
+    const request = { campaignId: 'rubric', roundId: 'rubric-r1', round: 1, incumbent, candidates: [candidate] }
+    expect((await createEvolution(options).runRound(request)).slots[0]?.quality).toBe(.75)
+    const guarded = await createEvolution({ ...options, solve: async input => ({ ...await solve(input), guardsMet: false }) })
+      .runRound({ ...request, campaignId: 'rubric-guard', roundId: 'rubric-guard-r1' })
+    expect(guarded.winner).toBeNull()
+    expect(guarded.outcomes[0]?.reason).toContain('hard guards')
+  })
+
   it.each(['higher', 'lower'] as const)('refuses a failure reward better than a successful observation (%s)', async direction => {
     const live = await fixture(), incumbent = await live.revision('h0', initial, 1),
       candidate = await live.revision('h1', { ...initial, workflowGuidance: 'check boundary first' }, 1)
@@ -148,6 +286,53 @@ describe('method evolution', () => {
     expect(new Set(live.calls.map(call => call.operationId)).size).toBe(8)
     await createEvolution(options).runRound(request)
     expect(live.calls).toHaveLength(8)
+  })
+
+  it('records physical qualification failures as scored slots with real costs and a fixed denominator', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 1),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'try physical specialization' }, 1)
+    const solve: EvolutionOptions['solve'] = async request => {
+      const result = await live.solve(request)
+      return request.revision.digest === candidate.digest && request.case?.caseId === 'calculate'
+        ? { taskId: result.taskId, runId: result.runId, cost: result.cost,
+          status: 'business-failure', reason: 'functional RTL failed synthesis qualification', measurementArtifact: {
+            artifactDigest: result.artifactDigest, inputDigests: result.inputDigests, implementationDigest: result.implementationDigest,
+            acceptanceDigest: result.acceptanceDigest,
+          } }
+        : result
+    }
+    const options = { ...live.options, suite: suiteFor(), executionProfileDigest: 'e'.repeat(64), baseline: solve, solve }
+    const decision = await createEvolution(options).runRound({ campaignId: 'physical', roundId: 'physical-r1', round: 1,
+      incumbent, candidates: [candidate] })
+    expect(decision.winner).toBeNull()
+    const evaluation = live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, 'physical-r1:0:candidate:evaluation')!
+    expect(evaluation.missed).toHaveLength(0)
+    const ineligible = evaluation.observed.filter(trial => JSON.parse(trial.detail!).status === 'business-failure')
+    expect(ineligible).toHaveLength(2)
+    expect(ineligible[0]).toMatchObject({ quality: 0, cost: 100, guardsMet: false })
+    expect(projectEvaluation(evaluation)).toMatchObject({ denominator: 4, observed: 4, quality: .5, cost: 400, missing: [], admissible: false })
+  })
+
+  it('records unavailable independent review evidence as missing slots instead of business zeroes', async () => {
+    const live = await fixture(), incumbent = await live.revision('h0', initial, 1),
+      candidate = await live.revision('h1', { ...initial, workflowGuidance: 'try a new investigation order' }, 1)
+    const solve: EvolutionOptions['solve'] = async request => {
+      const result = await live.solve(request)
+      return { taskId: result.taskId, runId: result.runId, cost: result.cost,
+        status: 'infrastructure-failure', reason: 'acceptance review evidence is unavailable for criteria: correct' }
+    }
+    const decision = await createEvolution({ ...live.options, suite: suiteFor(), executionProfileDigest: 'e'.repeat(64),
+      parallelism: 2, solve }).runRound({ campaignId: 'missing-review', roundId: 'missing-review-r1', round: 1,
+      incumbent, candidates: [candidate] })
+    expect(decision.winner).toBeNull()
+    const evaluation = live.store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION,
+      'missing-review-r1:0:candidate:evaluation')!
+    expect(evaluation.observed).toEqual([])
+    expect(evaluation.failed ?? []).toEqual([])
+    expect(evaluation.missed).toHaveLength(4)
+    expect(evaluation.missed.every(slot => slot.reason.includes('review evidence is unavailable'))).toBe(true)
+    expect(projectEvaluation(evaluation)).toMatchObject({ denominator: 4, observed: 0, admissible: false,
+      missing: Array.from({ length: 4 }, () => expect.objectContaining({ reason: expect.stringContaining('review evidence is unavailable') })) })
   })
 
   it('records unknown native costs and completes evaluation without blocking later rounds', async () => {

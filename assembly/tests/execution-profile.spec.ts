@@ -66,6 +66,12 @@ function fixture() {
 beforeEach(() => { resources.parallelism = 4; resources.memory = 8 * 1024 ** 3; changedFiles.clear() })
 
 describe('frozen execution identity', () => {
+  it('binds evaluation concurrency into the comparison profile', async () => {
+    const held = fixture(), serial = await held.profile()
+    const parallel = await executionProfile(held.parent, held.seams, held.domain, 2)
+    expect(parallel.profile.evaluationParallelism).toBe(2)
+    expect(parallel.digest).not.toBe(serial.digest)
+  })
   it('tracks effective provider retries and model capacity independently of the request config', async () => {
     const held = fixture(), first = await held.profile()
     held.retry({ mode: 'normal', maxRetries: 1, retryableCodes: ['TRANSPORT'],
@@ -148,6 +154,17 @@ describe('frozen execution identity', () => {
     expect((await executionProfile(held.parent, held.seams, changedVerifier)).digest).not.toBe(first.digest)
     const changedArgs = { ...held.domain, verifiers: held.domain.verifiers.map(v => ({ ...v, args: ['--strict', '{artifact}'] })) }
     expect((await executionProfile(held.parent, held.seams, changedArgs)).digest).not.toBe(first.digest)
+  })
+
+  it('binds reviewed domain coefficients and evaluation policy into the profile', async () => {
+    const held = fixture(), first = await held.profile()
+    const measurement = { ...held.domain.measurement!, parameters: { areaWeight: .35, delayWeight: .65 },
+      evaluation: { weights: { quality: 1, cost: 0 }, noiseFloor: .005 } }
+    const weighted = await executionProfile(held.parent, held.seams, { ...held.domain, measurement })
+    expect(weighted.digest).not.toBe(first.digest)
+    expect(weighted.profile.measurement).toMatchObject({ parameters: measurement.parameters, evaluation: measurement.evaluation })
+    const changed = { ...measurement, parameters: { areaWeight: .5, delayWeight: .5 } }
+    expect((await executionProfile(held.parent, held.seams, { ...held.domain, measurement: changed })).digest).not.toBe(weighted.digest)
   })
 
   it('changes with the available CPU and memory resources', async () => {

@@ -23,6 +23,7 @@ import { digestOf } from '../../src/protocol/envelope.ts'
 import { matrixOf, trialKey, type Suite, type TaskCase, type Split } from '../../src/measure/suite.ts'
 import { calibrationFrom } from '../../src/measure/calibration.ts'
 import type { TaskContract } from '../../src/task/contract.ts'
+import type { DomainMeasurementReport } from './domain-measurement.ts'
 
 export interface SolveResult {
   readonly trajectory?: import('@deepseek-ai/dsh-attachment').FileAttachmentRef
@@ -38,6 +39,8 @@ export interface SolveResult {
   readonly acceptanceDigest: string
   readonly verdict?: { readonly criterionId: string; readonly evidenceDigest: string; readonly artifactDigest: string }
   readonly guardsMet?: boolean
+  readonly criteria?: readonly { readonly criterionId: string; readonly verdict: string; readonly hardGuard: boolean }[]
+  readonly measurement?: DomainMeasurementReport
 }
 export interface SolveFailure {
   readonly status: 'no-submission' | 'business-failure' | 'infrastructure-failure'
@@ -47,6 +50,8 @@ export interface SolveFailure {
   readonly cost: number | null
   readonly costBasis?: EvaluationCostBasis
   readonly trajectory?: import('@deepseek-ai/dsh-attachment').FileAttachmentRef
+  /** A domain calculator may reject a submitted candidate independently of Task acceptance. */
+  readonly measurementArtifact?: Pick<SolveResult, 'artifactDigest' | 'inputDigests' | 'implementationDigest' | 'acceptanceDigest' | 'verdict'>
 }
 export type SolveObservation = SolveResult | SolveFailure
 
@@ -58,6 +63,7 @@ export interface EvolutionOptions {
   readonly metric: EvaluationMetric
   readonly weights: EvaluationWeights
   readonly trials: number
+  readonly parallelism?: number
   readonly suite?: Suite
   readonly split?: Split
   readonly executionProfileDigest?: string
@@ -118,6 +124,9 @@ function measuresAt(entries: readonly Envelope[], registry: ProtocolRegistry): M
 
 export function createEvolution(options: EvolutionOptions): Evolution {
   const { store, registry, criterion, metric, weights, trials } = options
+  const parallelism = options.parallelism ?? 1
+  if (!Number.isSafeInteger(parallelism) || parallelism < 1)
+    refuse('malformed-declaration', 'evaluation parallelism must be a positive integer')
   const measure = createMeasureCommands({ store, registry,
     implementations: [criterion, metric.measured].map((held) => ({ ref: held.verifierRef, version: held.verifierVersion, implementationDigest: held.implementationDigest,
     })),
@@ -147,53 +156,77 @@ export function createEvolution(options: EvolutionOptions): Evolution {
   async function evaluate(incumbent: RevisionRef, revision: RevisionRef, operationId: string, ordering: {
     readonly expected?: EvaluationState
     readonly solve: EvolutionOptions['solve']
+    readonly reuse?: EvaluationState
   }): Promise<string> {
     const evaluationId = `${operationId}:evaluation`
     const matrix = options.suite === undefined ? undefined : matrixOf(options.suite, options.split ?? 'evolve',
       options.executionProfileDigest ?? refuse('malformed-declaration', 'suite evaluation requires an execution profile'))
     const count = matrix?.slots.length ?? trials
     const judgement = matrix === undefined ? [criterion] : []
-    for (let slot = 0; slot < count; slot++) {
+    const existing = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
+    if (existing !== undefined && (digestOf(existing.matrix ?? null) !== digestOf(matrix ?? null) ||
+      digestOf(existing.metric) !== digestOf(metric) || digestOf(existing.weights) !== digestOf(weights) || existing.trials !== count))
+      refuse('caliber-mismatch', 'evaluation recovery changed its frozen matrix, metric, weights or trial count')
+    let opened!: () => void
+    const ready = new Promise<void>(resolve => { opened = resolve })
+    if (existing?.run !== undefined) opened()
+    const evaluateSlot = async (slot: number): Promise<void> => {
       const prior = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
-      if (prior?.observed.some(trial => trial.slot === slot) || prior?.failed?.some(trial => trial.slot === slot) || prior?.missed.some(trial => trial.slot === slot)) continue
+      if (prior?.observed.some(trial => trial.slot === slot) || prior?.failed?.some(trial => trial.slot === slot) || prior?.missed.some(trial => trial.slot === slot)) return
       const held = matrix?.slots[slot]
       const taskCase = held === undefined ? undefined : options.suite!.cases.find(c => c.caseId === held.caseId)!
       const key = held === undefined ? undefined : trialKey(matrix!, revision, held, operationId)
-      const result = await ordering.solve({ revision, operationId: key === undefined ? `${operationId}:trial:${slot}` : `trial:${key}`,
-        ...(taskCase === undefined ? {} : { case: taskCase, contract: taskCase.contract, trialKey: key! }),
-        started: async run => {
-          if (slot === 0) {
-            await measure.openEvaluation({ commandId: `${operationId}:open-evaluation`, evaluationId, baseline: incumbent, candidate: revision,
-              run, metric, weights, trials: count, judgement, ...(matrix === undefined ? {} : { matrix }) })
-          }
-          const actual = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, run.taskId)!.runs[run.runId]!
-          if (matrix === undefined) {
-            const plan = ordering.expected ?? store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
-            checkContext(plan, actual.bubble!, `${operationId} trial ${slot}`)
-          } else if (ordering.expected !== undefined) {
-            const reference = ordering.expected.observed.find(trial => trial.slot === slot)?.run
-              ?? ordering.expected.failed?.find(trial => trial.slot === slot)?.run
-            if (reference === undefined) refuse('caliber-mismatch', 'baseline slot has no valid execution evidence')
-            const baseline = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, reference.taskId)!.runs[reference.runId]!.bubble!
-            if (contextDigestOf(baseline) !== contextDigestOf(actual.bubble!)) refuse('caliber-mismatch', 'case trial changed frozen execution context')
-          }
-        } })
+      const started: Parameters<EvolutionOptions['solve']>[0]['started'] = async run => {
+        if (slot === 0) {
+          await measure.openEvaluation({ commandId: `${operationId}:open-evaluation`, evaluationId, baseline: incumbent, candidate: revision,
+            run, metric, weights, trials: count, judgement, ...(matrix === undefined ? {} : { matrix }) })
+        }
+        const actual = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, run.taskId)!.runs[run.runId]!
+        if (matrix === undefined) {
+          const plan = ordering.expected ?? store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
+          checkContext(plan, actual.bubble!, `${operationId} trial ${slot}`)
+        } else if (ordering.expected !== undefined) {
+          const reference = ordering.expected.observed.find(trial => trial.slot === slot)?.run
+            ?? ordering.expected.failed?.find(trial => trial.slot === slot)?.run
+          if (reference === undefined) refuse('caliber-mismatch', 'baseline slot has no valid execution evidence')
+          const baseline = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, reference.taskId)!.runs[reference.runId]!.bubble!
+          if (contextDigestOf(baseline) !== contextDigestOf(actual.bubble!)) refuse('caliber-mismatch', 'case trial changed frozen execution context')
+        }
+        if (slot === 0) opened()
+      }
+      const cached = [...ordering.reuse?.observed ?? [], ...ordering.reuse?.failed ?? []].find(t => t.slot === slot)
+      let result: SolveObservation
+      if (cached !== undefined) {
+        result = JSON.parse(cached.detail!) as SolveObservation
+        await started({ taskId: result.taskId, runId: result.runId })
+      } else result = await ordering.solve({ revision, operationId: key === undefined ? `${operationId}:trial:${slot}` : `trial:${key}`,
+        ...(taskCase === undefined ? {} : { case: taskCase, contract: taskCase.contract, trialKey: key! }), started })
+      const detail = JSON.stringify({ ...result, ...(cached === undefined ? {} : { reusedFrom: { evaluationId: ordering.reuse!.evaluationId, slot } }) })
       const ref = { taskId: result.taskId, runId: result.runId }
       if ('status' in result) {
         if (result.status === 'infrastructure-failure') {
           await measure.missTrial({ commandId: `${operationId}:trial:${slot}`, evaluationId, slot,
-            reason: JSON.stringify(result) })
+            reason: detail })
+        } else if (result.status === 'business-failure' && result.measurementArtifact !== undefined) {
+          await measure.recordTrial({ commandId: `${operationId}:trial:${slot}`, evaluationId, trial: {
+            slot, quality: options.suite?.failureQuality ?? 0, run: ref,
+            artifactDigest: result.measurementArtifact.artifactDigest, inputDigests: result.measurementArtifact.inputDigests,
+            implementationDigest: result.measurementArtifact.implementationDigest,
+            ...(result.cost === null ? {} : { cost: result.cost }), guardsMet: false, detail,
+          } })
         } else {
           await measure.failTrial({ commandId: `${operationId}:trial:${slot}`, evaluationId, trial: {
             slot, quality: options.suite?.failureQuality ?? 0, status: result.status, reason: result.reason, run: ref,
             implementationDigest: metric.measured.implementationDigest, ...(result.cost === null ? {} : { cost: result.cost }),
-            detail: JSON.stringify(result), guardsMet: taskCase?.hardGuards.length === 0,
+            detail, guardsMet: taskCase?.hardGuards.length === 0,
           } })
         }
-        continue
+        return
       }
       const actual = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, result.taskId)!.runs[result.runId]!
       const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
+      if (options.suite?.scoring === 'criteria' && (result.quality < 0 || result.quality > 1 || !Number.isFinite(result.quality)))
+        refuse('caliber-mismatch', 'criteria quality must be a fraction in [0,1]')
       if (matrix !== undefined && result.met && (metric.direction === 'lower'
         ? result.quality > options.suite!.failureQuality : result.quality < options.suite!.failureQuality))
         refuse('caliber-mismatch', 'suite failureQuality must be at least as bad as every successful observation under the declared metric direction')
@@ -201,20 +234,37 @@ export function createEvolution(options: EvolutionOptions): Evolution {
         refuse('evidence-input-mismatch', 'trial result names a different Run from started()')
       if (matrix === undefined) checkContext(plan, actual.bubble!, `${operationId} trial ${slot} result`)
       await measure.recordTrial({ commandId: `${operationId}:trial:${slot}`, evaluationId, trial: {
-        slot, quality: matrix !== undefined && !result.met ? options.suite!.failureQuality : result.quality,
+        slot, quality: matrix !== undefined && !result.met && options.suite!.scoring !== 'criteria'
+          ? options.suite!.failureQuality : result.quality,
         ...(result.cost === null ? {} : { cost: result.cost }), artifactDigest: result.artifactDigest, run: ref,
         inputDigests: result.inputDigests, implementationDigest: result.implementationDigest,
         guardsMet: matrix === undefined ? true : result.guardsMet ?? taskCase!.hardGuards.length === 0,
-        detail: JSON.stringify(result),
+        detail,
       } })
     }
+    // Slot zero fixes the plan before other isolated trials start. Drain every in-flight trial
+    // before propagating failure, so recovery cannot race writes from the previous invocation.
+    let next = 0, failed = false
+    const workers = await Promise.allSettled(Array.from({ length: Math.min(matrix === undefined ? 1 : parallelism, count) }, async () => {
+      while (!failed && next < count) {
+        const slot = next++
+        try {
+          if (slot !== 0) await ready
+          if (failed) return
+          await evaluateSlot(slot)
+        } catch (error) { failed = true; throw error }
+        finally { if (slot === 0) opened() }
+      }
+    }))
+    for (const worker of workers) if (worker.status === 'rejected') throw worker.reason
     const state = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)!
     if (matrix === undefined && state.observed.length === count && !store.committedOf(`${operationId}:constraint`)) {
-      const results = state.observed.map(trial => JSON.parse(trial.detail!) as SolveResult)
-      const witness = results.find(result => !result.met) ?? results.at(-1)!
+      const results = state.observed.map(trial => JSON.parse(trial.detail!) as SolveObservation)
+      const witness = results.find(result => 'status' in result || !result.met) ?? results.at(-1)!
+      const evidence = 'status' in witness ? witness.measurementArtifact! : witness
       await measure.checkConstraint({ commandId: `${operationId}:constraint`, evaluationId, criterionId: criterion.criterionId,
-        met: results.every(result => result.met), artifactDigest: witness.artifactDigest, implementationDigest: witness.acceptanceDigest,
-        ...(witness.verdict === undefined ? {} : { verdict: witness.verdict }), detail: JSON.stringify({ results }) })
+        met: results.every(result => !('status' in result) && result.met), artifactDigest: evidence.artifactDigest, implementationDigest: evidence.acceptanceDigest,
+        ...(evidence.verdict === undefined ? {} : { verdict: evidence.verdict }), detail: JSON.stringify({ results }) })
     }
     return evaluationId
   }
@@ -240,9 +290,22 @@ export function createEvolution(options: EvolutionOptions): Evolution {
           refuse('malformed-declaration', `candidate ${revision.revisionId} repeats a method revision in this round`)
         candidates.push({ revision, edits })
       }
-      // RRSI loop.py: reuse the incumbent evaluation, then evaluate screened variants.
-      // One owner, explicit awaits; no unresolved bootstrap race or competing workers.
-      const baselineId = await evaluate(input.incumbent, input.incumbent, `${input.roundId}:bootstrap`, { solve: options.baseline })
+      // RRSI keeps the incumbent's measured evaluation. Reuse only committed evidence from this
+      // search under the exact suite/profile/metric; no cross-search or private-split cache.
+      const cut = store.load()
+      const matrix = options.suite === undefined ? undefined : matrixOf(options.suite, options.split ?? 'evolve',
+        options.executionProfileDigest ?? refuse('malformed-declaration', 'suite evaluation requires an execution profile'))
+      const reusableIds = [...cut.statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION).values()]
+        .filter(r => r.plan?.campaignId === input.campaignId && r.decision !== undefined)
+        .flatMap(r => [`${r.roundId}:bootstrap:evaluation`,
+          ...r.submissions.filter(c => c.slot === r.decision!.winner).map(c => c.evaluationId)])
+      const reuse = matrix === undefined ? undefined : reusableIds.map(id => cut.stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, id))
+        .findLast(e => e !== undefined && e.candidate !== undefined && sameRevision(e.candidate, input.incumbent) &&
+          digestOf(e.matrix ?? null) === digestOf(matrix) && digestOf(e.metric) === digestOf(metric) && digestOf(e.weights) === digestOf(weights) &&
+          projectEvaluation(e).missing.length === 0 && projectEvaluation(e).cost !== null &&
+          [...e.observed, ...e.failed ?? []].every(t => t.detail !== undefined))
+      const baselineId = await evaluate(input.incumbent, input.incumbent, `${input.roundId}:bootstrap`, {
+        solve: options.baseline, ...(reuse === undefined ? {} : { reuse }) })
       const plan = store.load().stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, baselineId)!
       const strategy = createStrategyCommands({ store, calibration: calibrationFrom(plan, options.calibration),
         measuresAt: cut => measuresAt(cut.entries(), registry) })

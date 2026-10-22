@@ -53,7 +53,7 @@ export async function openChildSession(seams: ChildSessionSeams, request: ChildS
   const persisted = await persistence.stat(agentSessionIdOf(request.agentId))
   const reasoningEffort = (request.parent.session.requestHeader()?.config ?? request.parent.options).reasoningEffort
   const opened = await openAgentSession(seams, {
-    agentId: request.agentId, resume: persisted !== undefined, cwd: request.cwd,
+    agentId: request.agentId, resume: persisted !== undefined, cwd: request.cwd, parent: request.parent,
     preset: request.preset ?? 'singularity-next',
     agentOptions: { ...request.model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) },
     setup: async (ctx) => {

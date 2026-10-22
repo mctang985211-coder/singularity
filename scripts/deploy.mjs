@@ -84,7 +84,7 @@ process.stdout.write(
     `deploy: linked ${linkPath} -> ${assemblyDir}`,
     `deploy: workspace root ${workspaceRoot}`,
     `deploy: verify with: dsh --profile ${PROFILE_NAME} --dump-config`,
-    `deploy: boot with:   dsh --profile ${PROFILE_NAME} --host 127.0.0.1 --port 7331 --no-open`,
+    `deploy: boot with:   node ${join(root, 'scripts/host-runtime.mjs')} --host 127.0.0.1 --port 7331 --no-open`,
     '',
   ].join('\n'),
 )

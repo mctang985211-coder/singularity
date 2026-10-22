@@ -5,7 +5,7 @@ import { matrixOf, parseSuite } from '../../src/measure/suite.ts'
 import { STRATEGY_PROTOCOL, type RoundState } from '../../src/strategy/protocol.ts'
 import type { TaskState } from '../../src/task/protocol.ts'
 import type { Apparatus } from '../src/apparatus.ts'
-import { searchView } from '../src/rsi-history.ts'
+import { searchFeedback, searchView } from '../src/rsi-history.ts'
 
 const h0 = { environmentId: 'methods', revisionId: 'h0', digest: 'a'.repeat(64) }
 const h1 = { ...h0, revisionId: 'h1', digest: 'b'.repeat(64) }
@@ -74,4 +74,33 @@ it('keeps an undersampled suite as insufficient evidence and leaves a working se
   expect(h.view()).toMatchObject({ outcome: 'insufficient-evidence' })
   h.task({ runs: { run: { runId: 'run', purpose: 'improve', revision: h0, status: 'running', stage: 'working', evidence: [], consumed: [], emitter: 'scheduler', actor: 'scheduler', startedAt: '' } } })
   expect(h.view()).not.toHaveProperty('outcome')
+})
+
+it('exposes bounded calculator details from recorded evolve trials to the next proposal', async () => {
+  const source: TaskState = { taskId: 'business', contract: { goal: 'design', artifact: 'design.v', inputs: [],
+    criteria: [{ criterionId: 'correct', statement: 'correctness' }] }, runs: { run: { runId: 'run', purpose: 'solve',
+    revision: h0, status: 'verified', stage: 'submitted', evidence: [], consumed: [], emitter: 'scheduler', actor: 'scheduler', startedAt: '' } } }
+  const task: TaskState = { ...source, taskId: 'analysis', search: { runId: 'run', maxProposals: 2, batches: [] },
+    runs: { run: { ...source.runs['run']!, purpose: 'improve', relatedTo: { taskId: source.taskId, runId: 'run' } } } }
+  const h = fixture()
+  const metrics = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`metric-${i}`, { value: i, unit: 'ns' }]))
+  const report = { quality: 1.23, metrics, detail: 'x'.repeat(3000) }
+  const criteria = [{ criterionId: 'correct', verdict: 'pass', hardGuard: true }]
+  for (const evaluation of h.evaluations.values()) evaluation.observed = evaluation.observed.map(trial => ({ ...trial,
+    detail: JSON.stringify({ measurement: report, criteria }) }))
+  const round = h.rounds.get('round')!
+  h.rounds.set('round', { ...round, plan: { campaignId: task.taskId, round: 1, incumbent: h0, candidates: 1,
+    historyCutoff: 0, caliber: 'a'.repeat(64), weights: { quality: 1, cost: 0 } } })
+  const tasks = new Map([[task.taskId, task], [source.taskId, source]])
+  const apparatus = { controlId: 'history', domain: {}, store: { load: () => ({ entries: () => [],
+    stateOf: (_protocol: string, _version: number, id: string) => tasks.get(id),
+    statesOf: (protocol: string) => protocol === STRATEGY_PROTOCOL ? h.rounds : protocol === MEASURE_PROTOCOL ? h.evaluations
+      : protocol === 'task' ? tasks : new Map() }) } } as unknown as Apparatus
+  const feedback = await searchFeedback(apparatus, task)
+  const trial = feedback.edits[0]!.workflow!.candidate[0]!
+  expect(trial.criteria).toEqual(criteria)
+  expect(trial.measurement).toMatchObject({ quality: 1.23, metricCount: 40 })
+  expect(Object.keys(trial.measurement!.metrics)).toHaveLength(32)
+  expect(trial.measurement!.detail).toHaveLength(2048)
+  expect(JSON.parse(h.candidate.observed[0]!.detail!).measurement.metrics).toEqual(metrics)
 })

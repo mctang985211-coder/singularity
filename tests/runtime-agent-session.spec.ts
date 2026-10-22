@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
+import { SessionId, SessionStore } from '@deepseek-ai/dsh-session'
 import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -213,6 +214,41 @@ describe('the derived session id', () => {
 })
 
 describe('creating and resuming', () => {
+  it.each([undefined, 2])('creates managed children with native lineage from parent depth %s', async depth => {
+    const context = new Context()
+    await context.plugin(SessionStore)
+    const live = harness()
+    const parent = { session: { id: SessionId('business-root'), header: { delegationDepth: depth } } } as unknown as Agent
+    const create = live.seams['agents'] as AgentRegistry
+    create.create = async options => {
+      expect(options.parentAgent).toBe(parent)
+      const session = context.sessions.create(options.sessionId, { meta: options.meta! })
+      expect(session.header).toMatchObject({ cwd: '/isolated/task/run', parentSession: 'business-root',
+        origin: 'subagent', delegationDepth: (depth ?? 0) + 1, agentPreset: 'singularity-next' })
+      return handleFor(options.sessionId, live.disposed, { failures: 0, error: undefined }) as never
+    }
+    try {
+      await openAgentSession(live.context, { agentId: 'managed-lineage', resume: false, parent,
+        cwd: '/isolated/task/run', preset: 'singularity-next' })
+      await closeAgentSession('managed-lineage')
+      expect(live.disposed).toEqual(['singularity:agent:managed-lineage'])
+    } finally { await context.fiber.dispose() }
+  })
+
+  it('retains live parent ownership when resuming legacy child history without rewriting its header', async () => {
+    const live = harness({ persisted: true })
+    const parent = {} as Agent
+    const registry = live.seams['agents'] as AgentRegistry
+    registry.resume = async options => {
+      expect(options.parentAgent).toBe(parent)
+      expect(options).not.toHaveProperty('meta')
+      return handleFor(options.resumeSessionId, live.disposed, { failures: 0, error: undefined }) as never
+    }
+    await openAgentSession(live.context, { agentId: 'legacy-lineage', resume: true, parent, cwd: '/isolated/task/run' })
+    await closeAgentSession('legacy-lineage')
+    expect(live.disposed).toEqual(['singularity:agent:legacy-lineage'])
+  })
+
   it('refuses resume when the exact session has no persisted history', async () => {
     const live = harness()
     await expect(openAgentSession(live.context, { agentId: 'never-created', resume: true })).rejects.toThrow('resume requires persisted history')

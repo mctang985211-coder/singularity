@@ -23,6 +23,7 @@ it.each([false, true])('mounts the isolated review preset on create/resume (resu
     await (request.setup as AgentSetup)(childCtx, agent)
     expect(request.preset).toBe('singularity-review')
     expect(request.resume).toBe(resumed)
+    expect(request.parent).toBe(parent)
     expect(request.agentOptions).toEqual({ provider: 'gateway', model: 'same-model', reasoningEffort: 'high' })
     return { agentId: 'review', sessionId: 'singularity:agent:review', resumed, agent }
   })

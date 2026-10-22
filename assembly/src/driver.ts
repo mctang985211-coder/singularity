@@ -109,6 +109,7 @@ export interface DriverOptions {
   readonly projections: Apparatus['projections']
   readonly controlId: string
   readonly workspaceRoot: string
+  readonly evaluationParallelism?: number
   readonly domain: Domain
   readonly persistence: SessionPersistence
   readonly seams: ChildSessionSeams
@@ -127,6 +128,9 @@ export interface TaskDriver extends TaskService {
 }
 
 export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
+  const parallelism = options.evaluationParallelism ?? 1
+  if (!Number.isSafeInteger(parallelism) || parallelism < 1)
+    refuse('malformed-declaration', 'evaluationParallelism must be a positive integer')
   const apparatus = await openApparatus(options.controlId, options.workspaceRoot, options.domain, options.persistence, options.attachments, options.projections,
   )
   const measurement = apparatus.domain.measurement
@@ -134,10 +138,11 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
   const evaluation: Pick<EvolutionOptions, 'criterion' | 'metric' | 'trials' | 'weights' | 'calibration'> = {
     criterion,
     metric: { measured: measurement?.criterion ?? { ...criterion, criterionId: `${criterion.criterionId}:quality` },
-      unit: measurement === undefined ? 'pass' : `${measurement.unit} / baseline`, direction: measurement?.direction ?? 'higher' },
+      unit: measurement === undefined ? apparatus.domain.suite?.scoring === 'criteria' ? 'criteria fraction' : 'pass'
+        : `${measurement.unit} / baseline`, direction: measurement?.direction ?? 'higher' },
     trials: 1,
-    weights: measurement === undefined ? { quality: 1, cost: 1 } : { quality: 100, cost: 15 },
-    calibration: { floor: measurement === undefined ? 0 : 0.01, source: 'declared' },
+    weights: measurement?.evaluation?.weights ?? (measurement === undefined ? { quality: 1, cost: 1 } : { quality: 100, cost: 15 }),
+    calibration: { floor: measurement?.evaluation?.noiseFloor ?? (measurement === undefined ? 0 : 0.01), source: 'declared' },
   }
   const controller = new AbortController(),
     active = new Set<Promise<unknown>>(),
@@ -429,10 +434,10 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     try {
       signal.throwIfAborted()
       const native = createNativeSolve(apparatus, options.seams, parent, signal, measurement === undefined ? undefined
-        : { digest: measurement.criterion.implementationDigest, measure: (source, signal) => measurement.measure(source, signal) })
+        : { digest: measurement.criterion.implementationDigest, measure: (source, signal, context) => measurement.measure(source, signal, context) })
       const suite = apparatus.domain.suite
-      const profile = suite === undefined ? undefined : await executionProfile(parent, options.seams, apparatus.domain)
-      const evolution = createEvolution({ store: apparatus.store, registry: apparatus.registry, ...evaluation,
+      const profile = suite === undefined ? undefined : await executionProfile(parent, options.seams, apparatus.domain, parallelism)
+      const evolution = createEvolution({ store: apparatus.store, registry: apparatus.registry, ...evaluation, parallelism,
         productionHead: publishedMethod(apparatus)!.revisionId,
         ...(suite === undefined ? {} : { suite, executionProfileDigest: profile!.digest }),
         loadMethod: async (revision) => (await loadMethod(apparatus, revision)).assets,
@@ -457,7 +462,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
           await started(source)
           return observeSolve(apparatus, source.taskId, source.runId, signal,
             measurement === undefined ? undefined : { digest: measurement.criterion.implementationDigest,
-              measure: (source, signal) => measurement.measure(source, signal) })
+              measure: (source, signal, context) => measurement.measure(source, signal, context) })
         } : native,
         solve: native,
       })
@@ -501,7 +506,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
     const baseline = rounds[0]?.plan?.incumbent, last = rounds.at(-1)
     const champion = last?.submissions.find(s => s.slot === last.decision!.winner)?.revision ?? last?.plan?.incumbent
     if (baseline === undefined || champion === undefined || champion.digest === baseline.digest) return
-    const identity = await executionProfile(parent, options.seams, apparatus.domain)
+    const identity = await executionProfile(parent, options.seams, apparatus.domain, parallelism)
     const profile = identity.digest
     const roundId = `${task.taskId}:validation`, suiteDigest = digestOf(suite)
     const fact = (suffix: string, kind: string, payload: unknown) => {
@@ -526,8 +531,8 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
           refuse('illegal-transition', 'this validation tranche was consumed by another campaign; use a new suite')
         if (!identity.complete) refuse('caliber-mismatch', `execution profile evidence missing: ${identity.missing.join(', ')}`)
         const native = createNativeSolve(apparatus, options.seams, parent, signal, measurement === undefined ? undefined
-          : { digest: measurement.criterion.implementationDigest, measure: (source, signal) => measurement.measure(source, signal) })
-        const evolution = createEvolution({ store: apparatus.store, registry: apparatus.registry, ...evaluation,
+          : { digest: measurement.criterion.implementationDigest, measure: (source, signal, context) => measurement.measure(source, signal, context) })
+        const evolution = createEvolution({ store: apparatus.store, registry: apparatus.registry, ...evaluation, parallelism,
           productionHead: rounds[0]!.plan!.productionHead!,
           suite, split: 'validation', executionProfileDigest: profile, loadMethod: async revision => (await loadMethod(apparatus, revision)).assets,
           baseline: native, solve: native })
@@ -540,7 +545,7 @@ export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
         if (suite.cases.some(c => c.split === 'heldout')) {
           const finalId = `${task.taskId}:heldout`
           try {
-            const final = createEvolution({ store: apparatus.store, registry: apparatus.registry, ...evaluation,
+            const final = createEvolution({ store: apparatus.store, registry: apparatus.registry, ...evaluation, parallelism,
               productionHead: rounds[0]!.plan!.productionHead!, suite, split: 'heldout', executionProfileDigest: profile,
               loadMethod: async revision => (await loadMethod(apparatus, revision)).assets, baseline: native, solve: native })
             await final.runRound({ campaignId: finalId, roundId: finalId, round: 1, incumbent: baseline, candidates: [champion] })

@@ -72,6 +72,8 @@ export interface EvaluationView {
   /** Why it is not admissible, naming each failing rule. `null` only when it is admissible. */
   readonly why: string | null
   readonly families?: readonly { readonly familyId: string; readonly quality: number; readonly planned: number; readonly observed: number }[]
+  readonly cases?: readonly { readonly caseId: string; readonly familyId: string; readonly quality: number;
+    readonly planned: number; readonly observed: number; readonly cost: number | null; readonly guardsMet: boolean | null }[]
 }
 
 /** The measured cost, or `null` if any observation left it unknown. Nothing measured has no cost. */
@@ -135,7 +137,14 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
     constraints,
     admissible: reasons.length === 0,
     why: reasons.length === 0 ? null : reasons.join('; '),
-    ...(state.matrix === undefined ? {} : { families: [...new Set(state.matrix.slots.map(slot => slot.familyId))].sort().map(familyId => {
+    ...(state.matrix === undefined ? {} : { cases: [...new Set(state.matrix.slots.map(slot => slot.caseId))].sort().map(caseId => {
+      const slots = state.matrix!.slots.flatMap((slot, index) => slot.caseId === caseId ? [index] : [])
+      const results = observed.filter(entry => slots.includes(entry.slot))
+      return { caseId, familyId: state.matrix!.slots[slots[0]!]!.familyId, quality: weighted(slots),
+        planned: slots.length, observed: results.length, cost: results.length === slots.length ? costOf(results) : null,
+        guardsMet: results.some(t => t.guardsMet === false) ? false
+          : results.length === slots.length && results.every(t => t.guardsMet === true) ? true : null }
+    }), families: [...new Set(state.matrix.slots.map(slot => slot.familyId))].sort().map(familyId => {
       const slots = state.matrix!.slots.flatMap((slot, index) => slot.familyId === familyId ? [index] : [])
       return { familyId, quality: weighted(slots), planned: slots.length, observed: observed.filter(entry => slots.includes(entry.slot)).length }
     }) }),

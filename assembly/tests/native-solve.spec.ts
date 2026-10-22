@@ -18,6 +18,8 @@ import { fixtureReview } from './review-fixture.ts'
 import { agentFor, attachmentsAt, execFor, fakeExecution, FakePersistence, testProjections } from './seam.ts'
 import { nativeTurn } from './usage-fixture.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
+import { readTemplate, templateDeclaration } from '../src/template.ts'
+import { contractFor } from '../src/inputs.ts'
 
 const harness = vi.hoisted(() => ({ open: vi.fn() }))
 vi.mock('../../src/runtime/child-session.ts', async original => ({
@@ -25,6 +27,124 @@ vi.mock('../../src/runtime/child-session.ts', async original => ({
 }))
 let cleanup: (() => Promise<void>) | undefined
 afterEach(async () => { await cleanup?.(); vi.restoreAllMocks(); harness.open.mockReset() })
+
+it('scores the frozen non-guard rubric from sealed review evidence without accepting a failed Task', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'native-rubric-'))
+  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const original = domain.templates.get(domain.rootTemplate!)!
+  const root = await readTemplate(domain.dir, { ...templateDeclaration(original), criteria: [...original.criteria,
+    { criterionId: 'format', statement: 'the report is decimal text' },
+    { criterionId: 'scope', statement: 'protected inputs were preserved' }] }, domain.verifiers, 'rubric template')
+  const apparatus = await openApparatus('native-rubric', directory,
+    { ...domain, templates: new Map([...domain.templates, [root.id, root]]) },
+    new FakePersistence() as never, attachmentsAt(directory), testProjections)
+  cleanup = async () => { await apparatus.store.close(); await rm(directory, { recursive: true, force: true }) }
+  const worker = agentFor('rubric-worker', 'rubric-worker-session')
+  const trial = await propose(apparatus, callerOf(worker), 'rubric', { contract: contractFor(apparatus.domain, root, root.goal) })
+  await writeFile(join(trial.workspace, trial.contract.artifact), '999')
+  await submit(apparatus, fakeExecution(() => undefined), callerOf(worker), execFor(worker, 'submit-rubric'),
+    { taskId: trial.taskId, path: trial.contract.artifact }, new AbortController().signal, fixtureReview(apparatus))
+  vi.spyOn(apparatus.persistence, 'open').mockImplementation(async id => ({
+    header: { id, version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false }, inheritedEventCount: SessionLogOffset(0),
+    read: async () => ({ events: nativeTurn(17) }), close: async () => undefined,
+  }) as never)
+  const signal = new AbortController().signal
+  expect(await observeSolve(apparatus, trial.taskId, trial.runId, signal, undefined, ['scope'], 'criteria'))
+    .toMatchObject({ quality: .5, met: false, guardsMet: true })
+  expect(await observeSolve(apparatus, trial.taskId, trial.runId, signal, undefined, ['letters'], 'criteria'))
+    .toMatchObject({ quality: 1, met: false, guardsMet: false })
+  expect(await observeSolve(apparatus, trial.taskId, trial.runId, signal)).toMatchObject({ quality: 0, met: false })
+  const measure = vi.fn(async () => ({ quality: 1.75, metrics: { area: { value: 55, unit: 'um2' } } }))
+  const scored = await observeSolve(apparatus, trial.taskId, trial.runId, signal,
+    { digest: 'a'.repeat(64), measure }, ['letters'])
+  expect(scored).toMatchObject({ quality: 1.75, met: false, guardsMet: false,
+    measurement: { quality: 1.75, metrics: { area: { value: 55, unit: 'um2' } } } })
+  expect(measure).toHaveBeenCalledWith('999', signal, { taskId: trial.taskId, runId: trial.runId, contract: trial.contract })
+  const ineligible = await observeSolve(apparatus, trial.taskId, trial.runId, signal, {
+    digest: 'a'.repeat(64), measure: async () => ({ status: 'business-failure', reason: 'candidate is not synthesizable' }),
+  }, ['scope'])
+  expect(ineligible).toMatchObject({ status: 'business-failure', reason: 'candidate is not synthesizable',
+    taskId: trial.taskId, runId: trial.runId, trajectory: { attachmentId: expect.stringMatching(/^sha256:/) } })
+  expect(ineligible.cost).toBe(scored.cost)
+  expect(ineligible.costBasis).toEqual(scored.costBasis)
+  expect(ineligible).not.toHaveProperty('quality')
+  expect(await observeSolve(apparatus, trial.taskId, trial.runId, signal, {
+    digest: 'a'.repeat(64), measure: async () => { throw Error('EDA unavailable') },
+  }, ['scope'])).toMatchObject({ status: 'infrastructure-failure', reason: expect.stringContaining('EDA unavailable') })
+  const unavailableWorker = agentFor('unavailable-worker', 'unavailable-worker-session')
+  const unavailable = await propose(apparatus, callerOf(unavailableWorker), 'unavailable-rubric',
+    { contract: contractFor(apparatus.domain, root, root.goal) })
+  await writeFile(join(unavailable.workspace, unavailable.contract.artifact), '35')
+  await submit(apparatus, fakeExecution(() => undefined), callerOf(unavailableWorker), execFor(unavailableWorker, 'submit-unavailable'),
+    { taskId: unavailable.taskId, path: unavailable.contract.artifact }, signal, fixtureReview(apparatus, 'unknown'))
+  expect(await observeSolve(apparatus, unavailable.taskId, unavailable.runId, signal, undefined, ['scope'], 'criteria'))
+    .toMatchObject({ status: 'infrastructure-failure', reason: expect.stringContaining('review evidence is unavailable') })
+  const unmeasured = vi.fn(async () => 1.25)
+  const unknown = await observeSolve(apparatus, unavailable.taskId, unavailable.runId, signal,
+    { digest: 'a'.repeat(64), measure: unmeasured }, ['scope'])
+  expect(unknown).toMatchObject({ status: 'infrastructure-failure',
+    reason: expect.stringContaining('letters'), costBasis: { sessions: expect.any(Array) } })
+  expect(unknown).not.toHaveProperty('quality')
+  expect(unknown).not.toHaveProperty('measurement')
+  expect(unmeasured).not.toHaveBeenCalled()
+})
+
+it('keeps a sealed submission without review evidence unavailable instead of throwing or measuring zero', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'native-missing-review-'))
+  const apparatus = await openApparatus('native-missing-review', directory,
+    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    new FakePersistence() as never, attachmentsAt(directory), testProjections)
+  cleanup = async () => { await apparatus.store.close(); await rm(directory, { recursive: true, force: true }) }
+  const worker = agentFor('missing-review-worker', 'missing-review-session')
+  const trial = await propose(apparatus, callerOf(worker), 'missing-review', { goal: 'count letters' })
+  await writeFile(join(trial.workspace, trial.contract.artifact), '35')
+  const signal = new AbortController().signal
+  await expect(submit(apparatus, fakeExecution(() => undefined), callerOf(worker), execFor(worker, 'submit-missing-review'),
+    { taskId: trial.taskId, path: trial.contract.artifact }, signal,
+    async (taskId, run) => {
+      await apparatus.tasks.forAgent(String(worker.id)).failRun({ commandId: 'business-stopped-before-review',
+        taskId, runId: run.runId, cause: 'business', reason: 'business execution stopped before acceptance' })
+      throw Error('review service unavailable')
+    })).rejects.toThrow('review service unavailable')
+  expect(taskStateOf(apparatus, trial.taskId).runs[trial.runId]).toMatchObject({ status: 'failed', evidence: [],
+    submission: { artifactDigest: expect.any(String) } })
+  vi.spyOn(apparatus.persistence, 'open').mockImplementation(async id => ({
+    header: { id, version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false }, inheritedEventCount: SessionLogOffset(0),
+    read: async () => ({ events: nativeTurn(17) }), close: async () => undefined,
+  }) as never)
+  const measure = vi.fn(async () => 0)
+  const result = await observeSolve(apparatus, trial.taskId, trial.runId, signal, { digest: 'a'.repeat(64), measure })
+  expect(result).toMatchObject({ status: 'infrastructure-failure',
+    reason: expect.stringContaining('letters'), trajectory: { attachmentId: expect.stringMatching(/^sha256:/) } })
+  expect(result).not.toHaveProperty('quality')
+  expect(measure).not.toHaveBeenCalled()
+})
+
+it.each(['fail', 'partial'] as const)('retains explicit %s acceptance as a business result with its measured evidence', async verdict => {
+  const directory = await mkdtemp(join(tmpdir(), 'native-business-review-'))
+  const apparatus = await openApparatus('native-business-review', directory,
+    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    new FakePersistence() as never, attachmentsAt(directory), testProjections)
+  cleanup = async () => { await apparatus.store.close(); await rm(directory, { recursive: true, force: true }) }
+  const worker = agentFor('business-review-worker', 'business-review-session')
+  const trial = await propose(apparatus, callerOf(worker), 'business-review', { contract: {
+    goal: 'implement a local module', artifact: 'design.v', inputs: [],
+    criteria: [{ criterionId: 'correct', statement: 'the local module meets its interface' }] } })
+  await writeFile(join(trial.workspace, trial.contract.artifact), 'candidate module')
+  const signal = new AbortController().signal
+  await submit(apparatus, fakeExecution(() => undefined), callerOf(worker), execFor(worker, 'submit-business-review'),
+    { taskId: trial.taskId, path: trial.contract.artifact }, signal, fixtureReview(apparatus, verdict))
+  vi.spyOn(apparatus.persistence, 'open').mockImplementation(async id => ({
+    header: { id, version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false }, inheritedEventCount: SessionLogOffset(0),
+    read: async () => ({ events: nativeTurn(17) }), close: async () => undefined,
+  }) as never)
+  const measure = vi.fn(async () => ({ quality: 1.25, metrics: { area: { value: 50, unit: 'cells' } } }))
+  const result = await observeSolve(apparatus, trial.taskId, trial.runId, signal, { digest: 'a'.repeat(64), measure })
+  expect(result).toMatchObject({ met: false, quality: 1.25, criteria: [{ criterionId: 'correct', verdict }],
+    measurement: { metrics: { area: { value: 50, unit: 'cells' } } } })
+  expect(result).not.toHaveProperty('status')
+  expect(measure).toHaveBeenCalledOnce()
+})
 
 it.each(['business', 'runtime', 'cancelled'] as const)('counts a %s failure according to its committed cause, retaining its sealed trace', async cause => {
   const directory = await mkdtemp(join(tmpdir(), 'native-failure-'))
@@ -113,6 +233,12 @@ it.each([
       ignorable: true, data: { memoryId: 'previous-rsi-handoff', phase: 'settled', callSeq: 0, dispatched: true, stream: [] } }])
     const result = await solve({ revision: method, operationId: `trial-${overhead}`, started: async () => undefined })
     expect(result).toMatchObject({ quality: 1, met: true, cost: complete ? 30 : null })
+    const ineligible = await observeSolve(apparatus, result.taskId, result.runId, new AbortController().signal, {
+      digest: 'a'.repeat(64), measure: async () => ({ status: 'business-failure', reason: 'functional candidate failed physical qualification' }),
+    })
+    expect(ineligible).toMatchObject({ status: 'business-failure', reason: 'functional candidate failed physical qualification',
+      taskId: result.taskId, runId: result.runId, cost: complete ? 30 : null, costBasis: result.costBasis })
+    expect(ineligible).not.toHaveProperty('quality')
     expect(result.costBasis!.sessions.map(session => ({ from: session.from, end: session.end, tokens: session.tokens })))
       .toEqual([{ from: reused ? 12 : 1, end: reused ? 18 : 7, tokens: complete ? 10 : 0 }, { from: 0, end: 6, tokens: complete ? 20 : 0 }])
     expect(result.costBasis!.sessions.every(session => session.complete)).toBe(complete)
