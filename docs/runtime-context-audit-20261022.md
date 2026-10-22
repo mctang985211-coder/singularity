@@ -80,6 +80,8 @@ DSH RuntimeContextProjection 比较文本后将变化内容追加为普通 `user
 
 使用新 checkout、新 DSH_HOME、新 controlId 重新运行，防止携带旧膨胀上下文、改变旧 executionProfile 或与已有 identified 通知正文冲突。复用已批准的 69 文件环境包并逐 SHA 核对。按用户最终要求，本次评测并行度为 1，OpenAI Chat Completions 接口为 `https://ccapi.cgdoem.cn/v1`，模型 ID 为 `cn:deepseek-v4.1-flash`，max 思考不变，700k 压缩线；密钥仅存私有 home，不入 Git。范围仍是局部 INT8 数据通路、模块 Verilator + Yosys + OpenSTA，禁止全芯片 Verilator、bebop-p2e 与商业 EDA。现有合成任务不能作为 CosyVoice 整模加速或未知领域迁移的论文结果。
 
+修复代码 `2b7921b030acab243290f4dfc9f6a276dcee0419` 已推送到 `codex/chip-rsi-storage-recovery-20261022`。新实验位于 `/home/ROXY/singularity-next/chip-rsi-context-fix-20261022`，control 为 `chip-local-rsi-context-fix-20261022`，root 为 `task-89e15b1fd8015c52`。2026-10-22 17:01:57（Asia/Shanghai）的原生记录有 7 次成功主响应、零失败 attempt、零父背景模型调用、零被禁止的自动上下文 section；请求 header 实测为 ccapi / `cn:deepseek-v4.1-flash` / max / maxTokens 196608。启动时源码及 69 个批准文件均无漂移。该时间点 root 正在运行，尚无 RSI 测评或收益结论。启动证据为新实验目录的 `startup-evidence.json` 与 `context-startup-evidence.json`。
+
 修复阻断了已证实的重复输入通路；尚未完成的新长跑不能用于宣称节省比例或 RSI 质量提高。
 
 原始审计工件位于 `/home/ROXY/singularity-next/context-audit-20261022/`：`previous-report.md`、`latest-findings.md`、`previous-audit.mjs`、`previous-detail.mjs`、`audit-latest.mjs`、`audit-runtime-detail.mjs` 及对应 JSON。旧实验日志原地保留，不进入 Git。
