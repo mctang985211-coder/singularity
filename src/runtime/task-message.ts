@@ -1,3 +1,4 @@
+/** DSH adapter seam; protocol modules may reference its types, never load its runtime. */
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 
 export interface SchedulerMessageSource {

@@ -38,7 +38,7 @@ async function setup() {
   const apparatus = await openApparatus(
       'review',
       root,
-      await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+      await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
       new FakePersistence() as never,
       attachmentsAt(root), testProjections,
     ),

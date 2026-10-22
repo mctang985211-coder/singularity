@@ -73,3 +73,7 @@ node scripts/singularity.mjs env approve /path/to/new-staging --reviewer your-na
 该命令只读取清单、校验路径并记录精确 SHA256，写入 `environment-approval.json`。它不代替人工审核、不执行评分代码、不部署、不启动 RSI，也不覆盖已有批准记录。代理不能批准自己的产物；若用户明确授权协调者代为验收，协调者可以注明授权身份后执行本命令。批准记录应与实验报告一起保留，启动前应比对文件摘要。之后使用现有 `doctor --domain`、宿主部署与 `experiment run` 流程；Task 运行时只获得声明允许的资料。
 
 失败不会改用另一个 Agent 或自动开始实验。检查 `.env-setup/diagnostics.log` 和 `events.jsonl` 后，修复问题并在新 staging 中重新开始；模型未产生完整包时不能执行批准。
+
+## 领域代码归属
+
+唯一标准参考为 [domain/reference](../domain/README.md)。环境 agent 生成的 Task/suite、适配器、工具、评分器、oracle 与领域测试全部放在指定 staging，使用现有 manifest/approval 冻结。不得加入 Singularity 源码或产品 spec，也不建立领域注册表。部署显式设置 `SINGULARITY_DOMAIN`；外部工具检查可写成环境包根部 `verify.mjs`，由 `pnpm verify:domain -- /path/to/environment` 执行。

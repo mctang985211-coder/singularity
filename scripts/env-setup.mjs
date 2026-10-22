@@ -22,7 +22,7 @@ export function setupPrompt(request, workspace, checkout = CHECKOUT) {
 
 You are an ordinary top-level DSH session doing environment setup once. Your work ends after presenting the completed package for one final operator review. Do not start RSI, create a Singularity Task or control graph, invoke Singularity tools or bubbles, deploy a host, or change the Singularity checkout. Use ordinary file, shell and web tools. Read ENV_SETUP_CONTEXT.md for current source contracts; inspect the cited source before inventing configuration fields.
 
-Explore the domain, available tools, source references and existing material specified below. Write the requested domain configuration, Task contracts, frozen suite, baseline workflow guidance, Skills/Tools and a domain-owned score calculator. Use the existing file formats and configuration helpers: loadDomain, contractFor and parseSuite; do not reconstruct template or contract digests by hand. Before importing checkout TypeScript in a Node script, await import of scripts/dsh-control-runtime.mjs to resolve private DSH packages. These helpers validate configuration without starting a Task. Keep all generated configuration and evaluator code inside this staging directory. External tool/source references may be absolute paths; record their versions and source revisions. Never copy credentials into the package.
+Explore the domain, available tools, source references and existing material specified below. Write the requested domain configuration, Task contracts, frozen suite, baseline workflow guidance, Skills/Tools and a domain-owned score calculator. Use the existing file formats and configuration helpers: loadDomain, contractFor and parseSuite; do not reconstruct template or contract digests by hand. Before importing checkout TypeScript in a Node script, await import of scripts/dsh-control-runtime.mjs to resolve private DSH packages. These helpers validate configuration without starting a Task. Keep all domain-specific configuration, adapters, evaluators, workloads and tests inside this staging directory. Do not add them to Singularity source or product specs. domain/reference is the only standard example, not an installed domain or a prescribed solution. External tool/source references may be absolute paths; record their versions and source revisions. Never copy credentials into the package.
 
 The scoring formula belongs to this environment, not the Singularity kernel. Explain each metric, unit, direction, normalization, coefficient, failure rule and missing-measurement rule. Separate correctness guards from graded quality. Label tool-derived proxies honestly; never present a synthesis proxy as routed silicon PPA. Show raw measurements, every weighted contribution and the resulting score for a baseline and meaningfully different valid candidates. Include an invalid candidate. Check that rounding, clipping, thresholds and normalization do not collapse distinct valid designs to one score. Record actual calculator self-check results. Keep expensive or prohibited evaluation outside scope.
 
@@ -53,7 +53,8 @@ async function writeContext(workspace, checkout) {
     ['Host configuration and RSI controls', 'assembly/src/index.ts'],
     ['Portable native DSH installation', 'docs/standalone-dsh.md'],
     ['Setup lifecycle and manifest contract', 'docs/env-setup.md'],
-    ['Small working domain example', 'deployment/domain/letters/task.json'],
+    ['Domain ownership and reference usage', 'domain/README.md'],
+    ['Only reference environment; never a deployment default', 'domain/reference/task.json'],
     ['Native Task / experiment launch commands', 'scripts/singularity.mjs'],
   ]
   const rows = []

@@ -34,7 +34,7 @@ import { fixtureReview } from './review-fixture.ts'
 import { submit, judgeAndRecord } from '../src/submission.ts'
 import { attachmentsAt, execFor, factsOf, fakeExecution, FakePersistence, nativeRuntime } from './seam.ts'
 
-const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
+const domainDir = fileURLToPath(new URL('../../domain/reference', import.meta.url))
 const roots: string[] = []
 const schedulers: Scheduler[] = []
 afterEach(async () => {

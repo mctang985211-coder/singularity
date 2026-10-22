@@ -24,9 +24,9 @@ function refuse(reason) {
   process.exit(1)
 }
 
-/** Substitute the two deployment paths, refusing a template that would keep a token. */
+/** Substitute explicit deployment paths, refusing a template that would keep a token. */
 function materialise(text, file) {
-  const out = text.replaceAll(CHECKOUT_TOKEN, root).replaceAll(DSH_HOME_TOKEN, homeDir)
+  const out = text.replaceAll(CHECKOUT_TOKEN, root).replaceAll(DSH_HOME_TOKEN, homeDir).replaceAll('@@DOMAIN_DIR@@', domainDir)
   if (out.includes('@@')) refuse(`${file} still contains a materialisation token after substitution`)
   return out
 }
@@ -37,6 +37,10 @@ if (configuredHome === undefined || configuredHome === '')
 const homeDir = resolve(configuredHome)
 if (homeDir === join(homedir(), '.dsh'))
   refuse(`DSH_HOME resolves to the global harness home (${homeDir}); this deployment never writes there`)
+
+if (!process.env['SINGULARITY_DOMAIN']) refuse('SINGULARITY_DOMAIN must name the reviewed domain directory')
+const domainDir = await realpath(resolve(process.env['SINGULARITY_DOMAIN']))
+if (!existsSync(join(domainDir, 'task.json'))) refuse('SINGULARITY_DOMAIN has no task.json')
 
 const assemblyManifest = JSON.parse(await readFile(join(assemblyDir, 'package.json'), 'utf8'))
 

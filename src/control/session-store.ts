@@ -1,4 +1,5 @@
 /**
+ * DSH adapter seam. Protocol/decision modules use only its erased port types.
  * The control store: our facts, carried by a DSH session this deployment owns.
  *
  * **Why a session of our own.** Control records live in a separate session with a stable id

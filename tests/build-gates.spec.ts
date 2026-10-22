@@ -1,12 +1,43 @@
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const { coreWriteFindings, domainFindings, inventoryFindingsWith, mutationFindings }: {
+const { coreWriteFindings, boundaryFindings, domainFindings, inventoryFindingsWith, mutationFindings }: {
   coreWriteFindings(sources: readonly { file: string; text: string }[]): readonly string[]
+  boundaryFindings(sources: readonly { file: string; text: string }[]): readonly string[]
   domainFindings(sources: readonly { file: string; text: string }[], declarations: readonly unknown[]): readonly string[]
   inventoryFindingsWith(ledger: unknown, declared: readonly unknown[]): readonly string[]
   mutationFindings(ledger: unknown, textOf: (file: string) => string): readonly string[]
 } = await import(fileURLToPath(new URL('../scripts/gates.mjs', import.meta.url)))
+
+describe('executable package boundaries', () => {
+  it.each([
+    "import { openDriver } from '../../assembly/src/driver.ts'",
+    "export type { TaskDriver } from '../../assembly/src/driver.ts'",
+    "const host = await import('@deepseek-ai/dsh-session')",
+    "import { Session } from '@deepseek-ai/dsh-session'",
+    "import { type Session, SessionId } from '@deepseek-ai/dsh-session'",
+    "import { openAgentSession } from '../runtime/agent-session.ts'",
+    "const host = require('@deepseek-ai/dsh-session')",
+  ])('rejects an inward runtime leak: %s', text => {
+    expect(boundaryFindings([{ file: 'src/task/example.ts', text }]).length).toBeGreaterThan(0)
+  })
+  it('detects a host leak through an otherwise ordinary core bridge', () => {
+    expect(boundaryFindings([
+      { file: 'src/task/example.ts', text: "export { adapter } from './bridge.ts'" },
+      { file: 'src/task/bridge.ts', text: "export { Session as adapter } from '@deepseek-ai/dsh-session'" },
+    ])).toHaveLength(1)
+  })
+  it('allows explicit host adapters and erased protocol type references', () => {
+    expect(boundaryFindings([
+      { file: 'src/runtime/agent-session.ts', text: "import { SessionId } from '@deepseek-ai/dsh-session'" },
+      { file: 'src/control/session-store.ts', text: "import { SessionId } from '@deepseek-ai/dsh-session'" },
+      { file: 'src/task/run.ts', text: "import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'" },
+    ])).toEqual([])
+  })
+  it('keeps domain implementations out of assembly', () => {
+    expect(boundaryFindings([{ file: 'assembly/src/example.ts', text: "export * from '../../domain/reference/verifier.mjs'" }])).toHaveLength(1)
+  })
+})
 
 describe('core persistence boundary', () => {
   it('allows named filesystem reads and ignores writer words inside comments', () => {
@@ -25,7 +56,7 @@ describe('core persistence boundary', () => {
   })
 })
 
-it.each(['assembly/src/plugin.ts', 'assembly/client.js', 'assembly/frontend/panel.tsx'])(
+it.each(['src/task/example.ts', 'assembly/src/plugin.ts', 'assembly/client.js', 'assembly/frontend/panel.tsx'])(
   'rejects domain identity literals in %s while allowing domain data loaded through a port', file => {
     const domain = { criterion: { criterionId: 'controlled-criterion' }, verifier: { program: 'controlled-verifier.mjs' } }
     expect(domainFindings([{ file, text: "const criterion = 'controlled-criterion'" }], [domain])).toHaveLength(1)

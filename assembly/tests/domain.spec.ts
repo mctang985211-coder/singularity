@@ -11,7 +11,7 @@ import { loadDomain, templateOf } from '../src/domain.ts'
 import { templateDeclaration } from '../src/template.ts'
 import { spawnProcess } from '../src/process.ts'
 
-const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
+const REAL = fileURLToPath(new URL('../../domain/reference', import.meta.url))
 const sha256 = (bytes: string | Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
 const scratch: string[] = []
 afterEach(async () => { await Promise.all(scratch.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))) })

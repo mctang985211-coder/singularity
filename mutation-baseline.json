@@ -1628,7 +1628,7 @@
       "rule": "a settled round whose native notification was lost is delivered on recovery without another evaluation",
       "edits": [
         {
-          "file": "assembly/src/driver.ts",
+          "file": "assembly/src/driver-rsi.ts",
           "find": "for (const request of task.rounds ?? [])\n        if (task.runs[request.runId]!.status === 'running')",
           "replace": "for(const request of task.rounds??[])if(task.runs[request.runId]!.status==='running'&&request.status==='pending')"
         }

@@ -54,7 +54,7 @@ describe('the deployable build', () => {
     await buildAssembly(root)
     await expect(checkBuild(root)).resolves.toBeUndefined()
     const home = join(root, 'private-home')
-    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home } })
+    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') } })
     const profile = JSON.parse(await readFile(join(home, 'profiles/singularity-next-web/package.json'), 'utf8')) as { name: string }
     expect(profile.name).toBe('singularity-next-web')
   }, 30_000)
@@ -95,7 +95,7 @@ describe('the deployable build', () => {
     await mkdir(profile, { recursive: true })
     await writeFile(join(profile, 'sentinel'), 'existing deployment')
     await writeFile(join(root, 'src/value.ts'), 'export const value = 2\n')
-    await expect(run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home } }),
+    await expect(run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') } }),
     )
       .rejects.toThrow(/stale/)
     expect(await readFile(join(profile, 'sentinel'), 'utf8')).toBe('existing deployment')
@@ -105,7 +105,7 @@ describe('the deployable build', () => {
     const root = await fixture()
     await buildAssembly(root)
     const home = join(root, 'private-home')
-    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home } })
+    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') } })
     const patch = await readFile(join(home, 'profiles/singularity-next-web/cordis.patch.yml'), 'utf8')
     // The plugin's Config marks all of these required and an id-targeted patch replaces the whole
     // config, so a template without them composes a row the host refuses to activate — and that

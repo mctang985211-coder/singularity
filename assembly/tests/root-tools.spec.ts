@@ -53,7 +53,7 @@ try {
   await ctx.plugin(Loader, { baseUrl: pathToFileURL(config).href })
   ctx.loader.builtins.group = Group
   await ctx.plugin(Presets, { default: 'singularity-root' })
-  const hostConfig = { controlId: 'root-tools', domainDir: join(checkout, 'deployment/domain/letters'), workspaceRoot: join(root, 'workspaces') }
+  const hostConfig = { controlId: 'root-tools', domainDir: join(checkout, 'domain/reference'), workspaceRoot: join(root, 'workspaces') }
   let hostFiber = ctx.plugin(host, hostConfig)
   await hostFiber
   const routes = new Map()

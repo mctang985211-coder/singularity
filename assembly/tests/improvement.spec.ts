@@ -28,7 +28,7 @@ it('freezes the RSI workflow bounds before its first Run and preserves them acro
   roots.push(root)
   const medium = new FakePersistence(), parent = agentFor('business', 'business')
   const mount = async () => openApparatus('bounded-improvement', root,
-    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
     medium as never, attachmentsAt(root), testProjections)
   let apparatus = await mount()
   try {

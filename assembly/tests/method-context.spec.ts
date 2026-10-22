@@ -19,7 +19,7 @@ import { templateDeclaration } from '../src/template.ts'
 import { propose } from '../src/surfaces.ts'
 import { agentFor, attachmentsAt, FakePersistence } from './seam.ts'
 
-const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
+const domainDir = fileURLToPath(new URL('../../domain/reference', import.meta.url))
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
 

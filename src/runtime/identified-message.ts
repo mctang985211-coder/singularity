@@ -1,3 +1,4 @@
+/** DSH adapter seam; protocol modules may reference its types, never load its runtime. */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionStore } from '@deepseek-ai/dsh-session'

@@ -20,7 +20,7 @@ async function setup() {
   const workspace = await mkdtemp(join(tmpdir(), 'root-submission-'))
   roots.push(workspace)
   const medium = new FakePersistence()
-  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
   const apparatus = await openApparatus('root-submission', workspace, domain, medium as never, attachmentsAt(workspace), testProjections)
   const agent = agentFor('root', 'root'), caller = callerOf(agent)
   const root = await propose(apparatus, caller, 'root', { goal: 'Coordinate the complete letter count' })

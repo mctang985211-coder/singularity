@@ -3,7 +3,7 @@ import { ToolArgsError, type ToolDefinition, type ToolRunContext } from '@deepse
 import { describe, expect, it } from 'vitest'
 
 import { apply, taskGuidance, rootGuidance, reviewGuidance, guidanceFor } from '../src/agent.ts'
-import type { AgentTaskSurface } from '../src/driver.ts'
+import type { AgentTaskSurface } from '../src/task-service.ts'
 import { agentFor, execFor } from './seam.ts'
 function scope(surface: Partial<AgentTaskSurface> = {}) {
   const tools: ToolDefinition[] = [],

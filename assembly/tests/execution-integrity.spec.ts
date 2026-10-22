@@ -24,7 +24,7 @@ async function setup() {
     apparatus = await openApparatus(
       'submission',
       root,
-      await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+      await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
       medium as never,
       attachmentsAt(root), testProjections,
     )

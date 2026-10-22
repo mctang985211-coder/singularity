@@ -13,7 +13,9 @@
     "gates": "node scripts/gates.mjs",
     "verify": "node -e \"console.log('verify: offline only; no product evidence')\" && pnpm build && pnpm test && pnpm gates",
     "setup:host": "node scripts/setup-host.mjs",
-    "doctor": "node scripts/singularity.mjs doctor"
+    "doctor": "node scripts/singularity.mjs doctor",
+    "build-private-dsh": "node scripts/build-private-dsh.mjs",
+    "verify:domain": "node scripts/verify-domain.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

@@ -28,7 +28,7 @@ import { contractFor } from '../src/inputs.ts'
 import { submit } from '../src/submission.ts'
 import { fixtureReview } from './review-fixture.ts'
 
-const dir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
+const dir = fileURLToPath(new URL('../../domain/reference', import.meta.url))
 const tool = "import {readFileSync} from 'node:fs'; process.stdout.write(String((readFileSync(process.argv[2],'utf8').match(/[A-Za-z]/g)??[]).length))"
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
@@ -285,14 +285,14 @@ it('freezes capability bindings to Skills and Tools from the same Revision and r
   const method = await createMethod(apparatus, { ...assets,
     templates: assets.templates.map((raw) => {
       const template = raw as { id: string }
-      return template.id === apparatus.domain.rootTemplate ? { ...template, capabilities: ['count', 'probe', 'yosys'] } : template
+      return template.id === apparatus.domain.rootTemplate ? { ...template, capabilities: ['count', 'probe', 'unbound'] } : template
     }), tools: [...assets.tools, probe],
   })
   const proposal = await propose(apparatus, caller, 'bind-generated-assets', { goal: 'count letters', method })
   const bindings = { skills: [{ name: 'count', digest: digestOf(assets.skills[0]) }],
     tools: [{ name: 'count', digest: digestOf(assets.tools[0]) }, { name: 'probe', digest: digestOf(probe) },
     ],
-    gaps: ['yosys'],
+    gaps: ['unbound'],
   }
   expect(await contextFor(apparatus, proposal)).toMatchObject({ skills: bindings.skills, tools: bindings.tools, gaps: bindings.gaps })
   const view = await contextFor(apparatus, proposal)

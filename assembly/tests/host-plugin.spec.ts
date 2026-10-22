@@ -19,7 +19,7 @@ import { asyncRefusalOf } from '../../tests/fixtures.ts'
 import { Config, apply, inject, name } from '../src/index.ts'
 import { FakePersistence } from './seam.ts'
 
-const REAL = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
+const REAL = fileURLToPath(new URL('../../domain/reference', import.meta.url))
 
 let root: string | undefined
 

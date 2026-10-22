@@ -8,12 +8,12 @@
 # @@CHECKOUT@@ / @@DSH_HOME@@ are materialisation tokens: scripts/deploy.mjs substitutes them when it
 # writes this profile and refuses to write a file in which one survives.
 #
-# domainDir is this checkout's domain material, never a copy: the task protocol's verifier program
-# lives there, so a profile that pointed somewhere else would run a different criterion.
+# SINGULARITY_DOMAIN selects the reviewed external environment package explicitly.
+# The repository reference is documentation/test material, never a deployment default.
 - id: singularity-assembly
   config:
     controlId: singularity-autonomous-v10
-    domainDir: '@@CHECKOUT@@/deployment/domain/sha256'
+    domainDir: '@@DOMAIN_DIR@@'
     workspaceRoot: '@@DSH_HOME@@/workspaces/singularity'
 
 # Sealed Task artifacts and native evidence replace editor-wide Git snapshots.

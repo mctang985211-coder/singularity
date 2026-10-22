@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { openDriver, type TaskDriver } from '../src/driver.ts'
+import { openDriver } from '../src/driver.ts'
+import type { TaskDriver } from '../src/task-service.ts'
 import { contractDigest } from '../../src/task/contract.ts'
 import { openApparatus } from '../src/apparatus.ts'
 import { propose } from '../src/surfaces.ts'
@@ -14,7 +15,7 @@ import type { TurnFailure, TurnFailureHandler } from '../src/execution.ts'
 import { spawnProcess } from '../src/process.ts'
 import { attachmentsAt, agentFor, execFor, factsOf, fakeExecution, FakePersistence } from './seam.ts'
 
-const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
+const domainDir = fileURLToPath(new URL('../../domain/reference', import.meta.url))
 const roots: string[] = []
 const drivers: TaskDriver[] = []
 afterEach(async () => {

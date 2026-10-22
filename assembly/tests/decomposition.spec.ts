@@ -9,7 +9,7 @@ import { asyncRefusalOf } from '../../tests/fixtures.ts'
 import { callerOf, openApparatus } from '../src/apparatus.ts'
 import { loadDomain } from '../src/domain.ts'
 import { contractFor } from '../src/inputs.ts'
-import type { PlannedChild } from '../src/driver.ts'
+import type { PlannedChild } from '../src/task-service.ts'
 import { spawnProcess } from '../src/process.ts'
 import { decompose, propose, retry } from '../src/surfaces.ts'
 import { startAttempt } from '../src/attempt.ts'
@@ -17,7 +17,7 @@ import { createMethod, loadMethod, seedMethod } from '../src/method.ts'
 import { templateDeclaration, type TemplateChild } from '../src/template.ts'
 import { attachmentsAt, agentFor, factsOf, FakePersistence } from './seam.ts'
 
-const domainDir = fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url))
+const domainDir = fileURLToPath(new URL('../../domain/reference', import.meta.url))
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
 const recipe: readonly TemplateChild[] = [

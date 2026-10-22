@@ -29,7 +29,7 @@ const event = (seq: number, text: string): SessionEvent => ({ seq: SessionSeq(se
 it('reviews RSI reports against sealed source and search evidence at submission, excluding private, unrelated and later observations', async () => {
   const root = await mkdtemp(join(tmpdir(), 'rsi-report-evidence-')); roots.push(root)
   const apparatus = await openApparatus('report-scope', root,
-    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
     new FakePersistence() as never, attachmentsAt(root), testProjections)
   try {
     const contract = { goal: 'Produce an evidenced report', artifact: 'report.json', inputs: [],

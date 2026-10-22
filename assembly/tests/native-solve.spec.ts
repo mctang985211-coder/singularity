@@ -30,7 +30,7 @@ afterEach(async () => { await cleanup?.(); vi.restoreAllMocks(); harness.open.mo
 
 it('scores the frozen non-guard rubric from sealed review evidence without accepting a failed Task', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'native-rubric-'))
-  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
   const original = domain.templates.get(domain.rootTemplate!)!
   const root = await readTemplate(domain.dir, { ...templateDeclaration(original), criteria: [...original.criteria,
     { criterionId: 'format', statement: 'the report is decimal text' },
@@ -92,7 +92,7 @@ it('scores the frozen non-guard rubric from sealed review evidence without accep
 it('keeps a sealed submission without review evidence unavailable instead of throwing or measuring zero', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'native-missing-review-'))
   const apparatus = await openApparatus('native-missing-review', directory,
-    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
     new FakePersistence() as never, attachmentsAt(directory), testProjections)
   cleanup = async () => { await apparatus.store.close(); await rm(directory, { recursive: true, force: true }) }
   const worker = agentFor('missing-review-worker', 'missing-review-session')
@@ -123,7 +123,7 @@ it('keeps a sealed submission without review evidence unavailable instead of thr
 it.each(['fail', 'partial'] as const)('retains explicit %s acceptance as a business result with its measured evidence', async verdict => {
   const directory = await mkdtemp(join(tmpdir(), 'native-business-review-'))
   const apparatus = await openApparatus('native-business-review', directory,
-    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
     new FakePersistence() as never, attachmentsAt(directory), testProjections)
   cleanup = async () => { await apparatus.store.close(); await rm(directory, { recursive: true, force: true }) }
   const worker = agentFor('business-review-worker', 'business-review-session')
@@ -149,7 +149,7 @@ it.each(['fail', 'partial'] as const)('retains explicit %s acceptance as a busin
 it.each(['business', 'runtime', 'cancelled'] as const)('counts a %s failure according to its committed cause, retaining its sealed trace', async cause => {
   const directory = await mkdtemp(join(tmpdir(), 'native-failure-'))
   const apparatus = await openApparatus('native-failure', directory,
-    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
     new FakePersistence() as never, attachmentsAt(directory), testProjections)
   cleanup = async () => { await apparatus.store.close(); await rm(directory, { recursive: true, force: true }) }
   const business = agentFor('business', 'business-session')
@@ -171,7 +171,7 @@ it.each([
 ])('counts only the current solve and acceptance with complete=$complete, reused=$reused', async ({ complete, reused }) => {
   const directory = await mkdtemp(join(tmpdir(), 'native-cost-'))
   const apparatus = await openApparatus('native-cost', directory,
-    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+    await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
     new FakePersistence() as never, attachmentsAt(directory), testProjections)
   cleanup = async () => { await apparatus.store.close(); await rm(directory, { recursive: true, force: true }) }
   const business = agentFor('business', 'business-session')

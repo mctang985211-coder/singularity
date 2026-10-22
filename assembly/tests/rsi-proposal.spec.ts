@@ -74,7 +74,7 @@ it('keeps frozen source bytes out of edits and preserves assets while adding, ch
 
 it('refuses malformed batches before consuming slots, then charges a complete candidate that fails prune', async () => {
   const root = await mkdtemp(join(tmpdir(), 'rsi-prune-')), medium = new FakePersistence()
-  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
   const suite = parseSuite({ version: 1, suiteId: 'preflight', failureQuality: 0, cases: [{
     caseId: 'evolve-letters', familyId: 'letters', sourceId: 'letters-source', split: 'evolve', trials: 2, weight: 1, hardGuards: [],
     contract: { goal: 'count letters', artifact: 'report.txt', inputs: [], criteria: [{ criterionId: 'correct', statement: 'correct count' }] },

@@ -17,7 +17,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((r) => rm(r, { rec
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'artifact-recovery-'))
   roots.push(root)
-  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess),
+  const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
     medium = new FakePersistence(),
     apparatus = await openApparatus('recovery', root, domain, medium as never, attachmentsAt(root), testProjections)
   const agent = agentFor('worker', 'worker'),

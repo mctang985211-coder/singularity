@@ -1,7 +1,9 @@
 # 私有 DSH 实跑测试
 
-开发、构建 peers 和产品运行都使用 `/home/ROXY/singularity-next/`。旧 harness 只供只读参考。
-真实运行加载私有 `singularity-next-web` profile 与本仓库已构建插件；会话与原始证据保留在专用 home。
+2026-10-22：领域任务与适配器已外置；下文 letters/CPU/SHA256 描述为历史运行合同，不是主仓当前内置任务。新环境由 env setup 从唯一 `domain/reference` 参考生成，部署显式指定 `SINGULARITY_DOMAIN`，领域验收在该环境包执行。
+
+
+当前开发与部署使用显式配置的重建宿主，步骤见 [standalone-dsh](standalone-dsh.md)。历史实跑使用 `/home/ROXY/singularity-next/` 下的私有 `singularity-next-web` profile 与对应冻结插件；会话与原始证据保留在专用 home。
 
 ## 一轮代码验证
 

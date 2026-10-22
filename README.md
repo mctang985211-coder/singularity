@@ -14,11 +14,12 @@
 | [context](docs/context.md) | 未关闭问题、用户裁定与证据边界 |
 | [standalone-dsh](docs/standalone-dsh.md) | 私有 DSH 环境、构建与验证命令 |
 
-开发需要 Linux、Node ≥22.19、pnpm 11.18.0、bubblewrap，以及有权使用的**带补丁 DSH 0.2.0-rc.2 安装**。项目保持私有、未授予开源许可；DSH 不由本仓下载。没有该依赖时会明确失败，不会安装 registry 同名包。版本和补丁产物摘要见 [dsh-baseline.json](dsh-baseline.json)，准备步骤见 [standalone-dsh](docs/standalone-dsh.md)。
+开发需要 Linux、Node ≥22.19、pnpm 11.18.0、bubblewrap，以及有权使用的**带补丁 DSH 0.2.0-rc.2 安装**。项目保持私有、未授予开源许可；DSH 可由固定源码和补丁重建。没有该依赖时会明确失败，不会安装 registry 同名包。版本和补丁产物摘要见 [dsh-baseline.json](dsh-baseline.json)，准备步骤见 [standalone-dsh](docs/standalone-dsh.md)。
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm setup:host /path/to/private-dsh/node_modules/@deepseek-ai
+pnpm build-private-dsh -- /path/to/new-private-dsh
+pnpm setup:host /path/to/new-private-dsh/installed/node_modules/@deepseek-ai
 pnpm run doctor
 pnpm verify
 ```
@@ -36,11 +37,12 @@ node scripts/singularity.mjs env approve /path/to/new-staging --reviewer your-na
 
 该入口使用原生 headless profile，不创建 Singularity Task、Bubble 或 RSI，准备完成即退出等待一次审核。模型路由补丁不能挂载 Singularity。配置清单、审核与冻结摘要见[环境准备说明](docs/env-setup.md)。
 
-部署前在 `deployment/profile/cordis.patch.yml` 配置模型路由、领域和控制标识，并在独立 DSH home 配置凭据。领域外部工具与只读参考路径也必须在本机存在。
+部署前在 `deployment/profile/cordis.patch.yml` 配置模型路由和控制标识，通过 `SINGULARITY_DOMAIN` 指定领域目录，并在独立 DSH home 配置凭据。领域外部工具与只读参考路径也必须在本机存在。
 
 ```sh
 export DSH_HOME=/path/to/private-home
-export DSH_CONTROL_INSTALLED=/path/to/private-dsh/node_modules/@deepseek-ai
+export DSH_CONTROL_INSTALLED=/path/to/new-private-dsh/installed/node_modules/@deepseek-ai
+export SINGULARITY_DOMAIN=/path/to/reviewed-environment/domain
 node scripts/deploy.mjs
 node scripts/host-runtime.mjs --host 127.0.0.1 --port 7331 --no-open
 ```
@@ -49,7 +51,7 @@ CLI 使用与网页相同的原生服务和认证。把宿主启动时提供的 
 
 ```sh
 export SINGULARITY_URL=http://127.0.0.1:7331
-pnpm run doctor --host --domain ./deployment/domain/letters
+pnpm run doctor --host --domain "$SINGULARITY_DOMAIN"
 node scripts/singularity.mjs task run ./request.json --request-id my-task-001 --learning off --wait
 node scripts/singularity.mjs task status <task-or-session-id>
 node scripts/singularity.mjs task cancel <session-id>
@@ -75,9 +77,11 @@ node scripts/singularity.mjs experiment report <task-or-session-id> --output ./r
 
 实验要求 suite 与已部署领域的冻结 suite 摘要完全一致。当前 CLI 只启动第一个 evolve case 的业务 root；有效候选请求 round 后，原生 driver 才执行 evolve 的完整 case×trial 比较，冻结 champion 后再验证 validation/heldout。完整 pilot 逐题执行入口尚未接通，冻结 suite 不会自动补跑其他业务案例。validation/heldout 契约不会随 CLI 提案输入公开。报告从 committed snapshot 导出 suite、campaign 终局、逐轮测量及证据，不维护第二套实验真相。suite 配置与隔离边界见[终局计划](docs/task-first-domain-rsi-plan.md)。
 
+独立迁移目前仅在配置 suite 的发布路径强制执行。无 suite 的单题路径仍可经审核发布，不能将其发布结果当作领域泛化证据；统一发布门槛仍是计划 T08 的未完成项。
+
 `singularity-assembly.evaluationParallelism` 默认 1，可在新实验中设为 4，使固定 suite 内的独立 trial 并行；轮次和发布仍按序推进。并行度进入 execution profile，改变后应开始新实验。同一 search 内相同方法、矩阵、profile 和计分口径的完整 incumbent 证据可复用，保留原 Task/Run 来源；私有验证重新执行。领域 measurement 可以返回 `{quality, metrics: {name: {value, unit}}, detail}`，公式及系数由领域模块定义并随实现摘要固定，各项原始指标保留在 trial 记录和 RSI 反馈。需要标准通过比例时可选 `suite.scoring: "criteria"`，与自定义 measurement 互斥。
 
-[局部芯片推理示例](domains/chip-inference/README.md)使用模型配置导出的点积 workload、模块级 Verilator、Yosys 和 OpenSTA，提供连续面积/延迟评分。它不运行全芯片仿真或 bebop-p2e；功耗未进入得分，算子结果不能代表端到端模型推理表现。
+仓库只保留 [domain/reference](domain/README.md) 一份配置参考供 env setup agent 阅读。领域适配器、任务、评分器与工具链检查由它生成到用户指定的独立环境包；部署必须显式设置 `SINGULARITY_DOMAIN`，内核没有领域默认值。`pnpm verify:domain -- /path/to/environment` 执行该包自己的 `verify.mjs`。
 
 Git 回退后应重新执行 `pnpm build`，再部署到独立 home/controlId 并检查最终配置。旧日志、旧运行补丁和旧 bundle 不能自动组成一次可恢复的新实验；例如历史草案的 `environmentApproval` 不是当前插件配置字段，审核摘要在启动前核对，不应把该字段继续传给插件。
 
@@ -90,4 +94,4 @@ RSI 每次开始或恢复读取 `kind=search` 的 phase、next、预算和 `auth
 
 模型请求的流式输出、错误分类、重试和最终失败由 DSH 原生 agent loop、`llm-retry` 与 provider `retryPolicy` 负责。当前部署为 normal 模式、最多重试 20 次，10% 抖动指数退避从 500 毫秒到 3 分钟。部分推理、文本或未执行的工具调用后发生 TRANSPORT 断流，仍可由原生重试恢复；失败 chunks 保存在 `assistant/attempt`，不会进入成功消息或执行其中的工具。不可重试错误和重试耗尽保留原生 `turn/end` 原因，Task 层按该事实记录当前 Run 失败；取消和 attempt 用量同样遵循原生语义。直接 `ctx.llm.stream()` 的背景摘要仍由原生调用者决定重试。
 
-委派区分必须验收的 `required` 责任与可择优、可停止的 `exploration` 分支。父背景默认生成结构化 checkpoint；`singularity_memory` 提供可读分支的统一分页目录，标出本节点继承背景，按 ref 自行选择阅读全文。单会话上下文压缩由 DSH 原生 BasicCompaction 管理。CPU 快速回归使用 `deployment/domain/polybench` 的 PolyBench/C 3mm：仅提供参考 C、固定评测入口与任务声明，最多 4 核、4 线程，数值正确且实测加速至少 1.20 倍即可交付。SHA256 领域仅提供一份 RTL、固定 Yosys 综合指导和必要任务声明，面积及功能由独立审核按实际证据验收。
+委派区分必须验收的 `required` 责任与可择优、可停止的 `exploration` 分支。父背景默认生成结构化 checkpoint；`singularity_memory` 提供可读分支的统一分页目录，标出本节点继承背景，按 ref 自行选择阅读全文。单会话上下文压缩由 DSH 原生 BasicCompaction 管理。领域规则及外部工具验证属于独立环境包，默认工程回归不执行 EDA、CPU benchmark 或外部领域框架。

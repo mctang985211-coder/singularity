@@ -2,7 +2,7 @@
 /** Product boundary, schema, dependency and deployable-build checks. */
 import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
 import { hostFindings, hostInstall } from './host-config.mjs'
@@ -21,6 +21,49 @@ function treeFiles(directory) {
     const path = join(directory, entry.name)
     return entry.isDirectory() ? treeFiles(path) : [path]
   }).sort()
+}
+
+/** Runtime/control are DSH adapters; every other src module is host-independent. */
+export function boundaryFindings(sources) {
+  const findings = []
+  for (const { file, text } of sources) {
+    const path = resolve(ROOT, file), name = relative(ROOT, path)
+    const core = name.startsWith('src/')
+    const adapter = name.startsWith('src/runtime/') || name === 'src/control/session-store.ts'
+    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)
+    const check = (node, specifier, typeOnly = false) => {
+      const target = specifier.startsWith('.') || specifier.startsWith('/') ? relative(ROOT, resolve(dirname(path), specifier)) : specifier
+      const report = detail => findings.push(`${name}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1} ${detail}`)
+      if (core && (target.startsWith('assembly/') || target.startsWith('@dangosys/dsh-singularity-next')))
+        report('core cannot depend on assembly')
+      if (target.startsWith('domain/') || target.startsWith('domains/') || target.startsWith('deployment/domain/'))
+        report('domain implementations belong to external environment packages, never product imports')
+      if (core && !adapter && !typeOnly && (specifier.startsWith('@deepseek-ai/') ||
+        (!specifier.startsWith('node:') && !target.startsWith('src/')) ||
+        target.startsWith('src/runtime/') || target.startsWith('src/control/') || specifier === 'node:module'))
+        report('protocol/decision code cannot load a host adapter or external runtime')
+    }
+    const visit = node => {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        const clause = ts.isImportDeclaration(node) ? node.importClause : undefined
+        const bindings = clause?.namedBindings ?? (ts.isExportDeclaration(node) ? node.exportClause : undefined)
+        const typeOnly = clause?.isTypeOnly || (ts.isExportDeclaration(node) && node.isTypeOnly) ||
+          (!clause?.name && bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings)) && bindings.elements.length > 0 && bindings.elements.every(e => e.isTypeOnly))
+        check(node, node.moduleSpecifier.text, !!typeOnly)
+      }
+      if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal))
+        check(node, node.argument.literal.text, true)
+      if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (!node.questionDotToken && ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+        const arg = node.arguments[0]
+        if (arg && ts.isStringLiteral(arg)) check(node, arg.text)
+        else if (core) findings.push(`${name}: core module loading must use literal imports`)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+  }
+  return findings
 }
 
 export function coreWriteFindings(sources) {
@@ -178,12 +221,13 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
         },
       ],
       ['core-no-durable-write', () => coreWriteFindings(sources('src'))],
-      ['assembly-domain-free', () => domainFindings([...sources('assembly/src'),
+      ['package-boundaries', () => boundaryFindings([...sources('src'), ...sources('assembly/src')])],
+      ['product-domain-free', () => domainFindings([...sources('src'), ...sources('assembly/src'),
         ...sources('assembly/frontend'),
         ...['client.js'].map((file) => ({ file: 'assembly/' + file, text: readFileSync(join(ROOT, 'assembly', file), 'utf8'),
               })),
             ],
-        treeFiles(join(ROOT, 'deployment/domain')).filter((file) => file.endsWith('task.json'))
+        treeFiles(join(ROOT, 'domain')).filter((file) => file.endsWith('task.json'))
               .map((file) => JSON.parse(readFileSync(file, 'utf8'))),
           ),
       ],

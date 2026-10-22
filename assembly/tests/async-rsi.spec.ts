@@ -21,7 +21,8 @@ import { TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type TaskState } from '.
 import { DEFAULT_WORKFLOW_LIMITS } from '../../src/task/budget.ts'
 import { parseSuite } from '../../src/measure/suite.ts'
 import type { EvolutionOptions } from '../src/evolution.ts'
-import { openDriver, type TaskDriver, type AgentTaskSurface } from '../src/driver.ts'
+import { openDriver } from '../src/driver.ts'
+import type { TaskDriver, AgentTaskSurface } from '../src/task-service.ts'
 import { loadDomain } from '../src/domain.ts'
 import { contractFor } from '../src/inputs.ts'
 import { spawnProcess } from '../src/process.ts'
@@ -121,7 +122,7 @@ async function fixture({ suite = false, heldout = true } = {}) {
     return live
   }
   const parent = makeAgent('business'), dispatches: UserMessage[] = []
-  const baseDomain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const baseDomain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
   const domain = !suite ? baseDomain : { ...baseDomain, suite: parseSuite({ version: 1, suiteId: 'offline-driver-wiring', failureQuality: 0,
     cases: (heldout ? ['evolve', 'validation', 'heldout'] : ['evolve', 'validation']).flatMap(split =>
       Array.from({ length: split === 'evolve' ? 1 : 3 }, (_, family) => ({
@@ -349,7 +350,7 @@ it('resumes the same unfinished RSI after a startup failure without rerunning th
   const trace = (factsOf(h.medium).findLast(f => f.kind === 'rsi/status' && (f.payload as { status: string }).status === 'running')!.payload as { trace: { bytes: number } }).trace
   await driver!.close(); driver = undefined
   const control = await openApparatus('async', h.root,
-    await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess), h.medium as never,
+    await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess), h.medium as never,
     attachmentsAt(h.root), testProjections)
   try {
     await expect(control.store.emit({ commandId: 'changed-resume-trace', protocol: TASK_PROTOCOL, version: TASK_VERSION,
@@ -1041,7 +1042,7 @@ it('settles three frozen slots once under duplicate concurrent calls and cold re
 
 it.each(['35', '0'])('freezes learning off and closes business result %s without starting RSI after recovery', async artifact => {
   const h = await fixture()
-  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
   const template = domain.templates.get(domain.rootTemplate!)!
   const contract = contractFor(domain, template, 'count protected letters')
   const root = await h.enter(JSON.stringify({ contract, learning: false }))

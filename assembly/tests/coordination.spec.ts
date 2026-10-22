@@ -26,7 +26,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((r) => rm(r, { rec
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'task-coordination-')); roots.push(root)
   const persistence = new FakePersistence(), runtime = nativeRuntime()
-  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
   const apparatus = await openApparatus('coordination', root, domain, persistence as never, attachmentsAt(root), testProjections)
   const parent = runtime.agent('parent'), caller = callerOf(parent)
   const proposal = await propose(apparatus, caller, 'root', { goal: 'count letters' })

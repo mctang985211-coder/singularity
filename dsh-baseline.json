@@ -29,7 +29,7 @@
   ],
   "checkout": {
     "commit": "639ed015397290b3745d163aafe02ffee4aa3f84",
-    "tag": "v0.2.0-rc.2",
+    "tag": "dsh-v0.2.0-rc.2",
     "repository": "https://github.com/deepseek-ai/deepseek-harness"
   },
   "drift": {
@@ -49,6 +49,10 @@
     {
       "name": "memory-pressure",
       "sha256": "c23f805250a29097d3d9cd8b1f925ccc5322ba90c9734ef3bfdc365504aa3dd8"
+    },
+    {
+      "name": "pending-wake",
+      "sha256": "a273fd5480456bdb5741d30e421fe553dd353ed9d0577193a7f698c6d5d06b5b"
     }
   ],
   "artifacts": {
@@ -57,6 +61,9 @@
     "dsh-session/lib/types/index.d.ts": "d79b82272aa0ef34817d8b5ef457d0405f2f08b7408ea1d06087938fc5112c5d",
     "dsh-session/lib/types/types.d.ts": "47dba68b697429bd777d66f5da9a24790683066cca3dd42506f0168dfae6c61b",
     "dsh-token-meter/lib/index.js": "29dfa31ebee78e2df7030b3a4fa391378ffdb7804b5e39d1632c2f4e053de65a",
-    "dsh-compaction-basic/lib/index.js": "411324d7f37a05562687e42435c2475c66819ed11ea275040f97e0082b9a7cf2"
+    "dsh-compaction-basic/lib/index.js": "411324d7f37a05562687e42435c2475c66819ed11ea275040f97e0082b9a7cf2",
+    "dsh-agent/lib/types/runtime-types.d.ts": "4b90a21c7e441f7e1e807ba67af88c61c7cb2b554c4ec9f4e68b9fe3ea1cb776",
+    "dsh-agent-loop/lib/index.js": "c4e32ffcedd2ef190432a76bc8dffa8935f9f38e0d5e04c81940f78ca4d6f91b",
+    "dsh-agent-loop/lib/types/agent.d.ts": "fab97d57beb986aa396a3a1c46498e6951e33ce185c8cca8c6e51d87ac1635e8"
   }
 }

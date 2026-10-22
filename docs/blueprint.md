@@ -38,7 +38,9 @@ RRSI 只提供决定与正则化约束；执行复用 DSH/Task/Bubble，见 [ADR
 |---|---|---|
 | core | 单一控制存储、Task v23、Strategy v9、Measure v5、Review v5；批次预算、历史搜索头/S*、suite 矩阵与配对校准、冻结迁移 | 外部模型/工具来源不能靠本地声明完全证明 |
 | G1/G2 | 完整契约、可选模板、workflow 策略/方向、独立审核、整图预算、增量规划、恢复/取消、snapshot v13 | 新协议真实模型协调行为与领域运行 |
-| G3 | 异步有界稀疏搜索、case/family 反馈、冻结 champion、独立 validation/heldout、发布审核和唯一指针、CLI 报告 | Buckyball 真实案例/oracle 与完整环境、实际迁移/消融效果 |
+| G3 | 异步有界稀疏搜索、case/family 反馈、suite 的独立 validation/heldout、发布审核和唯一指针、CLI 报告 | 无 suite 发布尚未强制迁移；CLI 未逐题运行完整 pilot；实际迁移/消融效果待独立领域包验证 |
+
+领域实现不进入 core/assembly 或产品 spec。主仓只保留 `domain/reference` 给 env setup 阅读；领域包在用户 staging 生成，经审核后显式选择部署。2026-10-22 的结构修复和逐包验收见[计划第 9 节](task-first-domain-rsi-plan.md#9-详细实施任务)。
 
 核心基础与原生装配生命周期保留；模型请求的 retry、错误分类与最终失败直接由 DSH 处理，Task 只消费原生 turn/end；无自定义 provider 拦截与整图重启机制。[context](context.md) 只记录未关闭问题和证据边界，历史“通过”不代表新合同通过。
 代码/测试/门禁数量不用于推算完成率。体积是审查信号；每条新增状态/规则需有真实生产者、消费者和行为反例。

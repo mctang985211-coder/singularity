@@ -4,6 +4,8 @@
 RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba1`。
 实施更新：2026-10-20。**已有 Task/Workflow、多任务矩阵、有界稀疏搜索与独立迁移发布链路。`184556` 报告 accepted 但六槽零 round；已按真实 Agent 输入/输出修复异步推进、工具读取与审核提示。letters 完成两轮测评、发布、恢复与报告验收，后续业务消费发布版本并 accepted。Buckyball cutoff551 已完成一轮与报告验收，结果 insufficient-evidence、无发布：候选 A 质量不变而成本增加 43.66%；B 因私有检查被错误委派且业务失败误归 runtime 丢失一次观察。现已分离公开任务规范/私有验证配方并修正失败传播，工程及真实工具链复验通过，尚未新跑模型 RSI。证据见 [RSI 修复取证](rsi-repair-evidence.md)，报告关闭不代表领域收益。** 当前 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只接纳新图。每批冻结 1–3 个候选、每候选一个机制、最多六槽、repair=0；KISS 稀疏模式，不宣称实现退火。DSH 继续拥有会话、重试、用量与持久化。完整逐题 pilot 与研究出口仍以第 9 节为准。
 
+结构收尾：2026-10-22，基线 `f3755aa`。五项结构修改已落地：DSH 源码重建、依赖方向 gate、driver 生命周期拆分、领域检查显式外置、唯一 `domain/reference` 标准参考。用户最新约束取代旧的双领域目录方案：所有真实领域任务、适配器及其测试属于独立领域包，不进入产品源码/spec，也不选择隐式默认领域。**原 T00–T16 未全部完成**：无 suite 发布路径未强制独立迁移，CLI 未逐题运行完整 pilot，跨机器复现与正式领域/论文证据尚缺。当前逐包状态及结构验收以第 9 节为准；前文实跑记录保留为历史证据。
+
 本版按用户最新定义收敛：Task 是 workflow 中可独立交付、验收和追责的节点；RSI 演化节点定义、分解和关系组织策略，Skill/Tool 提供配套能力。评测负责验证这种演化，而不替代产品主体。第 1、6 节给出最终对象模型和执行语义，第 9 节给出唯一施工顺序，第 13–16 节给出研究、Buckyball 和提示词的验收细则。不再另写一份相互竞争的 final-plan。
 
 本计划接替旧装配蓝图的施工排序，保留旧文档中的历史证据。遇到历史设计与本计划冲突，先按本计划列出的新行为修改测试与实现，不为旧行为建立兼容桥。具体执行仍以用户最新指令为准。
@@ -704,29 +706,29 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
 
 ## 9. 详细实施任务
 
-2026-10-19 本轮状态如下。工程能力与真实模型/领域证据分开验收；下文的完整目标保留，未满足出口不因离线通过而关闭。静态预检边界修复已通过本轮完整工程验证，尚未部署或真实模型重跑，记录见 §2.2。所有新增事实进入原有 control log；没有新增 workflow 运行时、旧图兼容桥或第二消息队列。
+2026-10-22 按当前源码重新核查全部 T00–T16。下表区分代码与工程见证、仍未满足的产品/实验出口；结构整理没有改变 Task/Strategy 协议，也没有新增 workflow 运行时、队列或领域注册器。历史实验结果仍见 §2.2，不继承为本轮效果证据。
 
-| 包 | 本轮实现/确定性见证 | 剩余出口或明确边界 |
+| 包 | 当前实现与见证 | 剩余出口或明确边界 |
 |---|---|---|
-| T00 | 当前协议、文档与施工状态同步 | 随实际验证维护，不虚报研究完成 |
-| T01 | 最多 6 个冻结槽，冻结后失败也扣额；全拒绝/无赢家可结束；Run 提交统一关闭搜索，错误提交不提前终结；封存候选冷恢复；启动失败可显式恢复，终态/取消不复活 | 所有理论崩溃点未穷举；真实领域负结果尚无 |
-| T02 | 完整契约、可选模板/空策略、首次根完整委派；冻结契约不随模板修改/删除；原生 JSONL 探针证明首次模型请求收到固定策略，delivered/read 分开 | delivered 不证明模型遵循；真实模型策略行为效果未测 |
-| T03 | 闭合 suite、family/source 分组与 split 隔离、每轮独立 TrialKey、executionProfile、本地源码/bundle/preset/资源/verifier 参数及公共 provider retry/model metadata 摘要、私有验证读面 | 服务端模型 revision opaque；传递依赖与工具声明并非全面独立认证；跨 control 污染依赖实验者封存来源 |
-| T04 | 原生 case×trial 矩阵、权重/family 聚合、失败保留分母、无提交不造产物、基础设施缺失与恢复；复用根会话按准确 dispatch 与封存提交的原生投影差值计费，保留连续轨迹 | 缺 dispatch/billing sample 时比较成本 unknown；领域评分/oracle 需真实冻结 |
-| T05 | campaign+caliber 隔离的已接纳搜索头及 S*；方向反例；重复基线噪声带；family 配对质量/成本区间 | 小样本可诚实证据不足；无匹配 seed/交错执行的时漂控制证明 |
-| T06 | 唯一 paths 批次 API，1–3 槽同一 incumbent/截止；一个机制、repair=0、总 6 槽；新批次纯静态整批预检通过后冻结同一份 bytes，pending 按附件恢复；untried 保留槽、两轮停滞首槽 prune、证据检查与 critic 均在冻结后；单份槽结果；静态错误不扣槽、混合批次不部分接纳已有回归 | 新边界尚未真实模型重跑；选择 b=1 稀疏模式，不实施 2→1 退火；机制独立性由 critic 判断，非形式证明 |
-| T07 | 稳定 evolve case/family 预测、配对命中/未命中/未预测退化、近 6 轮反馈与拒绝原因；逐观察节点/责任/依赖/产物关系和消费计数；全失败允许无 success_habits | 观测关联不证明因果；实际消融价值需领域实验 |
-| T08 | 冻结 H0/champion；validation/可选 heldout；已消费事实、关闭继续提案/请求评估；发布重算 exact validation 配对报告，独立 review+CAS；原始矩阵/结果可导出 | 未污染检查只在本 control 内按 suite/已见 validation 与 heldout 的 family/contract；真实迁移与跨 host 来源承诺未获证明 |
-| T09 | 在飞追加、逐子通知、根内图投影、准确 producerRunId；整图节点/规划/Run/无进展额度及 native 步数出口；持久取消及冷恢复；pilot 已有真实委派与独立验收见证 | 逐节点抢先响应、复杂任务收敛及组织效率仍需行为实验；已在途并发请求不能由事后计数撤销 |
-| T10 | 整删 provider.ts、自定义 partial/flush/exhausted 判断、整图停机/重启与侧日志；直接使用 DSH 原生重试/最终错误；Task 从 turn/end 保留原始原因；RSI/审核复用步骤出口，取消/终态失败中止在飞工作并阻止失效后发布 | 原生策略决定重试资格、预算和失败出口；raw 调用仍由原生调用方决定重试 |
-| T11 | 正式 doctor/task run/status/cancel/experiment run/report；学习开关；认证/幂等身份；移除浏览器 campaign 路径；可单独停止业务后的 RSI，taskId 精确取消不误停同会话新根 | experiment run 仅启动第一个 evolve 业务 root，完整 pilot 逐题执行入口未接通；学习失败后的真实模型恢复未验收；同请求 ID 仅用于原文恢复，变更输入须新 ID |
-| T12 | 显式私有宿主配置、版本/补丁摘要、frozen 公共依赖安装、异路径构建；NOTICE/来源/贡献/安全文档与固定权限 CI | 根项目私有 UNLICENSED；私有宿主不随仓分发；本地无 remote，远端保护/CI 执行与另一机器复现待外部环境 |
-| T13 | 最新 `pnpm verify` 退出 0，90 文件/946 测试/7 门禁通过；覆盖静态拒绝、字段定位、真实引用填写运行时模板后进入 critic、审核模板解析、read.kind 必填、冻结恢复与结算幂等；真实 JSONL 发布竞态、恢复/取消/步骤出口及既有原生 delivery/retry/用量和 Buckyball 业务验收证据保留，见 §2.2 | 本轮尚未部署或真实模型重跑；较早异步等待失败的根因未定位，真实迁移未验收，历史故障分别记录 |
-| T14 | 冻结协议、11 篇原始摘要定位、RRSI 对照；pilot 来源、分组/split、oracle、资源与统计门已冻结 | 正式迁移需更多独立族和完成的比较；更完整硬件/compiler 相关工作与论文新颖性未完成 |
-| T15 | 四层角色/方法/方向接线、真实 round directives、冻结发布 subject、按需 workflow 元数据/历史反馈；原生首次 delivery 见证；RSI 当前头提案/报告模板与按实际 criteria 生成的审核模板；read.kind 必填 | 新模板尚未真实模型重跑；模型是否依策略改变组织、真实效果及消融未测 |
-| T16 | 最小 C/ISA 投影及固定工具、真实 MCP/BEMU；6 题/3 族 labelled-synthetic pilot；12 个正反样本、unknown/refutation、并发取消和私有读隔离通过；真实业务根已有独立验收 | 完整 pilot 逐题运行未接通；早期学习被 HTTP 402 中断，最新运行 6 invalid/0 round；正式候选比较、迁移与论文门未完成；不覆盖全仓递归依赖或 MLIR/RTL/PPA |
+| T00 | 同一计划、当前入口与历史记录同步；本次基线为 `f3755aa` | 持续按实际证据维护，不能总括标记全部完成 |
+| T01 | 最多六个冻结槽、失败扣额、无赢家合法结束、冷恢复、取消与终态不复活；报告路径先检查再结算 | 并未穷举所有崩溃点；复杂真实领域的稳定性还需行为证据 |
+| T02 | 完整 Task 契约、可选模板、空 workflow 策略、根首次完整移交、固定方法 delivery；冻结契约不随模板修改 | 送达不证明模型遵循；未知任务上的组织质量需要实测 |
+| T03 | 冻结 suite、family/source/split、TrialKey、execution profile、私有验证读面 | 服务端模型 revision opaque；跨 control 来源与工具传递依赖不能仅凭摘要独立认证 |
+| T04 | 实际 case×trial 测量矩阵、权重/family 聚合、业务失败保留分母、基础设施 unknown；原生 dispatch/计费投影 | 无足够 billing 样本时成本 unknown；真实领域 oracle 必须由领域包冻结 |
+| T05 | `src/strategy/view.ts` 的已接纳搜索头和历史 S*、方向归一、校准噪声带、配对区间 | 小样本可返回证据不足；匹配 seed/时漂控制未形成正式证据 |
+| T06 | 1–3 槽冻结批次、单一机制、repair=0、最多六槽、静态预检与封存恢复、停滞 prune | b=1 稀疏模式是明确的 KISS 选择，未实现退火；机制独立性依赖 critic，不能称形式保证 |
+| T07 | 预测/命中/退化反馈、逐节点责任与依赖/产物观察、消费计数 | 图变化和观测关联不构成因果解释；实际消融价值待测 |
+| T08 | suite 路径有冻结 champion、独立 validation/可选 heldout、重算配对报告、review+CAS，取消后禁止切换 | **未全完成**：`driver-rsi.ts` 在无 suite 时仍会按 round winner 请求发布，`method-release.ts` 仅在有 suite 时强制 transfer；单题审核通过仍可发布。不能声称全部发布都要求未见任务证据 |
+| T09 | 逐子通知、在飞追加、全局方向/局部责任、准确 producer、构图/Run/无进展预算、持久取消与恢复 | 复杂未知任务的抢先协调、收敛效率和模型组织行为仍需实测 |
+| T10 | 删除自定义 provider 恢复包装；driver 改为组合入口，execution/review/RSI/release 分工，共用 store/作业/关闭范围 | 此次结构出口已实现；不能由拆文件推断全部 helper 最优或原生错误永不发生 |
+| T11 | doctor/task run/status/cancel/experiment run/report、学习开关、认证和幂等、RSI 单独取消 | **未全完成**：`scripts/singularity.mjs` 的 experiment run 只提交第一个 evolve 业务 root；测量阶段全矩阵不等于完整 pilot 已逐题执行 |
+| T12 | 固定 tag/commit 的私有 DSH 源码重建及 baseline 校验、版本化三份源码补丁、显式宿主/领域、可执行包边界、领域测试外置、来源/安全/贡献/CI 文件 | **未全完成**：仅本机空目录重建；另一机器/干净容器复现未做；根项目仍 private/UNLICENSED，公开授权与远端保护/CI 未验收 |
+| T13 | 结构改造的构建、类型、行为、门禁和 DSH 源码回归记录见 §9.2；旧真实运行证据保留 | **未全完成**：工程通过不能关闭领域效果门；未重跑模型或正式独立迁移 |
+| T14 | 已有冻结协议、RRSI 源码对照和历史 pilot 来源/split/oracle/资源规则 | 系统查新、新颖性定位、足量独立族、正式对照与消融仍未完成 |
+| T15 | 角色/方法/方向装配、真实 round directives、冻结发布 subject、按需图读面和历史反馈；原生 delivery 见证 | 模型是否遵循、是否提高领域探索和组织效率、提示/图策略消融尚未实证 |
+| T16 | 历史 Buckyball 最小 C/ISA 环境、合成任务 oracle/隔离与业务验收见证保留 | **主仓适配器工作已按用户要求撤销**；今后只在独立领域包继续。完整 pilot、有效候选比较、迁移及论文出口仍未完成，不能标完成或推及 MLIR/RTL/PPA |
 
-**剩余证据边界：** 最小 C/ISA pilot 的环境、来源、oracle 和隔离阻断已解除，真实业务根已验收；作者树仍不是完整上游复现。本轮采用明确标注的合成缺陷，不冒充历史漏洞。早期学习因 HTTP 402 失败，较早 CommandCode 运行曾提前关闭搜索；`214154` 的六批提案结构失败，`003416` 转抄损坏冻结源码且零 round，最新 `124254` 尚未进入 RSI 就因错误子合同陷入审批等待，现已取消。报告 accepted 不证明其宿主故障归因正确，也未形成有效比较、迁移或新方法发布。完整 pilot 逐题执行入口未接通；T14/T16 正式迁移与 T13 领域效果保持未完成；当前每个 split 只有一族，仍未满足冻结的三族统计门。当前修复的工程验证见第 2.2 节，尚未用真实模型重跑。
+**下一步出口：** 先决定并落实 T08 无 suite 方法的发布资格；未见任务证据不足时保持生产头不变，但业务仍可运行。再补 T11 的逐题实验编排，复用现有 Task/请求身份与恢复事实，不另建实验运行时。随后按 T12 做干净环境复现，并在独立领域包完成 T14/T16 的冻结比较、消融与迁移；T13 最后分别报告工程结论与效果结论。此处列出的剩余工作没有在本轮冒充完成。
 
 ### T00 · 固定审查基线与新合同
 
@@ -900,7 +902,7 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
 - 当前 CLI 入口（与 README 一致）：
 
   ```sh
-  node scripts/singularity.mjs doctor --domain ./deployment/domain/letters
+  node scripts/singularity.mjs doctor --domain /path/to/reviewed-environment/domain
   node scripts/singularity.mjs task run ./request.json --learning off --wait
   node scripts/singularity.mjs experiment run ./suite.json --request-id experiment-001 --wait
   node scripts/singularity.mjs experiment report <task-or-session-id> --output ./report.json
@@ -917,6 +919,7 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
 - 详细要求见第 10 节；实施拆成 portable dependency setup、授权/来源文档、CI/发布、文档清理四个小提交。
 - 反例：换 checkout 路径或用户目录后可以验证；缺私有宿主时明确失败而非装入错误 registry 版本；包里无凭据/本地运行材料；来源和许可证随再分发包保留。
 - 完成门：另一机器或干净容器按公开步骤复现离线检查；所有不能公开获取的依赖明确说明，未满足前不声称开箱即用。
+- 2026-10-22 结构收尾：宿主源码重建、wake baseline、包依赖 gate、driver 拆分、领域验证外置及唯一标准参考均已实现，证据见 §9.2；跨机器复现和公开分发仍不关闭。旧的“适配器/实例双目录”方案已由用户取消，不再建设。
 
 ### T13 · 最终工程与领域效果验收
 
@@ -946,6 +949,26 @@ T00 → T14（研究协议/任务来源）→ T16（分阶段 Buckyball 接入�
 T15a 只含业务上下文/角色装配，T15b 接 T06/T07 的实际 round directives 与冻结发布契约，发布的最终探针随 T08 完成；两者范围在第 16 节固定，避免依赖环。T16 环境、产物与隔离可在阶段 A/B 期间准备，正式搜索必须经过阶段 B，最终迁移必须冻结 champion。T12 不阻塞最初探针，但阻塞公开可复现交付。
 
 **停止线：不在 workflow 方法尚未消费、逐节点协调未通过，或 T01/T03/T04/T05 未完成时，用昂贵单题多轮实跑寻找领域提升证据。** 这类运行最多用于定位接线问题。
+
+### 9.2 2026-10-22 结构修复与复核
+
+本次基于 `f3755aa` 的源码实施五项结构修复。用户最新要求优先：项目只保留一个给 env setup agent 阅读的标准领域参考，真实领域任务及适配器不进入产品源码或 spec。以下实现替代上一版仅审查未实施、并建议保留双领域目录的内容。
+
+| 原结构项 | 当前落地 | 完成范围 |
+|---|---|---|
+| P0 / T12：私有 DSH 可重建 | `scripts/build-private-dsh.mjs` 克隆 `dsh-v0.2.0-rc.2`，核对 commit `639ed015397290b3745d163aafe02ffee4aa3f84`，检查/应用三份源码补丁，frozen 安装并构建生产 host/client/native/Web，再检查 baseline | 本机新空目录全程成功；旧编译产物 patch/应用脚本删除；另一机器复现仍待做 |
+| P1 / T10/T12：可执行依赖边界 | `package-boundaries` 阻止 core 反向依赖 assembly、加载 DSH/adapter 及产品导入领域实现；`src/runtime/**`、`src/control/session-store.ts` 显式为 adapter seam；纯类型引用可保留 | 静态/dynamic/require、re-export、混合类型和值、桥接泄漏负例及合法 seam 通过；暂不为结构整理增加 workspace 包 |
+| P1 / T10：driver 生命周期 | `driver.ts` 仅组合；`driver-execution.ts` 管 admission/业务端口，`driver-review.ts` 管验收/判断恢复，`driver-rsi.ts` 管搜索/轮次/取消，`driver-release.ts` 管迁移/发布；`driver-runtime.ts` 共用资源，`task-service.ts` 定义公共端口 | 一个 apparatus/store/scheduler、作业与关闭范围；沿用取消、恢复、失败传播、exact producer 和发布竞态见证；无第二队列或状态机 |
+| P2 / T12/T13：领域验证隔离 | 删除主仓中的 SHA256/PolyBench/Buckyball 专用 spec；`pnpm verify:domain -- <environment-directory>` 只执行显式选择包的 `verify.mjs`，无入口明确 SKIP，实际非零失败原样返回 | 默认 verify 不调用 EDA/GCC/Buckyball；仍要求声明的 Node/Linux/Bubblewrap 和私有 DSH，不称跨平台全环境 hermetic |
+| P2 / T12：唯一领域参考 | `domain/reference/` 是唯一参考和通用协议 fixture；删除旧两个领域目录、产品 Buckyball adapter 及专用测试；env setup 读取参考，在用户 staging 产出领域包；部署要求显式 `SINGULARITY_DOMAIN` | 生产源码不依赖参考身份；`product-domain-free` 覆盖 core/assembly/frontend/client；沿用 setup manifest/approval 冻结来源，不增加领域注册器或默认路径 |
+
+**DSH 重建实证。** 在 `.singularity/private-dsh-rebuild/` 从本地 Git 镜像克隆固定 tag、校验 commit、应用源码补丁后完成构建，日志 `/tmp/singularity-private-dsh-rebuild-20261022.log`；`setup:host` 已通过同一 baseline 校验。三份补丁为 session log-only、memory pressure 和 pending wake，九份产物摘要纳入 `dsh-baseline.json`。实际源码编译的两份声明与旧手工修改的位置/注释不同，经过差异审查更新摘要；既有运行 JS 摘要一致，没有按构建结果自动接受新 baseline。
+
+上游聚合 TypeScript 配置同时包含旧测试 mock，必需的 `Agent.wake()` 使其中部分对象不再类型匹配。构建脚本使用相同显式 production references，逐项目类型检查与构建全部生产代码，不把 wake 改成 optional，也不修改旧测试来伪造通过。单独执行 log-only、token-meter/route-pricing、compaction 的源码行为回归：**7 文件、193 项通过**，日志 `/tmp/singularity-private-dsh-behavior-20261022.log`。Singularity 自身的原生 wake、取消、审核、恢复与 RSI 回归使用重建宿主。
+
+**当前工程验证。** 最终完整 `pnpm verify` **退出 0：构建和 core/assembly 类型检查通过，93 文件、1015 项测试、8 条 gates 通过**，日志 `/tmp/singularity-structure-final-verify-20261022.log`。frontend 独立类型检查也通过。编译反例故意生成的两条 TS2322 在测试内被正确拒绝，不是当前源码编译失败。边界、领域身份与 mutation ledger 扫描均无问题；`verify:domain` 无入口明确 SKIP、实际失败退出码透传、缺显式领域拒绝部署和非空 DSH 构建目录拒绝覆盖均已核查。更新文档的本地链接/围栏及 `git diff --check` 通过。没有部署到运行中的宿主，没有运行付费模型或覆盖历史实验。
+
+**原计划并未全部完成。** 表中的五项结构修复不能替代 §9 的 T08/T11 产品出口、T12 干净环境/公开交付出口或 T13–T16 研究出口。尤其无 suite 发布目前依赖 reviewer，而非强制未见任务证据；完整 pilot 的业务逐题编排仍缺。最终领域比较与论文主张必须在外部领域包中提供，不能通过把领域实现重新塞回 spec 来补齐。
 
 ## 10. GitHub 项目与分发审查
 
@@ -1471,9 +1494,10 @@ workflow 的短策略按第 6.5 节自动送达，解决组织方法完全未暴
 
 ### T16 · Buckyball 最小领域接入与迁移实验
 
-- 当前状态：最小 C/ISA 环境、产物、并发隔离与六题 oracle 预检通过；真实业务根已有独立验收。完整 pilot 逐题执行入口未接通，任务门中的 refutation 目前仅有 oracle 反例；早期学习因 HTTP 402 失败，`214154` 的六批提案结构失败，`003416` 转抄损坏冻结源码且零 round，最新 `124254` 未进入 RSI 即陷入审批等待并已取消。模型调查、完整候选比较、迁移与论文出口未完成，不标全包完成。
+- 2026-10-22 范围更新：主仓内接入方案撤销，以下实验门仅适用于用户选择的独立领域包；不能为完成 T16 增加领域专用生产源码或产品 spec。历史运行副本与证据不动。
+- 历史 pilot 状态：最小 C/ISA 环境、产物、并发隔离与六题 oracle 预检通过，真实业务根已有独立验收；较早运行出现过 HTTP 402、零 round 和审批等待。后续一轮实际比较为 insufficient-evidence，无发布，详见 §2.2。完整 pilot 逐题执行、正式比较、迁移与论文出口仍未完成；移除主仓适配器不会改写这些历史结果。
 - 依赖：T02/T03/T04/T09；正式搜索依赖 T01/T05–T08；设计由 T14 固定。
-- 修改入口：新增一个领域声明及少量 task/suite/评测适配，复用 inputs/workspace/measure/release。工具若已有稳定 CLI 就直接绑定，只有状态/路径/证据适配确有需要时才写 wrapper。
+- 修改入口：**仅在独立领域包中**新增 task/suite/评测适配，复用产品已有 inputs/workspace/measure/release 端口；主仓只保留 `domain/reference`。已误加的 `assembly/src/buckyball.ts`、专用 spec 和旧领域目录在本轮删除，相关历史结果继续保留。工具若已有稳定 CLI 就直接绑定，只有路径/证据适配确有需要时才写 wrapper。
 - 子任务与阶段门：
   1. **环境门**：冻结源码树、依赖和工具链；doctor 能识别缺组件；一个已知 workload 在独立 trial 环境通过。当前作者工作区不作为默认可写实验环境。
   2. **产物门**：实现受限文本 change-set 的干净应用与独立验证；补丁错误、基线不符、保护文件修改均给出真实失败。

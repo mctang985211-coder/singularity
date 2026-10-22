@@ -67,7 +67,7 @@ it('durably delivers the exact workflow on the first native step and records a l
   const adapter = new DeliveryAdapter()
   ctx.llm.registerAdapter(['delivery-fixture'], adapter)
   const agent = await ctx.agentLoop.create(SessionId('native-method-recipient'), { provider: 'delivery-fixture', model: 'fixture', maxTokens: 128 })
-  const domain = await loadDomain(fileURLToPath(new URL('../../deployment/domain/letters', import.meta.url)), spawnProcess)
+  const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
   const apparatus = await openApparatus('native-delivery', root, domain, ctx.sessionPersistence, attachmentsAt(root), ctx.sessionProjections)
   apparatuses.push(apparatus)
   const workflowGuidance = 'Investigate the uncertain interface before choosing independent responsibility boundaries.'

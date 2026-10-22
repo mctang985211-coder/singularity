@@ -8,7 +8,7 @@ import { TASK_PROTOCOL, TASK_VERSION, type RunState, type TaskState } from '../.
 import { createReviewCommands } from '../../src/review/commands.ts'
 import { agentSessionIdOf } from '../../src/runtime/agent-session.ts'
 import { bindCaller, declareCaller, taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
-import type { DecomposeInput, PlanRecord, Proposal } from './driver.ts'
+import type { DecomposeInput, PlanRecord, Proposal } from './task-service.ts'
 import { taskIdOf, runIdOf } from './ids.ts'
 import { assertProtectedInputs, assertTemplateContract, contractFor, protectedInputsOf } from './inputs.ts'
 import type { Scheduler } from './scheduler.ts'

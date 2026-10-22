@@ -1,0 +1,26 @@
+--- a/packages/core/agent-loop/src/agent.ts
++++ b/packages/core/agent-loop/src/agent.ts
+@@ -158,6 +158,11 @@
+     const resolvedTarget = wakingAfterAbort ? 'next-turn' : target
+     this.inbox.splice(resolvedTarget, Infinity, 0, [message])
+     if (wakeup) this.wakeDriver(wakingAfterAbort)
++  }
++
++  wake(): void {
++    if (!this.inbox.hasPending) return
++    this.wakeDriver(this.phase.kind !== 'idle' && this.phase.abort.signal.aborted)
+   }
+ 
+   followup(input: UserMessage): void {
+--- a/packages/core/agent/src/runtime-types.ts
++++ b/packages/core/agent/src/runtime-types.ts
+@@ -214,6 +214,9 @@
+    */
+     send(message: UserMessage, target: InboxTarget, wakeup: boolean): void
+ 
++    /** Wake existing pending input once; empty inboxes do not start a turn. */
++    wake(): void
++
+     /**
+    * Queue an ordinary follow-up turn and wake the driver. The item becomes the
+    * sole ordinary message of its own turn.
