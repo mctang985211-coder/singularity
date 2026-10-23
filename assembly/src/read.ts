@@ -60,21 +60,19 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
   if (input.kind === 'search') {
     if (review !== undefined || run?.purpose !== 'improve' || task?.search === undefined)
       refuse('not-responsible', 'search state belongs to its RSI author')
-    const history = searchHistory(apparatus, task)
-    const feedback = await searchFeedback(apparatus, task)
-    if (input.ref === 'feedback') return textPage(Buffer.from(JSON.stringify(feedback, null, 2)), input.from, input.count)
     if (input.ref === 'authoring') return textPage(Buffer.from(JSON.stringify({
+      authoring: { proposal: rsiProposalTemplate(), report: structuredClone(RSI_REPORT_TEMPLATE) },
       proposal: rsiProposalContract, method: METHOD_FORMAT, report: RSI_REPORT_FORMAT,
     }, null, 2)), input.from, input.count)
-    if (input.ref !== undefined) refuse('malformed-declaration', 'search ref must be authoring or feedback')
+    if (input.ref !== undefined && input.ref !== 'feedback') refuse('malformed-declaration', 'search ref must be authoring or feedback')
+    const feedback = await searchFeedback(apparatus, task)
+    if (input.ref === 'feedback') return textPage(Buffer.from(JSON.stringify(feedback, null, 2)), input.from, input.count)
+    const history = searchHistory(apparatus, task)
     return { ...rsiState(task), reference: history.incumbent, nextRound: history.directives,
       cases: apparatus.domain.suite?.cases.filter(c => c.split === 'evolve').map(c => ({ caseId: c.caseId, familyId: c.familyId })) ?? [],
       feedback: { edits: feedback.edits.map(edit => ({ roundId: edit.roundId, outcome: edit.outcome, revision: edit.revision })),
         rejected: feedback.rejected.map(({ batchId, slot, status }) => ({ batchId, slot, status })) },
-      authoring: { proposal: rsiProposalTemplate(), report: structuredClone(RSI_REPORT_TEMPLATE),
-        instructions: 'Read kind=search with ref=authoring and from/count for proposal and report rules.',
-        assets: 'Read kind=method for the current assets; kind=method with from/count pages its JSON as UTF-8 bytes.',
-        feedback: 'Read kind=search with ref=feedback and from/count for full rejection details and measurements.' },
+      authoring: { ref: 'authoring' },
     }
   }
   if (input.kind === 'workflow') {

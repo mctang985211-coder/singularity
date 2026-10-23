@@ -568,8 +568,18 @@ it('admits a filled runtime JSON template with real evidence and only a workflow
   await h.call(h.parent, 'business-submit').submit({ taskId: root.taskId, path: root.contract.artifact })
   const request = await improving(), agent = h.agents.get(String(agentSessionIdOf(request.agentId)))!
   const scope = h.call(agent, 'explicit-workflow')
-  const read = await scope.history({ kind: 'search' }) as { authoring: { proposal: ReturnType<typeof rsiProposalTemplate> } }
-  const template = read.authoring.proposal
+  const read = await scope.history({ kind: 'search' }) as { authoring: { ref: string } }
+  expect(read.authoring).toEqual({ ref: 'authoring' })
+  let text = '', from = 0
+  for (;;) {
+    const page = await scope.history({ kind: 'search', ref: read.authoring.ref, from, count: 8192 }) as { text: string; next: number; complete: boolean }
+    text += page.text
+    if (page.complete) break
+    from = page.next
+  }
+  const authoring = JSON.parse(text) as { authoring: { proposal: ReturnType<typeof rsiProposalTemplate>; report: { transfer: { status: string } } } }
+  expect(authoring.authoring.report.transfer.status).toBe('not-tested-before-submission')
+  const template = authoring.authoring.proposal
   const index = await scope.history({ kind: 'trajectory', ref: 'business' }) as { seq: number }[]
   const eventSeq = index[0]!.seq
   await scope.history({ kind: 'trajectory', ref: 'business', eventSeq })

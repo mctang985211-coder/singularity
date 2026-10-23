@@ -98,7 +98,7 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
             ? ['search', 'summary', 'task', 'artifact', 'template', 'method', 'round', 'subject', 'trajectory', 'roots', 'sessions', 'usage', 'steps'] as const
             : ['summary', 'task', 'artifact', 'template', 'method', 'round', 'subject', 'trajectory'] as const },
         ...(config.role === 'improve' || config.role === 'review' ? { rootId: { type: 'string' as const, description: config.role === 'improve' ? 'Required for historical reads/citations.' : 'Only a root in subject.rsiEvidence; no arbitrary history.' } } : {}),
-        ref: { type: 'string', description: 'task/artifact: taskId; template: templateId; trajectory: sessionId; round: roundId; search: authoring or feedback for detailed rules/outcomes.' },
+        ref: { type: 'string', description: 'task/artifact: taskId; template: templateId; trajectory: sessionId; round: roundId; search: authoring for templates/rules, feedback for outcomes.' },
         runId: { type: 'string', description: 'Select an authorized artifact Run.' },
         eventSeq: { type: 'integer', description: 'Copy seq from a trajectory index to read/cite the actual event.' },
         from: { type: 'integer', description: 'Zero-based offset: UTF-8 bytes for text pages; entries for lists.' },
@@ -218,7 +218,7 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
   ]
   const improve = [defineTool({
     name: 'singularity_propose_method',
-    description: 'Admit 1–3 proposal JSON files from search.authoring.proposal when canPropose=true. Static refusal consumes no slots; admission freezes bytes and consumes slots even on failure. Returns screening immediately; end the turn.',
+    description: 'Admit 1–3 proposal JSON files using search ref=authoring templates when canPropose=true. Static refusal consumes no slots; admission freezes bytes and consumes slots even on failure. Returns screening immediately; end the turn.',
     parameters: { paths: { type: 'array', required: true, items: { type: 'string' } } }, output,
     execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).proposeMethod(args))),
   })]
