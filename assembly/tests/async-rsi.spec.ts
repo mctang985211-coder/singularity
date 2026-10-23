@@ -170,9 +170,9 @@ async function fixture({ suite = false, heldout = true } = {}) {
         const assignment = JSON.parse((request.message!.content[0] as { text: string }).text)
         if (assignment.purpose === 'proposal' || assignment.purpose === 'publication') {
           expect(driver!.reviewTarget(id)?.kind).toBe(assignment.purpose)
-          for (const name of ['bash', 'web', 'singularity_decompose_task', 'singularity_answer'])
+          for (const name of ['bash', 'web', 'write', 'edit', 'singularity_decompose_task', 'singularity_answer'])
             expect(admission({ name, agent } as never)).toContain('Method review')
-          for (const name of ['read', 'write', 'singularity_submit'])
+          for (const name of ['read', 'singularity_submit'])
             expect(admission({ name, agent } as never)).toBeUndefined()
           await expect(driver!.forCall(execFor(agent, 'no-delegation')).decompose({ taskId: assignment.reviewId, children: [] }))
             .rejects.toThrow('method reviews do not delegate')
@@ -180,7 +180,7 @@ async function fixture({ suite = false, heldout = true } = {}) {
           while (true) {
             const page = await driver!.forCall(execFor(agent, 'subject-page')).history({ kind: 'subject', from,
               count: 8192 }) as { subjectDigest: string; next: number; complete: boolean; text: string }
-            expect(page.subjectDigest).toBe(assignment.subjectDigest)
+            expect(page.subjectDigest).toMatch(/^[0-9a-f]{64}$/)
             subject += page.text
             if (page.complete) break
             from = page.next
@@ -201,19 +201,23 @@ async function fixture({ suite = false, heldout = true } = {}) {
             } }])
             await expect(driver!.forCall(execFor(agent, 'review-history')).history({ kind: 'roots' }))
               .rejects.toThrow('working RSI')
-            await expect(driver!.forCall(execFor(agent, 'review-trajectory')).history({ kind: 'trajectory', ref: 'business', eventSeq: 0 }))
+            const readable = await driver!.forCall(execFor(agent, 'review-evidence-index')).history({ kind: 'trajectory' }) as { pages: unknown[] }
+            expect(readable.pages).toMatchObject([{ kind: 'trajectory', ref: 'business', eventSeq: 0 }])
+            expect(await driver!.forCall(execFor(agent, 'review-trajectory')).history(readable.pages[0] as never))
+              .toMatchObject({ text: JSON.stringify(logs.get('business')![0], null, 2) })
+            await expect(driver!.forCall(execFor(agent, 'review-foreign-event')).history({ kind: 'trajectory', ref: 'business', eventSeq: 1 }))
               .rejects.toThrow('frozen evidence scope')
             await beforeProposalJudgment?.()
           }
         }
-        const output = assignment.output.template
-        expect(output.subjectDigest).toBe(assignment.subjectDigest)
+        const output = assignment.output.arguments
+        expect(assignment.output.tool).toBe('singularity_submit')
+        expect(Object.keys(output)).toEqual(['findings'])
         expect(readFindings(output.findings).map(f => f.criterionId)).toEqual(assignment.criteria.map((c: { criterionId: string }) => c.criterionId))
-        await writeFile(join(request.cwd, assignment.output.path), JSON.stringify({ ...output,
+        await driver!.forCall(execFor(agent, 'judgment')).submit({
           findings: output.findings.map((finding: { criterionId: string }) => ({ ...finding,
             verdict: assignment.purpose === 'publication' ? publicationVerdict : finding.criterionId === 'proposal-safe' ? screenVerdict : 'pass',
-            detail: 'Independent test review', evidence: ['subject.json'] })) }))
-        await driver!.forCall(execFor(agent, 'judgment')).submit({ taskId: assignment.reviewId, path: 'review.json' })
+            detail: 'Independent test review', evidence: ['subject.json'] })) })
       },
       stop: () => undefined,
       close: async () => undefined,

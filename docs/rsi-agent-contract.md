@@ -10,6 +10,10 @@ root 只能把子节点凭其声明输入与工具可履行的责任冻结进子
 
 critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字段的 before/after，`baseline` 为修改前 Method，`assets` 为修改后 Method，`changes` 为实际 diff；`edit.changes` 只保留已验证的资产键，作者字段 `value` 已应用并省略。不能按作者提交 schema 将此投影判为缺字段。proposal/report 作者模板只向 RSI 作者返回。
 
+审核节点直接调用 `singularity_submit({findings:[{criterionId,verdict,detail,evidence}]})`。Agent 不写 `review.json`，不提交目标、身份或摘要；宿主从当前冻结 ReviewRun 生成带 `reviewId/target/subjectDigest` 的封存结果。工具 schema 与服务边界均拒绝 Agent 增写绑定字段。每项 criterion 恰好判定一次，已有 protected 非 pass 检查仍不能被改判 pass；重复提交相同判定幂等，不同判定冲突。
+
+审核 dispatch 提供实际 `criteria`、`method`、文件路径和 `reads`。`kind=method` 不带 ref 即读当前固定版本；`kind=trajectory` 不带 ref 列出可以直接调用的会话与页参数。提案审核可读宿主已冻结的引用页，不能沿引用任意读取其它事件或历史；报告审核同样只读封存时可用的证据。提案和发布审核仅保留 read/glob/grep、证据读取与判定提交，工作区只读；业务验收审核保留必要的独立执行能力。
+
 ## 工作顺序
 
 1. 每次开始、恢复或压缩后，先调用 `singularity_read({"kind":"search"})`。短结果给出 `phase`、`next`、`pending`、剩余槽、`nextRound`、evolve `cases`、反馈摘要和 `authoring.ref` 入口。`screening/evaluating/reporting` 时结束 turn，宿主负责推进；`ready` 才能提出新机制或提交报告。工具 `kind` 必填。
@@ -108,13 +112,12 @@ critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字
 
 报告文件先封存，再按 suite 与冻结 champion 条件触发宿主的 validation、heldout 与允许的 publication，最后进行报告验收。因此作者只能陈述提交前可见事实；最终学习终局以随后持久化的 transfer、发布指针和 search 投影为准，不能提前填写“已验证迁移”或“已发布”。
 
-## Review JSON
+## Review 提交
 
-Acceptance、proposal critic 与 publication 使用同一输出形状。复制该次 dispatch 给出的真实 `subjectDigest`，对每个实际 criterion 恰好写一个 finding；proposal 当前有六项，publication 当前为 `publication-approved`，acceptance 按任务冻结标准。不要从另一种审核复制固定清单。
+Acceptance、proposal critic 与 publication 直接向 `singularity_submit` 提交相同结构的参数，对 dispatch 中每个实际 criterion 恰好给出一个 finding。目标、身份和摘要由宿主绑定，不出现在 Agent 提交中。
 
 ```json
 {
-  "subjectDigest": "<dispatch中的真实subjectDigest>",
   "findings": [
     {
       "criterionId": "<该次实际criterionId>",
@@ -126,7 +129,7 @@ Acceptance、proposal critic 与 publication 使用同一输出形状。复制�
 }
 ```
 
-`verdict` 只能取 `pass`、`fail`、`partial`、`unknown` 中的一个，模板默认 `unknown` 是合法值。每条 `detail` 必须有内容，evidence 使用真实引用字符串。写 `review.json` 后调用 `singularity_submit({"path":"review.json"})`；诚实的 fail/unknown 也能完成审核。
+`verdict` 只能取 `pass`、`fail`、`partial`、`unknown` 中的一个，默认 `unknown` 是合法值。每条 `detail` 必须有内容，evidence 使用真实引用字符串；诚实的 fail/unknown 也能完成审核。无需生成审核文件。
 
 先把 `subject` 全部分页读完。Proposal critic 使用其中冻结的实际 diff、机制与原生证据页面，不求解、不执行、不修复候选；publication 判断冻结的独立比较、资产消费和完整成本。只有 acceptance 可按需委派取证，且不能把保护检查的非 pass 改成 pass。输出合同不要求额外的总 verdict 或模型自行决定发布。
 

@@ -94,8 +94,10 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
       if (budget !== undefined) prompt.contexts.push({ name: 'singularity:budget', text:
         `Workflow steps used ${budget.steps}/${budget.maxSteps}; remaining ${budget.remainingSteps}, shared with children and acceptance.` })
       const reviewTarget = driver.reviewTarget(String(context.agent.id))
-      if (reviewTarget !== undefined && reviewTarget.kind !== 'acceptance')
+      if (reviewTarget !== undefined && reviewTarget.kind !== 'acceptance') {
         prompt.tools = prompt.tools.filter(tool => methodReviewTools.has(tool.name))
+        prompt.sections = prompt.sections.filter(section => !['tool:bash', 'tool:pwsh', 'tool:write', 'tool:edit'].includes(section.name))
+      }
       if (ctx.agentPresets.serviceFor(context.agent, 'singularityAgentRole') === 'improve')
         prompt.tools = prompt.tools.filter(tool => improvementTools.has(tool.name))
       const search = driver.rsiState(String(context.agent.id))

@@ -195,4 +195,17 @@ describe('small role interfaces', () => {
     await submit.execute({ sourceTaskId: 'child', sourceRunId: 'verified-run' }, exec)
     expect(got).toEqual({ taskId: 'host-task', sourceTaskId: 'child', sourceRunId: 'verified-run' })
   })
+  it('accepts only reviewer findings and rejects model-authored bindings before invoking the host', async () => {
+    const received: unknown[] = []
+    const s = scope({ submit: async input => { received.push(input); return {} as never } })
+    apply(s.ctx, { role: 'review' })
+    const submit = s.tools.find(tool => tool.name === 'singularity_submit')!
+    const exec = execFor(agentFor('reviewer', 'reviewer'), 'judgment')
+    const findings = [{ criterionId: 'correct', verdict: 'pass', detail: 'The sealed output matches.', evidence: ['submitted-artifact'] }]
+    await submit.execute({ findings }, exec)
+    for (const injected of [{ path: 'review.json' }, { findings, subjectDigest: 'mistyped' }, { findings, reviewId: 'another-review' },
+      { findings: [{ ...findings[0], artifactDigest: 'forged' }] }])
+      await expect(submit.execute(injected, exec)).rejects.toBeInstanceOf(ToolArgsError)
+    expect(received).toEqual([{ findings }])
+  })
 })

@@ -31,6 +31,8 @@ root 必须委派实现，普通子节点自行决定是否继续分解。委派
 
 依据准确会话、committed snapshot、封存附件与正式 receipt 定位问题；不得伪造模型流程。恢复使用原会话、原 Run 与冻结目录，已冻结的检查结果、审核、trial 和发布决定复用。图、依赖、能力缺口、验收及 RSI 记录取同一状态前缀，节点直接连接自己的原生会话。
 
+独立审核的模型入口只提交结构化 findings；宿主写入冻结对象绑定与摘要并封存结果，不让模型重抄摘要或审核标识。`kind=trajectory` 的审核目录必须能直接读取所列会话或冻结引用页，同时拒绝其它页。原生请求回归核对实际送给模型的 findings schema；原有 protected 检查、身份隔离和冻结证据检查继续生效。
+
 ## Method 进化与原生发布验收
 
 部署 seed 初始化唯一方法指针。每个 Run 直接固定方法 Revision 和 Bubble 执行快照；临时契约不创建 Revision。根任务关闭后，后台等待原生会话结束并封存完整轨迹，再创建 RSI 节点；evaluation 根不再次触发 RSI。RSI 按路径提交含原生证据、分析和具名增量编辑的 JSON 提案契约，经结构、绑定及六项独立审查后进入冷启动候选测评；基线复用封存业务 root。审查附件只携带宿主按 RSI 权限验证的引用片段，不授予审查者跨轮 history 或 memory 权限。提案准入即冻结附件并立即返回 screening 引用，宿主自动继续 critic/selftest/测评；作者不重发路径、不轮询。搜索状态从 Task 事实派生，kind=search 读取，长资产/规则/反馈分开分页；宿主从 measure、strategy、release 事实恢复；最终发布仍要求独立 ReviewRun 和准确 expected head。

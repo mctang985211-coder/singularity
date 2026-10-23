@@ -80,7 +80,7 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
     if (exec.agent === undefined) return undefined
     const review = reviewOf(apparatus, String(exec.agent.id))
     if (review !== undefined && review.target.kind !== 'acceptance' && !methodReviewTools.has(exec.name))
-      return 'Method review only reads evidence and writes/submits its judgment; it cannot execute, delegate or browse'
+      return 'Method review only reads frozen evidence and submits findings; it cannot mutate files, execute, delegate or browse'
     const task = owner(String(exec.agent.id))
     const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
     if (run?.purpose === 'improve' && !improvementTools.has(exec.name))
@@ -413,11 +413,13 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
             signal.throwIfAborted()
             assertActive(apparatus, current())
             if (review !== undefined) {
-              if (!('path' in input)) refuse('not-responsible', 'reviewers submit their own review.json')
+              assertClosedKeys(input, ['findings'], 'review submission', 'malformed-declaration')
+              if (!('findings' in input)) refuse('malformed-declaration', 'reviewers submit only findings')
               const release = await execution.drain(exec)
-              try { return await submitReview(apparatus, review, input.path) }
+              try { return await submitReview(apparatus, review, input.findings) }
               finally { release() }
             }
+            if ('findings' in input) refuse('not-responsible', 'only reviewers submit findings')
             const task = owner(caller.agentId)!
             const reason = rsiToolReason(task, 'singularity_submit')
             if (reason !== undefined) refuse('illegal-transition', reason)
@@ -466,7 +468,7 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
         writable:
           review === undefined
             ? run === undefined || (run.status === 'running' && run.stage === 'working' && waitingReason(apparatus, task!.taskId) === undefined)
-            : review.status === 'running' && waitingReason(apparatus, review.reviewId) === undefined,
+            : review.target.kind === 'acceptance' && review.status === 'running' && waitingReason(apparatus, review.reviewId) === undefined,
         protected:
           review === undefined
             ? (run?.bubble?.inputs.map((i) => join(root, i.name)) ?? [])

@@ -40,7 +40,7 @@ import { digestOf } from '../../src/protocol/envelope.ts'
 
 export const SUBJECT_INPUT = 'singularity-subject'
 // RRSI critic.py reviews intent/content before evaluation; it never solves a task.
-export const methodReviewTools = new Set(['read', 'glob', 'grep', 'write', 'edit', 'singularity_read', 'singularity_submit'])
+export const methodReviewTools = new Set(['read', 'glob', 'grep', 'singularity_read', 'singularity_submit'])
 export interface ReviewWitness {
   readonly reviewId: string
   readonly subjectDigest: string
@@ -174,16 +174,18 @@ export function witnessOf(review: ReviewRun): ReviewWitness {
     detail: findings.map((f) => `${f.criterionId}: ${f.detail}`).join('\n'),
   }
 }
-export async function submitReview(apparatus: Apparatus, review: ReviewRun, path: string): Promise<ReviewWitness> {
+export async function submitReview(apparatus: Apparatus, assignment: ReviewRun, rawFindings: unknown): Promise<ReviewWitness> {
+  const review = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, assignment.reviewId)
+  if (review === undefined || review.agentId !== assignment.agentId)
+    refuse('not-responsible', 'only the assigned reviewer can submit findings')
   declareCaller(apparatus, review.agentId)
-  if (review.status === 'completed') return witnessOf(review)
-  if (path !== 'review.json') refuse('malformed-declaration', 'write the final judgment to review.json')
-  await assertRunFile(review.workspace, path)
-  const bytes = await readFile(join(review.workspace, path))
-  const result = JSON.parse(bytes.toString('utf8')) as { subjectDigest: string; findings: unknown }
-  if (result.subjectDigest !== review.subjectDigest)
-    refuse('evidence-input-mismatch', 'judgment changed its frozen subject')
-  const findings = readFindings(result.findings)
+  const findings = readFindings(rawFindings)
+  if (review.status === 'completed') {
+    if (digestOf(findings) !== digestOf(review.findings)) refuse('command-conflict', 'review already completed with different findings')
+    return witnessOf(review)
+  }
+  if (findings.length !== review.criteria.length || review.criteria.some(c => !findings.some(f => f.criterionId === c.criterionId)))
+    refuse('unadjudicated-criterion', `decide each criterion exactly once: ${JSON.stringify(review.criteria.map(c => c.criterionId))}`)
   const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as {
     checks?: readonly ProductionVerdict[]
   }
@@ -194,7 +196,9 @@ export async function submitReview(apparatus: Apparatus, review: ReviewRun, path
     `review-complete:${review.reviewId}`,
     review.reviewId,
     findings,
-    await apparatus.attachments.saveFile({ name: path, data: bytes }),
+    await apparatus.attachments.saveFile({ name: 'review.json', data: Buffer.from(JSON.stringify({
+      reviewId: review.reviewId, target: review.target, subjectDigest: review.subjectDigest, findings,
+    }, null, 2) + '\n') }),
     `agent:${review.agentId}`,
   )
   return witnessOf(apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, review.reviewId)!)
@@ -300,14 +304,14 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
           purpose: review.target.kind,
           assignment: 'subject.json',
           criteria: review.criteria,
-          subjectDigest,
+          method: review.method,
+          reads: { subject: { kind: 'subject' }, method: { kind: 'method' }, evidence: { kind: 'trajectory' } },
           artifact: data.artifact === undefined ? undefined : 'submitted-artifact',
           inputs: (data.inputs ?? []).map(({ name }) => ({ name, path: join('inputs', name) })),
           evidenceInputs: reviewInputsOf(review, data).map(({ name, source }) => ({ name, source })),
           output: {
-            path: 'review.json',
-            template: {
-              subjectDigest,
+            tool: 'singularity_submit',
+            arguments: {
               findings: review.criteria.map((c) => ({
                 criterionId: c.criterionId,
                 verdict: 'unknown',

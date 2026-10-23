@@ -231,7 +231,11 @@ try {
   const submitFields = request => Object.keys(request.tools.find(tool => tool.name === 'singularity_submit').parameters.properties).sort()
   assert.deepEqual(submitFields(parentRequest), ['sourceRunId', 'sourceTaskId'])
   assert.deepEqual(submitFields(childRequest), ['path'])
-  assert.deepEqual(submitFields(reviewRequest), ['path'])
+  assert.deepEqual(submitFields(reviewRequest), ['findings'])
+  const reviewSubmit = reviewRequest.tools.find(tool => tool.name === 'singularity_submit').parameters
+  assert.deepEqual(reviewSubmit.required, ['findings'])
+  assert.equal(reviewSubmit.additionalProperties, false)
+  assert.deepEqual(Object.keys(reviewSubmit.properties.findings.items.properties).sort(), ['criterionId', 'detail', 'evidence', 'verdict'])
   assert.equal(reviewRequest.tools.find(tool => tool.name === 'singularity_read').parameters.properties.rootId.type, 'string')
   assert.deepEqual(submitFields(improveRequest), ['path'])
   assert(!reviewRequest.tools.some(tool => ['singularity_ask_parent', 'singularity_propose_method'].includes(tool.name)))

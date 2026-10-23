@@ -4,7 +4,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it } from 'vitest'
+import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
+import { resolveRetryPolicy, type RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 
 const checkout = fileURLToPath(new URL('../../', import.meta.url))
 const buildScript = fileURLToPath(new URL('../build.mjs', import.meta.url))
@@ -114,12 +117,20 @@ describe('the deployable build', () => {
     expect(patch).not.toContain('nativeTokens:')
   }, 30_000)
 
-  it('deploys one retry executor without a gateway error-code policy', async () => {
+  it('deploys one native retry executor with a bounded provider policy', async () => {
     const deployment = await readFile(join(checkout, 'deployment/profile/cordis.patch.yml'), 'utf8')
     const bundle = await readFile(join(checkout, 'assembly/cordis.patch.yml'), 'utf8')
-    expect(deployment).toMatch(/retryPolicy:\s+mode: normal\s+maxRetries: 20/)
-    expect(deployment).toContain('maxDelayMs: 180000')
-    expect(deployment).not.toContain('retryableCodes:')
+    const { hostRequire } = await import(new URL('../../scripts/host-config.mjs', import.meta.url).href)
+    const yaml = createRequire(hostRequire().resolve('@deepseek-ai/cordis-plugin-include/package.json'))('js-yaml')
+    const rows = yaml.load(deployment, { schema: entryListSchema }) as { id: string; config?: { providers?: Record<string, { retryPolicy?: RetryPolicyConfig }> } }[]
+    const providers = rows.find(row => row.id === 'llm-pi-ai')!.config!.providers!
+    expect(Object.keys(providers).length).toBeGreaterThan(0)
+    for (const [name, provider] of Object.entries(providers)) {
+      const policy = resolveRetryPolicy(provider.retryPolicy, `providers.${name}.retryPolicy`)
+      expect(policy).toMatchObject({ mode: 'normal', maxRetries: 20 })
+      expect(policy.maxDelayMs).toBeGreaterThan(0)
+      expect(Number.isSafeInteger(policy.maxDelayMs)).toBe(true)
+    }
     expect(bundle).not.toContain('id: llm-retry')
   })
 })

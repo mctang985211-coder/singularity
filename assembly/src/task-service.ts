@@ -2,7 +2,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { type ReviewRun } from '../../src/review/protocol.ts'
+import { type ReviewRun, type Finding } from '../../src/review/protocol.ts'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import type { TaskContract } from '../../src/task/contract.ts'
 import {
@@ -48,7 +48,7 @@ export interface AgentTaskSurface {
   proposeMethod(input: { readonly paths: readonly string[] }): Promise<unknown>
   history(input?: ReadInput): Promise<unknown>
   decompose(input: DecomposeInput): Promise<PlanRecord>
-  submit(input: SubmissionInput): Promise<Submission | ReviewWitness>
+  submit(input: SubmissionInput | { readonly findings: readonly Finding[] }): Promise<Submission | ReviewWitness>
   current(): string
 }
 export interface PlannedChild {

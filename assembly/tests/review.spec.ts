@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createReviewCommands } from '../../src/review/commands.ts'
+import type { ProductionVerdict } from '../../src/verifier/production.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import { openApparatus, callerOf, declareCaller, taskStateOf } from '../src/apparatus.ts'
 import { loadDomain } from '../src/domain.ts'
@@ -19,6 +20,7 @@ import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { reviewInputsOf } from '../src/inputs.ts'
 import { fixtureReview } from './review-fixture.ts'
 import { sha256 } from '../src/ids.ts'
+import { sealedBytes } from '../src/sealed.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { readForAgent, readTrajectory } from '../src/read.ts'
 import { createScheduler } from '../src/scheduler.ts'
@@ -32,7 +34,7 @@ afterEach(async () => {
   child.open.mockReset()
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })))
 })
-async function setup() {
+async function setup(protectedVerdict?: ProductionVerdict['verdict']) {
   const root = await mkdtemp(join(tmpdir(), 'review-run-'))
   roots.push(root)
   const apparatus = await openApparatus(
@@ -67,7 +69,9 @@ async function setup() {
           apparatus,
           proposal.taskId,
           taskStateOf(apparatus, proposal.taskId).runs[run.runId]!,
-          [],
+          protectedVerdict === undefined ? [] : [{ runId: run.runId, criterionId: proposal.contract.criteria[0]!.criterionId,
+            verdict: protectedVerdict, verifierRef: 'protected-check', verifierVersion: '1', implementationDigest: sha256('check'),
+            artifactDigest: sha256(bytes), inputDigests: run.bubble!.inputs, detail: 'Protected acceptance result' }],
         ),
         null,
         2,
@@ -113,6 +117,32 @@ async function start(h: Awaited<ReturnType<typeof setup>>, agentId = 'reviewer')
 it('refuses a reviewer with the executor identity', async () => {
   const h = await setup()
   await expect(start(h, 'worker')).rejects.toThrow('executor cannot review')
+  await h.apparatus.store.close()
+})
+it('binds findings using host state without any reviewer file or copied digest', async () => {
+  const h = await setup(), review = await start(h)
+  const findings = review.criteria.map(({ criterionId }) => ({ criterionId, verdict: 'unknown' as const,
+    detail: 'The available evidence does not establish this criterion.', evidence: ['subject.json'] }))
+  await expect(submitReview(h.apparatus, review, [])).rejects.toThrow('decide each criterion exactly once')
+  await expect(submitReview(h.apparatus, review, [{ ...findings[0], subjectDigest: 'mistyped' }])).rejects.toThrow('subjectDigest')
+  const witness = await submitReview(h.apparatus, { ...review, subjectDigest: 'mistyped',
+    target: { ...review.target, artifactDigest: 'forged' } } as ReviewRun, findings)
+  expect(witness.subjectDigest).toBe(h.subjectDigest)
+  const saved = h.apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, review.reviewId)!
+  expect(JSON.parse((await sealedBytes(h.apparatus, saved.result!)).toString('utf8')))
+    .toEqual({ reviewId: review.reviewId, target: review.target, subjectDigest: h.subjectDigest, findings })
+  await expect(readFile(join(review.workspace, 'review.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(await submitReview(h.apparatus, review, findings)).toEqual(witness)
+  await expect(submitReview(h.apparatus, review, findings.map(f => ({ ...f, verdict: 'pass' })))).rejects.toThrow('different findings')
+  await h.apparatus.store.close()
+})
+it('cannot override a protected non-pass check with structured findings', async () => {
+  const h = await setup('fail'), review = await start(h)
+  const findings = review.criteria.map(({ criterionId }) => ({ criterionId, verdict: 'pass' as const,
+    detail: 'Reviewer assessment', evidence: ['subject.json'] }))
+  await expect(submitReview(h.apparatus, review, findings)).rejects.toThrow('cannot override a failed protected check')
+  const witness = await submitReview(h.apparatus, review, findings.map(f => ({ ...f, verdict: 'fail' })))
+  expect(witness.verdict).toBe('fail')
   await h.apparatus.store.close()
 })
 it('activates a review with no delegated evidence without fabricating a completed plan', async () => {
@@ -238,18 +268,18 @@ it.each(['subject.json', 'submitted-artifact'])('isolates frozen input %s from r
     const dispatch = JSON.parse((request.message!.content[0] as { text: string }).text)
     expect(dispatch.inputs).toEqual([{ name, path: join('inputs', name) }])
     expect(dispatch.evidenceInputs).toEqual([
-      { name: 'subject.json', source: { kind: 'protected', ref: `${dispatch.reviewId}:subject.json`, digest: dispatch.subjectDigest } },
+      { name: 'subject.json', source: { kind: 'protected', ref: `${dispatch.reviewId}:subject.json`, digest: sha256(Buffer.from(JSON.stringify(subject, null, 2))) } },
       { name: 'submitted-artifact', source: { kind: 'protected', ref: `${dispatch.reviewId}:submitted-artifact`, digest: sha256('finding') } },
       { name: `inputs/${name}`, source: { kind: 'protected', ref: `${dispatch.reviewId}:inputs/${name}`, digest: run.bubble!.inputs[0]!.digest } },
     ])
     expect(JSON.parse(await readFile(join(request.cwd, 'subject.json'), 'utf8'))).toEqual(subject)
     expect(await readFile(join(request.cwd, 'submitted-artifact'), 'utf8')).toBe('finding')
     expect(await readFile(join(request.cwd, 'inputs', name), 'utf8')).toBe('The quick brown fox jumps over the lazy dog.\n')
-    await writeFile(join(request.cwd, 'review.json'), JSON.stringify({ subjectDigest: dispatch.subjectDigest,
-      findings: [{ criterionId: 'finding', verdict: 'pass', detail: 'independent finding', evidence: [join('inputs', name)] }],
-    }))
+    expect(dispatch.output).toMatchObject({ tool: 'singularity_submit', arguments: { findings: expect.any(Array) } })
+    expect(Object.keys(dispatch.output.arguments)).toEqual(['findings'])
+    expect(dispatch.reads).toEqual({ subject: { kind: 'subject' }, method: { kind: 'method' }, evidence: { kind: 'trajectory' } })
     const review = h.apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, dispatch.reviewId)!
-    await submitReview(h.apparatus, review, 'review.json')
+    await submitReview(h.apparatus, review, [{ criterionId: 'finding', verdict: 'pass', detail: 'independent finding', evidence: [join('inputs', name)] }])
     return { wait: async () => undefined, stop: () => undefined, close: async () => undefined }
   })
   const witness = await reviewSubject(h.apparatus, {}, agentFor('worker', 'worker'), 'one-off', subject,
@@ -335,20 +365,14 @@ it('allows evidence Tasks with their own review and completes a negative outer j
     fixtureReview(h.apparatus),
   )
   await mkdir(review.workspace, { recursive: true })
-  await writeFile(
-    join(review.workspace, 'review.json'),
-    JSON.stringify({
-      subjectDigest: review.subjectDigest,
-      findings: review.criteria.map(({ criterionId }) => (
+  const findings = review.criteria.map(({ criterionId }) => (
         {
           criterionId,
           verdict: 'fail',
           detail: 'The submitted count is zero, but independent evidence finds 35.',
           evidence: [childId],
         }
-      )),
-    }),
-  )
+      ))
   const events: SessionEvent[] = []
   const terminal = h.apparatus.store.load().entries().findLast((f) => f.subject === childId && f.kind === 'run/verified')!
   const message = schedulerMessage({ kind: 'singularity', purpose: 'plan-outcome', controlId: h.apparatus.controlId,
@@ -359,7 +383,7 @@ it('allows evidence Tasks with their own review and completes a negative outer j
     if (waits === 2) events.push({ seq: SessionSeq(events.length), time: 0, type: 'agent/inbox/spliced',
       data: { target: 'next-turn', start: 0, inserted: [message] } } as SessionEvent)
     if (waits === 3) events.push({ seq: SessionSeq(events.length), time: 0, type: 'user/message', data: message } as SessionEvent)
-    if (waits === 4) await submitReview(h.apparatus, held, 'review.json')
+    if (waits === 4) await submitReview(h.apparatus, held, findings)
   }, stop: () => undefined, close: async () => undefined })
   const persistence = { open: async () => ({ read: async () => ({ events }), close: async () => undefined }) }
   const witness = await reviewSubject({ ...h.apparatus, persistence: persistence as never }, {}, agentFor('worker', 'worker'),

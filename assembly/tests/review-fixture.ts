@@ -1,5 +1,4 @@
 /** Unit-test reviewer port. Native campaign evidence always comes from actual reviewer sessions. */
-import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createReviewCommands } from '../../src/review/commands.ts'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun, type Finding } from '../../src/review/protocol.ts'
@@ -39,23 +38,15 @@ export function fixtureReview(apparatus: Apparatus, verdict: Finding['verdict'] 
         method: run.revision,
       })
       review = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!
-      await mkdir(review.workspace, { recursive: true })
-      await writeFile(
-        join(review.workspace, 'review.json'),
-        JSON.stringify({
-          subjectDigest: review.subjectDigest,
-          findings: review.criteria.map((c) => {
-            const check = checks.find((check) => check.criterionId === c.criterionId)
-            return {
-              criterionId: c.criterionId,
-              verdict: check !== undefined && check.verdict !== 'pass' ? check.verdict : verdict,
-              detail: check?.detail ?? 'Independent fixture judgment',
-              evidence: ['attachment:' + run.submission!.files.artifact.attachmentId],
-            }
-          }),
-        }),
-      )
     }
-    return submitReview(apparatus, review, 'review.json')
+    return submitReview(apparatus, review, review.criteria.map((c) => {
+      const check = checks.find((check) => check.criterionId === c.criterionId)
+      return {
+        criterionId: c.criterionId,
+        verdict: check !== undefined && check.verdict !== 'pass' ? check.verdict : verdict,
+        detail: check?.detail ?? 'Independent fixture judgment',
+        evidence: ['attachment:' + run.submission!.files.artifact.attachmentId],
+      }
+    }))
   }
 }

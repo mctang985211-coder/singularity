@@ -97,8 +97,8 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
           ? ['summary', 'workflow', 'task', 'artifact', 'template', 'method', 'trajectory'] as const : config.role === 'improve'
             ? ['search', 'summary', 'task', 'artifact', 'template', 'method', 'round', 'subject', 'trajectory', 'roots', 'sessions', 'usage', 'steps'] as const
             : ['summary', 'task', 'artifact', 'template', 'method', 'round', 'subject', 'trajectory'] as const },
-        ...(config.role === 'improve' || config.role === 'review' ? { rootId: { type: 'string' as const, description: config.role === 'improve' ? 'Required for historical reads/citations.' : 'Only a root in subject.rsiEvidence; no arbitrary history.' } } : {}),
-        ref: { type: 'string', description: 'task/artifact: taskId; template: templateId; trajectory: sessionId; round: roundId; search: authoring for templates/rules, feedback for outcomes.' },
+        ...(config.role === 'improve' || config.role === 'review' ? { rootId: { type: 'string' as const, description: config.role === 'improve' ? 'Required for historical reads/citations.' : 'Only a root named in the frozen evidence directory.' } } : {}),
+        ref: { type: 'string', description: 'task/artifact: taskId; template: templateId (omit to list); method: omit for the pinned method, or use its revisionId/digest; trajectory: sessionId (reviewers omit to list readable sessions/pages); round: roundId; search: authoring or feedback.' },
         runId: { type: 'string', description: 'Select an authorized artifact Run.' },
         eventSeq: { type: 'integer', description: 'Copy seq from a trajectory index to read/cite the actual event.' },
         from: { type: 'integer', description: 'Zero-based offset: UTF-8 bytes for text pages; entries for lists.' },
@@ -121,9 +121,7 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
       name: 'singularity_submit',
       description: config.role === 'improve'
         ? 'Seal report.json using search.authoring.report; requires phase=ready. A negative result may finish the search. Private validation follows sealing.'
-        : config.role === 'review'
-          ? 'Seal review.json filled from dispatch.output.template.'
-          : 'Seal the declared workspace artifact for independent acceptance and delivery to authorized consumers.',
+        : 'Seal the declared workspace artifact for independent acceptance and delivery to authorized consumers.',
       parameters: { path: { type: 'string', required: true } }, output,
       execute: async (args, exec) => JSON.stringify(await attempt(() => {
             const surface = ctx.singularity.forCall(exec)
@@ -231,8 +229,24 @@ export function apply(ctx: Context, config: Config = { role: 'task' }): void {
       return surface.submit({ taskId: surface.current(), ...args })
     })),
   })
+  const reviewSubmit = defineTool({
+    name: 'singularity_submit',
+    description: 'Submit one judgment per frozen criterion. The host supplies the subject binding, identities and digests; only findings are accepted.',
+    parameters: { findings: { type: 'array', required: true, items: {
+      type: 'object', additionalProperties: false, properties: {
+        criterionId: { type: 'string', required: true },
+        verdict: { type: 'string', required: true, enum: ['pass', 'fail', 'partial', 'unknown'] as const },
+        detail: { type: 'string', required: true },
+        evidence: { type: 'array', required: true, items: { type: 'string' } },
+      },
+    } } }, output,
+    execute: async (args, exec) => JSON.stringify(await attempt(() => ctx.singularity.forCall(exec).submit(args))),
+  })
+  // DSH's per-property helper uses an open root; review bindings are host-only.
+  reviewSubmit.parameters.additionalProperties = false
   const tools = config.role === 'root' ? [common[0]!, common[1]!, rootSubmit, delegation, stopExplorations, answer, retry]
-    : [...common, ...(config.role === 'review' ? [delegation, answer] : config.role === 'improve' ? improve : task)]
+    : config.role === 'review' ? [common[0]!, common[1]!, reviewSubmit, delegation, answer]
+    : [...common, ...(config.role === 'improve' ? improve : task)]
   const disposers = tools.map((tool) => ctx.tools.register(tool))
   if (config.role === 'root') {
     const allowed = new Set([...tools.map(tool => tool.name), 'read', 'read_image', 'glob', 'grep'])

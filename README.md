@@ -90,9 +90,9 @@ Git 回退后应重新执行 `pnpm build`，再部署到独立 home/controlId �
 新宿主可用 `singularity-assembly.methodFile` 指定初始 method JSON：必须显式包含 `workflowGuidance`（可空，最多 8192 UTF-8 字节）、`templates`（可空）、`skills`、`tools`，不含方法级 `rootTemplate`。`scripts/rsi-campaign.mjs` 仅保留为单题连续运行诊断工具，现已使用同一原生 HTTP 客户端；其本地文件只记录诊断脚本进度，正式 suite 实验使用上述 CLI。重复同题不构成迁移验证。
 冻结 Task 的模板来源按原摘要保留，后续方法可修改或删除该模板。业务启动材料携带固定方法的短策略与全局方向；`singularity_read(kind=workflow)` 分页提供同一根内的关系元数据，不扩大产物或会话正文权限。`bound/delivered/read/invoked` 分别记录绑定、宿主送达、读取和调用，不证明模型遵循了策略。RSI 通过 `roots`、`sessions`、`usage`、`steps` 和 `trajectory` 按需查询历史；`subject` 按 UTF-8 字节分页，跟随 `next` 直到 `complete`。提案只写 analysis 和带 value 的 edit.changes，宿主保留未改字段与冻结源码；新批次先对同一份 bytes 做 JSON/schema、派生 Method、实际 diff 与冻结 evolve case/family ID 的纯静态预检，任一文件失败则整批不冻结、不扣槽；通过后才冻结这些 bytes，pending 按附件恢复。每个搜索任务最多冻结 6 个槽、repair=0，冻结后的证据、critic、duplicate 与 smoke 失败仍消耗额度；相同 digest 不重抽，恢复不重置。critic 通过后才加载/selftest，再进入原生评估。没有待处理提案/评估即可如实提交报告，结果为 `improved / no-improvement / insufficient-evidence`；无需为了结束而发布。
 
-RSI 每次开始或恢复读取 `kind=search` 的 phase、next、预算和 authoring 入口；写作模板与规则合并在 `ref=authoring` 页，资产与详细反馈分别按需分页。提案准入立即返回，宿主自动继续冻结批次并恢复作者；待定期间关闭作者写入。审核者使用 dispatch 的 `output.template`。三种标准 JSON、证据引用和提交时序见 [RSI agent 工作合同](docs/rsi-agent-contract.md)。
+RSI 每次开始或恢复读取 `kind=search` 的 phase、next、预算和 authoring 入口；写作模板与规则合并在 `ref=authoring` 页，资产与详细反馈分别按需分页。提案准入立即返回，宿主自动继续冻结批次并恢复作者；待定期间关闭作者写入。审核者直接提交 findings，宿主绑定冻结对象。提案、报告、审核的参数与提交时序见 [RSI agent 工作合同](docs/rsi-agent-contract.md)。
 
-模型请求的流式输出、错误分类、重试和最终失败由 DSH 原生 agent loop、`llm-retry` 与 provider `retryPolicy` 负责。当前部署为 normal 模式、最多重试 20 次，10% 抖动指数退避从 500 毫秒到 3 分钟。部分推理、文本或未执行的工具调用后发生 TRANSPORT 断流，仍可由原生重试恢复；失败 chunks 保存在 `assistant/attempt`，不会进入成功消息或执行其中的工具。不可重试错误和重试耗尽保留原生 `turn/end` 原因，Task 层按该事实记录当前 Run 失败；取消和 attempt 用量同样遵循原生语义。直接 `ctx.llm.stream()` 的背景摘要仍由原生调用者决定重试。
+模型请求的流式输出、错误分类、重试和最终失败由 DSH 原生 agent loop、`llm-retry` 与 provider `retryPolicy` 负责。当前部署为 normal 模式、最多重试 20 次；退避和可重试错误码按 provider 配置及 DSH 默认值解析。部分推理、文本或未执行的工具调用后发生 TRANSPORT 断流，仍可由原生重试恢复；失败 chunks 保存在 `assistant/attempt`，不会进入成功消息或执行其中的工具。不可重试错误和重试耗尽保留原生 `turn/end` 原因，Task 层按该事实记录当前 Run 失败；取消和 attempt 用量同样遵循原生语义。直接 `ctx.llm.stream()` 的背景摘要仍由原生调用者决定重试。
 
 节点策略唯一源码为 [prompts.ts](assembly/src/prompts.ts)，工具参数与分页说明只在 DSH 原生 schema，dispatch/通知只送运行事实。RSI 删除资产类型探索配额和停滞强制删除；候选仍按证据、独立筛查和冻结测评决定，允许无赢家结束。
 

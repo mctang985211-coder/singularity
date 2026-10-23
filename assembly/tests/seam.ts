@@ -193,7 +193,10 @@ export async function mount(config: Config, medium = new FakePersistence(),
     const caller = callerOf(exec.agent)
     return {
       retry: (input: Parameters<AgentTaskSurface['retry']>[0]) => retry(apparatus, caller, String(exec.callId), input),
-      submit: (input: Parameters<AgentTaskSurface['submit']>[0]) => submit(apparatus, execution, caller, exec, input, exec.signal, fixtureReview(apparatus)),
+      submit: (input: Parameters<AgentTaskSurface['submit']>[0]) => {
+        if ('findings' in input) refuse('not-responsible', 'this fixture only mounts task submission')
+        return submit(apparatus, execution, caller, exec, input, exec.signal, fixtureReview(apparatus))
+      },
     } as AgentTaskSurface
   },
   }

@@ -38,7 +38,7 @@ TaskContract 使用 `goal / artifact / inputs / criteria / skills? / capabilitie
 
 执行者写工作区产物，再以相对路径提交。宿主关闭写准入并 drain，冻结实际字节和原生 transcript 前缀，以 `run/submitted` 原子记录提交，进入 `working → submitted` 的唯一阶段路径。缺失文件、修改输入、持久化失败、取消与执行异常不返回成功空结果；恢复读取相同封存字节和检查。
 
-每次提交创建独立 ReviewRun，执行者不能审自己的产物。ReviewRun 固定精确对象、criterion 和独立会话；直接 artifact 输入的 producer 证据按 Bubble 中的准确 Run 冻结并按需读取，不能递归放开其上游或后续对话。review.json 必须逐条给出 judgment 和证据引用。protected fail 不能被覆盖为 pass。审核可分解取证 Task，后者各自独立审核；ReviewRun 本身不创建审核审核者。
+每次提交创建独立 ReviewRun，执行者不能审自己的产物。ReviewRun 固定精确对象、criterion 和独立会话；直接 artifact 输入的 producer 证据按 Bubble 中的准确 Run 冻结并按需读取，不能递归放开其上游或后续对话。Agent 只提交逐项判定和证据，宿主绑定冻结对象并封存审核结果。protected fail 不能被覆盖为 pass。审核可分解取证 Task，后者各自独立审核；ReviewRun 本身不创建审核审核者。
 
 审核的 fail / partial / unknown 都是有效完成的判断；运行失败有独立 failed 事实。调查的负结果保留。父节点必须消费已审核子证据并完成自己的集成与验收，不能把 child support 当父结论。
 
