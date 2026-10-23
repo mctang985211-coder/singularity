@@ -18,19 +18,15 @@ export function assertOrdinarySetupConfig(config) {
 }
 
 export function setupPrompt(request, workspace) {
-  return `Prepare one reviewable environment in ${workspace}, then finish for operator review. This is ordinary DSH; do not deploy, approve, start Tasks/RSI or change the checkout. Read only needed interfaces in ENV_SETUP_CONTEXT.md. Import scripts/dsh-control-runtime.mjs before checkout TypeScript; domain/reference is the example.
+  return `Prepare the requested RSI environment in ${workspace}. This is ordinary DSH; do not approve, deploy, start Tasks/RSI or change the checkout. Read ENV_SETUP_CONTEXT.md for interfaces.
 
-Keep domain data, adapters and tests in staging. Use loadDomain/contractFor and parseSuite when a suite is included. Bind needed Skills/Tools explicitly; keep private checks outside worker references. Record external paths/versions without credentials. Method assets supply domain procedures, not copies of node policy or tool manuals.
+Provide same-domain task content as a suite, acceptance criteria, a fixed scoring policy and only the tools needed for agents to test scores. Suite contracts describe finite deliverables, not solving procedures. State scoring trade-offs and hard guards consistently; define units, normalization and failure/missing-data rules. Separate evolve/validation/heldout families and keep private cases/checks outside worker references. Expose scorer usage through public references and task content.
 
-Define finite delivery with goal, artifact, inputs and criteria. State allowed scoring trade-offs in the goal and hard guards in criteria. Exploration may return supported no-gain evidence; never require global optimality, repeated new bests or a quota of successful variants. Root coordinates; workers execute.
+Unless the user explicitly requests them, omit Method files, Skills, TaskTemplates, decomposition, workflow guidance, standalone Task files, solver implementations and launch/verification scaffolding. Singularity starts with an empty method and explores RSI itself. Keep required schema arrays empty when unused.
 
-Freeze the evaluator before search. In package files record metrics, units, normalization, weights, failure/missing-data rules and proxy limitations. Show raw results and score contributions for a baseline, a different valid candidate and an invalid candidate; valid differences must remain distinguishable. Run relevant real checks once, repeating only after a relevant change/failure.
+Check loading and scoring with small known-valid/invalid fixtures; do not search for better solutions. Record observed scores and limitations briefly in SETUP_REVIEW.md, referencing scoring code for details. Evaluation parallelism is 1. Record external dependencies/versions without credentials.
 
-Deliver:
-- SETUP_REVIEW.md: brief check results, limitations and launch command with host evaluationParallelism=1. Reference package files and ENV_SETUP_CONTEXT.md for details.
-- setup-manifest.json: {"version":1,"domain":"relative/domain-directory","task":"relative/task-contract.json","review":"SETUP_REVIEW.md","files":["relative/path", ...]}. List itself, the review and every package input/code/configuration file. Use regular files inside staging, no symlinks; exclude external references, logs and caches.
-
-After these deliverables, identify SETUP_REVIEW.md in the final response and end the session. Approval and experiments belong to the operator.
+Write setup-manifest.json: {"version":1,"domain":"relative/domain-directory","review":"SETUP_REVIEW.md","files":["relative/path", ...]}. Include itself, the review and all environment inputs/code/config. Use regular files inside staging, no symlinks; exclude logs, caches and temporary checks. Identify the review in your final answer and finish.
 
 User request:
 ${request.trim()}\n`
@@ -38,21 +34,17 @@ ${request.trim()}\n`
 
 async function writeContext(workspace, checkout) {
   const files = [
-    ['Node roles and stopping policy; do not duplicate in method assets', 'assembly/src/prompts.ts'],
     ['Task contract schema', 'src/task/contract.ts'],
     ['Domain loader; task.json fields and path visibility', 'assembly/src/domain.ts'],
-    ['Canonical Task contract construction; contractFor binds input/template digests', 'assembly/src/inputs.ts'],
-    ['Method loading and baseline construction', 'assembly/src/method.ts'],
-    ['Domain-owned measurement interface', 'assembly/src/domain-measurement.ts'],
     ['Frozen multi-case suite and split rules', 'src/measure/suite.ts'],
-    ['Only reference environment; never a deployment default', 'domain/reference/task.json'],
+    ['Optional numeric measurement adapter', 'assembly/src/domain-measurement.ts'],
   ]
   const rows = []
   for (const [purpose, file] of files) {
     const path = join(checkout, file), bytes = await readFile(path)
     rows.push(`| ${purpose} | ${path} | ${sha256(bytes)} |`)
   }
-  const text = `# Environment setup: source/configuration map\n\nCheckout: ${checkout}\nStaging: ${workspace}\n\nThis is a native headless DSH session. Singularity's assembly, Task scheduler, bubbles, reviewer and RSI are absent. The ordinary DSH session log is the execution record. Read only the source relevant to the requested field; historical plans are not configuration schemas.\n\n| Read for | Source file | SHA256 at launch |\n|---|---|---|\n${rows.join('\n')}\n\nRead the domain loader and measurement interface before writing task.json or score code. A domain declares protected inputs, optional local templates, references, verifier implementations, a measurement module and an optional suite. A Task contract declares a goal, artifact, frozen inputs and acceptance criteria. A suite supplies distinct cases and separate evolve/validation/heldout families. Method assets govern how business nodes approach and organize work; they do not grant access to private evaluator data.\n\nAfter operator review/deployment, launch a business smoke with node ${join(checkout, 'scripts/singularity.mjs')} task run <task.json> --learning off --wait. evaluationParallelism=1 is a singularity-assembly host config field, not a Task field or CLI flag.\n\nThe score calculator is environment-owned executable code. Record coefficients, raw contributions and any allowed trade-offs in the review package. Keep acceptance requirements consistent with the formula; a quality preference must not imply endless refinement. A valid package is approved separately with singularity env approve; that records exact bytes without creating a Task or starting RSI.\n`
+  const text = `# Environment interfaces\n\nCheckout: ${checkout}\nStaging: ${workspace}\n\nRead only relevant schemas. Before importing checkout TypeScript, import ${join(checkout, 'scripts/dsh-control-runtime.mjs')} for native dependency resolution. Historical plans and the template-based reference example are not generation requirements.\n\n| Read for | Source file | SHA256 at launch |\n|---|---|---|\n${rows.join('\n')}\n\nThe domain task.json declares inputs, verifiers and templates arrays, public references and a suite path. Use templates: [] by default; suite cases directly contain task contracts with goal, artifact, protected inputs (exact SHA256) and criteria. No separate root Task or method file is needed. The host supplies the empty method seed.\n\nA public score CLI can live in a read-only references subtree and run via the agent's shell, without a Method Tool or Skill. Keep the suite and hidden evaluator data outside public references. Scoring may use whole-task pass, suite scoring: "criteria", or an optional measurement module; choose the simplest suitable interface. Approval freezes listed bytes separately; this session only prepares the environment.\n`
   await writeFile(join(workspace, 'ENV_SETUP_CONTEXT.md'), text, { mode: 0o600 })
 }
 
@@ -139,11 +131,13 @@ export async function approveEnvironmentSetup(workspace, { reviewer = 'operator'
   const manifestBytes = await readFile(join(root, MANIFEST))
   const manifest = JSON.parse(manifestBytes.toString('utf8'))
   if (manifest.version !== 1 || !Array.isArray(manifest.files) || !manifest.files.length ||
-    ['domain', 'task', 'review'].some(key => typeof manifest[key] !== 'string' || !manifest[key]))
-    throw new Error('setup-manifest.json requires version 1, domain, task, review and files')
+    ['domain', 'review'].some(key => typeof manifest[key] !== 'string' || !manifest[key]))
+    throw new Error('setup-manifest.json requires version 1, domain, review and files')
   if (new Set(manifest.files).size !== manifest.files.length || !manifest.files.includes(MANIFEST) ||
-    !manifest.files.includes(manifest.task) || !manifest.files.includes(manifest.review))
-    throw new Error('Manifest files must be unique and include the manifest, task and review')
+    !manifest.files.includes(manifest.review))
+    throw new Error('Manifest files must be unique and include the manifest and review')
+  if (manifest.task !== undefined && (typeof manifest.task !== 'string' || !manifest.files.includes(manifest.task)))
+    throw new Error('An optional standalone task must be a manifest-listed file')
   if (manifest.files.some(file => typeof file !== 'string' || file === APPROVAL || file.startsWith('.env-setup/')))
     throw new Error('Approval and native run logs are not environment package inputs')
   const files = []
@@ -152,7 +146,7 @@ export async function approveEnvironmentSetup(workspace, { reviewer = 'operator'
   if (!manifest.files.includes(`${manifest.domain}/task.json`)) throw new Error('Manifest files must include domain/task.json')
   await packageFile(root, `${manifest.domain}/task.json`)
   const approval = { version: 1, reviewedBy: reviewer, approvedAt: new Date().toISOString(),
-    manifestDigest: sha256(manifestBytes), domain: manifest.domain, task: manifest.task, files }
+    manifestDigest: sha256(manifestBytes), domain: manifest.domain, ...(manifest.task === undefined ? {} : { task: manifest.task }), files }
   await writeFile(join(root, APPROVAL), JSON.stringify(approval, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
   return { ...approval, approvalFile: join(root, APPROVAL) }
 }

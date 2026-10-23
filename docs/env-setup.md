@@ -35,12 +35,13 @@ node scripts/singularity.mjs env setup /path/to/request.md \
     model: my-model
 ```
 
-入口生成 `ENV_SETUP_CONTEXT.md`，提供当前 checkout 的节点协议、Task、模板、领域、方法、suite、measurement 和宿主配置源码路径与启动时摘要。只按需读对应接口；不再让 setup agent 阅读长篇架构蓝图和终局计划。请求文件负责定义领域目标、允许的工具、参考源码、成本边界和禁止的操作。入口不内置 PPA 系数或预设领域任务。
+默认只生成同领域多任务的内容、验收标准、固定评分策略和供 Agent 试分的必要工具。任务直接放入 suite 的 contract，区分 evolve/validation/heldout 的 family 与 source；这些 contract 表达“做什么、怎样算完成”，不预先决定怎么求解。
 
-Agent 需要生成简短的 `SETUP_REVIEW.md`，记录范围、真实检查结果、限制和启动命令；公式、算例及输入清单引用包内文件，源码来源引用 `ENV_SETUP_CONTEXT.md`，避免重复维护。评分文件应展示参数、单位、归一化、权重、失败/缺测规则，以及不同有效候选能产生可区分的结果，正确性门槛独立列出。使用 Yosys/OpenSTA 的估计必须说明库、约束和代理含义，不能称为实际布线后芯片 PPA。禁止执行的昂贵仿真应在请求里明确列出。
+用户未明确要求时，不生成 Method、Skill、TaskTemplate、decomposition、workflowGuidance、独立 root Task 文件、求解器、启动脚本或验证框架。领域声明仍名为 `task.json`，其中接口要求的 `templates` 数组默认留空；这不代表生成任务模板。宿主已有空 Method seed，后续由 Singularity 自行探索 RSI。
 
+`ENV_SETUP_CONTEXT.md` 只提供 contract、domain、suite 和可选 measurement 四个接口及启动时源码摘要。它说明依赖解析和空方法入口；不再默认引导阅读节点 system prompt、方法资产或模板示例。普通 Task 的评分可用现有通过/criteria 计分，数值目标才需要 measurement。公开试分 CLI 放在 domain 的只读 `references` 子树，用 shell 调用，无需 Method Tool/Skill；suite 和私有检查不得放入公开子树。
 
-生成的业务目标必须有有限交付口径：接受可验证产物，不要求证明全局最优、连续超过当前最好分数或凑齐成功变体数量。加权折中必须在 goal 里明确，单项硬门写入 criteria；探索允许有证据的无收益结论。Method/Skill 只写领域方法，不复制节点 system policy 或 tool 手册。baseline 调用与实现属于执行节点，root 协调与选择；Skill/Tool 绑定不继承。审核 launch 命令固定 `evaluationParallelism=1`。达到所需检查后写清单、结束，避免追加验证脚本。
+评分定义单位、归一化、允许的折中和失败/缺测处理；goal 与硬性 criteria 应保持一致，不要求全局最优或不断产生新高分。用少量已知有效/无效样例检查加载和评分，不搜索更优解。`SETUP_REVIEW.md` 只写实测结果、限制和依赖版本，公式引用代码，避免重复解释。评测并行度为 1。领域工具的代理指标须如实标明含义，例如 Yosys/OpenSTA 估计不能称为实际布线后 PPA。
 
 配置清单示例：
 
@@ -48,22 +49,18 @@ Agent 需要生成简短的 `SETUP_REVIEW.md`，记录范围、真实检查结�
 {
   "version": 1,
   "domain": "domain",
-  "task": "request.json",
   "review": "SETUP_REVIEW.md",
   "files": [
     "setup-manifest.json",
     "SETUP_REVIEW.md",
-    "request.json",
     "domain/task.json",
     "domain/suite.json",
-    "domain/measurement.mjs",
-    "scoring-policy.json",
-    "score-examples.json"
+    "domain/public/score.mjs"
   ]
 }
 ```
 
-`files` 必须补全实际使用的评估器、私有 oracle、输入、方法/Skill/Tool、来源快照和参数文件。路径均相对 staging；文件和中间目录不能是符号链接。外部工具与源码引用在审核材料中记录路径、版本和修订号。它们不由该清单复制或冻结，部署前仍须检查其一致性。未列入清单的文件也不受摘要冻结保护。原生会话日志、构建缓存和临时产物不进入评测依据。
+`files` 列全实际使用的输入、评分代码与参数。所有路径相对 staging；文件和中间目录不得为符号链接。仅用户需要独立 Task 文件时，可加可选 `task` 字段并把文件列入 `files`；已有含 `task` 的清单仍可批准。外部依赖记录路径、版本，不由清单复制或冻结，使用前须核对。日志、缓存和临时检查不进入评测依据；未列入清单的文件不受摘要保护。
 
 准备过程的 `.env-setup/` 保存输入提示、effective config、原生 JSON 事件、诊断日志和终局 session 身份。它只是本次普通 session 的记录。模型最终回答和退出码会写入 `run.json`；完成准备仍显示 `approval: pending`。诊断文件可能含领域资料，目录默认只允许当前用户访问。
 
@@ -79,4 +76,4 @@ node scripts/singularity.mjs env approve /path/to/new-staging --reviewer your-na
 
 ## 领域代码归属
 
-唯一标准参考为 [domain/reference](../domain/README.md)。环境 agent 生成的 Task/suite、适配器、工具、评分器、oracle 与领域测试全部放在指定 staging，使用现有 manifest/approval 冻结。不得加入 Singularity 源码或产品 spec，也不建立领域注册表。部署显式设置 `SINGULARITY_DOMAIN`；外部工具检查可写成环境包根部 `verify.mjs`，由 `pnpm verify:domain -- /path/to/environment` 执行。
+仓库的 [domain/reference](../domain/README.md) 展示可选模板和验证器，供需要这些接口时参考，不是默认生成清单。领域文件均放在 staging，不加入 Singularity 源码或产品 spec。部署显式设置 `SINGULARITY_DOMAIN`。已有环境的 `verify.mjs` 仍可由 `pnpm verify:domain -- /path/to/environment` 显式执行；builder 默认不生成它。

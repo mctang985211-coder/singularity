@@ -32,7 +32,6 @@ if (process.argv.includes('--dump-config')) {
   const received = JSON.parse(await readFile(join(workspace, 'received.json'), 'utf8'))
   expect(received).toMatchObject({ args: ['--profile', 'headless', '--patch', patch, '--json', '-'], cwd: workspace, token: null, cookie: null })
   expect(received.input).toContain('never run full-chip simulation')
-  expect(received.input).toContain('Do not start RSI')
   expect(await readFile(join(workspace, 'ENV_SETUP_CONTEXT.md'), 'utf8')).toContain('assembly/src/domain-measurement.ts')
   expect(JSON.parse(await readFile(join(workspace, '.env-setup/run.json'), 'utf8')).approval).toBe('pending')
   await expect(readFile(join(workspace, 'environment-approval.json'))).rejects.toMatchObject({ code: 'ENOENT' })
@@ -105,23 +104,28 @@ it('rejects effective configurations that accidentally compose a Task agent or S
   expect(() => assertOrdinarySetupConfig('- id: web')).toThrow('headless runner is missing')
 })
 
-async function packageAt(root: string, extra: string[] = []) {
+async function packageAt(root: string, extra: string[] = [], standaloneTask = false) {
   await mkdir(join(root, 'domain'), { recursive: true })
-  await writeFile(join(root, 'domain/task.json'), '{}\n')
-  await writeFile(join(root, 'request.json'), '{"goal":"local design"}\n')
+  await writeFile(join(root, 'domain/task.json'), '{"inputs":[],"verifiers":[],"templates":[],"suite":"suite.json"}\n')
+  await writeFile(join(root, 'domain/suite.json'), '{"version":1,"suiteId":"local-design"}\n')
+  if (standaloneTask) await writeFile(join(root, 'request.json'), '{"goal":"local design"}\n')
   await writeFile(join(root, 'SETUP_REVIEW.md'), 'Baseline 0.41, improvement 0.53; correctness is independent.\n')
   await writeFile(join(root, 'score.json'), '{"weights":{"area":0.4,"delay":0.6}}\n')
-  await writeFile(join(root, 'setup-manifest.json'), JSON.stringify({ version: 1, domain: 'domain', task: 'request.json', review: 'SETUP_REVIEW.md',
-    files: ['setup-manifest.json', 'domain/task.json', 'request.json', 'SETUP_REVIEW.md', 'score.json', ...extra] }))
+  await writeFile(join(root, 'setup-manifest.json'), JSON.stringify({ version: 1, domain: 'domain', review: 'SETUP_REVIEW.md',
+    ...(standaloneTask ? { task: 'request.json' } : {}),
+    files: ['setup-manifest.json', 'domain/task.json', 'domain/suite.json', 'SETUP_REVIEW.md', 'score.json',
+      ...(standaloneTask ? ['request.json'] : []), ...extra] }))
 }
 
-it('freezes the reviewed calculator bytes and refuses to overwrite an existing approval', async () => {
-  const root = await temp(); await packageAt(root)
+it.each([false, true])('freezes a suite package (standalone task: %s) and refuses to overwrite an existing approval', async standaloneTask => {
+  const root = await temp(); await packageAt(root, [], standaloneTask)
   const result = await approveEnvironmentSetup(root, { reviewer: 'authorized operator' })
   expect(result.reviewedBy).toBe('authorized operator')
   const score = result.files.find((file: { path: string }) => file.path === 'score.json')
   expect(score.sha256).toBe(createHash('sha256').update(await readFile(join(root, 'score.json'))).digest('hex'))
-  expect(result.files).toHaveLength(5)
+  expect(result.files).toHaveLength(standaloneTask ? 6 : 5)
+  if (standaloneTask) expect(result.task).toBe('request.json')
+  else expect(result).not.toHaveProperty('task')
   await writeFile(join(root, 'score.json'), '{"weights":{"area":0.8,"delay":0.2}}\n')
   expect(score.sha256).not.toBe(createHash('sha256').update(await readFile(join(root, 'score.json'))).digest('hex'))
   await expect(approveEnvironmentSetup(root)).rejects.toMatchObject({ code: 'EEXIST' })

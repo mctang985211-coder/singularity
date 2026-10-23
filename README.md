@@ -26,7 +26,7 @@ pnpm verify
 
 `setup:host` 只验证并生成被 Git 忽略的 `.singularity/` 本地解析配置；checkout 和用户目录可以改变。`pnpm verify` 执行离线 build、测试和 gates，不调用模型。生产效果必须依据[原生实跑证据](docs/e2e-testing.md)。
 
-复杂领域可以先交给一个普通 DSH session 准备环境、Task/suite、初始方法和评分计算器，再审核实际文件：
+复杂领域可以先交给一个普通 DSH session 准备同领域多任务 suite、验收标准、评分策略和试分工具，再审核实际文件。默认不生成 Method、Skill、TaskTemplate 或独立 Task 文件，由 Singularity 从空方法探索 RSI：
 
 ```sh
 export DSH_HOME=/path/to/private-setup-home
@@ -81,7 +81,7 @@ node scripts/singularity.mjs experiment report <task-or-session-id> --output ./r
 
 `singularity-assembly.evaluationParallelism` 默认 1，可在新实验中设为 4，使固定 suite 内的独立 trial 并行；轮次和发布仍按序推进。并行度进入 execution profile，改变后应开始新实验。同一 search 内相同方法、矩阵、profile 和计分口径的完整 incumbent 证据可复用，保留原 Task/Run 来源；私有验证重新执行。领域 measurement 可以返回 `{quality, metrics: {name: {value, unit}}, detail}`，公式及系数由领域模块定义并随实现摘要固定，各项原始指标保留在 trial 记录和 RSI 反馈。需要标准通过比例时可选 `suite.scoring: "criteria"`，与自定义 measurement 互斥。
 
-仓库只保留 [domain/reference](domain/README.md) 一份配置参考供 env setup agent 阅读。领域适配器、任务、评分器与工具链检查由它生成到用户指定的独立环境包；部署必须显式设置 `SINGULARITY_DOMAIN`，内核没有领域默认值。`pnpm verify:domain -- /path/to/environment` 执行该包自己的 `verify.mjs`。
+仓库只保留 [domain/reference](domain/README.md) 一份可选模板/验证器示例。builder 按所需接口生成独立环境包，不默认复制该示例或生成 `verify.mjs`；已有环境仍可用 `pnpm verify:domain -- /path/to/environment` 显式执行自己的验证脚本。部署必须设置 `SINGULARITY_DOMAIN`，内核没有领域默认值。
 
 Git 回退后应重新执行 `pnpm build`，再部署到独立 home/controlId 并检查最终配置。旧日志、旧运行补丁和旧 bundle 不能自动组成一次可恢复的新实验；例如历史草案的 `environmentApproval` 不是当前插件配置字段，审核摘要在启动前核对，不应把该字段继续传给插件。
 
