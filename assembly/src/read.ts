@@ -30,6 +30,8 @@ import { coordinationOf, parentContextOf, parentPlan, waitingReason, readScopeOf
 import type { FrozenInputProducer, FrozenRsiEvidence } from './review.ts'
 import { readHistory } from './history.ts'
 import { trajectoryPage, textPage } from './pages.ts'
+import { workflowBudget } from '../../src/task/budget.ts'
+import { workflowSteps } from './evaluation-cost.ts'
 
 export interface ReadInput {
   readonly kind?: 'summary' | 'workflow' | 'task' | 'artifact' | 'template' | 'method' | 'search' | 'round' | 'subject' | 'trajectory' | 'roots' | 'sessions' | 'usage' | 'steps'
@@ -137,6 +139,7 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
         refuse('malformed-declaration', 'template range must use a nonnegative offset and 1 to 100 entries per page')
       return [...domain.templates.values()].slice(from, from + count).map((template) => ({ id: template.id,
         goal: template.goal, ...(template.applicability === undefined ? {} : { applicability: template.applicability }),
+        skills: template.skills, capabilities: template.capabilities,
         producers: [...new Set(template.inputs.flatMap((input) => input.source.kind === 'artifact' ? [input.source.template] : []))],
       }))
     }
@@ -199,7 +202,13 @@ export async function readForAgent(apparatus: Apparatus, agentId: string, input:
   if (!Number.isSafeInteger(from) || from < 0 || !Number.isSafeInteger(count) || count < 1 || count > 100)
     refuse('malformed-declaration', 'summary range must use a nonnegative offset and 1 to 100 entries')
   const related = [...tasks.values()].filter((state) => visible!.has(state.taskId))
+  const budget = review !== undefined || audit ? undefined : workflowBudget(tasks, cut.entries(), task!.taskId)
+  const steps = budget?.limits === undefined ? undefined : await workflowSteps(apparatus, budget.rootId)
   return { coordination: coordinationOf(apparatus, current), method: reference,
+    ...(steps === undefined ? {} : { budget: { ...budget,
+      steps, remainingSteps: Math.max(0, budget!.limits!.maxSteps - steps),
+      scope: 'Shared native step/start count: root, descendants and independent acceptance. Reserve steps for submission and root acceptance; cutoff is a fact position, not a step count.',
+    } }),
     total: related.length, from, next: from + count < related.length ? from + count : null,
     tasks: related.slice(from, from + count).map((state) => {
       const producers = frozenProducers.get(state.taskId)

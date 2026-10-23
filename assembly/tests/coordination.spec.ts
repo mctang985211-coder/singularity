@@ -215,8 +215,11 @@ it('enforces the delegation hold on native tools, workspace, method calls and su
   const h = await setup()
   await h.scheduler.close(); await h.apparatus.store.close()
   let admission!: Parameters<typeof fakeExecution>[0]
+  const nativePersistence = h.runtime.seams.get!('sessionPersistence') as typeof h.apparatus.persistence
   const driver = await openDriver({ projections: testProjections, controlId: 'coordination', workspaceRoot: h.root, domain: h.domain,
-    persistence: h.persistence as never, attachments: attachmentsAt(h.root), seams: h.runtime.seams,
+    persistence: { open: (id, access) => String(id).startsWith('singularity:control:')
+      ? h.persistence.open(id, access) : nativePersistence.open(id, access),
+    } as typeof h.apparatus.persistence, attachments: attachmentsAt(h.root), seams: h.runtime.seams,
     execution: (guard) => { admission = guard; return fakeExecution(guard) } })
   const call = driver.forCall(execFor(h.parent, 'waiting'))
   expect(admission({ agent: h.parent, name: 'bash' } as never)).toContain('delegated')

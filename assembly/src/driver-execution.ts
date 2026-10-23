@@ -13,7 +13,7 @@ import type { TaskContract } from '../../src/task/contract.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../../src/task/protocol.ts'
 import { callerOf, declareCaller, taskStateOf } from './apparatus.ts'
 import { answerChild, askParent, assertActive, directionForRun, parentPlan, waitingReason } from './coordination.ts'
-import { taskDispatchStart, taskSessionsOf } from './evaluation-cost.ts'
+import { workflowSteps } from './evaluation-cost.ts'
 import type { Admission } from './execution.ts'
 import { sha256, taskIdOf } from './ids.ts'
 import { improvementTaskId, improvementTools } from './improvement.ts'
@@ -243,13 +243,8 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
           }
           const limit = root.workflowLimits?.maxSteps ?? (parentOf(root.taskId) === undefined ? undefined : DEFAULT_WORKFLOW_LIMITS.maxSteps)
           if (limit !== undefined) {
-            let steps = 0
             const rootSession = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, root.responsibility!.agentId)!.sessionId
-            for (const id of taskSessionsOf(apparatus, root.taskId)) {
-              const events = await nativeEvents(id)
-              const from = id === rootSession ? taskDispatchStart(events, apparatus.controlId, root.taskId) ?? events.length : 0
-              steps += events.slice(from).filter(e => e.type === 'step/start').length
-            }
+            const steps = await workflowSteps(apparatus, root.taskId)
             if (steps >= limit) {
               const run = Object.values(root.runs).at(-1)!
               if (run.status === 'running') {
@@ -259,6 +254,7 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
                 await scheduler.advance(root.taskId)
                 await closeRoot(taskStateOf(apparatus, root.taskId), taskStateOf(apparatus, root.taskId).runs[run.runId]!, 'failed')
                 registry().get(SessionId(rootSession))?.cancel({ kind: 'parent' }, { keepInbox: true })
+                schedule()
               }
               return undefined
             }

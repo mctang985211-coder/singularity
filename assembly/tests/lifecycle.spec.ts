@@ -64,7 +64,8 @@ it('projects memory from the committed assigned Run without consuming methods or
 it('reads complete contract examples and a scoped method directory on demand', async () => {
   const h = await setup(), call = h.call('templates')
   expect(await call.history({ kind: 'template', from: 1, count: 1 })).toEqual([
-    { id: 'extract-letters', goal: 'extract every ASCII letter in source order, with no other bytes', producers: [] },
+    { id: 'extract-letters', goal: 'extract every ASCII letter in source order, with no other bytes', producers: [],
+      skills: [], capabilities: [] },
   ])
   expect(await call.history({ kind: 'template', ref: 'extract-letters' })).toMatchObject({ contract: {
     template: { id: 'extract-letters', digest: expect.any(String) },

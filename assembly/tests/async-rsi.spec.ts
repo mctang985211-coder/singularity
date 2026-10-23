@@ -1287,6 +1287,43 @@ it.each(['family', 'contract'] as const)('rejects a new validation tranche reusi
   expect(factsOf(h.medium).filter(fact => fact.kind === 'pointer/switched')).toHaveLength(1)
 }, 30_000)
 
+it('starts independent RSI from a budget-exhausted business root without another external wakeup', async () => {
+  const h = await fixture(), root = await h.enter('count protected letters')
+  businessTurn(h, 13)
+  const log = h.logs.get('business')!
+  for (let index = 1; index < DEFAULT_WORKFLOW_LIMITS.maxSteps; index++)
+    log.push({ seq: SessionSeq(log.length), time: log.length, type: 'step/start', data: { turn: 2, step: index } })
+  await driver!.enter(h.parent, [], { provider: 'test', model: 'model-under-test' })
+  const request = await improving()
+  expect(factsOf(h.medium).find(fact => fact.subject === root.taskId && fact.kind === 'task/closed')!.payload)
+    .toMatchObject({ reason: 'failed' })
+  expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/status').map(fact => (fact.payload as { status: string }).status))
+    .toEqual(['pending', 'running'])
+  const author = h.agents.get(String(agentSessionIdOf(request.agentId)))!
+  expect(await h.call(author, 'independent-rsi').history({ kind: 'search' })).toMatchObject({ phase: 'ready' })
+  expect((await driver!.read()).tasks.find(task => task.taskId === root.taskId)!.phase).toBe('failed')
+})
+
+it('includes independent acceptance steps in the live shared workflow budget', async () => {
+  const h = await fixture(), root = await h.enter('count protected letters')
+  businessTurn(h, 13)
+  const plan = await h.call(h.parent, 'budget-child').decompose({ taskId: root.taskId, children: [
+    { key: 'inspect', contract: { goal: 'Inspect one counting boundary', artifact: 'finding.txt', inputs: [],
+      criteria: [{ criterionId: 'finding', statement: 'Report a supported observation' }] },
+    dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' },
+  ] })
+  const childId = plan.opened[0]!, agent = h.agents.get(String(agentSessionIdOf(childId)))!
+  await writeFile(join(driver!.world(String(agent.id)).root, 'finding.txt'), 'ASCII boundaries are fixed.')
+  await h.call(agent, 'submit-finding').submit({ taskId: childId, path: 'finding.txt' })
+  const review = (await driver!.read()).reviews.find(review => review.target.kind === 'acceptance' && review.target.taskId === childId)!
+  h.logs.set(review.sessionId, Array.from({ length: 37 }, (_, index) => ({
+    seq: SessionSeq(index), time: index, type: 'step/start', data: { turn: 1, step: index + 1 },
+  })))
+  expect(await h.call(h.parent, 'budget-with-review').history({ kind: 'summary' })).toMatchObject({
+    budget: { steps: 38, remainingSteps: DEFAULT_WORKFLOW_LIMITS.maxSteps - 38 },
+  })
+})
+
 it('keeps old native steps outside the next root budget, then terminates the current root and every descendant at maxSteps', async () => {
   const h = await fixture(), contract = contractFor(h.domain, h.domain.templates.get(h.domain.rootTemplate!)!, 'count protected letters')
   const previous = await h.enter(JSON.stringify({ contract, learning: false }), 'old-root')
@@ -1300,6 +1337,8 @@ it('keeps old native steps outside the next root budget, then terminates the cur
   }
   appendSteps('business', DEFAULT_WORKFLOW_LIMITS.maxSteps)
   const root = await h.enter(JSON.stringify({ contract, learning: false }), 'fresh-root')
+  expect(JSON.parse((h.dispatches.at(-1)!.content[0] as { text: string }).text).direction.root.workflowLimits)
+    .toEqual(DEFAULT_WORKFLOW_LIMITS)
   appendSteps('business', 1)
   const log = h.logs.get('business')!
   log.push({ seq: SessionSeq(log.length), time: log.length, type: 'user/message', surfaceOp: 'append', data: h.dispatches.at(-1)! })
@@ -1317,8 +1356,17 @@ it('keeps old native steps outside the next root budget, then terminates the cur
   const rootCancel = vi.spyOn(h.parent, 'cancel'), childCancel = vi.spyOn(childAgent, 'cancel'), grandCancel = vi.spyOn(grandAgent, 'cancel')
   expect(await driver!.enter(grandAgent, [], { provider: 'test', model: 'model-under-test' })).toBeUndefined()
   expect(factsOf(h.medium).filter(fact => fact.kind === 'run/failed' && fact.subject === root.taskId)).toHaveLength(0)
+  for (const agent of [h.parent, childAgent, grandAgent]) {
+    expect(await h.call(agent, 'visible-budget').history({ kind: 'summary' })).toMatchObject({
+      budget: { rootId: root.taskId, limits: DEFAULT_WORKFLOW_LIMITS, steps: 1,
+        remainingSteps: DEFAULT_WORKFLOW_LIMITS.maxSteps - 1, nodes: 3, plans: 2, runs: 3 },
+    })
+  }
   appendSteps(String(childAgent.id), DEFAULT_WORKFLOW_LIMITS.maxSteps - 2)
   appendSteps(String(grandAgent.id), 1)
+  expect(await h.call(h.parent, 'exhausted-budget').history({ kind: 'summary' })).toMatchObject({
+    budget: { steps: DEFAULT_WORKFLOW_LIMITS.maxSteps, remainingSteps: 0 },
+  })
   await driver!.enter(grandAgent, [], { provider: 'test', model: 'model-under-test' })
   const final = factsOf(h.medium), ids = [root.taskId, childId, grandId]
   for (const id of ids) expect(final.filter(fact => fact.kind === 'run/failed' && fact.subject === id)).toHaveLength(1)
@@ -1336,6 +1384,9 @@ it('keeps old native steps outside the next root budget, then terminates the cur
   await driver!.activate('business')
   await driver!.activate(String(childAgent.id))
   await driver!.activate(String(grandAgent.id))
+  expect(await h.call(h.parent, 'recovered-budget').history({ kind: 'summary' })).toMatchObject({
+    budget: { rootId: root.taskId, steps: DEFAULT_WORKFLOW_LIMITS.maxSteps, remainingSteps: 0 },
+  })
   expect(factsOf(h.medium).filter(fact => fact.kind === 'run/failed')).toEqual(failures)
   expect(harness.open.mock.calls.filter(([, request]) => [childId, grandId].includes(request.agentId))).toHaveLength(2)
 })

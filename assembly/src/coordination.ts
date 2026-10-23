@@ -309,7 +309,8 @@ export function workflowDirection(states: ReadonlyMap<string, TaskState>, id: st
     ...(graph.consumers.get(id) ?? []),
   ])
   return { cutoff, root: { taskId: rootId, goal: root.contract!.goal.slice(0, 512),
-      goalComplete: root.contract!.goal.length <= 512, contractDigest: root.contractDigest },
+      goalComplete: root.contract!.goal.length <= 512, contractDigest: root.contractDigest,
+      ...(root.workflowLimits === undefined ? {} : { workflowLimits: root.workflowLimits }) },
     supportPath: path.map(taskId => {
       const state = states.get(taskId)!, parentId = graph.parents.get(taskId)
       const edge = parentId === undefined ? undefined : states.get(parentId)!.decomposition!.children.find(child => child.taskId === taskId)

@@ -69,6 +69,10 @@ it('offers a pinned asset catalog and records only guidance and Skills actually 
     expect(context).not.toHaveProperty('boundSkills')
     expect(context.references).not.toContain(domainDir)
     expect(JSON.stringify(context)).not.toContain(h.assets.skills[0]!.content)
+    expect(await readForAgent(h.apparatus, h.caller.agentId, { kind: 'template' })).toContainEqual({
+      id: h.apparatus.domain.rootTemplate!, goal: expect.any(String), producers: [],
+      skills: ['count'], capabilities: ['candidate-check'],
+    })
     expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.run.runId]!.consumed).toEqual(h.initialConsumption)
 
     await ctx.plugin(SkillRegistry, {})

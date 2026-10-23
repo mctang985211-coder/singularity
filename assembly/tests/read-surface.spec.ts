@@ -230,6 +230,10 @@ it('keeps validation and heldout Tasks outside proposer reads and prepared memor
 
 it('pages related Task indexes without replaying contracts, verdicts or historical Run bodies', async () => {
   const h = await setup()
+  // This index fixture has control facts but no modeled execution steps.
+  const reading = { ...h.apparatus, persistence: { open: async () => ({
+    read: async () => ({ events: [] }), close: async () => undefined,
+  }) } as unknown as SessionPersistence }
   const oldRun = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!
   const failure = 'Old diagnostic evidence. '.repeat(1000)
   await h.apparatus.tasks.forAgent(h.caller.agentId).failRun({ commandId: 'old-failure', taskId: h.proposal.taskId,
@@ -243,12 +247,12 @@ it('pages related Task indexes without replaying contracts, verdicts or historic
       dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const })) })
   type Summary = { total: number; from: number; next: number | null;
     tasks: { taskId: string; parentId: string | null; sessionId: string; runs: { runId: string; status: string }[] }[] }
-  const first = await readForAgent(h.apparatus, h.caller.agentId) as Summary
+  const first = await readForAgent(reading, h.caller.agentId) as Summary
   expect(first).toMatchObject({ total: 26, from: 0, next: 20 })
   expect(first.tasks).toHaveLength(20)
   expect(first.tasks.find(task => task.taskId === h.proposal.taskId)!.runs)
     .toEqual([{ runId: current.runId, status: 'running', stage: 'working', artifactDigest: undefined }])
-  const second = await readForAgent(h.apparatus, h.caller.agentId, { kind: 'summary', from: first.next! }) as Summary
+  const second = await readForAgent(reading, h.caller.agentId, { kind: 'summary', from: first.next! }) as Summary
   expect(second).toMatchObject({ total: 26, from: 20, next: null })
   expect(second.tasks).toHaveLength(6)
   expect(new Set([...first.tasks, ...second.tasks].map(task => task.taskId)).size).toBe(26)
@@ -258,7 +262,7 @@ it('pages related Task indexes without replaying contracts, verdicts or historic
   const childId = second.tasks[0]!.taskId
   expect(await readForAgent(h.apparatus, h.caller.agentId, { kind: 'task', ref: childId }))
     .toMatchObject({ contract: { goal: expect.stringContaining(goal) } })
-  expect((await readForAgent(h.apparatus, h.caller.agentId, { kind: 'summary', count: 100 }) as Summary).tasks)
+  expect((await readForAgent(reading, h.caller.agentId, { kind: 'summary', count: 100 }) as Summary).tasks)
     .toHaveLength(26)
   for (const range of [{ from: -1 }, { count: 0 }, { count: 101 }, { from: 0.5 }])
     await expect(readForAgent(h.apparatus, h.caller.agentId, { kind: 'summary', ...range })).rejects.toThrow('summary range')
