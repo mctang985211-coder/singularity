@@ -53,6 +53,19 @@ async function setup() {
 const contextFor = (apparatus: Apparatus, proposal: { taskId: string; runId: string }) =>
   methodContext(apparatus, proposal.taskId, taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!)
 
+it('starts from a host-owned empty seed when the environment has no method assets', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'singularity-empty-method-')); roots.push(root)
+  await writeFile(join(root, 'task.json'), '{}')
+  const domain = await loadDomain(root, spawnProcess)
+  const apparatus = await openApparatus('empty-method', root, domain, new FakePersistence() as unknown as SessionPersistence,
+    attachmentsAt(root), testProjections)
+  try {
+    const seed = await seedMethod(apparatus)
+    expect(publishedMethod(apparatus)).toEqual(seed)
+    expect((await loadMethod(apparatus, seed)).assets).toEqual({ workflowGuidance: '', templates: [], skills: [], tools: [] })
+  } finally { await apparatus.store.close() }
+})
+
 it('validates an imported seed and uses the latest publication for each independent business root', async () => {
   const { apparatus, assets, caller } = await setup()
   const invalid = { ...assets, templates: assets.templates.map(raw => ({ ...raw as object, artifact: 'changed.txt' })) }

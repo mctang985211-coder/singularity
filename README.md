@@ -26,7 +26,7 @@ pnpm verify
 
 `setup:host` 只验证并生成被 Git 忽略的 `.singularity/` 本地解析配置；checkout 和用户目录可以改变。`pnpm verify` 执行离线 build、测试和 gates，不调用模型。生产效果必须依据[原生实跑证据](docs/e2e-testing.md)。
 
-复杂领域可以先交给一个普通 DSH session 准备同领域多任务 suite、验收标准、评分策略和试分工具，再审核实际文件。默认不生成 Method、Skill、TaskTemplate 或独立 Task 文件，由 Singularity 从空方法探索 RSI：
+复杂领域可以先交给一个普通 DSH session 准备同领域多任务 suite、验收标准、评分策略和试分工具，再审核实际文件。默认不生成 Method、Skill、TaskTemplate、独立 Task 文件或审核手册，由 Singularity 从空方法探索 RSI：
 
 ```sh
 export DSH_HOME=/path/to/private-setup-home

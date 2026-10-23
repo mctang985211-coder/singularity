@@ -20,13 +20,13 @@ export function assertOrdinarySetupConfig(config) {
 export function setupPrompt(request, workspace) {
   return `Prepare the requested RSI environment in ${workspace}. This is ordinary DSH; do not approve, deploy, start Tasks/RSI or change the checkout. Read ENV_SETUP_CONTEXT.md for interfaces.
 
-Provide same-domain task content as a suite, acceptance criteria, a fixed scoring policy and only the tools needed for agents to test scores. Suite contracts describe finite deliverables, not solving procedures. State scoring trade-offs and hard guards consistently; define units, normalization and failure/missing-data rules. Separate evolve/validation/heldout families and keep private cases/checks outside worker references. Expose scorer usage through public references and task content.
+Provide only same-domain task content in a suite, acceptance criteria, fixed scoring and the tools needed for agents to test scores. Define finite deliverables and consistent scoring trade-offs/hard guards. Keep scoring rules (units, normalization, failure/missing data) and invocation help with the scorer; task content cites its command. Separate evolve/validation/heldout families; keep private cases/checks outside public references.
 
-Unless the user explicitly requests them, omit Method files, Skills, TaskTemplates, decomposition, workflow guidance, standalone Task files, solver implementations and launch/verification scaffolding. Singularity starts with an empty method and explores RSI itself. Keep required schema arrays empty when unused.
+Method/Skill/TaskTemplate assets, task decomposition, workflow guidance, standalone Task files, solvers, extra documents and launch/verification scaffolding require an explicit user request. Singularity supplies the empty method and explores RSI itself.
 
-Check loading and scoring with small known-valid/invalid fixtures; do not search for better solutions. Record observed scores and limitations briefly in SETUP_REVIEW.md, referencing scoring code for details. Evaluation parallelism is 1. Record external dependencies/versions without credentials.
+Smoke-check loading and scores on small known-valid/invalid fixtures, without searching for solutions. Report results, limitations and dependency versions briefly in your final answer. Evaluation parallelism is 1; never record credentials.
 
-Write setup-manifest.json: {"version":1,"domain":"relative/domain-directory","review":"SETUP_REVIEW.md","files":["relative/path", ...]}. Include itself, the review and all environment inputs/code/config. Use regular files inside staging, no symlinks; exclude logs, caches and temporary checks. Identify the review in your final answer and finish.
+Write setup-manifest.json: {"version":1,"domain":"relative/domain-directory","files":["relative/path", ...]}. List itself and all environment inputs/code/config. Use regular staging files, no symlinks; exclude logs, caches and temporary checks. Then finish.
 
 User request:
 ${request.trim()}\n`
@@ -44,7 +44,7 @@ async function writeContext(workspace, checkout) {
     const path = join(checkout, file), bytes = await readFile(path)
     rows.push(`| ${purpose} | ${path} | ${sha256(bytes)} |`)
   }
-  const text = `# Environment interfaces\n\nCheckout: ${checkout}\nStaging: ${workspace}\n\nRead only relevant schemas. Before importing checkout TypeScript, import ${join(checkout, 'scripts/dsh-control-runtime.mjs')} for native dependency resolution. Historical plans and the template-based reference example are not generation requirements.\n\n| Read for | Source file | SHA256 at launch |\n|---|---|---|\n${rows.join('\n')}\n\nThe domain task.json declares inputs, verifiers and templates arrays, public references and a suite path. Use templates: [] by default; suite cases directly contain task contracts with goal, artifact, protected inputs (exact SHA256) and criteria. No separate root Task or method file is needed. The host supplies the empty method seed.\n\nA public score CLI can live in a read-only references subtree and run via the agent's shell, without a Method Tool or Skill. Keep the suite and hidden evaluator data outside public references. Scoring may use whole-task pass, suite scoring: "criteria", or an optional measurement module; choose the simplest suitable interface. Approval freezes listed bytes separately; this session only prepares the environment.\n`
+  const text = `# Minimal environment interface\n\nCheckout: ${checkout}\nStaging: ${workspace}\n\nPaths below are relative to the domain directory. Omit unused templates/verifiers/inputs.\n\nDomain task.json: {"inputs":[{"ref":"data","from":"input.json"}],"suite":"suite.json","references":["public"]}\nSuite: {"version":1,"suiteId":"DOMAIN","failureQuality":0,"cases":[CASE, ...]}\nCASE: {"caseId":"CASE","familyId":"FAMILY","sourceId":"SOURCE","split":"evolve","weight":1,"trials":2,"contract":{"goal":"finite task content; score command","artifact":"result.json","inputs":[{"name":"input.json","source":{"kind":"protected","ref":"data","digest":"SHA256 of input bytes"}}],"criteria":[{"criterionId":"correct","statement":"acceptance standard"}]},"hardGuards":["correct"]}\n\nUse distinct evolve/validation/heldout families and sources. Publication comparisons require at least three independent families and two trials per case in each compared split; smaller suites are smoke tests.\n\nTask acceptance uses independent reviewers. Default suite quality is 1 for acceptance, otherwise failureQuality. Optional scoring: "criteria" counts passed non-guard criteria; numeric objectives can use a measurement adapter instead. Public score CLI code/help goes in references and runs via the agent shell at its absolute staging path; no Method Tool/Skill is needed. The suite and hidden evaluator data stay outside references.\n\nSource details only when needed (not a reading checklist). Before importing checkout TypeScript, import ${join(checkout, 'scripts/dsh-control-runtime.mjs')}.\n\n| Interface | Source | SHA256 at launch |\n|---|---|---|\n${rows.join('\n')}\n`
   await writeFile(join(workspace, 'ENV_SETUP_CONTEXT.md'), text, { mode: 0o600 })
 }
 
@@ -106,7 +106,7 @@ export async function runEnvironmentSetup({ request, workspace, patch, checkout 
     const session = stream.find(event => event.type === 'session')
     const final = stream.findLast(event => event.type === 'final')
     const result = { version: 1, sessionId: session?.sessionId ?? null, exitCode: code, workspace: staging,
-      approval: 'pending', review: join(staging, 'SETUP_REVIEW.md'), final: final?.text ?? null }
+      approval: 'pending', manifest: join(staging, MANIFEST), final: final?.text ?? null }
     await writeFile(join(record, 'run.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 })
     if (code !== 0 || !session || !final) throw new Error(`Native environment setup did not complete (exit ${code}); inspect ${record}`)
     return result
@@ -131,13 +131,13 @@ export async function approveEnvironmentSetup(workspace, { reviewer = 'operator'
   const manifestBytes = await readFile(join(root, MANIFEST))
   const manifest = JSON.parse(manifestBytes.toString('utf8'))
   if (manifest.version !== 1 || !Array.isArray(manifest.files) || !manifest.files.length ||
-    ['domain', 'review'].some(key => typeof manifest[key] !== 'string' || !manifest[key]))
-    throw new Error('setup-manifest.json requires version 1, domain, review and files')
-  if (new Set(manifest.files).size !== manifest.files.length || !manifest.files.includes(MANIFEST) ||
-    !manifest.files.includes(manifest.review))
-    throw new Error('Manifest files must be unique and include the manifest and review')
-  if (manifest.task !== undefined && (typeof manifest.task !== 'string' || !manifest.files.includes(manifest.task)))
-    throw new Error('An optional standalone task must be a manifest-listed file')
+    typeof manifest.domain !== 'string' || !manifest.domain)
+    throw new Error('setup-manifest.json requires version 1, domain and files')
+  if (new Set(manifest.files).size !== manifest.files.length || !manifest.files.includes(MANIFEST))
+    throw new Error('Manifest files must be unique and include the manifest')
+  for (const key of ['task', 'review'])
+    if (manifest[key] !== undefined && (typeof manifest[key] !== 'string' || !manifest.files.includes(manifest[key])))
+      throw new Error(`Optional ${key} must be a manifest-listed file`)
   if (manifest.files.some(file => typeof file !== 'string' || file === APPROVAL || file.startsWith('.env-setup/')))
     throw new Error('Approval and native run logs are not environment package inputs')
   const files = []

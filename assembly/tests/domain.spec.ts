@@ -45,6 +45,23 @@ const sourced = (id: string, source: object) => ({ ...declaration().templates[0]
   inputs: [{ name: 'in/source.txt', source }] })
 
 describe('the deployment domain', () => {
+  it('loads a suite without template, verifier or protected-input placeholders', async () => {
+    const dir = await fixture({ suite: 'suite.json' })
+    await writeFile(join(dir, 'suite.json'), JSON.stringify({ version: 1, suiteId: 'minimal', failureQuality: 0,
+      cases: [{ caseId: 'one', familyId: 'one', sourceId: 'one', split: 'evolve', weight: 1, trials: 1, hardGuards: [],
+        contract: { goal: 'Write hello', artifact: 'result.txt', inputs: [], criteria: [{ criterionId: 'hello', statement: 'Contains hello' }] } }] }))
+    const domain = await loadDomain(dir, spawnProcess)
+    expect(domain.suite?.suiteId).toBe('minimal')
+    expect(domain.inputs).toEqual([])
+    expect(domain.templates.size).toBe(0)
+    expect(domain.verifiers).toEqual([])
+  })
+
+  it.each(['inputs', 'templates', 'verifiers'])('rejects an explicit malformed %s instead of treating it as absent', async key => {
+    expect(await asyncRefusalOf(() => fixture({ [key]: null }).then(dir => loadDomain(dir, spawnProcess))))
+      .toMatchObject({ code: 'malformed-declaration' })
+  })
+
   it('exposes only explicitly declared shared references and resolves domain-relative paths', async () => {
     const dir = await fixture(declaration())
     expect((await loadDomain(dir, spawnProcess)).references).toEqual([])

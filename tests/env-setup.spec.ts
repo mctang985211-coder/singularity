@@ -23,12 +23,13 @@ if (process.argv.includes('--dump-config')) {
   await fs.writeFile('received.json', JSON.stringify({args: process.argv.slice(2), cwd: process.cwd(), input,
     token: process.env.SINGULARITY_TOKEN ?? null, cookie: process.env.SINGULARITY_COOKIE ?? null}));
   console.log(JSON.stringify({type:'session',sessionId:'ordinary-fresh-session'}));
-  console.log(JSON.stringify({type:'final',text:'Review SETUP_REVIEW.md before approval.'}));
+  console.log(JSON.stringify({type:'final',text:'Prepared setup-manifest.json for review.'}));
 }
 `, { mode: 0o700 })
   const result = await runEnvironmentSetup({ request: 'Explore only local module PPA; never run full-chip simulation.', workspace, binary, patch,
     env: { ...process.env, DSH_HOME: join(root, 'private-home'), SINGULARITY_TOKEN: 'private', SINGULARITY_COOKIE: 'private' } })
-  expect(result).toMatchObject({ sessionId: 'ordinary-fresh-session', exitCode: 0, approval: 'pending', workspace })
+  expect(result).toMatchObject({ sessionId: 'ordinary-fresh-session', exitCode: 0, approval: 'pending', workspace,
+    manifest: join(workspace, 'setup-manifest.json') })
   const received = JSON.parse(await readFile(join(workspace, 'received.json'), 'utf8'))
   expect(received).toMatchObject({ args: ['--profile', 'headless', '--patch', patch, '--json', '-'], cwd: workspace, token: null, cookie: null })
   expect(received.input).toContain('never run full-chip simulation')
@@ -104,27 +105,29 @@ it('rejects effective configurations that accidentally compose a Task agent or S
   expect(() => assertOrdinarySetupConfig('- id: web')).toThrow('headless runner is missing')
 })
 
-async function packageAt(root: string, extra: string[] = [], standaloneTask = false) {
+async function packageAt(root: string, extra: string[] = [], legacy = false) {
   await mkdir(join(root, 'domain'), { recursive: true })
   await writeFile(join(root, 'domain/task.json'), '{"inputs":[],"verifiers":[],"templates":[],"suite":"suite.json"}\n')
   await writeFile(join(root, 'domain/suite.json'), '{"version":1,"suiteId":"local-design"}\n')
-  if (standaloneTask) await writeFile(join(root, 'request.json'), '{"goal":"local design"}\n')
-  await writeFile(join(root, 'SETUP_REVIEW.md'), 'Baseline 0.41, improvement 0.53; correctness is independent.\n')
+  if (legacy) {
+    await writeFile(join(root, 'request.json'), '{"goal":"local design"}\n')
+    await writeFile(join(root, 'SETUP_REVIEW.md'), 'Baseline 0.41, improvement 0.53; correctness is independent.\n')
+  }
   await writeFile(join(root, 'score.json'), '{"weights":{"area":0.4,"delay":0.6}}\n')
-  await writeFile(join(root, 'setup-manifest.json'), JSON.stringify({ version: 1, domain: 'domain', review: 'SETUP_REVIEW.md',
-    ...(standaloneTask ? { task: 'request.json' } : {}),
-    files: ['setup-manifest.json', 'domain/task.json', 'domain/suite.json', 'SETUP_REVIEW.md', 'score.json',
-      ...(standaloneTask ? ['request.json'] : []), ...extra] }))
+  await writeFile(join(root, 'setup-manifest.json'), JSON.stringify({ version: 1, domain: 'domain',
+    ...(legacy ? { task: 'request.json', review: 'SETUP_REVIEW.md' } : {}),
+    files: ['setup-manifest.json', 'domain/task.json', 'domain/suite.json', 'score.json',
+      ...(legacy ? ['request.json', 'SETUP_REVIEW.md'] : []), ...extra] }))
 }
 
-it.each([false, true])('freezes a suite package (standalone task: %s) and refuses to overwrite an existing approval', async standaloneTask => {
-  const root = await temp(); await packageAt(root, [], standaloneTask)
+it.each([false, true])('freezes a suite package (legacy task/review: %s) and refuses to overwrite an existing approval', async legacy => {
+  const root = await temp(); await packageAt(root, [], legacy)
   const result = await approveEnvironmentSetup(root, { reviewer: 'authorized operator' })
   expect(result.reviewedBy).toBe('authorized operator')
   const score = result.files.find((file: { path: string }) => file.path === 'score.json')
   expect(score.sha256).toBe(createHash('sha256').update(await readFile(join(root, 'score.json'))).digest('hex'))
-  expect(result.files).toHaveLength(standaloneTask ? 6 : 5)
-  if (standaloneTask) expect(result.task).toBe('request.json')
+  expect(result.files).toHaveLength(legacy ? 6 : 4)
+  if (legacy) expect(result.task).toBe('request.json')
   else expect(result).not.toHaveProperty('task')
   await writeFile(join(root, 'score.json'), '{"weights":{"area":0.8,"delay":0.2}}\n')
   expect(score.sha256).not.toBe(createHash('sha256').update(await readFile(join(root, 'score.json'))).digest('hex'))

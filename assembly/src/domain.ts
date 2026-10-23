@@ -61,7 +61,7 @@ export async function loadDomain(dir: string, runProcess: (invocation: VerifierI
     }
   }
   const inputs: DomainInput[] = []
-  for (const [index, entry] of list(declared['inputs'], 'task.json.inputs').entries()) {
+  for (const [index, entry] of (declared['inputs'] === undefined ? [] : list(declared['inputs'], 'task.json.inputs')).entries()) {
     const at = `task.json.inputs[${index}]`
     const input = record(entry, at)
     assertClosedKeys(input, ['ref', 'from'], at, 'malformed-declaration')
@@ -72,13 +72,13 @@ export async function loadDomain(dir: string, runProcess: (invocation: VerifierI
     inputs.push({ ref, sourcePath, digest: sha256(bytes), bytes })
   }
   const verifiers: DomainVerifier[] = []
-  for (const [index, entry] of list(declared['verifiers'], 'task.json.verifiers').entries()) {
+  for (const [index, entry] of (declared['verifiers'] === undefined ? [] : list(declared['verifiers'], 'task.json.verifiers')).entries()) {
     const verifier = await verifierOf(dir, entry, `task.json.verifiers[${index}]`, invocation => runProcess(invocation, undefined, dir, { root: dir, writable: false, protected: [], references: [...references, ...verifierReferences] }))
     if (verifiers.some(other => other.ref === verifier.ref)) refuse('malformed-declaration', `task.json repeats verifier ${JSON.stringify(verifier.ref)}`)
     verifiers.push(verifier)
   }
   const templates = new Map<string, TaskTemplate>()
-  for (const [index, entry] of list(declared['templates'], 'task.json.templates').entries()) {
+  for (const [index, entry] of (declared['templates'] === undefined ? [] : list(declared['templates'], 'task.json.templates')).entries()) {
     const template = await readTemplate(dir, entry, verifiers, `task.json.templates[${index}]`)
     if (templates.has(template.id)) refuse('malformed-declaration', `task.json repeats template ${JSON.stringify(template.id)}`)
     templates.set(template.id, template)
