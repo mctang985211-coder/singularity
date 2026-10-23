@@ -1,6 +1,6 @@
 # RSI agent 工作合同
 
-更新：2026-10-20。本文说明现有提案、审核与报告入口。`kind=search` 是已有 read 工具的短投影；状态仅从既有 Task/Run/batch/round 事实派生，不新增状态库。解析边界以 [rsi-proposal.ts](../assembly/src/rsi-proposal.ts)、[method.ts](../assembly/src/method.ts)、[review.ts](../assembly/src/review.ts) 为准。
+更新：2026-10-23（Task v24；仅新图）。节点 system policy 的唯一来源为 [prompts.ts](../assembly/src/prompts.ts)，本文用于人类查阅接口，不附加给 agent。本文说明现有提案、审核与报告入口。`kind=search` 是已有 read 工具的短投影；状态仅从既有 Task/Run/batch/round 事实派生，不新增状态库。解析边界以 [rsi-proposal.ts](../assembly/src/rsi-proposal.ts)、[method.ts](../assembly/src/method.ts)、[review.ts](../assembly/src/review.ts) 为准。
 
 Singularity 的业务顺序是：root 最少委派 → Task 在自己的 workspace 生成产物 → submit 封存 → 宿主独立验收 → 父任务复用已验证产物。只读参考仓库不是共享工作区；补丁中的目标路径不是可写宿主路径；跨任务交接使用声明的 artifact inputs。RSI 在业务结束后读取这些冻结事实，提案由独立 critic 筛选、宿主跑新业务对照；报告通过与方法收益是两回事。
 
@@ -15,7 +15,7 @@ critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字
 1. 每次开始、恢复或压缩后，先调用 `singularity_read({"kind":"search"})`。短结果给出 `phase`、`next`、`pending`、剩余槽、`nextRound`、evolve `cases`、反馈摘要和 `authoring.proposal/report` 模板。`screening/evaluating/reporting` 时结束 turn，宿主负责推进；`ready` 才能提出新机制或提交报告。工具 `kind` 必填。
 2. 读取 `kind=subject`，沿 `next` 字节偏移直到 `complete=true`。按需读 `trajectory` 索引，复制真实 sessionId 与 seq，再带 `eventSeq` 读事件正文；索引和摘要不能代替原生正文。`kind=method` 读当前资产，带 `from/count` 可按 UTF-8 字节分页；其中不再混入搜索状态、提案模板与完整反馈。
 3. 第一次编辑前读取 `kind=search,ref=authoring` 的全部页面，其中有 proposal/report 规则和 Method 格式。从可核查发现提出一个独立机制，保留已证成功行为，写出可观察触发条件、反例与迁移假设。允许带来源的公开领域知识和参数化程序；旧题答案、任务 ID、输出与按题分支留在证据中。
-4. 填写 `search.authoring.proposal`，只在 `edit.changes` 写需要改的字段；宿主保留其它资产与冻结源码。保存 1–3 份 JSON，调用 `singularity_propose_method({"paths":["proposal.json"]})`。服从 `nextRound` 的剩余槽、探索槽和 prune 要求。整批静态拒绝不冻结、不扣槽；入场后的无效、拒绝、重复或执行失败仍扣槽，`repair=0`。
+4. 填写 `search.authoring.proposal`，只在 `edit.changes` 写需要改的字段；宿主保留其它资产与冻结源码。保存 1–3 份 JSON，调用 `singularity_propose_method({"paths":["proposal.json"]})`。服从 `nextRound` 的剩余槽；不再要求触及新资产类型或停滞时强制删除。按实证选择最小充分改动，可删冗余指导，无须为了填槽新增 Skill/Tool。整批静态拒绝不冻结、不扣槽；入场后的无效、拒绝、重复或执行失败仍扣槽，`repair=0`。
 5. 准入仅冻结通过预检的 bytes，立即返回 `status=screening` 和 `batchId`，不等待 critic 或测评。随后结束 turn；宿主从附件执行 critic → selftest → evaluation，并以已提交事实恢复作者。重启同样继续冻结批次，不需要模型重发 paths；改写或删除原提案文件不影响已冻结工作。待定期间模型不可新写文件、提案或交报告。
 6. 恢复后重读 search；用 `kind=search,ref=feedback` 分页读取具体拒绝、审核发现和测量，用 `kind=round,ref=roundId` 检查结果。只有无待办时才按实际事实填写 `search.authoring.report`，写 report.json 后 `singularity_submit({"path":"report.json"})`。无赢家和证据不足均可如实结束，不要求搜到成功。
 

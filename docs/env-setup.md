@@ -35,9 +35,12 @@ node scripts/singularity.mjs env setup /path/to/request.md \
     model: my-model
 ```
 
-入口生成 `ENV_SETUP_CONTEXT.md`，提供当前 checkout 的架构、Task、模板、领域、方法、suite、measurement 和宿主配置源码路径与启动时摘要。源码是格式依据；终局计划包含未实施设计，不能直接作为配置 schema。请求文件负责定义领域目标、允许的工具、参考源码、成本边界和禁止的操作。入口不内置 PPA 系数或预设领域任务。
+入口生成 `ENV_SETUP_CONTEXT.md`，提供当前 checkout 的节点协议、Task、模板、领域、方法、suite、measurement 和宿主配置源码路径与启动时摘要。只按需读对应接口；不再让 setup agent 阅读长篇架构蓝图和终局计划。请求文件负责定义领域目标、允许的工具、参考源码、成本边界和禁止的操作。入口不内置 PPA 系数或预设领域任务。
 
-Agent 需要生成 `SETUP_REVIEW.md`，解释任务范围、参考与版本、评分公式、参数/单位/归一化、各项加权贡献、失败与缺测规则、真实验证结果以及启动命令。评分应展示不同有效候选能产生可区分的结果，同时独立列出正确性门槛。使用 Yosys/OpenSTA 的估计必须说明库、约束和代理含义，不能称为实际布线后芯片 PPA。禁止执行的昂贵仿真应在请求里明确列出。
+Agent 需要生成简短的 `SETUP_REVIEW.md`，记录范围、真实检查结果、限制和启动命令；公式、算例及输入清单引用包内文件，源码来源引用 `ENV_SETUP_CONTEXT.md`，避免重复维护。评分文件应展示参数、单位、归一化、权重、失败/缺测规则，以及不同有效候选能产生可区分的结果，正确性门槛独立列出。使用 Yosys/OpenSTA 的估计必须说明库、约束和代理含义，不能称为实际布线后芯片 PPA。禁止执行的昂贵仿真应在请求里明确列出。
+
+
+生成的业务目标必须有有限交付口径：接受可验证产物，不要求证明全局最优、连续超过当前最好分数或凑齐成功变体数量。加权折中必须在 goal 里明确，单项硬门写入 criteria；探索允许有证据的无收益结论。Method/Skill 只写领域方法，不复制节点 system policy 或 tool 手册。baseline 调用与实现属于执行节点，root 协调与选择；Skill/Tool 绑定不继承。审核 launch 命令固定 `evaluationParallelism=1`。达到所需检查后写清单、结束，避免追加验证脚本。
 
 配置清单示例：
 

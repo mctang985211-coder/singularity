@@ -12,10 +12,7 @@ import { fileAttachmentRef } from './run.ts'
 export interface ProposalBatch {
   readonly batchId: string
   readonly incumbent: RevisionRef
-  readonly editBudget: 1
   readonly historyCutoff: number
-  readonly untried: readonly string[]
-  readonly prune: boolean
   readonly slots: readonly { readonly path: string; readonly contentDigest: string; readonly proposal: FileAttachmentRef }[]
   readonly outcomes: readonly { readonly slot: number; readonly status: string; readonly detail: string; readonly revision?: RevisionRef }[]
   readonly settled: boolean
@@ -38,11 +35,11 @@ function working(state: TaskState, actor: string, runId: string): void {
 export function searchKinds(): Readonly<Record<string, KindRule<TaskState>>> {
   return {
     'rsi/batch-opened': defineKind<TaskState, Omit<ProposalBatch, 'outcomes' | 'settled'>, {}>({
-      guarantees: { appended: true }, emitter: 'scheduler', members: ['batchId', 'incumbent', 'editBudget', 'historyCutoff', 'untried', 'prune', 'slots'], nested: {},
+      guarantees: { appended: true }, emitter: 'scheduler', members: ['batchId', 'incumbent', 'historyCutoff', 'slots'], nested: {},
       parse: raw => {
-        const row = record(raw, 'proposal batch'), budget = row['editBudget']
-        if (budget !== 1 || !Number.isSafeInteger(row['historyCutoff']) || (row['historyCutoff'] as number) < 0 || typeof row['prune'] !== 'boolean' || !Array.isArray(row['untried']) || row['untried'].some(a => !['workflow', 'template', 'skill', 'tool'].includes(String(a))) || new Set(row['untried']).size !== row['untried'].length || !Array.isArray(row['slots']) || !row['slots'].length || row['slots'].length > 3)
-          refuse('malformed-payload', 'batch needs one to three slots and a positive edit budget')
+        const row = record(raw, 'proposal batch')
+        if (!Number.isSafeInteger(row['historyCutoff']) || (row['historyCutoff'] as number) < 0 || !Array.isArray(row['slots']) || !row['slots'].length || row['slots'].length > 3)
+          refuse('malformed-payload', 'batch needs one to three slots and a nonnegative history cutoff')
         const slots = row['slots'].map(raw => {
           const slot = record(raw, 'batch slot')
           assertClosedKeys(slot, ['path', 'contentDigest', 'proposal'], 'batch slot')
@@ -51,7 +48,7 @@ export function searchKinds(): Readonly<Record<string, KindRule<TaskState>>> {
             proposal: fileAttachmentRef(slot['proposal'], contentDigest, 'batch slot.proposal') }
         })
         if (new Set(slots.map(s => s.contentDigest)).size !== slots.length) refuse('malformed-payload', 'duplicate batch slot')
-        return { batchId: text(row, 'batchId', 'batch'), incumbent: revisionRef(row['incumbent'], 'batch incumbent', REVISION_MEMBERS), editBudget: 1, historyCutoff: row['historyCutoff'] as number, untried: row['untried'] as string[], prune: row['prune'] as boolean, slots }
+        return { batchId: text(row, 'batchId', 'batch'), incumbent: revisionRef(row['incumbent'], 'batch incumbent', REVISION_MEMBERS), historyCutoff: row['historyCutoff'] as number, slots }
       },
       reduce: (state, fact, payload) => {
         const search = state.search

@@ -112,7 +112,6 @@ export function coordinationOf(apparatus: Apparatus, id: string, cut: ControlRea
       canPlan: working && waitingReason(apparatus, id, cut, 'plan') === undefined,
       canExecute: working && waiting === null && !rootCoordinator,
       canSubmit: working && waiting === null && (!rootCoordinator || children.some(child => child.status === 'verified')),
-      boundary: 'Delegation assigns the named child result. Supports links do not discharge parent criteria; the parent still owns selection and integration and must submit for independent acceptance.',
     },
     waiting,
     questionsToAnswer,
@@ -202,10 +201,10 @@ export async function deliverQuestions(apparatus: Apparatus, seams: ChildSession
       if (!q.answers.some((a) => a.resolves))
         await deliver(recipient(q.parentAgentId), 'question', q.seq,
           JSON.stringify({ questionId: q.questionId, taskId: task.taskId, runId: q.runId, question: q.question,
-            blocking: q.blocking, instruction: 'Answer this child with singularity_answer; the frozen contract stays in force.' }))
+            blocking: q.blocking }))
       for (const answer of q.answers)
         await deliver(recipient(task.responsibility!.agentId), 'answer', answer.seq,
-          JSON.stringify({ questionId: q.questionId, ...answer, instruction: 'Read this answer before continuing; it changes no frozen input or acceptance standard.' }))
+          JSON.stringify({ questionId: q.questionId, ...answer }))
     }
 }
 
@@ -324,6 +323,5 @@ export function workflowDirection(states: ReadonlyMap<string, TaskState>, id: st
         consumesMyOutput: graph.consumers.get(id)?.includes(taskId) ?? false }
     }),
     consumers: graph.consumers.get(id) ?? [],
-    boundary: 'Only your frozen contract defines acceptance. Read workflow pages for relationships and task ref=taskId for authorized full contracts.',
   }
 }

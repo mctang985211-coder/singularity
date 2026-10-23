@@ -230,7 +230,7 @@
     },
     {
       "protocol": "task",
-      "version": 23,
+      "version": 24,
       "subject": "the task id",
       "kinds": [
         {
@@ -286,10 +286,7 @@
           "members": [
             "batchId",
             "incumbent",
-            "editBudget",
             "historyCutoff",
-            "untried",
-            "prune",
             "slots"
           ]
         },

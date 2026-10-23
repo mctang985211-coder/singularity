@@ -298,9 +298,6 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
         JSON.stringify({
           reviewId,
           purpose: review.target.kind,
-          ...(review.target.kind === 'acceptance' ? { instruction:
-            'Accept this frozen Task against its contract. This is an acceptance review, not publication. The subject source and contribution source fields identify sealed producer transcripts: read their trajectory events for recorded execution evidence. Loose producer files are not directly shared. If the sealed record is insufficient, delegate a bounded evidence Task with dispatch.evidenceInputs. Do not repair the artifact or invoke a private host oracle.' } : {}),
-          ...(review.target.kind === 'proposal' ? { instruction: 'Screen the method proposal using subject.requirements and frozen nativeEvidence. Read baseline, assets and host-computed changes with singularity_read({"kind":"subject","from":0,"count":8192}), following next byte offsets until complete=true. edit.changes contains validated asset/target keys; author-only value fields are intentionally omitted. Judge changed intent/content; do not solve, run commands, fetch URLs, delegate experiments or repair the candidate. Write review.json and submit it.' } : {}),
           assignment: 'subject.json',
           criteria: review.criteria,
           subjectDigest,
@@ -309,7 +306,6 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
           evidenceInputs: reviewInputsOf(review, data).map(({ name, source }) => ({ name, source })),
           output: {
             path: 'review.json',
-            instruction: 'Fill this template: preserve subjectDigest and criterionIds, replace details/evidence with actual findings, and choose one verdict per criterion: pass, fail, partial or unknown. No extra fields.',
             template: {
               subjectDigest,
               findings: review.criteria.map((c) => ({

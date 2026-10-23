@@ -104,6 +104,7 @@ async function fixture({ suite = false, heldout = true } = {}) {
         get seq() {
           return log.length
         },
+        snapshotEvents: () => structuredClone(logs.get(id)!),
       },
       followup: (message: UserMessage) => {
         if (!allowDelivery) throw Error('interrupted before outcome delivery')
@@ -255,7 +256,7 @@ async function fixture({ suite = false, heldout = true } = {}) {
     return dispatch === undefined ? undefined : JSON.parse((dispatch.content[0] as { text: string }).text).assigned
   }
   const call = (agent: Agent, id: string) => driver!.forCall(execFor(agent, id))
-  return { root, medium, logs, agents, parent, call, enter, mount, reportFailure, domain, dispatches, attachments,
+  return { root, medium, logs, agents, parent, call, enter, mount, reportFailure, domain, dispatches, attachments, persistence,
     admission: (name: string, agent: Agent) => admission({ name, agent } as never) }
 }
 /** Drive the runtime continuation explicitly; production admission returns before any critic. */
@@ -857,9 +858,8 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   expect(factsOf(h.medium).find(fact => fact.kind === 'rsi/round-settled')!.payload).toMatchObject({ status: 'completed' })
   expect(await scope.history({ kind: 'search' })).toMatchObject({
     reference: method.reference,
-    nextRound: { editBudget: 1, remainingSlots: 4, maxBatchSlots: 3, repairsPerSlot: 0,
-      untried: ['workflow', 'skill', 'tool'], prune: false, pruneSlot: null,
-      historyCutoff: expect.any(Number), reservedSlot: expect.stringContaining('untried asset class') },
+    nextRound: { remainingSlots: 4, maxBatchSlots: 3, repairsPerSlot: 0,
+      historyCutoff: expect.any(Number) },
     feedback: { edits: [{ revision: candidate, outcome: 'not-selected' }], rejected: [{ slot: 0, status: 'rejected' }] },
     cases: [],
   })
@@ -1304,6 +1304,30 @@ it('starts independent RSI from a budget-exhausted business root without another
   expect((await driver!.read()).tasks.find(task => task.taskId === root.taskId)!.phase).toBe('failed')
 })
 
+it('counts an unpublished child from its native live log without hiding missing cold history', async () => {
+  const h = await fixture(), root = await h.enter('count protected letters')
+  businessTurn(h, 13)
+  const plan = await h.call(h.parent, 'new-child').decompose({ taskId: root.taskId, children: [
+    { key: 'inspect', contract: { goal: 'Inspect one counting boundary', artifact: 'finding.txt', inputs: [],
+      criteria: [{ criterionId: 'finding', statement: 'Report a supported observation' }] },
+    dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' },
+  ] })
+  const sessionId = String(agentSessionIdOf(plan.opened[0]!)), child = h.agents.get(sessionId)!
+  // DSH can assemble an unpublished child's prompt before its first durable append.
+  h.agents.delete(sessionId)
+  const open = h.persistence.open.bind(h.persistence)
+  vi.spyOn(h.persistence, 'open').mockImplementation(async (id, access) => {
+    if (id === sessionId) throw new Error(`session "${id}" not found`)
+    return open(id, access)
+  })
+  expect(await driver!.stepBudget(sessionId, child.session)).toMatchObject({ rootId: root.taskId, steps: 1 })
+  h.logs.get(sessionId)!.push({ seq: SessionSeq(0), time: 1, type: 'step/start', data: { turn: 1, step: 1 } })
+  expect(await driver!.stepBudget(sessionId, child.session)).toMatchObject({ steps: 2 })
+  // Without a live session, missing persisted history remains an error.
+  await expect(driver!.stepBudget(sessionId)).rejects.toThrow('not found')
+  h.agents.set(sessionId, child)
+})
+
 it('includes independent acceptance steps in the live shared workflow budget', async () => {
   const h = await fixture(), root = await h.enter('count protected letters')
   businessTurn(h, 13)
@@ -1322,6 +1346,8 @@ it('includes independent acceptance steps in the live shared workflow budget', a
   expect(await h.call(h.parent, 'budget-with-review').history({ kind: 'summary' })).toMatchObject({
     budget: { steps: 38, remainingSteps: DEFAULT_WORKFLOW_LIMITS.maxSteps - 38 },
   })
+  expect(await driver!.stepBudget(review.sessionId)).toEqual({ rootId: root.taskId,
+    steps: 38, maxSteps: DEFAULT_WORKFLOW_LIMITS.maxSteps, remainingSteps: DEFAULT_WORKFLOW_LIMITS.maxSteps - 38 })
 })
 
 it('keeps old native steps outside the next root budget, then terminates the current root and every descendant at maxSteps', async () => {

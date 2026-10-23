@@ -242,7 +242,7 @@ async function parseCandidate(domain: Domain, content: string, baseline: MethodA
 
 /** RRSI done() -> critic -> evaluation request. No parallel state store or model-controlled round ids. */
 async function screenRsiMethod(apparatus: Apparatus, seams: ChildSessionSeams, agent: Agent,
-  agentId: string, input: { readonly content: string; readonly incumbent: import('../../src/task/protocol.ts').RevisionRef; readonly editBudget: number; readonly untried: readonly string[]; readonly prune: boolean }, signal: AbortSignal) {
+  agentId: string, input: { readonly content: string; readonly incumbent: import('../../src/task/protocol.ts').RevisionRef }, signal: AbortSignal) {
   assertImprovementOwner(apparatus, agentId)
   const cut = apparatus.store.load(), tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION),
     agents = cut.statesOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION)
@@ -250,18 +250,6 @@ async function screenRsiMethod(apparatus: Apparatus, seams: ChildSessionSeams, a
   const incumbent = input.incumbent
   const baseline = await loadMethod(apparatus, incumbent)
   const { proposal, candidate } = await parseCandidate(apparatus.domain, input.content, baseline.assets)
-  if (input.untried.length && !proposal.edit.changes.some(change => input.untried.includes(change.asset)))
-    refuse('malformed-declaration', 'reserved exploration slot must touch an actually untried asset class')
-  if (input.prune) {
-    const removed = proposal.edit.changes.some(change => {
-      if (change.asset === 'workflow') return baseline.assets.workflowGuidance !== '' && proposal.method.workflowGuidance === ''
-      const key = change.asset === 'template' ? 'id' : 'name', field = `${change.asset}s` as 'templates' | 'skills' | 'tools'
-      return baseline.assets[field].some(asset => (asset as Record<string, unknown>)[key] === change.target) &&
-        !proposal.method[field].some(asset => (asset as Record<string, unknown>)[key] === change.target)
-    })
-    if (!removed) refuse('malformed-declaration', 'stalled search requires a real current-asset deletion in its prune slot')
-  }
-
   const sources = [...proposal.analysis.failure_modes, ...proposal.analysis.capability_gaps, ...proposal.analysis.success_habits].flatMap(mode => mode.evidence)
   const nativeEvidence: { reference: RsiEvidence; page: unknown }[] = []
   for (const ref of new Map(sources.map(ref => [digestOf(ref), ref])).values()) {
@@ -363,8 +351,6 @@ async function admitBatch(apparatus: Apparatus,
     refuse('illegal-transition', `evaluation ${evaluating.roundId} is pending; end the turn and wait for host feedback. No new batch admitted; no candidate slots consumed`)
   const history = searchHistory(apparatus, task)
   const incumbent = existing?.incumbent ?? history.incumbent
-  const untried = existing?.untried ?? history.directives.untried
-  const prune = existing?.prune ?? history.directives.prune
   {
     const baseline = await loadMethod(apparatus, incumbent)
     // Static draft checks reveal no evidence, critic or trial outcome. Check the whole
@@ -383,8 +369,8 @@ async function admitBatch(apparatus: Apparatus,
       slots.push({ path: draft.path, contentDigest: draft.contentDigest,
         proposal: await apparatus.attachments.saveFile({ name: draft.path, data: draft.bytes }) })
   }
-  if (!existing) await searchFact(apparatus, task, 'rsi/batch-opened', { batchId, incumbent, editBudget: 1, slots,
-    historyCutoff: history.directives.historyCutoff, untried, prune }, batchId)
+  if (!existing) await searchFact(apparatus, task, 'rsi/batch-opened', { batchId, incumbent, slots,
+    historyCutoff: history.directives.historyCutoff }, batchId)
   return { batchId, admitted: true, status: 'screening', slotsConsumed: slots.length,
     next: 'End the turn. The host screens these frozen bytes and evaluates approved candidates; it will resume you.' }
 }
@@ -396,7 +382,7 @@ export async function advanceRsiBatch(apparatus: Apparatus, seams: ChildSessionS
   assertImprovementOwner(apparatus, agentId)
   const pending = task.search?.batches?.find(batch => !batch.settled)
   if (pending === undefined) return
-  const { batchId, slots, incumbent, untried, prune } = pending
+  const { batchId, slots, incumbent } = pending
   const run = Object.values(task.runs).at(-1)!
   const roundId = `round-${sha256(`${task.taskId}/${batchId}`).slice(0, 24)}`
   const round = task.rounds?.find(r => r.roundId === roundId)?.round ?? (task.rounds?.length ?? 0) + 1
@@ -405,8 +391,7 @@ export async function advanceRsiBatch(apparatus: Apparatus, seams: ChildSessionS
     let outcome: { status: string; revision?: import('../../src/task/protocol.ts').RevisionRef; reason?: string | undefined; reviewId?: string }
     try {
       const content = (await sealedBytes(apparatus, held.proposal)).toString('utf8')
-      outcome = await screenRsiMethod(apparatus, seams, agent, agentId, { content, incumbent, editBudget: 1,
-        untried: slots.length > 1 && slot === slots.length - 1 ? untried : [], prune: prune && slot === 0 }, signal)
+      outcome = await screenRsiMethod(apparatus, seams, agent, agentId, { content, incumbent }, signal)
     } catch (error) {
       signal.throwIfAborted()
       if (error instanceof SyntaxError) outcome = { status: 'invalid', reason: `invalid proposal JSON: ${error.message}` }

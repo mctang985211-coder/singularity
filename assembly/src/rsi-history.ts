@@ -65,17 +65,9 @@ export function searchHistory(apparatus: Apparatus, task: TaskState) {
   const source = task.runs[task.search!.runId]!.relatedTo!
   const incumbent = latest?.submissions.find(c => c.slot === latest.decision?.winner)?.revision
     ?? latest?.plan?.incumbent ?? taskStateOf(apparatus, source.taskId).runs[source.runId]!.revision
-  const measured = rounds.flatMap(r => r.submissions).filter(c => {
-    const e = evaluations.get(c.evaluationId)
-    return e !== undefined && projectEvaluation(e).admissible
-  })
-  const untried = ['workflow', 'template', 'skill', 'tool'].filter(a => !measured.some(c => c.edits.some(e => e.asset === a)))
-  const stalled = rounds.length >= 2 && rounds.slice(-2).every(r => r.decision?.winner === null)
-  return { incumbent, rounds, evaluations, directives: { historyCutoff: cut.entries().length, editBudget: 1,
+  return { incumbent, rounds, evaluations, directives: { historyCutoff: cut.entries().length,
     remainingSlots: task.search!.maxProposals - (task.search!.batches ?? []).reduce((n, b) => n + b.slots.length, 0),
-    maxBatchSlots: 3, repairsPerSlot: 0, untried, prune: stalled,
-    reservedSlot: 'last slot of a multi-slot batch must touch an untried asset class when one remains',
-    pruneSlot: stalled ? 'first slot must delete a current asset; keep every deletion under the same critic and measurement gates' : null } }
+    maxBatchSlots: 3, repairsPerSlot: 0 } }
 }
 
 export async function searchFeedback(apparatus: Apparatus, task: TaskState) {

@@ -151,17 +151,20 @@ export function taskSessionsOf(apparatus: Apparatus, taskId: string): Set<string
   return sessions
 }
 /** The live workflow guard and model-facing budget use the same native steps, including acceptance. */
-export async function workflowSteps(apparatus: Apparatus, rootId: string): Promise<number> {
+export async function workflowSteps(apparatus: Apparatus, rootId: string,
+  liveEvents: (sessionId: string) => readonly SessionEvent[] | undefined = () => undefined,
+): Promise<number> {
   const cut = apparatus.store.load(), root = cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, rootId)!
   const rootSession = cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, root.responsibility!.agentId)!.sessionId
   let steps = 0
   for (const id of taskSessionsOf(apparatus, rootId)) {
-    const handle = await apparatus.persistence.open(SessionId(id), 'read')
-    try {
-      const { events } = await handle.read()
-      const from = id === rootSession ? taskDispatchStart(events, apparatus.controlId, rootId) ?? events.length : 0
-      steps += events.slice(from).filter(event => event.type === 'step/start').length
-    } finally { await handle.close() }
+    let events = liveEvents(id)
+    if (events === undefined) {
+      const handle = await apparatus.persistence.open(SessionId(id), 'read')
+      try { events = (await handle.read()).events } finally { await handle.close() }
+    }
+    const from = id === rootSession ? taskDispatchStart(events, apparatus.controlId, rootId) ?? events.length : 0
+    steps += events.slice(from).filter(event => event.type === 'step/start').length
   }
   return steps
 }

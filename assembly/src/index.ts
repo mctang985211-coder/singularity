@@ -90,17 +90,12 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
       if (typeof provider !== 'string' || typeof model !== 'string') refuse('malformed-declaration', 'Singularity prompt has no exact model route')
       routes.set(context.agent, { provider, model })
       const responsibility = driver.responsibility(String(context.agent.id))
+      const budget = await driver.stepBudget(String(context.agent.id), context.agent.session)
+      if (budget !== undefined) prompt.contexts.push({ name: 'singularity:budget', text:
+        `Workflow steps used ${budget.steps}/${budget.maxSteps}; remaining ${budget.remainingSteps}, shared with children and acceptance.` })
       const reviewTarget = driver.reviewTarget(String(context.agent.id))
       if (reviewTarget !== undefined && reviewTarget.kind !== 'acceptance')
         prompt.tools = prompt.tools.filter(tool => methodReviewTools.has(tool.name))
-      if (reviewTarget !== undefined) prompt.contexts.push({ name: 'singularity:review-purpose', text: JSON.stringify({
-        purpose: reviewTarget.kind,
-        instruction: reviewTarget.kind === 'acceptance'
-          ? 'This is acceptance. Read the sealed producer trajectory for execution evidence using singularity_read(kind=trajectory). Loose workspace files are not sealed artifacts, but the sealed source transcript is readable. If necessary, delegate an independent evidence Task using dispatch.evidenceInputs; never call a private host oracle.'
-          : reviewTarget.kind === 'proposal'
-            ? 'This is a pre-execution proposal screen. Decide whether the changed mechanism is supported and safe to TEST. Transfer and performance are hypotheses here; missing experiment results are not a reason to reject. Compare before and after explicitly; no execution or delegation.'
-            : 'This is publication. Judge the frozen independent measurements and release conditions; no execution or delegation.',
-      }) })
       if (ctx.agentPresets.serviceFor(context.agent, 'singularityAgentRole') === 'improve')
         prompt.tools = prompt.tools.filter(tool => improvementTools.has(tool.name))
       const search = driver.rsiState(String(context.agent.id))
@@ -112,8 +107,8 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
           (!writable.has(tool.name) || search.phase === 'ready'))
       }
       if (responsibility !== undefined) {
-        // Native runtime contexts append to the conversation; they do not replace
-        // earlier snapshots. Keep admission here, and read live state on demand.
+        // Only the small live budget changes automatically; full responsibility
+        // and relationship projections remain on-demand reads.
         if (responsibility.waiting !== null) {
           const readable = new Set(['read', 'read_image', 'glob', 'grep', 'singularity_read', 'singularity_memory',
             'singularity_answer', 'singularity_ask_parent', 'singularity_stop_explorations', 'singularity_retry_task',

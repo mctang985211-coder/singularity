@@ -65,7 +65,7 @@ it('reviews RSI reports against sealed source and search evidence at submission,
         proposal: await apparatus.attachments.saveFile({ name: `proposal-${slot}.json`, data: bytes }) }
     }))
     await taskFact('batch-opened', analysis.taskId, 'rsi/batch-opened', { batchId: 'batch', incumbent: method,
-      editBudget: 1, historyCutoff: apparatus.store.load().entries().length, untried: [], prune: false, slots }, 'agent:analysis')
+      historyCutoff: apparatus.store.load().entries().length, slots }, 'agent:analysis')
     for (const [slot, revision] of revisions.entries()) await taskFact(`batch-slot-${slot}`, analysis.taskId, 'rsi/batch-slot-settled', {
       batchId: 'batch', slot, revision, status: 'screen-failed', detail: 'No measured candidate.' }, 'agent:analysis')
     await taskFact('batch-ended', analysis.taskId, 'rsi/batch-ended', { batchId: 'batch' }, 'agent:analysis')

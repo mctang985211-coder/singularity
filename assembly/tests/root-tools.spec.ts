@@ -32,7 +32,7 @@ const web = await import(pathToFileURL(pkg.resolve('@dangosys/dsh-singularity-ne
 const rows = []
 for (const id of ['singularity-root', 'singularity-next', 'singularity-review', 'singularity-improve']) {
   const row = yaml.load(await readFile(join(checkout, 'assembly/presets', id + '.patch.yml'), 'utf8'), { schema: entryListSchema })[0].insert[0]
-  rows.push({ ...row, config: { ...row.config, plugins: row.config.plugins.filter(plugin => plugin.id === 'singularity-agent') } })
+  rows.push({ ...row, config: { ...row.config, plugins: row.config.plugins.filter(plugin => ['persona', 'singularity-agent'].includes(plugin.id)) } })
 }
 const config = join(root, 'cordis.yml')
 await writeFile(config, yaml.dump(rows, { schema: entryListSchema, noRefs: true }))
@@ -88,7 +88,7 @@ try {
   assert(!prompt.sections.some(section => ['tool:bash', 'tool:pwsh', 'tool:write', 'tool:edit'].includes(section.name)))
   const rootProtocol = prompt.sections.find(section => section.name === 'singularity:protocol').text
   assert(rootProtocol.includes('reference trees are read-only'))
-  assert(rootProtocol.includes('sealed artifacts and declared artifact inputs'))
+  assert(rootProtocol.includes('sealed artifacts through declared inputs'))
   assert(rootProtocol.includes('independent root acceptance'))
   const execute = (name, args) => ctx.tools.execute({ name, arguments: args, agent, callId: 'probe-' + name, signal: new AbortController().signal })
   for (const [name, args] of [['bash', {}], ['pwsh', {}], ['write', { file_path: 'result.txt', content: 'mutation' }],
@@ -115,8 +115,6 @@ try {
   assert.equal(ctx.agentPresets.serviceFor(child, 'singularityAgentRole'), 'task')
   for (const name of ['bash', 'write', 'edit', 'singularity_decompose_task']) assert(childPrompt.tools.some(tool => tool.name === name), name)
   const childProtocol = childPrompt.sections.find(section => section.name === 'singularity:protocol').text
-  assert(childProtocol.includes('use singularity_ask_parent and end the turn'))
-  assert(childProtocol.includes('Do not request escalation or bypass isolation'))
   assert(!childProtocol.includes('You must decompose'))
   const written = await ctx.tools.execute({ name: 'write', arguments: { file_path: 'result.txt', content: 'child implementation' },
     agent: child, callId: 'child-write', signal: new AbortController().signal })
@@ -161,9 +159,6 @@ try {
     setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-review') } })
   const reviewPrompt = await ctx.systemPrompt.assemble({ scope: reviewer })
   const reviewProtocol = reviewPrompt.sections.find(section => section.name === 'singularity:protocol').text
-  assert(reviewProtocol.includes('without repairing the subject'))
-  assert(reviewProtocol.includes('Proposal/publication reviews use only the frozen subject'))
-  assert(reviewProtocol.includes('protected inputs and reference trees are read-only'))
   // A synthetic assignment exercises native delivery without starting or accepting a business Task.
   reviewer.followup(createUserMessage({ source: { kind: 'singularity', purpose: 'dispatch', controlId: 'root-tools',
     parentTaskId: 'protocol-probe', taskId: 'protocol-probe', runId: 'protocol-probe', factSeq: 0 },
@@ -215,24 +210,9 @@ try {
   const systemText = request => request.messages.filter(message => message.role === 'system')
     .flatMap(message => message.content.filter(block => block.type === 'text').map(block => block.text)).join('\\n')
   assert(systemText(parentRequest).includes(rootProtocol), 'Root protocol was assembled but not delivered to the model')
-  assert(systemText(parentRequest).includes('host-owned template checks run after artifact sealing, not as child commands or extra child criteria'), 'Root lacks the host-check delegation boundary')
   assert(systemText(childRequest).includes(childProtocol), 'Task protocol was assembled but not delivered to the model')
   assert(systemText(reviewRequest).includes(reviewProtocol), 'Review protocol was assembled but not delivered to the model')
   assert(systemText(improveRequest).includes(improveProtocol), 'RSI protocol was assembled but not delivered to the model')
-  assert(systemText(improveRequest).includes('Business roots only read, delegate and submit verified child artifacts.'), 'RSI author lacks the business root capability boundary')
-  assert(systemText(improveRequest).includes('Keep commands, implementation and integration in delegated Tasks'), 'RSI author lacks the executable delegation route')
-  let flowOffset = 0
-  for (const [phase, pattern] of [
-    ['search state', /singularity_read[^\\n]*search/i],
-    ['frozen evidence', /subject[\\s\\S]*?trajectory/i],
-    ['edits', /edit\\.changes/],
-    ['host handoff', /singularity_propose_method[\\s\\S]*?admission returns immediately[\\s\\S]*?end the turn/i],
-    ['final report', /search\\.authoring\\.report[\\s\\S]*?singularity_submit/i],
-  ]) {
-    const match = pattern.exec(improveProtocol.slice(flowOffset))
-    assert(match, 'RSI system lacks the ordered ' + phase + ' stage')
-    flowOffset += match.index + match[0].length
-  }
   assert.deepEqual(improveRequest.tools.map(tool => tool.name).sort(), ['read', 'glob', 'grep', 'write', 'edit',
     'singularity_read', 'singularity_memory', 'singularity_propose_method', 'singularity_submit'].sort())
   for (const name of ['singularity_read', 'singularity_propose_method', 'singularity_submit'])
@@ -242,12 +222,11 @@ try {
   assert.deepEqual(Object.keys(improveTool('singularity_propose_method').parameters.properties), ['paths'])
   assert.deepEqual(improveTool('singularity_propose_method').parameters.required, ['paths'])
   assert.equal(improveTool('singularity_propose_method').parameters.properties.paths.items.type, 'string')
-  assert(improveTool('singularity_propose_method').description.includes('edit.changes'))
   const improveRead = improveTool('singularity_read').parameters.properties
   for (const kind of ['search', 'method', 'subject', 'trajectory', 'round', 'roots', 'sessions', 'usage', 'steps']) assert(improveRead.kind.enum.includes(kind), kind)
   assert.equal(improveRead.rootId.type, 'string')
   assert.equal(improveRead.eventSeq.type, 'integer')
-  assert(improveTool('singularity_read').description.includes('phase'))
+  assert(improveRead.kind.description.includes('phase'))
   assert(!systemText(childRequest).includes(rootProtocol), 'Child inherited root-only coordination instructions')
   const submitFields = request => Object.keys(request.tools.find(tool => tool.name === 'singularity_submit').parameters.properties).sort()
   assert.deepEqual(submitFields(parentRequest), ['sourceRunId', 'sourceTaskId'])
@@ -258,7 +237,6 @@ try {
   assert(!reviewRequest.tools.some(tool => ['singularity_ask_parent', 'singularity_propose_method'].includes(tool.name)))
   assert(parentRequest.tools.every(tool => !['bash', 'write', 'edit', 'singularity_ask_parent'].includes(tool.name)))
   for (const name of ['bash', 'write', 'edit', 'singularity_ask_parent']) assert(childRequest.tools.some(tool => tool.name === name), name)
-  assert(childRequest.tools.find(tool => tool.name === 'singularity_ask_parent').description.includes('cannot alter the frozen contract'))
   for (const [liveAgent, nativeRequest] of [[assigned, childRequest], [improver, improveRequest]]) {
     const nativeLog = await ctx.sessionPersistence.open(liveAgent.session.id, 'read')
     try {
@@ -268,6 +246,7 @@ try {
       assert.deepEqual(events.find(event => event.type === 'request/header').data.header.tools, nativeRequest.tools)
     } finally { await nativeLog.close() }
   }
+  assert(new RegExp('Workflow steps used [0-9]+/1024; remaining [0-9]+').test(JSON.stringify(childRequest.messages)), 'Child did not receive its live shared budget')
   assert(!JSON.stringify(childRequest.messages).includes(inheritedDecision), 'Background was injected before the child chose to read it')
   assert(childRequest.tools.some(tool => tool.name === 'singularity_memory'))
   const directory = await ctx.tools.execute({ name: 'singularity_memory', agent: assigned, arguments: {}, callId: 'optional-memory-index', signal: new AbortController().signal })

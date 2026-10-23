@@ -15,7 +15,7 @@ import { pairedReport } from '../../src/measure/paired.ts'
 import { matrixOf } from '../../src/measure/suite.ts'
 import { sameRevision } from '../../src/task/shape.ts'
 import { structuralEditDetailsOf } from '../../src/strategy/edits.ts'
-import { rsiCriticRequirements, rsiDesignReference } from './rsi-policy.ts'
+import { rsiDesignReference } from './rsi-policy.ts'
 export type MethodRelease = { readonly roundId: string }
 export async function releaseMethod(apparatus: Apparatus, seams: ChildSessionSeams, agent: Agent,
   callId: string, request: MethodRelease, signal: AbortSignal,
@@ -83,7 +83,7 @@ export async function releaseMethod(apparatus: Apparatus, seams: ChildSessionSea
       evidence,
       transfer: transfer === undefined ? null : { ...transfer, report: JSON.parse((await sealedBytes(apparatus, transfer.report!)).toString('utf8')) },
       requirements:
-        rsiCriticRequirements + '\nJudge protected acceptance, independent evaluation, actually consumed assets and measured root-through-acceptance costs. All RSI usage stays outside comparison. Reusing one template or passing one task does not establish transfer. A prewritten task algorithm without a conditional general mechanism is task specialization even if the baseline already contained it. Separate observed cost changes, reviewer sampling and tested transfer. Do not claim domain generalization without unseen-task evidence. Frozen Task and session references support detailed evidence reads.',
+        'Judge protected acceptance, independent evaluation, actually consumed assets and measured root-through-acceptance costs. All RSI usage stays outside comparison. Reusing one template or passing one task does not establish transfer. A prewritten task algorithm without a conditional general mechanism is task specialization even if the baseline already contained it. Separate observed cost changes, reviewer sampling and tested transfer. Do not claim domain generalization without unseen-task evidence. Frozen Task and session references support detailed evidence reads.',
     },
     signal,
   )

@@ -287,7 +287,7 @@ describe('fact-driven child scheduling', () => {
     expect(notice.source).toMatchObject({ kind: 'singularity', purpose: 'plan-outcome', parentTaskId: 'parent-task', taskId: 'child-task', factSeq: terminal.seq,
       })
     expect(JSON.parse(contentOf(notice))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
-      completed: 2, requiredFailures: 2, instruction: expect.stringContaining('kind=summary') })
+      completed: 2, requiredFailures: 2 })
     expect(contentOf(notice)).not.toContain('child-task-dependent')
     expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)).toMatchObject({
       status: 'failed', failureCause: cause === 'runtime' ? 'runtime' : 'business', failureReason: expect.stringContaining('required delegated responsibilities ended without verification') })
@@ -303,7 +303,6 @@ describe('fact-driven child scheduling', () => {
     await scheduler.advance('parent-task')
     expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
     const notice = h.runtime.delivered.find((entry) => entry.sessionId === 'parent-session')!.message
-    expect(contentOf(notice)).toContain('independent')
     expect(JSON.parse(contentOf(notice))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
       completed: 1, requiredFailures: 0 })
     expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)[0]).toMatchObject({ status: 'running', evidence: [],
@@ -330,7 +329,7 @@ describe('fact-driven child scheduling', () => {
     expect(notices).toHaveLength(1)
     expect(notices[0]!.message.source).toMatchObject({ taskId: 'child-task-sibling' })
     expect(JSON.parse(contentOf(notices[0]!.message))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
-      completed: 2, requiredFailures: 1, instruction: expect.stringContaining('kind=summary') })
+      completed: 2, requiredFailures: 1 })
     expect(contentOf(notices[0]!.message)).not.toContain('provider unavailable')
     expect(contentOf(notices[0]!.message)).not.toContain('artifactDigest')
   })

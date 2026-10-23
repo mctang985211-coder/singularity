@@ -7,10 +7,6 @@
         description: Root coordination through delegated and independently verified child results.
         order: -1
         plugins:
-          - id: persona
-            name: '@deepseek-ai/dsh-persona'
-            config:
-              prefix: You are a Singularity root coordinator powered by the {{model}} model.
           - id: compaction
             name: cordis:group
             group: true

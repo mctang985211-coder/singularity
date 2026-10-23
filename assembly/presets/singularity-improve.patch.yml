@@ -10,8 +10,8 @@
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
+              prefix: ''
               suffix: Your RSI workspace is {{cwd}}.
-              prefix: You are a Singularity method improvement agent powered by the {{model}} model.
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
           - id: tool-fs-search

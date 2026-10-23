@@ -84,6 +84,7 @@ export interface DriverOptions {
   readonly execution: (admission: Admission, onTurnFailure: TurnFailureHandler) => Execution
 }
 export interface TaskDriver extends TaskService {
+  stepBudget(agentId: string, session?: import('@deepseek-ai/dsh-session').Session): Promise<{ readonly rootId: string; readonly steps: number; readonly maxSteps: number; readonly remainingSteps: number } | undefined>
   rsiState(agentId: string): ReturnType<typeof rsiState>
   prepareMemory(agent: Agent): Promise<void>
   failed(agentId: string): boolean

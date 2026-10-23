@@ -72,14 +72,14 @@ it('keeps frozen source bytes out of edits and preserves assets while adding, ch
     changes: [changes[0], changes[0]] } }, seed)).toThrow('edit each asset once')
 })
 
-it('refuses malformed batches before consuming slots, then charges a complete candidate that fails prune', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'rsi-prune-')), medium = new FakePersistence()
+it('refuses malformed batches before consuming slots, then charges an admitted candidate with missing native evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rsi-preflight-')), medium = new FakePersistence()
   const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
   const suite = parseSuite({ version: 1, suiteId: 'preflight', failureQuality: 0, cases: [{
     caseId: 'evolve-letters', familyId: 'letters', sourceId: 'letters-source', split: 'evolve', trials: 2, weight: 1, hardGuards: [],
     contract: { goal: 'count letters', artifact: 'report.txt', inputs: [], criteria: [{ criterionId: 'correct', statement: 'correct count' }] },
   }] })
-  const apparatus = await openApparatus('prune', root, { ...domain, suite },
+  const apparatus = await openApparatus('preflight', root, { ...domain, suite },
     medium as never, attachmentsAt(root), testProjections)
   try {
     const parent = agentFor('business', 'business')
@@ -103,7 +103,7 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
     const run = taskStateOf(apparatus, analysis.taskId).runs[analysis.runId]!
     const { assets } = await loadMethod(apparatus, run.revision)
     history.read.mockReturnValue({ incumbent: run.revision,
-      directives: { historyCutoff: apparatus.store.load().entries().length, untried: [], prune: true } })
+      directives: { historyCutoff: apparatus.store.load().entries().length } })
     const validShape = rsiProposal(assets, { ...assets, workflowGuidance: 'Preserve independent acceptance.' }, source.taskId, parent.id)
     const proposal = { ...validShape, edit: { ...validShape.edit, predicted_cases: ['evolve-letters'] } }
     const { eventSeq: _eventSeq, ...missingSeq } = proposal.analysis.success_habits[0]!.evidence[0]!
@@ -146,14 +146,14 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
       expect(error.refusal.detail, invalid.path).toContain('no candidate slots consumed')
       expect(factsOf(medium), invalid.path).toEqual(before)
     }
-    await writeFile(join(analysis.workspace, 'no-prune.json'), JSON.stringify(proposal))
+    await writeFile(join(analysis.workspace, 'valid-shape.json'), JSON.stringify(proposal))
     // One valid file does not buy admission for a mixed batch with a malformed peer.
-    await expect(call(['no-prune.json', 'missing-event.json'])).rejects.toThrow('missing-event.json')
+    await expect(call(['valid-shape.json', 'missing-event.json'])).rejects.toThrow('missing-event.json')
     expect(factsOf(medium)).toEqual(before)
     expect(taskStateOf(apparatus, analysis.taskId).search!.batches ?? []).toHaveLength(0)
-    const admitted = await call(['no-prune.json'])
+    const admitted = await call(['valid-shape.json'])
     expect(admitted).toMatchObject({ admitted: true, slotsConsumed: 1, status: 'invalid',
-      reason: 'stalled search requires a real current-asset deletion in its prune slot' })
+      reason: expect.stringContaining('no sealed exploration trace') })
     expect(admitted).not.toHaveProperty('roundId')
     const batches = taskStateOf(apparatus, analysis.taskId).search!.batches!
     expect(batches).toHaveLength(1)
@@ -168,7 +168,7 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
       await apparatus.store.emit({ commandId: `rsi:${status}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
         kind: 'rsi/status', subject: source.taskId, payload: { status, detail: 'frozen fixture', ...(status === 'running' ? { trace } : {}) } })
     history.read.mockReturnValue({ incumbent: run.revision,
-      directives: { historyCutoff: apparatus.store.load().entries().length, untried: [], prune: false } })
+      directives: { historyCutoff: apparatus.store.load().entries().length } })
     for (const taskId of ['unrelated', 'downstream']) {
       await writeFile(join(analysis.workspace, `${taskId}.json`), JSON.stringify({ ...proposal,
         edit: { ...proposal.edit, predicted_affected: [taskId] } }))
@@ -177,6 +177,16 @@ it('refuses malformed batches before consuming slots, then charges a complete ca
       else expect(result.status).toBe('screen-failed') // Passed evidence checks; this unit fixture has no native reviewer host.
     }
     expect(factsOf(medium).filter(fact => fact.kind === 'review/started')).toHaveLength(1)
+    // Evidence, rather than an asset-class quota, controls both batch slots.
+    const paths = ['bounded-a.json', 'bounded-b.json']
+    for (const [index, path] of paths.entries()) await writeFile(join(analysis.workspace, path), JSON.stringify({ ...proposal,
+      edit: { ...proposal.edit, predicted_affected: ['downstream'], changes: [{ asset: 'workflow', target: 'workflowGuidance',
+        value: index === 0 ? 'Delegate one bounded evidence pass.' : 'Select the verified result after a bounded comparison.' }] } }))
+    await call(paths)
+    expect(taskStateOf(apparatus, analysis.taskId).search!.batches!.at(-1)!.outcomes.map(outcome => outcome.status))
+      .toEqual(['screen-failed', 'screen-failed']) // Both reached the reviewer; this fixture supplies no reviewer host.
+    expect(factsOf(medium).filter(fact => fact.kind === 'review/started')).toHaveLength(3)
+
   } finally {
     history.read.mockReset()
     await apparatus.store.close()

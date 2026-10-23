@@ -492,7 +492,10 @@ export async function readTrajectory(
     }
     searchTask = task
     const root = taskStateOf(apparatus, run.relatedTo!.taskId)
-    if (!ownEvaluation) sessions = JSON.parse((await sealedBytes(apparatus, root.rsi!.trace!)).toString('utf8')).sessions
+    if (!ownEvaluation) {
+      if (root.rsi?.trace === undefined) refuse('not-responsible', 'subject has no sealed exploration trace')
+      sessions = JSON.parse((await sealedBytes(apparatus, root.rsi.trace)).toString('utf8')).sessions
+    }
   }
   const roundIds = new Set(searchTask?.rounds?.map(round => round.roundId))
   for (const evaluation of cut.statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION).values()) {

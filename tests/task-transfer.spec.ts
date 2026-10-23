@@ -18,8 +18,8 @@ function running(purpose = 'improve') {
   emit(log, 'rsi/search-opened', { runId: RUN_ID, maxProposals: 6 })
   return log
 }
-const batch = (id = 'batch-1') => ({ batchId: id, incumbent: REVISION, editBudget: 1, historyCutoff: 0,
-  untried: ['workflow'], prune: false, slots: [{ path: 'candidate.json', contentDigest: 'e'.repeat(64),
+const batch = (id = 'batch-1') => ({ batchId: id, incumbent: REVISION, historyCutoff: 0,
+  slots: [{ path: 'candidate.json', contentDigest: 'e'.repeat(64),
     proposal: fileAttachment('e'.repeat(64), 'candidate.json', 128) }] })
 const state = (log: MemoryLog) => log.stateAt<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID, log.count)!
 

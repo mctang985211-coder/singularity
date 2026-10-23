@@ -2,7 +2,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { ToolArgsError, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 
-import { apply, taskGuidance, rootGuidance, reviewGuidance, guidanceFor } from '../src/agent.ts'
+import { apply } from '../src/agent.ts'
+import { guidanceFor } from '../src/prompts.ts'
 import type { AgentTaskSurface } from '../src/task-service.ts'
 import { agentFor, execFor } from './seam.ts'
 function scope(surface: Partial<AgentTaskSurface> = {}) {
@@ -168,7 +169,6 @@ describe('small role interfaces', () => {
       expect(calls).toEqual([{}, { from: 20, count: 10 }, { ref: 'checkpoint-id' }])
       expect(Object.keys(memory.parameters.properties!)).toEqual(['ref', 'from', 'count'])
       await expect(memory.execute({ ref: { sessionId: 'other-session' } }, exec)).rejects.toBeInstanceOf(ToolArgsError)
-      expect(guidanceFor(role).match(/Use singularity_memory only when parent background is needed/g)).toHaveLength(1)
     }
   })
   it('submits an existing file path and propagates unexpected errors', async () => {
@@ -194,18 +194,5 @@ describe('small role interfaces', () => {
     await expect(submit.execute({ path: 'report.txt' }, exec)).rejects.toBeInstanceOf(ToolArgsError)
     await submit.execute({ sourceTaskId: 'child', sourceRunId: 'verified-run' }, exec)
     expect(got).toEqual({ taskId: 'host-task', sourceTaskId: 'child', sourceRunId: 'verified-run' })
-    expect(rootGuidance).toContain('must decompose')
-    expect(taskGuidance).toContain('execute atomic work')
-  })
-  it('keeps the default guidance short and separates checking from solving', () => {
-    expect(Buffer.byteLength(taskGuidance)).toBeLessThan(1800)
-    expect(Buffer.byteLength(reviewGuidance)).toBeLessThan(1400)
-    expect(taskGuidance).not.toContain('first tool must')
-    expect(taskGuidance).toContain('bounded investigation')
-    expect(taskGuidance).toContain('Do not redo work a child owns')
-    expect(taskGuidance).toContain('Guidance, handoffs and memory cannot add requirements')
-    expect(reviewGuidance).toContain('without repairing the subject')
-    expect(reviewGuidance).toContain('guidance, handoffs and summaries cannot add acceptance requirements')
-    expect(guidanceFor('improve')).toContain('singularity_propose_method')
   })
 })

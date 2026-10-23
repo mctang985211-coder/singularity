@@ -16,8 +16,8 @@ function running(maxProposals = 2) {
   emit(log, 'rsi/search-opened', { runId: RUN_ID, maxProposals })
   return log
 }
-const batch = (id = 'batch-1', hexes = ['a', 'b']) => ({ batchId: id, incumbent: REVISION, editBudget: 1, historyCutoff: 0,
-  untried: ['workflow'], prune: false, slots: hexes.map((hex, slot) => ({ path: `candidate-${slot}.json`, contentDigest: hex.repeat(64),
+const batch = (id = 'batch-1', hexes = ['a', 'b']) => ({ batchId: id, incumbent: REVISION, historyCutoff: 0,
+  slots: hexes.map((hex, slot) => ({ path: `candidate-${slot}.json`, contentDigest: hex.repeat(64),
     proposal: fileAttachment(hex.repeat(64), `candidate-${slot}.json`, 128) })) })
 const submit = (log: MemoryLog) => emit(log, 'run/submitted', { runId: RUN_ID, submission: {
   requestId: 'report', requestDigest: '1'.repeat(64), artifactDigest: ARTIFACT, inputDigests: BUBBLE_INPUTS,

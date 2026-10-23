@@ -6,6 +6,7 @@ import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/
 import { assertClosedKeys } from '../../src/protocol/envelope.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { createReviewCommands } from '../../src/review/commands.ts'
+import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { DEFAULT_WORKFLOW_LIMITS } from '../../src/task/budget.ts'
@@ -45,6 +46,24 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
   const { acceptanceFor, restoreJudgement } = reviewLifecycle
   const { taskSignal, rsiStatus, closeRoot, stopRsiWork, rsiRootOf, schedule } = rsi
   const { validateChampion } = releaseLifecycle
+  // A live projection, never a persisted counter. Follow acceptance evidence
+  // branches back to the same root whose native sessions the guard counts.
+  const stepBudget: TaskDriver['stepBudget'] = async (agentId, session) => {
+    const review = reviewOf(apparatus, agentId)
+    if (review !== undefined && review.target.kind !== 'acceptance') return undefined
+    let id = review?.target.kind === 'acceptance' ? review.target.taskId : owner(agentId)?.taskId
+    if (id === undefined) return undefined
+    for (let parent = parentOf(id); parent !== undefined; parent = parentOf(id)) {
+      const target = apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).get(parent)?.target
+      if (target !== undefined && target.kind !== 'acceptance') return undefined
+      id = target?.kind === 'acceptance' ? target.taskId : parent
+    }
+    const root = tasks().get(id), maxSteps = root?.workflowLimits?.maxSteps
+    if (maxSteps === undefined || root?.closure !== undefined) return undefined
+    const steps = await workflowSteps(apparatus, id, sessionId =>
+      (session?.id === sessionId ? session : registry().get(SessionId(sessionId))?.session)?.snapshotEvents())
+    return { rootId: id, steps, maxSteps, remainingSteps: Math.max(0, maxSteps - steps) }
+  }
   const memoryRef = async (agentId: string): Promise<ParentMemoryRef | undefined> => {
     const task = owner(agentId)
     if (task === undefined) return undefined
@@ -120,6 +139,7 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
     }),
   )
   const service: Omit<TaskDriver, 'close'> = {
+    stepBudget,
     cancel: ({ sessionId, taskId }) => work(async () => {
       const task = taskId === undefined ? owner(sessionId) : tasks().get(taskId)
       const holder = task?.responsibility === undefined ? undefined : apparatus.store.load()
@@ -234,31 +254,20 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
           }
         }
         const assignedTask = owner(agentId), assignedRun = assignedTask === undefined ? undefined : Object.values(assignedTask.runs).at(-1)
-        if (assignedTask !== undefined && assignedRun?.status === 'running' && assignedRun.stage === 'working') {
-          let root = assignedTask
-          for (let parent = parentOf(root.taskId); parent !== undefined; parent = parentOf(root.taskId)) {
-            const taskParent = tasks().get(parent)
-            if (taskParent === undefined) break
-            root = taskParent
+        const budget = await stepBudget(agentId, agent.session)
+        if (budget !== undefined && budget.steps >= budget.maxSteps) {
+          const root = tasks().get(budget.rootId)!, run = Object.values(root.runs).at(-1)!
+          if (run.status === 'running') {
+            declareCaller(apparatus, root.responsibility!.agentId)
+            await apparatus.tasks.forAgent(root.responsibility!.agentId).failRun({ commandId: `step-limit:${root.taskId}:${run.runId}`,
+              taskId: root.taskId, runId: run.runId, cause: 'business', reason: `workflow step limit ${budget.maxSteps} exhausted` })
+            await scheduler.advance(root.taskId)
+            await closeRoot(taskStateOf(apparatus, root.taskId), taskStateOf(apparatus, root.taskId).runs[run.runId]!, 'failed')
+            registry().get(SessionId(root.responsibility!.agentId))?.cancel({ kind: 'parent' }, { keepInbox: true })
+            schedule()
           }
-          const limit = root.workflowLimits?.maxSteps ?? (parentOf(root.taskId) === undefined ? undefined : DEFAULT_WORKFLOW_LIMITS.maxSteps)
-          if (limit !== undefined) {
-            const rootSession = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, root.responsibility!.agentId)!.sessionId
-            const steps = await workflowSteps(apparatus, root.taskId)
-            if (steps >= limit) {
-              const run = Object.values(root.runs).at(-1)!
-              if (run.status === 'running') {
-                declareCaller(apparatus, root.responsibility!.agentId)
-                await apparatus.tasks.forAgent(root.responsibility!.agentId).failRun({ commandId: `step-limit:${root.taskId}:${run.runId}`,
-                  taskId: root.taskId, runId: run.runId, cause: 'business', reason: `workflow step limit ${limit} exhausted` })
-                await scheduler.advance(root.taskId)
-                await closeRoot(taskStateOf(apparatus, root.taskId), taskStateOf(apparatus, root.taskId).runs[run.runId]!, 'failed')
-                registry().get(SessionId(rootSession))?.cancel({ kind: 'parent' }, { keepInbox: true })
-                schedule()
-              }
-              return undefined
-            }
-          }
+          agent.cancel({ kind: 'parent' }, { keepInbox: true })
+          return undefined
         }
         if (assignedTask !== undefined && assignedRun?.status === 'running' && assignedRun.stage === 'working' && assignedRun.purpose !== 'improve')
           await confirmWorkflowDelivery(apparatus, assignedTask.taskId, assignedRun)
@@ -305,7 +314,7 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
             runId: proposal.runId,
             factSeq: apparatus.store.committedOf(`start:${proposal.runId}`)!.seq,
           },
-          JSON.stringify({ assigned: proposal, method: await methodContext(apparatus, proposal.taskId, taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!),
+          JSON.stringify({ assigned: proposal, budget: await stepBudget(agentId, agent.session), method: await methodContext(apparatus, proposal.taskId, taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!),
             direction: directionForRun(apparatus, proposal.taskId, taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!) }),
         )
       }),

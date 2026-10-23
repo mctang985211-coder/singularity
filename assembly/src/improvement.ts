@@ -135,8 +135,7 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
       taskId: id, runId: run.runId, contract: taskStateOf(apparatus, id).contract,
         method,
         trace: 'subject.json',
-        evidenceReading:
-          'Read kind=search for phase, next action, budget and authoring templates. Pending screening/evaluation belongs to the host; end the turn. Read kind=subject through complete=true; trajectory ref=sessionId lists seq for eventSeq citations. Read method assets with from/count pages. Proposals contain analysis and edit.changes values, not a complete Method. Use singularity_propose_method for proposals and singularity_submit for report.json.',
+
       }),
     ),
   })

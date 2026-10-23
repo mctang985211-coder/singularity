@@ -150,11 +150,7 @@ export function createScheduler(apparatus: Apparatus, seams: ChildSessionSeams,
     if (terminal === undefined) return
     const runId = reviewOf(parentTaskId)?.reviewId ?? Object.values(taskStateOf(apparatus, parentTaskId).runs).at(-1)!.runId
     const unmet = plan.children.filter(child => child.requirement === 'required' && child.status !== 'verified')
-    const instruction = unmet.length === 0
-      ? 'Continue your existing parent Run, integrate accepted work and independently validate your final artifact.'
-      : 'Required work ended without verification. This parent Run fails; report the recorded failure.'
-    const text = JSON.stringify({ parentTaskId, complete: true, completed: plan.children.length, requiredFailures: unmet.length,
-      instruction: `${instruction} Read singularity_read kind=summary for Task and artifact references, then kind=task or kind=artifact for selected evidence. Child support is not a parent verdict.` })
+    const text = JSON.stringify({ parentTaskId, complete: true, completed: plan.children.length, requiredFailures: unmet.length })
     if (unmet.length > 0) {
       // Publish terminal authority before the notification can wake the parent's next step.
       const reason = 'required delegated responsibilities ended without verification: ' + unmet.map(child => `${child.taskId} (${child.status})`).join(', ')

@@ -2,13 +2,15 @@
 
 审查日期：2026-10-17（Asia/Shanghai）。代码基线：`4314487`。
 RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba1`。
-实施更新：2026-10-20。**已有 Task/Workflow、多任务矩阵、有界稀疏搜索与独立迁移发布链路。`184556` 报告 accepted 但六槽零 round；已按真实 Agent 输入/输出修复异步推进、工具读取与审核提示。letters 完成两轮测评、发布、恢复与报告验收，后续业务消费发布版本并 accepted。Buckyball cutoff551 已完成一轮与报告验收，结果 insufficient-evidence、无发布：候选 A 质量不变而成本增加 43.66%；B 因私有检查被错误委派且业务失败误归 runtime 丢失一次观察。现已分离公开任务规范/私有验证配方并修正失败传播，工程及真实工具链复验通过，尚未新跑模型 RSI。证据见 [RSI 修复取证](rsi-repair-evidence.md)，报告关闭不代表领域收益。** 当前 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只接纳新图。每批冻结 1–3 个候选、每候选一个机制、最多六槽、repair=0；KISS 稀疏模式，不宣称实现退火。DSH 继续拥有会话、重试、用量与持久化。完整逐题 pilot 与研究出口仍以第 9 节为准。
+实施更新：2026-10-20。**已有 Task/Workflow、多任务矩阵、有界稀疏搜索与独立迁移发布链路。`184556` 报告 accepted 但六槽零 round；已按真实 Agent 输入/输出修复异步推进、工具读取与审核提示。letters 完成两轮测评、发布、恢复与报告验收，后续业务消费发布版本并 accepted。Buckyball cutoff551 已完成一轮与报告验收，结果 insufficient-evidence、无发布：候选 A 质量不变而成本增加 43.66%；B 因私有检查被错误委派且业务失败误归 runtime 丢失一次观察。现已分离公开任务规范/私有验证配方并修正失败传播，工程及真实工具链复验通过，尚未新跑模型 RSI。证据见 [RSI 修复取证](rsi-repair-evidence.md)，报告关闭不代表领域收益。** 当时 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只接纳新图。每批冻结 1–3 个候选、每候选一个机制、最多六槽、repair=0；KISS 稀疏模式，不宣称实现退火。DSH 继续拥有会话、重试、用量与持久化。完整逐题 pilot 与研究出口仍以第 9 节为准。
 
 结构收尾：2026-10-22，基线 `f3755aa`。五项结构修改已落地：DSH 源码重建、依赖方向 gate、driver 生命周期拆分、领域检查显式外置、唯一 `domain/reference` 标准参考。用户最新约束取代旧的双领域目录方案：所有真实领域任务、适配器及其测试属于独立领域包，不进入产品源码/spec，也不选择隐式默认领域。**原 T00–T16 未全部完成**：无 suite 发布路径未强制独立迁移，CLI 未逐题运行完整 pilot，跨机器复现与正式领域/论文证据尚缺。当前逐包状态及结构验收以第 9 节为准；前文实跑记录保留为历史证据。
 
 本版按用户最新定义收敛：Task 是 workflow 中可独立交付、验收和追责的节点；RSI 演化节点定义、分解和关系组织策略，Skill/Tool 提供配套能力。评测负责验证这种演化，而不替代产品主体。第 1、6 节给出最终对象模型和执行语义，第 9 节给出唯一施工顺序，第 13–16 节给出研究、Buckyball 和提示词的验收细则。不再另写一份相互竞争的 final-plan。
 
 本计划接替旧装配蓝图的施工排序，保留旧文档中的历史证据。遇到历史设计与本计划冲突，先按本计划列出的新行为修改测试与实现，不为旧行为建立兼容桥。具体执行仍以用户最新指令为准。
+
+2026-10-23 简化修订：当前 Task v24；仅新图。节点策略集中于 `assembly/src/prompts.ts`，工具格式留在 DSH schema，动态上下文只增加简短共享步数。删除资产类型保留槽、停滞强制删除和对应批次字段；以下当前施工条款已同步。此前实验取证仍按其原版本理解。源码与实测结论见[简化审查](prompt-simplification-20261023.md)。
 
 ## 1. 结论与产品目标
 
@@ -331,12 +333,12 @@ P0 表示会直接破坏本次产品目标或效果结论，P1 表示核心正�
 |---|---|---|
 | `Domain.evolve_ids/heldout_ids` | Domain 实际为一套固定输入与 rootTemplate | 必须引入多 case suite 与隔离 split |
 | T / m / k 分离 | 同题 campaign 次数、提案编号、trial 相互缠绕 | 以 campaign 固定配置，round 局部编号，slot 与 trial 单独标识 |
-| 退火独立编辑预算 b_t | 固定一个声明机制，无法支持分组退火 | 保留 b=1 模式；支持真实 edit groups，预算由宿主检查 |
+| 退火独立编辑预算 b_t | 固定一个声明机制 | 保留 b=1 模式，不引入分组退火框架；实际 diff 由宿主检查 |
 | 三镜分析 | 有 failure/gap/success schema，单 agent 可读轨迹 | 保留；输入升级成代表性多任务证据，稳定 mode ID |
 | 只读 digester | 无独立分工，分析依赖自主分页 | 先实现确定性选样和引用式摘要；证据量确实需要时才增加只读分工 |
 | 跨轮历史 L_t | 可以按需读取历史，但无完整 per-edit 反馈投影 | 必须冻结 edit→diff→trial→decision 关联，向下轮提供紧凑摘要 |
 | predicted_affected scoreboard | 只有声明校验 | 必须测后核验，显示未预测退化 |
-| tried/untried/stall/reserved slot | 无机械约束 | 使用已接线的 workflow/template/skill/tool 资产轴，实现一条明确保留槽规则 |
+| tried/untried/stall/reserved slot | 旧实现曾强制保留槽，v24 已删除 | 按证据选择机制，不用资产覆盖率驱动增删 |
 | prune_set | 无实现 | 输出当前仍存在的具体编辑/资产及消融候选，不凭词频直接删 |
 | critic + bounded repair | critic 已有，整体修订无界 | 保留独立会话，限制每 slot 修订；拒绝理由进入记录 |
 | smoke | 有部分资产 selftest，缺统一具名 gate | critic 后统一烟测；通过烟测不计入最终选择分数 |
@@ -608,16 +610,16 @@ flowchart TD
 
 T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。candidate repair 次数另有上限，不消耗一个全新的 round 来逃避约束；失败后的重试仍是同一候选身份。
 
-当前 KISS 配置固定最多 6 个冻结候选槽，单批 1–3 槽、每槽一个独立机制、repair=0。新批次的纯静态预检覆盖 JSON/schema、增量编辑及宿主派生 Method、实际 diff 和冻结 evolve case/family ID；任一文件失败整批不冻结、不扣槽。冻结后证据有效性、reserved/prune、critic、duplicate 与 smoke 失败均扣槽，不因恢复重置，不重新开放已结算候选。静态预检不提供语义审查或测评反馈。trial 数由各 case 在 suite 中冻结；正式配对判据至少需要三个独立 family、每 case 两次重复，仍不保证统计充分性。连续两轮无赢家后首槽必须删除当前资产，搜索始终受总槽数约束。调试的单题/单次输出只标 smoke。实际模型费按原生 usage 记录，不增加 token 执行闸门。
+当前 KISS 配置固定最多 6 个冻结候选槽，单批 1–3 槽、每槽一个独立机制、repair=0。新批次的纯静态预检覆盖 JSON/schema、增量编辑及宿主派生 Method、实际 diff 和冻结 evolve case/family ID；任一文件失败整批不冻结、不扣槽。冻结后证据有效性、critic、duplicate 与 smoke 失败均扣槽，不因恢复重置，不重新开放已结算候选。静态预检不提供语义审查或测评反馈。trial 数由各 case 在 suite 中冻结；正式配对判据至少需要三个独立 family、每 case 两次重复，仍不保证统计充分性。不设置资产类型配额或停滞强制删除；根据证据修改或删除资产，允许直接无赢家结束。调试的单题/单次输出只标 smoke。实际模型费按原生 usage 记录，不增加 token 执行闸门。
 
 ### 7.2 冻结轮次与候选生产
 
-每轮开始提交一次 round/opened，包含或引用：campaignId、局部 round、H_t、suite/caliber、候选槽位、b_t、δ、S*、historyCutoff、stall、tried/untried、reserved slots、prune targets、停止策略版本。
+每轮开始提交一次 round/opened，包含或引用：campaignId、局部 round、H_t、suite/caliber、候选槽位、单机制约束、δ、S*、historyCutoff、停止策略版本。
 
 1. 候选均从同一 H_t 派生。相邻槽位不得把前一槽位结果偷偷当作其 draft 基线。
 2. b_t 数的是独立机制 edit groups，不是改了几个文件；每个实际改动须归属一个 editId，重复和未归属都拒绝。
 3. b_min=1；是否启用从 2 退火到 1 在 campaign 冻结。若只支持 b=1，就如实标为稀疏模式，不宣称已实现退火。
-4. 保留槽要求在实际 diff 中触达一个未试资产类。给文本贴 tool 标签不能满足；同一 skill 重命名不能算新组件。
+4. 每槽按同一证据与测评准入，不为覆盖资产类型新增 Skill/Tool。删除冗余指导可作为普通单机制候选，不强制凑槽或删除。
 5. critic 判断机制是否独立和可迁移；宿主负责字段、diff、slot、预算、来源和执行权限。语义判断仍有误差，不能称为完全机械证明。
 6. 新批次先纯静态预检，再冻结同一份 bytes；任一草稿失败不创建批次。已有 pending 批次只按冻结附件恢复。冻结后检查证据有效性与搜索约束，再 critic，再 materialize/smoke。缺工具或无法加载记 smoke_fail；未提交记 no_proposal；不产生成功伪观测。复用唯一 paths 提交入口和同一解析逻辑，不新增预检工具或候选状态机。
 7. 每个冻结槽位保存无效、拒绝、重复或已请求评估的结果及原因；进入测评的候选继续保存完整观察、缺失、选择/未选择事实。不能只记录赢家。静态草稿错误返回文件与字段位置，不作为已冻结候选或已测机制。
@@ -651,7 +653,7 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
 
 ### 7.5 历史反馈应足够小，但不能全靠 agent 自觉寻找
 
-每轮提供固定摘要：近期已测 edit 的机制/收益/结果，少量未测拒绝及理由，稳定的 failure/gap/success 模式，预测命中和未预测退化，stall/untried/prune 指令。全部都能点回原始证据。
+每轮提供固定摘要：近期已测 edit 的机制/收益/结果，少量未测拒绝及理由，稳定的 failure/gap/success 模式，预测命中和未预测退化及剩余槽预算。全部都能点回原始证据。
 
 完整轨迹仍按事件/字节分页读取；不自动灌入全部历史。分析摘要是索引，不能替代证据。跨轮知识只进入 RSI 工作区；进入业务方法必须去实体化并通过独立候选验证。
 
@@ -716,7 +718,7 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
 | T03 | 冻结 suite、family/source/split、TrialKey、execution profile、私有验证读面 | 服务端模型 revision opaque；跨 control 来源与工具传递依赖不能仅凭摘要独立认证 |
 | T04 | 实际 case×trial 测量矩阵、权重/family 聚合、业务失败保留分母、基础设施 unknown；原生 dispatch/计费投影 | 无足够 billing 样本时成本 unknown；真实领域 oracle 必须由领域包冻结 |
 | T05 | `src/strategy/view.ts` 的已接纳搜索头和历史 S*、方向归一、校准噪声带、配对区间 | 小样本可返回证据不足；匹配 seed/时漂控制未形成正式证据 |
-| T06 | 1–3 槽冻结批次、单一机制、repair=0、最多六槽、静态预检与封存恢复、停滞 prune | b=1 稀疏模式是明确的 KISS 选择，未实现退火；机制独立性依赖 critic，不能称形式保证 |
+| T06 | 1–3 槽冻结批次、单一机制、repair=0、最多六槽、静态预检与封存恢复、合法无赢家结束 | b=1 稀疏模式是明确的 KISS 选择，未实现退火；机制独立性依赖 critic，不能称形式保证 |
 | T07 | 预测/命中/退化反馈、逐节点责任与依赖/产物观察、消费计数 | 图变化和观测关联不构成因果解释；实际消融价值待测 |
 | T08 | suite 路径有冻结 champion、独立 validation/可选 heldout、重算配对报告、review+CAS，取消后禁止切换 | **未全完成**：`driver-rsi.ts` 在无 suite 时仍会按 round winner 请求发布，`method-release.ts` 仅在有 suite 时强制 transfer；单题审核通过仍可发布。不能声称全部发布都要求未见任务证据 |
 | T09 | 逐子通知、在飞追加、全局方向/局部责任、准确 producer、构图/Run/无进展预算、持久取消与恢复 | 复杂未知任务的抢先协调、收敛效率和模型组织行为仍需实测 |
@@ -823,12 +825,12 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
   1. campaign 内局部 round 编号；创建 m 个明确 slot，不再每次提案都全局 +1。
   2. 当前选择 b=1 的一个独立机制；实际 diff 全覆盖、无 inert change，不为支持退火增加 edit-group 框架。
      workflow 策略、节点模板、Skill、Tool 都有准确可变字段与消费路径；合并/拆分/重排是机制语义，不再额外定义图编辑语言。
-  3. 冻结 tried/untried/stall 和探索保留槽；在 critic 后对实际 diff 再验。
+  3. 冻结候选 bytes、incumbent 和历史 cutoff；不按资产类型保留槽，也不因停滞强制增删资产。选择机制只依赖实证。
   4. 明确 repair 次数与候选 digest；相同被测失败候选不得靠重命名重新获得试验。
   5. 把 parse/validate 与 materialize/load 分开；新批次先对同一份 bytes 做整批纯静态预检，失败不冻结不扣槽；pending 按附件恢复。冻结后的证据、搜索约束与 critic 失败仍扣槽，critic 拒绝前不运行候选程序。
   6. critic→selftest/smoke→evaluation；每 slot 存具名 gate 与证据引用。
   7. 不把失败 gate 计入 measured tried/yield，不把无输出候选吞成空数组。
-- 反例：超预算、改多处却少报、重命名假 novelty、保留槽未触达 untried、critic 拒绝仍执行、同候选换 slot 重抽、所有冻结槽无效但 round 可结束；三份草稿之一结构非法时整批不冻结，预检后工作区变化不改变所冻结 bytes，pending 恢复不读取被改写或删除的草稿。
+- 反例：超预算、改多处却少报、同类资产的多个有据候选被机械拒绝、critic 拒绝仍执行、同候选换 slot 重抽、所有冻结槽无效但 round 可结束；三份草稿之一结构非法时整批不冻结，预检后工作区变化不改变所冻结 bytes，pending 恢复不读取被改写或删除的草稿。
 - 删除出口：单候选隐式轮次路径和重复候选生命周期，不保留两种提案 API。
 - 完成门：不存在仅在 prompt 中声明而在命令边界不检查的结构约束。
 
@@ -843,7 +845,7 @@ T 是最多搜索轮数，m 是每轮候选数量，k 是每 case 的 trials。c
   4. 根据 paired case 数据算预测命中、未预测退化、不确定项；反馈下一轮。
      对 workflow 编辑增加“实际节点/关系变化是否符合预测”的证据，分别记录 delivery、行为变化和业务效果；不能只凭指导文本变短算机制命中。
   5. 提供紧凑历史摘要和证据索引；详细轨迹仍按需读取。
-  6. prune targets 绑定当前仍存在的实际资产/编辑；生成单机制消融候选。
+  6. 有依据的删除/消融以当前存在的资产为目标，走相同提案和测评门，不另设强制删除槽。
   7. 全失败时允许无 observed success habit，不编造样例填字段。
 - 反例：更换临时 taskId 不丢归因；后来换 head 不改旧 Δ；失败 gate 不进 yield；已经删除的资产不再被 prune；消融关键停止/验收机制必须失败；未消费资产不能解释提升。
 - 完成门：同一已证伪机制再次提出时，系统能给出其先前测量与反例；有效新假设仍可进入搜索。
