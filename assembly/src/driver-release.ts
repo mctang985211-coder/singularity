@@ -6,7 +6,6 @@ import { ProtocolRefusal, refuse } from '../../src/protocol/refusal.ts'
 import { STRATEGY_PROTOCOL, STRATEGY_VERSION, type RoundState } from '../../src/strategy/protocol.ts'
 import type { TaskState } from '../../src/task/protocol.ts'
 import { taskStateOf } from './apparatus.ts'
-import { assertActive } from './coordination.ts'
 import { createEvolution } from './evolution.ts'
 import { executionProfile } from './execution-profile.ts'
 import { releaseMethod } from './method-release.ts'
@@ -19,9 +18,10 @@ export function createReleaseLifecycle(runtime: DriverRuntime) {
   const { apparatus, options, evaluation, measurement, parallelism, tasks, taskFact } = runtime
   const validateChampion = async (task: TaskState, parent: Agent, signal: AbortSignal): Promise<void> => {
     signal.throwIfAborted()
-    assertActive(apparatus, task.taskId)
     const suite = apparatus.domain.suite
-    if (suite === undefined || Object.values(task.runs).at(-1)?.purpose !== 'improve') return
+    const run = Object.values(task.runs).at(-1)
+    if (suite === undefined || run?.purpose !== 'improve') return
+    if (run.status !== 'running' || run.stage !== 'submitted') refuse('illegal-transition', 'validation requires a submitted RSI report')
     const rounds = [...apparatus.store.load().statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION).values()]
       .filter(r => r.plan?.campaignId === task.taskId && r.decision !== undefined).sort((a, b) => a.plan!.round - b.plan!.round)
     const baseline = rounds[0]?.plan?.incumbent, last = rounds.at(-1)

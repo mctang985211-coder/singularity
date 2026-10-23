@@ -19,8 +19,8 @@ export interface TransferState {
 function owner(state: TaskState, actor: string): void {
   requireResponsible(state, actor, 'transfer validation')
   const run = Object.values(state.runs).at(-1)
-  if (run?.purpose !== 'improve' || run.status !== 'running' || run.stage !== 'working' || state.rounds?.some(r => r.status === 'pending') || state.search?.batches?.some(b => !b.settled))
-    refuse('illegal-transition', 'freeze the champion only after search work settles')
+  if (run?.purpose !== 'improve' || run.status !== 'running' || run.stage !== 'submitted' || state.rounds?.some(r => r.status === 'pending') || state.search?.batches?.some(b => !b.settled))
+    refuse('illegal-transition', 'validation requires a submitted report and settled search work')
 }
 export function transferKinds(): Readonly<Record<string, KindRule<TaskState>>> {
   return {

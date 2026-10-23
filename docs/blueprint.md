@@ -36,9 +36,9 @@ RRSI 只提供决定与正则化约束；执行复用 DSH/Task/Bubble，见 [ADR
 
 | 部分 | 已有 | 尚未通过的出口 |
 |---|---|---|
-| core | 单一控制存储、Task v24、Strategy v9、Measure v5、Review v5；批次预算、历史搜索头/S*、suite 矩阵与配对校准、冻结迁移 | 外部模型/工具来源不能靠本地声明完全证明 |
+| core | 单一控制存储、Task v25、Strategy v9、Measure v5、Review v5；批次预算、历史搜索头/S*、suite 矩阵与配对校准、冻结迁移 | 外部模型/工具来源不能靠本地声明完全证明 |
 | G1/G2 | 完整契约、可选模板、workflow 策略/方向、独立审核、整图预算、增量规划、恢复/取消、snapshot v13 | 新协议真实模型协调行为与领域运行 |
-| G3 | 异步有界稀疏搜索、case/family 反馈、suite 的独立 validation/heldout、发布审核和唯一指针、CLI 报告 | 无 suite 发布尚未强制迁移；CLI 未逐题运行完整 pilot；实际迁移/消融效果待独立领域包验证 |
+| G3 | 异步有界稀疏搜索、case/family 反馈、suite 的独立 validation/heldout、发布审核和唯一指针、CLI 报告 | 无 suite 已禁止发布；CLI 未逐题运行完整 pilot，heldout 无额外自动通过门；实际迁移/消融效果待独立领域包验证 |
 
 领域实现不进入 core/assembly 或产品 spec。主仓只保留 `domain/reference` 给 env setup 阅读；领域包在用户 staging 生成，经审核后显式选择部署。2026-10-22 的结构修复和逐包验收见[计划第 9 节](task-first-domain-rsi-plan.md#9-详细实施任务)。
 

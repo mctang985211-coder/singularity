@@ -1,6 +1,6 @@
 # 2026-10-23：节点提示、环境准备与 RSI 的简化审查
 
-修改基线为 `ddebbb3`（先保存用户工作区的 checkpoint）；当前 Task v24，只接纳新图。旧实验保持原样，不用新代码回放旧图来改写结论。
+修改基线为 `ddebbb3`（先保存用户工作区的 checkpoint）；当前 Task v25，只接纳新图。旧实验保持原样，不用新代码回放旧图来改写结论。
 
 ## 真实问题在哪里
 
@@ -44,7 +44,7 @@ root 在合同证据足够时选择 verified direct-child 产物提交，组合�
 
 提案筛查判断“是否值得安全地测试”；发布审核判断已冻结的独立测量。发布不再复用提案 critic 的“缺少性能/迁移测量不能拒绝”说明。审核标准仍随冻结 subject 提供，节点 policy 不再重复拼接每条标准。
 
-没有把无 suite 的既有发布路径冒充迁移保证，也没有补做完整 pilot、跨机器复现或硬件消融。这些仍是原计划中明确的缺口。
+v24 的无 suite 发布缺口由后述 v25 修复关闭；完整 pilot、跨机器复现和硬件消融仍未补做，不把工程修复当作迁移收益。
 
 ## 环境准备的最小边界
 
@@ -95,3 +95,19 @@ RSI `improve-2afd2edddcec458835c98e11` 冻结一个候选、执行一轮 evolve 
 最终 cutoff118，报告独立验收 `review-94c8667bb13e2a80d215978a` 完成并判 partial：作者把 reviewer 成本差的 43.8% 写成“most”，又把封存原业务相对重测 baseline 的 39.2% 降幅写成 20.6%。宿主据此将 improve 和 root RSI 标为 failed，业务 root 仍为 verified；没有将主动收尾或单轮成本点估计冒充 RSI 成功。验收用了 31 个原生步骤，仍有明显取证成本，本轮没有通过放松准确性要求消除它。完整状态、原生日志与最终检查保留在 `runtime/{snapshot,report,native-evidence,final-check}.json`；所有 Task 终局后停止本次自建临时宿主，launcher exit 0，未修改原始报告或旧实验。
 
 工程验证：`232ec46` 全量 93 文件/1033 测试通过；后续 authoring 调整的 4 文件/73 项回归及最后 schema 调整的 1 文件/15 项回归通过，最终 build、8 项 gates 与 diff 检查通过。类型 mutation 反例的 TS 错误属于测试预期。上述 suite 是加载、评分与收尾冒烟，不满足迁移发布所需样本，也未重跑复杂 chip 优化。
+
+## v25：按运行故障修复执行边界
+
+本次继续以 `81784ca` 为起点，仍归于 `ddebbb3` 之后的同一次简化。没有改凭据、启动远程模型、重新部署宿主或回放旧图。
+
+- execution profile 以前从 assembly 自身解析 preset 插件。原生 Loader 已加载的包不一定在 assembly peers 中，导致实跑中的九项缺失。现在持有各 preset 的原生 generation lease，沿实际 entry tree/base URL 调用 Loader ESM resolver，记录各 preset 来源并 hash 实现；无法取证仍 fail closed。单测覆盖同名包在三个 preset 解析到不同实现、assembly 本身不能解析它们、修改任一实现改变 digest、真实缺失；真实 DSH preset 挂载另验证 compaction/command/pruner 的取证。
+- 删掉 submission 的 `prepare` 钩子。之前 sealFiles 后就开始私有测评，但 `run/submitted` 尚未持久化，验证异常可留下 working 作者。现在先持久化提交，再通过统一 acceptance 入口做私有验证、发布和报告审核；冷恢复也走它。删除已不可达的“等 transfer 后才能 submit”旧闸，复用 submitted 阶段，没有新增生命周期状态。该语义变化升级为 Task v25，只用于新图。
+- 删除无 suite 的自动发布分支，并在 release 入口统一拒绝缺少冻结独立验证的发布。合法负发布审核返回已有 witness、不 approve/publish，可继续验收诚实报告；没有吞掉结构错误或放松发布门。submitted 阶段的原生失败也会关闭仍 running 的工作，验证与后代收到取消。
+- 报告 results 改为引用真实 round 和机制观察；冻结分数、成本、结果仍由宿主提供给 reviewer。作者不再被要求重复抄算已有数据；若自行声称数值仍须准确。
+- builder 明确只整理用户提供的任务，不虚构 family 或跨 split 独立性；相关技术参考按只读资料/冻结输入进入，不自动激活 `.agents` 中角色、审批、旧工作流。四模型输入和统计覆盖见[启动说明](rsi-startup-and-chip-workloads.md)。
+
+相对 `ddebbb3`，`src/`、`assembly/src/`、`scripts/` 的生产源码合计增加 216 行、删除 247 行，净减 31 行、11617 bytes；测试与人类说明文档增加。纯节点 policy 的 UTF-8 bytes 为 root 2234→1843、task 1703→1481、review 1508→2022、improve 2199→2013；这里不包含已移除的动态 review-purpose、工具 schema、DSH 提示或消息。review 本地 policy 增长是集中共同协议和筛查职责的结果，不能声称每个角色都变短。前述 builder 27% 和产物 60% 下降只属于表中历史版本，当前 builder 新增了用户任务/资料边界，未重新跑模型测量成本。
+
+本轮日志位于 `/home/ROXY/singularity-next/profile-repair-*`；真实 native 挂载验证为 `profile-native-mounts.log`。回归覆盖报告提交先于私有试验、封存写盘中断的冷恢复不重抽、负发布审核、无 suite 不发布及验证期间取消/失败。没有从这些工程结果推断真实模型收益或芯片迁移效果。
+
+最终验证：`pnpm build` 退出 0；`profile-repair-tests-final2.log` 为 **93 文件、1037 项全通过**；`profile-repair-gates-final.log` 为 **8 gates 全通过**；changed documentation links 和 `git diff --check` 通过。日志里的两条 TS2322 是 build mutation 反例按预期被拒绝。没有运行全芯片 Verilator。

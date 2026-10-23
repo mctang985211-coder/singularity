@@ -42,7 +42,6 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
   request: SubmissionInput,
   signal: AbortSignal,
   review: AcceptanceReview,
-  prepare?: () => Promise<void>,
 ): Promise<Submission> {
   const state = taskStateOf(apparatus, request.taskId)
   const path = 'path' in request ? request.path : state.contract!.artifact
@@ -90,10 +89,6 @@ export async function submit(apparatus: Apparatus, execution: Execution, caller:
     )
       refuse('evidence-input-mismatch', 'workspace input differs from the frozen snapshot')
     const files = await sealFiles(apparatus, run, path, workspace)
-    // Only a valid, frozen submission may trigger external validation. Rejected calls
-    // leave the working Run available for correction and never end its search.
-    await prepare?.()
-    signal.throwIfAborted()
     const transcript = await execution.sealTranscript(exec)
     signal.throwIfAborted()
     await commands.submitRun({ commandId: 'seal:' + requestId, taskId: request.taskId, runId: run.runId,

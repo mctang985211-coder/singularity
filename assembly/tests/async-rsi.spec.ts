@@ -741,7 +741,7 @@ it('allocates campaign-local round numbers when two roots finish screening concu
     .toMatchObject({ roundId: (results[0] as { roundId: string }).roundId, status: 'failed' })
   expect(factsOf(h.medium).filter(fact => fact.kind === 'rsi/round-requested')).toEqual(requests)
 })
-it.each([[false, false], [true, false], [false, true]])('handles measured outcomes; publication rejection %s, end without winner %s', async (rejectPublication, finishNegative) => {
+it.each([false, true])('recovers local measured outcomes without publishing; end without winner %s', async finishNegative => {
   const h = await fixture(),
     proposal = await h.enter('count protected letters')
   businessTurn(h, 100)
@@ -752,7 +752,6 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
     scope = h.call(agent, 'create')
   const assigned = JSON.parse((request.message!.content[0] as { text: string }).text)
   let candidate: unknown
-  let evaluationApparatus!: Apparatus
   let trialCost = 150
   const revisionCosts = new Map<string, number>()
   // Freeze a real method change through the public RSI surface; evaluations below exercise core facts, not provider calls.
@@ -765,7 +764,6 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
         started: (run: { taskId: string; runId: string }) => Promise<void>
       },
     ) => {
-      evaluationApparatus = apparatus
       const revisionDigest = (input.revision as { digest: string }).digest
       if (!revisionCosts.has(revisionDigest)) revisionCosts.set(revisionDigest, trialCost)
       const id = String(agentSessionIdOf(input.operationId)),
@@ -904,8 +902,7 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
   )
   expect(factsOf(h.medium).filter((f) => f.kind === 'round/decided')).toEqual(decisions)
   expect(factsOf(h.medium).filter((f) => f.kind === 'rsi/round-requested')).toHaveLength(1)
-  // A no-winner outcome returns to this same owner. A changed method is measured
-  // against the same sealed root, then independently approved and published.
+  // A local winner still lacks an independent suite and cannot publish.
   expect((decisions[0]!.payload as { winner: number | null }).winner).toBeNull()
   if (finishNegative) {
     await writeFile(join(request.cwd, 'report.json'), JSON.stringify({ result: 'no improvement' }))
@@ -915,40 +912,26 @@ it.each([[false, false], [true, false], [false, true]])('handles measured outcom
     return
   }
   trialCost = 50
-  publicationVerdict = rejectPublication ? 'fail' : 'pass'
   method.assets.templates[0]!.applicability = 'Reuse sufficient evidence and delegate one bounded implementation.'
   await writeFile(join(request.cwd, 'repaired.json'), proposalBytes())
-  let repaired = await screened(h.call(agent, 'repair'), { paths: ['repaired.json'] }) as { roundId: string; revision: { digest: string } }
-  if (rejectPublication) {
-    await vi.waitFor(() => expect(factsOf(h.medium).filter(f => f.kind === 'rsi/round-settled')).toHaveLength(2), { timeout: 5_000 })
-    expect(factsOf(h.medium).findLast(f => f.kind === 'rsi/round-settled')!.payload).toMatchObject({ status: 'failed' })
-    expect(factsOf(h.medium).filter(f => f.kind === 'pointer/switched')).toHaveLength(1)
-    publicationVerdict = 'pass'
-    trialCost = 25
-    method.assets.templates[0]!.applicability = 'Reuse evidence only after confirming frozen input identity; delegate bounded implementation.'
-    await writeFile(join(request.cwd, 'repaired-again.json'), proposalBytes())
-    repaired = await screened(h.call(agent, 'repair-again'), { paths: ['repaired-again.json'] }) as typeof repaired
-  }
+  const repaired = await screened(h.call(agent, 'repair'), { paths: ['repaired.json'] }) as { roundId: string; revision: { digest: string } }
   await vi.waitFor(() => expect(factsOf(h.medium).filter(f => f.kind === 'rsi/round-settled'))
-    .toHaveLength(rejectPublication ? 3 : 2), { timeout: 5_000 })
+    .toHaveLength(2), { timeout: 5_000 })
   expect(factsOf(h.medium).findLast(f => f.kind === 'rsi/round-settled')!.payload).toMatchObject({ status: 'completed' })
-  expect(factsOf(h.medium).filter(f => f.kind === 'pointer/switched')).toHaveLength(2)
-  expect(harness.solve).toHaveBeenCalledTimes(rejectPublication ? 4 : 2)
+  expect(factsOf(h.medium).filter(f => f.kind === 'pointer/switched')).toHaveLength(1)
+  expect(harness.solve).toHaveBeenCalledTimes(2)
   const outcomes = factsOf(h.medium).filter(f => f.kind === 'rsi/round-settled')
   expect(outcomes[0]!.payload).toMatchObject({ status: 'completed' })
   const observed = factsOf(h.medium).filter(f => f.kind === 'trial/recorded').map(f => f.payload as { cost: number; detail: string })
-  expect(observed.map(trial => trial.cost)).toEqual(rejectPublication ? [100, 150, 100, 50, 50, 25] : [100, 150, 100, 50])
+  expect(observed.map(trial => trial.cost)).toEqual([100, 150, 100, 50])
   expect(JSON.parse(observed[0]!.detail).taskId).toBe(proposal.taskId)
   expect(JSON.parse(observed[2]!.detail).taskId).toBe(proposal.taskId)
   const reviews = factsOf(h.medium).filter(f => f.kind === 'review/started').map(f => (f.payload as { target: { kind: string } }).target.kind)
-  expect(reviews.filter(kind => kind === 'proposal')).toHaveLength(rejectPublication ? 4 : 3)
-  expect(reviews.filter(kind => kind === 'publication')).toHaveLength(rejectPublication ? 2 : 1)
-  // A later draft must not erase this search's already committed publication.
-  const { createReleaseCommands } = await import('../../src/release/commands.ts')
-  await createReleaseCommands({ store: evaluationApparatus.store }).draft({ commandId: 'later-draft', revision: method.reference })
-  await writeFile(join(request.cwd, 'report.json'), JSON.stringify({ result: 'published', roundId: repaired.roundId }))
+  expect(reviews.filter(kind => kind === 'proposal')).toHaveLength(3)
+  expect(reviews.filter(kind => kind === 'publication')).toHaveLength(0)
+  await writeFile(join(request.cwd, 'report.json'), JSON.stringify({ result: 'local winner lacks transfer evidence', roundId: repaired.roundId }))
   await h.call(agent, 'report').submit({ taskId: assigned.taskId, path: 'report.json' })
-  expect((await driver!.read()).tasks.find(task => task.taskId === assigned.taskId)!.search).toMatchObject({ outcome: 'improved' })
+  expect((await driver!.read()).tasks.find(task => task.taskId === assigned.taskId)!.search).toMatchObject({ outcome: 'insufficient-evidence' })
   await vi.waitFor(() => expect(factsOf(h.medium).findLast((f) => f.kind === 'rsi/status')!.payload)
     .toMatchObject({ status: 'completed' }))
 })
@@ -1119,6 +1102,10 @@ async function suiteCampaign({ heldout = true, validationRegression = false, exi
   const trials: { split: string; revision: string; taskId: string; operationId: string }[] = []
   harness.solve.mockImplementation(async (control: Apparatus, input: Parameters<EvolutionOptions['solve']>[0]) => {
     expect(input.case).toBeDefined()
+    if (input.case!.split !== 'evolve') {
+      const author = control.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, assigned.taskId)!.runs[assigned.runId]!
+      expect(author).toMatchObject({ status: 'running', stage: 'submitted', submission: expect.any(Object) })
+    }
     expect(input.contract).toEqual(input.case!.contract)
     expect(input.operationId).toBe(`trial:${input.trialKey}`)
     const trialId = String(agentSessionIdOf(input.operationId)), trialAgent = agentFor(trialId, trialId)
@@ -1184,12 +1171,11 @@ it('freezes the suite champion and recovers after measured validation/heldout be
   await h.mount()
   await driver!.activate(String(h.agent.id))
   const restored = h.call(h.agent, 'restore-transfer')
-  expect(await screened(restored, { paths: ['candidate.json'] })).toMatchObject({ roundId: h.proposal.roundId, status: 'completed' })
   const fresh = rsiProposal(h.method.assets, { ...h.method.assets, workflowGuidance: 'A fresh mechanism after validation is forbidden.' }, h.assigned.taskId, 'business')
   await writeFile(join(h.request.cwd, 'after-freeze.json'), JSON.stringify({ ...fresh, edit: { ...fresh.edit,
     predicted_affected: [(factsOf(h.medium).find(fact => fact.kind === 'task/admitted')!).subject],
     predicted_cases: ['evolve-0'], predicted_families: ['evolve-family-0'] } }))
-  await expect(screened(restored, { paths: ['after-freeze.json'] })).rejects.toThrow(/search ended|frozen|finish/)
+  await expect(screened(restored, { paths: ['after-freeze.json'] })).rejects.toThrow(/search ended|frozen|finish|working RSI node/)
   await expect(restored.history({ kind: 'round', ref: validationId })).rejects.toThrow('frozen evidence scope')
   await expect(restored.history({ kind: 'round', ref: heldoutId })).rejects.toThrow('frozen evidence scope')
   for (const split of ['validation', 'heldout']) {
@@ -1197,9 +1183,9 @@ it('freezes the suite champion and recovers after measured validation/heldout be
     await expect(restored.history({ kind: 'task', ref: trial.taskId })).rejects.toThrow('evidence scope')
     await expect(restored.history({ kind: 'artifact', ref: trial.taskId })).rejects.toThrow('evidence scope')
   }
-  expect(await restored.submit({ taskId: h.assigned.taskId, path: 'report.json' })).toMatchObject({ phase: 'verified' })
   await vi.waitFor(() => expect(factsOf(h.medium).findLast(fact => fact.kind === 'rsi/status')!.payload)
     .toMatchObject({ status: 'completed' }))
+  expect((await driver!.read()).tasks.find(task => task.taskId === h.assigned.taskId)!.phase).toBe('verified')
   expect(harness.solve).toHaveBeenCalledTimes(28)
   const final = factsOf(h.medium)
   expect(final.filter(fact => fact.kind === 'trial/recorded')).toEqual(observed)
@@ -1239,6 +1225,24 @@ it('freezes the suite champion and recovers after measured validation/heldout be
   expect(factsOf(h.medium).findLast(fact => fact.kind === 'method/consumed' && fact.subject === replacement.taskId &&
     (fact.payload as { mode: string }).mode === 'read')!.payload)
     .toMatchObject({ revision: h.proposal.revision, mode: 'read' })
+}, 30_000)
+
+it('finishes an honestly reported suite campaign after publication rejection without publishing or retrying private trials', async () => {
+  const h = await suiteCampaign({ heldout: false })
+  publicationVerdict = 'partial'
+  await writeFile(join(h.request.cwd, 'report.json'), JSON.stringify({ result: 'Frozen rounds are evidence, publication is independently judged.' }))
+  expect(await h.scope().submit({ taskId: h.assigned.taskId, path: 'report.json' })).toMatchObject({ phase: 'verified' })
+  await vi.waitFor(() => expect(factsOf(h.medium).findLast(fact => fact.kind === 'rsi/status')!.payload).toMatchObject({ status: 'completed' }))
+  const final = factsOf(h.medium), solves = harness.solve.mock.calls.length
+  expect(final.filter(fact => fact.kind === 'pointer/switched')).toHaveLength(1)
+  expect(final.filter(fact => fact.kind === 'rsi/transfer-settled')).toMatchObject([{ payload: { outcome: 'improved' } }])
+  expect((await driver!.read()).reviews.filter(review => review.target.kind === 'publication'))
+    .toMatchObject([{ status: 'completed', findings: [{ verdict: 'partial' }] }])
+  await driver!.close(); driver = undefined
+  await h.mount()
+  await driver!.activate(String(h.agent.id))
+  expect(harness.solve).toHaveBeenCalledTimes(solves)
+  expect(factsOf(h.medium)).toEqual(final)
 }, 30_000)
 
 it('closes an unseen validation cost regression without publishing, resampling or exposing private trial feedback', async () => {

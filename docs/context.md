@@ -2,9 +2,9 @@
 
 本页替换当前状态；历史证据从 Git 查证，施工顺序只在 [终局计划](task-first-domain-rsi-plan.md) 维护。
 
-2026-10-23 简化：Task v24 新图，节点协议集中、共享步数送达、删除 RSI 资产配额及强制删除；env builder 仅准备任务、验收、评分与试分工具，空方法由宿主供给，见[审查与实测](prompt-simplification-20261023.md)。旧实验与批准包保留原样，不向新协议回放。
+2026-10-23 简化：Task v25 新图，节点协议集中、共享步数送达、删除 RSI 资产配额及强制删除；env builder 只整理用户提供的任务、验收、评分与试分工具，空方法由宿主供给。无 suite 不发布；私有验证在报告提交持久化后开始，冷恢复继续同一验收入口。execution profile 从真实 mounted Loader 解析插件，报告引用冻结 round 免去数字重抄。见[审查与实测](prompt-simplification-20261023.md)和[芯片启动说明](rsi-startup-and-chip-workloads.md)。旧实验与批准包保留原样，不向新协议回放。
 
-2026-10-22 结构收尾：DSH 源码重建、依赖 gate、driver 生命周期拆分与领域外置已落地；主仓只留 `domain/reference`，部署没有默认领域。全部 T00–T16 的重新核查见[计划第 9 节](task-first-domain-rsi-plan.md#9-详细实施任务)。尚缺无 suite 发布的独立迁移硬门、完整 pilot 逐题 CLI、跨机器复现与正式效果/论文验收；下文旧运行结论保留各自版本范围。
+2026-10-22 结构收尾：DSH 源码重建、依赖 gate、driver 生命周期拆分与领域外置已落地；主仓只留 `domain/reference`，部署没有默认领域。全部 T00–T16 的重新核查见[计划第 9 节](task-first-domain-rsi-plan.md#9-详细实施任务)。当时无 suite 发布的缺口已由 v25 关闭；尚缺完整 pilot 逐题 CLI、跨机器复现与正式效果/论文验收；下文旧运行结论保留各自版本范围。
 
 2026-10-20：Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13。流程修复起点 `7bd91bb`，未回退 Git；保留现有 Task/workflow、冻结输入、独立验收、case×trial、取消与 champion 验证底座。
 

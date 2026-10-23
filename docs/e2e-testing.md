@@ -27,7 +27,7 @@ dsh --profile singularity-next-web --host 127.0.0.1 --port 7331 --no-open
 
 从原生界面提交领域目标和自然语言验收要求，不续发阶段指令。执行节点复用相关方法或直接声明一次性任务，提交工作区产物；独立 ReviewRun 逐条判断标准，必要时创建取证 Task。所有节点使用公开 create/resume 的普通主 agent 会话，Bubble 保护输入、验收程序和其他任务历史。
 
-root 必须委派实现，普通子节点自行决定是否继续分解。委派显式区分必须 verified 的 `required` 与可择优、可停止的 `exploration`；可用证据足够时，父停止未选探索并进入集成，停止本身不算验收通过。每次模型请求附简短的共享已用/总步数，包含后代与独立验收；不自动注入全局关系快照，也不在子节点启动时摘要父会话。首次显式 `singularity_memory()` 才准备本节点的有界父背景并分页列目录；已有 checkpoint 或失败记录不重复购买摘要，传 ref 只读。摘要失败在目录明确标记且不阻断 Task，持久化与证据完整性错误仍传播；root 看整树，独立审核仅看自己的取证分支。单会话使用 DSH 原生 BasicCompaction，在窗口 70% 触发（本轮 1M 窗口为 700k），保留原生默认尾部策略与 32768 tokens 摘要额度，替换实时上下文而保留原始事件。当前协议为 Task v24、Strategy v9、Measure v5、Review v5、snapshot v13。
+root 必须委派实现，普通子节点自行决定是否继续分解。委派显式区分必须 verified 的 `required` 与可择优、可停止的 `exploration`；可用证据足够时，父停止未选探索并进入集成，停止本身不算验收通过。每次模型请求附简短的共享已用/总步数，包含后代与独立验收；不自动注入全局关系快照，也不在子节点启动时摘要父会话。首次显式 `singularity_memory()` 才准备本节点的有界父背景并分页列目录；已有 checkpoint 或失败记录不重复购买摘要，传 ref 只读。摘要失败在目录明确标记且不阻断 Task，持久化与证据完整性错误仍传播；root 看整树，独立审核仅看自己的取证分支。单会话使用 DSH 原生 BasicCompaction，在窗口 70% 触发（本轮 1M 窗口为 700k），保留原生默认尾部策略与 32768 tokens 摘要额度，替换实时上下文而保留原始事件。当前协议为 Task v25、Strategy v9、Measure v5、Review v5、snapshot v13。
 
 依据准确会话、committed snapshot、封存附件与正式 receipt 定位问题；不得伪造模型流程。恢复使用原会话、原 Run 与冻结目录，已冻结的检查结果、审核、trial 和发布决定复用。图、依赖、能力缺口、验收及 RSI 记录取同一状态前缀，节点直接连接自己的原生会话。
 

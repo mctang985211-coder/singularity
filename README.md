@@ -2,7 +2,7 @@
 
 以 Task 为一等公民的领域 workflow 与 RSI 内核、DSH 插件。Task 节点表达冻结责任，通过分解、依赖和产物关系组成 workflow，独立 ReviewRun 判断交付。根任务终局后可异步改进 workflow 策略、TaskTemplate、Skill、Tool，经测评和发布审核切换唯一方法指针。
 
-当前协议为 Task v24、Strategy v9、Measure v5、Review v5，读投影为 v13。新协议只用于新图，不提供旧图兼容或迁移。
+当前协议为 Task v25、Strategy v9、Measure v5、Review v5，读投影为 v13。新协议只用于新图，不提供旧图兼容或迁移。
 
 按[终局实施计划](docs/task-first-domain-rsi-plan.md)实现有界搜索、合法无赢家终局、完整 Task 契约、可选模板、workflow 策略及逐节点协调。冻结 suite 可以通过同一原生 Task 路径执行 case × trial 对照；工程检查与领域提升结论分别记录。当前工程与实验出口以计划状态表为准，不把离线测试当作迁移收益。
 | 阅读入口 | 用途 |
@@ -26,7 +26,7 @@ pnpm verify
 
 `setup:host` 只验证并生成被 Git 忽略的 `.singularity/` 本地解析配置；checkout 和用户目录可以改变。`pnpm verify` 执行离线 build、测试和 gates，不调用模型。生产效果必须依据[原生实跑证据](docs/e2e-testing.md)。
 
-复杂领域可以先交给一个普通 DSH session 准备同领域多任务 suite、验收标准、评分策略和试分工具，再审核实际文件。默认不生成 Method、Skill、TaskTemplate、独立 Task 文件或审核手册，由 Singularity 从空方法探索 RSI：
+复杂领域可以先交给一个普通 DSH session，把用户提供的同领域任务整理为 suite、验收标准、评分策略和试分工具，再审核实际文件。builder 不自行编造任务或独立 family；资料不足时报告缺项。默认不生成 Method、Skill、TaskTemplate、独立 Task 文件或审核手册，由 Singularity 从空方法探索 RSI：
 
 ```sh
 export DSH_HOME=/path/to/private-setup-home
@@ -77,9 +77,9 @@ node scripts/singularity.mjs experiment report <task-or-session-id> --output ./r
 
 实验要求 suite 与已部署领域的冻结 suite 摘要完全一致。当前 CLI 只启动第一个 evolve case 的业务 root；有效候选请求 round 后，原生 driver 才执行 evolve 的完整 case×trial 比较，冻结 champion 后再验证 validation/heldout。完整 pilot 逐题执行入口尚未接通，冻结 suite 不会自动补跑其他业务案例。validation/heldout 契约不会随 CLI 提案输入公开。报告从 committed snapshot 导出 suite、campaign 终局、逐轮测量及证据，不维护第二套实验真相。suite 配置与隔离边界见[终局计划](docs/task-first-domain-rsi-plan.md)。
 
-独立迁移目前仅在配置 suite 的发布路径强制执行。无 suite 的单题路径仍可经审核发布，不能将其发布结果当作领域泛化证据；统一发布门槛仍是计划 T08 的未完成项。
+方法发布要求 suite、已封存报告、冻结 champion 的独立配对 validation 和发布审核通过；无 suite 的单题路径可以运行与测量，但不能发布方法。heldout 可选，其结果进入独立审核，当前没有额外的 heldout 自动通过门。四模型芯片任务的输入边界与统计覆盖见[启动说明](docs/rsi-startup-and-chip-workloads.md)。
 
-`singularity-assembly.evaluationParallelism` 默认 1，可在新实验中设为 4，使固定 suite 内的独立 trial 并行；轮次和发布仍按序推进。并行度进入 execution profile，改变后应开始新实验。同一 search 内相同方法、矩阵、profile 和计分口径的完整 incumbent 证据可复用，保留原 Task/Run 来源；私有验证重新执行。领域 measurement 可以返回 `{quality, metrics: {name: {value, unit}}, detail}`，公式及系数由领域模块定义并随实现摘要固定，各项原始指标保留在 trial 记录和 RSI 反馈。需要标准通过比例时可选 `suite.scoring: "criteria"`，与自定义 measurement 互斥。
+`singularity-assembly.evaluationParallelism` 默认 1；本次 API 最多六个并发会话，保持评测并行度 1，轮次和发布按序推进。并行度进入 execution profile，改变后应开始新实验。同一 search 内相同方法、矩阵、profile 和计分口径的完整 incumbent 证据可复用，保留原 Task/Run 来源；私有验证重新执行。领域 measurement 可以返回 `{quality, metrics: {name: {value, unit}}, detail}`，公式及系数由领域模块定义并随实现摘要固定，各项原始指标保留在 trial 记录和 RSI 反馈。需要标准通过比例时可选 `suite.scoring: "criteria"`，与自定义 measurement 互斥。
 
 仓库只保留 [domain/reference](domain/README.md) 一份可选模板/验证器示例。builder 按所需接口生成独立环境包，不默认复制该示例或生成 `verify.mjs`；已有环境仍可用 `pnpm verify:domain -- /path/to/environment` 显式执行自己的验证脚本。部署必须设置 `SINGULARITY_DOMAIN`，内核没有领域默认值。
 

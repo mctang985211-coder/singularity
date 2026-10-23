@@ -1,15 +1,23 @@
 import '../../scripts/dsh-control-runtime.mjs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentPresetRegistry } from '@deepseek-ai/dsh-agent-preset-registry'
+import { ModuleLoader, type Entry } from '@deepseek-ai/cordis-plugin-loader'
 import type { LlmResolvedModelInfo, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fileURLToPath } from 'node:url'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import type { Domain } from '../src/domain.ts'
 import { executionProfile } from '../src/execution-profile.ts'
 
 const resources = vi.hoisted(() => ({ parallelism: 4, memory: 8 * 1024 ** 3 }))
 const changedFiles = vi.hoisted(() => new Set<string>())
+const mounted = vi.hoisted(() => ({ presets: [] as { presetId: string; key: object; tree: { entries(): Iterable<Entry> } }[] }))
+vi.mock('@deepseek-ai/dsh-agent-preset-registry', async original => ({
+  ...await original<object>(), livePresetMounts: () => mounted.presets,
+}))
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>()
   return { ...fs, readFile: async (...args: Parameters<typeof fs.readFile>) => {
@@ -42,10 +50,19 @@ function fixture() {
     context: { contextWindow: 32_768 }, defaultMaxTokens: 4096 }
   const llm = { providerRetryPolicy: vi.fn(() => retry), resolveModelInfo: vi.fn(async () => model) }
   let providerAvailable = true
+  const bases = new Map(ids.map(id => [id, import.meta.url]))
+  mounted.presets = ids.map(id => ({ presetId: id, key: {}, tree: { entries: () =>
+    inventory.find(p => p.id === id)!.rows.map(row => ({
+      id: row.entryId!, options: { name: row.moduleName }, disabled: row.enabled === false,
+      parent: { tree: { ctx: { baseUrl: bases.get(id) } } },
+    } as Entry)) } }))
   const seams = { get: (name: string) => name === 'agentPresets' ? {
     compositionInventory: async () => inventory,
     readDocument: async (id: string) => documents.get(id),
-  } : name === 'llm' && providerAvailable ? llm : undefined } as ChildSessionSeams
+    acquireScope: async (id: string) => ({ key: mounted.presets.find(p => p.presetId === id)!.key,
+      [Symbol.asyncDispose]: async () => undefined }),
+  } : name === 'loader' ? { ctx: { root: { fiber: {} } }, internal: ModuleLoader.fromInternal() }
+    : name === 'llm' && providerAvailable ? llm : undefined } as ChildSessionSeams
   const domain: Domain = { dir: '/offline-domain', references: [], inputs: [], templates: new Map(),
     verifiers: [{ ref: 'protected-check', version: '1', implementationDigest: 'a'.repeat(64),
       program: '/offline-verifier', args: [], selftest: { samples: [] }, judge: async () => ({ verdict: 'unknown' }) }],
@@ -55,7 +72,7 @@ function fixture() {
       tools: [{ name: 'compiler', version: '1', implementationDigest: 'c'.repeat(64) }],
       conditions: ['one fixed workload'], measure: async () => 1 },
   }
-  return { parent, seams, domain, inventory, documents, llm,
+  return { parent, seams, domain, inventory, documents, llm, bases,
     retry: (value: ResolvedRetryPolicy) => { retry = value },
     model: (value: Partial<LlmResolvedModelInfo>) => { model = { ...model, ...value } },
     removeProvider: () => { providerAvailable = false },
@@ -64,8 +81,37 @@ function fixture() {
 }
 
 beforeEach(() => { resources.parallelism = 4; resources.memory = 8 * 1024 ** 3; changedFiles.clear() })
+const temporary: string[] = []
+afterEach(async () => { for (const root of temporary.splice(0)) await rm(root, { recursive: true, force: true }) })
 
 describe('frozen execution identity', () => {
+  it('hashes plugins from each mounted Loader tree, including packages unavailable to the assembly', async () => {
+    const held = fixture(), root = await mkdtemp(join(tmpdir(), 'profile-mounted-')); temporary.push(root)
+    const name = '@profile-test/native-tool'
+    const paths = []
+    for (const [index, id] of ids.entries()) {
+      const base = join(root, id), pkg = join(base, 'node_modules', name)
+      await mkdir(pkg, { recursive: true })
+      await writeFile(join(pkg, 'package.json'), JSON.stringify({ name, type: 'module', exports: './index.js' }))
+      await writeFile(join(pkg, 'index.js'), `export const version = ${index}\n`)
+      paths.push(join(pkg, 'index.js'))
+      held.bases.set(id, pathToFileURL(join(base, 'preset.yml')).href)
+      held.inventory[index] = { ...held.inventory[index]!, rows: [{ entryId: 'native', moduleName: name, enabled: true }] }
+    }
+    expect(() => import.meta.resolve(name)).toThrow()
+    const first = await held.profile()
+    expect(first.missing).toEqual([])
+    expect(first.profile.presets!.flatMap(p => p.sources.map(s => s.path))).toEqual(paths)
+    for (const path of paths) {
+      changedFiles.add(path)
+      expect((await held.profile()).digest).not.toBe(first.digest)
+      changedFiles.clear()
+    }
+    held.inventory[0] = { ...held.inventory[0]!, rows: [{ entryId: 'missing', moduleName: '@profile-test/absent', enabled: true }] }
+    const missing = await held.profile()
+    expect(missing.complete).toBe(false)
+    expect(missing.missing).toContain('mounted presets')
+  })
   it('binds evaluation concurrency into the comparison profile', async () => {
     const held = fixture(), serial = await held.profile()
     const parallel = await executionProfile(held.parent, held.seams, held.domain, 2)

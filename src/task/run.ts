@@ -251,8 +251,6 @@ export function runSubmittedKind(kind: string, emitter: string): KindRule<TaskSt
           refuse('illegal-transition', 'proposal batch is pending; finish the frozen batch before submitting')
         if (state.rounds?.some(round => round.status === 'pending'))
           refuse('illegal-transition', 'evaluation is pending; wait for its committed outcome before submitting')
-        if (state.transfer !== undefined && state.transfer.outcome === undefined)
-          refuse('illegal-transition', 'transfer validation is pending; settle its outcome before submitting')
       }
       if (run.evidence.length) refuse('illegal-transition', 'a judged Run cannot seal a later submission')
       assertInputsBound(run.bubble, payload.submission.inputDigests, where)

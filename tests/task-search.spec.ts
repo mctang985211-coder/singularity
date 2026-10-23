@@ -68,14 +68,18 @@ it('requires each frozen proposal attachment to match the slot content digest', 
   expect(state(log).search!.batches![0]!.slots[0]!.proposal).toEqual(frozen.slots[0]!.proposal)
 })
 
-it('keeps an unfinished transfer from sealing the report while allowing its settled result', () => {
+it('seals the report before private validation and keeps author admission closed through its outcome', () => {
   const log = running(), suiteDigest = 'd'.repeat(64)
+  submit(log)
+  const sealed = state(log).runs[RUN_ID]!.submission
   emit(log, 'rsi/transfer-frozen', { baseline: REVISION, champion: { ...REVISION, revisionId: 'champion', digest: 'b'.repeat(64) },
     suiteDigest, executionProfileDigest: 'c'.repeat(64), roundId: 'validation' })
-  expect(() => submit(log)).toThrow('transfer validation is pending')
+  expect(() => submit(log)).toThrow('running/submitted')
+  expect(() => emit(log, 'rsi/batch-opened', batch())).toThrow('working RSI Run')
   emit(log, 'rsi/transfer-started', { suiteDigest })
-  expect(() => submit(log)).toThrow('transfer validation is pending')
+  expect(state(log).runs[RUN_ID]).toMatchObject({ status: 'running', stage: 'submitted', submission: sealed })
   emit(log, 'rsi/transfer-settled', { outcome: 'insufficient-evidence', report: fileAttachment('e'.repeat(64), 'transfer-report.json', 128) })
-  submit(log)
   expect(state(log).runs[RUN_ID]!.stage).toBe('submitted')
+  expect(state(log).runs[RUN_ID]!.submission).toEqual(sealed)
+  expect(() => emit(log, 'rsi/batch-opened', batch())).toThrow('working RSI Run')
 })

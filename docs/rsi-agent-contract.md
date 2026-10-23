@@ -1,6 +1,6 @@
 # RSI agent 工作合同
 
-更新：2026-10-23（Task v24；仅新图）。节点 system policy 的唯一来源为 [prompts.ts](../assembly/src/prompts.ts)，本文用于人类查阅接口，不附加给 agent。本文说明现有提案、审核与报告入口。`kind=search` 是已有 read 工具的短投影；状态仅从既有 Task/Run/batch/round 事实派生，不新增状态库。解析边界以 [rsi-proposal.ts](../assembly/src/rsi-proposal.ts)、[method.ts](../assembly/src/method.ts)、[review.ts](../assembly/src/review.ts) 为准。
+更新：2026-10-23（Task v25；仅新图）。节点 system policy 的唯一来源为 [prompts.ts](../assembly/src/prompts.ts)，本文用于人类查阅接口，不附加给 agent。本文说明现有提案、审核与报告入口。`kind=search` 是已有 read 工具的短投影；状态仅从既有 Task/Run/batch/round 事实派生，不新增状态库。解析边界以 [rsi-proposal.ts](../assembly/src/rsi-proposal.ts)、[method.ts](../assembly/src/method.ts)、[review.ts](../assembly/src/review.ts) 为准。
 
 Singularity 的业务顺序是：root 最少委派 → Task 在自己的 workspace 生成产物 → submit 封存 → 宿主独立验收 → 父任务复用已验证产物。只读参考仓库不是共享工作区；补丁中的目标路径不是可写宿主路径；跨任务交接使用声明的 artifact inputs。RSI 在业务结束后读取这些冻结事实，提案由独立 critic 筛选、宿主跑新业务对照；报告通过与方法收益是两回事。
 
@@ -87,7 +87,7 @@ critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字
 
 ## Report JSON
 
-这是推荐结构，由冻结的 `improvement-reported` 标准进行独立验收；没有新增专用 report parser。从 `kind=search,ref=authoring` 页的 `authoring.report` 开始填写。`results` 只记实际 round 事实与可核查数字，无 round 时用 `[]`，未测数字用 `null`；区分草稿静态拒绝、已扣槽失败、已测未选中和真实发布，不把报告通过说成改进成功。
+这是推荐结构，由冻结的 `improvement-reported` 标准进行独立验收；没有新增专用 report parser。从 `kind=search,ref=authoring` 页的 `authoring.report` 开始填写。`results` 引用实际 round，无 round 时用 `[]`；宿主提供冻结数值，不要求作者重复抄写或重算。区分草稿静态拒绝、已扣槽失败、已测未选中和真实发布，不把报告通过说成改进成功。
 
 ```json
 {
@@ -104,7 +104,7 @@ critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字
 }
 ```
 
-`results` 的有测量项可写为 `{"roundId":"<真实roundId>","outcome":"<已提交的实际结果>","qualityDelta":null,"costRatio":null,"detail":"<具体观察及测量限制>"}`；数字只能来自对应测评事实，必要时说明度量方向与单位。反复通过同一题不证明迁移。业务成本只比较新业务根、其后代及独立验收；RSI 分析、提案、审核、编排与发布费用保持分开。
+`results` 的有测量项只需 `{"roundId":"<真实roundId>","detail":"<机制观察及测量限制>"}`。宿主已向 reviewer 提供对应冻结结果、分数和成本，作者引用 round，不再要求复制或重算数字；自行作出的数值断言仍须准确。反复通过同一题不证明迁移。业务成本只比较新业务根、其后代及独立验收；RSI 分析、提案、审核、编排与发布费用保持分开。
 
 报告文件先封存，再按 suite 与冻结 champion 条件触发宿主的 validation、heldout 与允许的 publication，最后进行报告验收。因此作者只能陈述提交前可见事实；最终学习终局以随后持久化的 transfer、发布指针和 search 投影为准，不能提前填写“已验证迁移”或“已发布”。
 

@@ -15,7 +15,6 @@ import { createEvolution } from './evolution.ts'
 import { executionProfile } from './execution-profile.ts'
 import { sha256 } from './ids.ts'
 import { explorationOf, improvementTaskId, startImprovement } from './improvement.ts'
-import { releaseMethod } from './method-release.ts'
 import { loadMethod, publishedMethod } from './method.ts'
 import { createNativeSolve, observeSolve } from './native-solve.ts'
 import { advanceRsiBatch } from './rsi-proposal.ts'
@@ -193,14 +192,11 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
           await started(source)
           return observeSolve(apparatus, source.taskId, source.runId, signal, measurement === undefined ? undefined : { digest: measurement.criterion.implementationDigest, measure: (source, signal, context) => measurement.measure(source, signal, context) })
         } : native, solve: native, })
-      const decision = await evolution.runRound({ ...round, campaignId: task.taskId })
+      await evolution.runRound({ ...round, campaignId: task.taskId })
       signal.throwIfAborted()
       const currentRun = taskStateOf(apparatus, task.taskId).runs[request.runId]!
       if (currentRun.status !== 'running' || currentRun.stage !== 'working')
         refuse('illegal-transition', 'evaluation requires its working RSI Run')
-      if (decision.winner !== null && suite === undefined)
-        await releaseMethod(
-          apparatus, options.seams, parent, `round:${round.roundId}:release`, { roundId: round.roundId }, signal, )
       signal.throwIfAborted()
       await taskFact(`round-settled:${round.roundId}`, 'rsi/round-settled', task.taskId, {
         roundId: round.roundId, status: 'completed', })

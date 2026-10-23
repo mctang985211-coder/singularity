@@ -3,7 +3,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cpus, platform, arch, release, totalmem, availableParallelism } from 'node:os'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { AgentPresetRegistry } from '@deepseek-ai/dsh-agent-preset-registry'
+import { livePresetMounts, type AgentPresetRegistry } from '@deepseek-ai/dsh-agent-preset-registry'
+import type { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { ChildSessionSeams } from '../../src/runtime/child-session.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
@@ -33,6 +34,8 @@ export async function executionProfile(parent: Agent, seams: ChildSessionSeams, 
     try { return await action() } catch { missing.push(name); return null }
   }
   const registry = (seams.get?.('agentPresets') ?? seams.agentPresets) as AgentPresetRegistry | undefined
+  const loader = seams.get?.('loader') as Loader | undefined
+  const mounted = new Map<string, Set<string>>()
   const config = parent.session.requestHeader()?.config ?? parent.options
   const provider = await capture('provider configuration', async () => {
     const llm = seams.get?.('llm') as LlmRuntime | undefined
@@ -51,22 +54,45 @@ export async function executionProfile(parent: Agent, seams: ChildSessionSeams, 
         systemPromptUpdate: model.systemPromptUpdate ?? null, toolUpdate: model.toolUpdate ?? null } }
   })
   const presets = await capture('mounted presets', async () => {
-    if (!registry) throw Error('missing preset registry')
+    if (!registry || !loader) throw Error('missing preset registry or host loader')
     const inventory = await registry.compositionInventory()
-    return Promise.all(['singularity-root', 'singularity-next', 'singularity-review'].map(async id => {
+    const mounts = livePresetMounts(loader.ctx.root.fiber)
+    const result = []
+    for (const id of ['singularity-root', 'singularity-next', 'singularity-review']) {
       const held = inventory.find(p => p.id === id)
       if (!held || held.broken || held.rows.some(r => r.enabled === 'conditional')) throw Error('unresolved preset')
-      return { id, declarationDigest: digestOf(await registry.readDocument(id)), rows: held.rows }
-    }))
+      const lease = await registry.acquireScope(id)
+      try {
+        const mount = mounts.find(m => m.key === lease.key)
+        if (!mount) throw Error('missing mounted preset')
+        const sources: { entryId: string; moduleName: string; path: string }[] = []
+        for (const entry of mount.tree.entries()) {
+          const name = entry.options.name
+          if (entry.options.group || entry.disabled || name === '@dangosys/dsh-singularity-next' || name.startsWith('@dangosys/dsh-singularity-next/')) continue
+          // Use the same ESM resolver and base as EntryTree.import, not assembly peers.
+          const base = entry.parent.tree.ctx.baseUrl!
+          const resolver = loader.internal
+          if (!resolver) throw Error('native ESM resolver unavailable')
+          const url = resolver.version === 'v1' ? (await resolver.resolve(name, base, {})).url
+            : resolver.resolveSync(base, { specifier: name, attributes: {} }).url
+          const path = url.startsWith('file:') ? fileURLToPath(url) : url
+          const roots = mounted.get(name) ?? new Set<string>()
+          roots.add(dirname(path))
+          mounted.set(name, roots)
+          sources.push({ entryId: entry.id, moduleName: name, path })
+        }
+        result.push({ id, declarationDigest: digestOf(await registry.readDocument(id)), rows: held.rows, sources })
+      } finally { await lease[Symbol.asyncDispose]() }
+    }
+    return result
   })
   const packages = new Set(['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-session',
     '@deepseek-ai/dsh-token-meter', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-llm-retry', '@deepseek-ai/dsh-subprocess',
-    ...presets?.flatMap(p => p.rows.filter(r => r.enabled === true && r.moduleName !== '@dangosys/dsh-singularity-next' &&
-      !r.moduleName.startsWith('@dangosys/dsh-singularity-next/')).map(r => r.moduleName)) ?? []])
+    ...mounted.keys()])
   const implementations: Record<string, string | null> = {}
   for (const name of [...packages].sort()) implementations[name] = await capture(name, async () => {
-    const entry = fileURLToPath(import.meta.resolve(name))
-    return treeDigest([dirname(entry)])
+    const roots = mounted.get(name) ?? new Set([dirname(fileURLToPath(import.meta.resolve(name)))])
+    return treeDigest([...roots].sort())
   })
   const runtimeDir = dirname(fileURLToPath(import.meta.url))
   const profile = {

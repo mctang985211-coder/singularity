@@ -10,9 +10,9 @@ import type { DriverOptions, TaskDriver } from './task-service.ts'
 export async function openDriver(options: DriverOptions): Promise<TaskDriver> {
   const runtime = await openDriverRuntime(options)
   const rsi = createRsiLifecycle(runtime)
-  const review = createReviewLifecycle(runtime, rsi.taskSignal)
   const release = createReleaseLifecycle(runtime)
-  const { service, execution } = createTaskLifecycle(runtime, review, rsi, release)
+  const review = createReviewLifecycle(runtime, rsi.taskSignal, release)
+  const { service, execution } = createTaskLifecycle(runtime, review, rsi)
   try { await seedMethod(runtime.apparatus, options.initialMethod) }
   catch (error) { await runtime.close(execution, rsi.cancellationReasons()); throw error }
   return { ...service, close: () => runtime.close(execution, rsi.cancellationReasons()) }

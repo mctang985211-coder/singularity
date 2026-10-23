@@ -35,7 +35,9 @@ node scripts/singularity.mjs env setup /path/to/request.md \
     model: my-model
 ```
 
-默认只生成同领域多任务的内容、验收标准、固定评分策略和供 Agent 试分的必要工具。任务直接放入 suite 的 contract，区分 evolve/validation/heldout 的 family 与 source；这些 contract 表达“做什么、怎样算完成”，不预先决定怎么求解。
+默认只将用户提供的同领域任务整理为内容、验收标准、固定评分策略和供 Agent 试分的必要工具。builder 不自行编造任务、family、独立性或用户尚未给出的设计目标；缺少任务定义或 split 覆盖时报告缺项。任务直接放入 suite 的 contract，区分 evolve/validation/heldout 的 family 与 source；这些 contract 表达“做什么、怎样算完成”，不预先决定怎么求解。
+
+用户参考资料在准备阶段进入：相关的公开技术文档放入只读 `references` 子树，case 特有的不可变资料作为声明并冻结摘要的 `inputs`。只建立必要索引，不默认复制整套 `.agents`，也不把其中角色、审批策略和旧工作流激活为节点指令；用户明确指定的强制交付条件应进入 contract。私有 validation/heldout 内容与答案不进入公共参考目录。具体芯片资料清单及四模型的统计限制见[启动说明](rsi-startup-and-chip-workloads.md)。
 
 用户未明确要求时，不生成 Method、Skill、TaskTemplate、decomposition、workflowGuidance、独立 root Task 文件、求解器、启动脚本或验证框架。领域声明仍名为 `task.json`；未使用的 `inputs`、`templates`、`verifiers` 可省略，不生成空占位资产。宿主已有空 Method seed，后续由 Singularity 自行探索 RSI。
 

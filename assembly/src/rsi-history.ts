@@ -43,6 +43,7 @@ export function searchView(apparatus: Apparatus, task: TaskState, cut = apparatu
     const round = rounds.get(request.roundId), baseline = evaluations.get(`${request.roundId}:bootstrap:evaluation`)
     if (request.status !== 'completed' || round?.decision === undefined ||
       round.submissions.length !== request.candidates.length || !complete(baseline)) return true
+    if (round.decision.winner !== null && baseline.matrix === undefined) return true
     return round.submissions.some(submission => {
       const candidate = evaluations.get(submission.evaluationId)
       return !complete(candidate) || (baseline.matrix !== undefined && pairedReport(baseline, candidate).interval === null)

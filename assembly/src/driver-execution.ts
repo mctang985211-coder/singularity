@@ -33,19 +33,17 @@ import { snapshotOf } from './snapshot.ts'
 import { submit } from './submission.ts'
 import { decompose, propose, retry } from './surfaces.ts'
 
-import type { ReleaseLifecycle } from './driver-release.ts'
 import type { ReviewLifecycle } from './driver-review.ts'
 import type { RsiLifecycle } from './driver-rsi.ts'
 import type { DriverRuntime } from './driver-runtime.ts'
 import type { TaskDriver } from './task-service.ts'
 
 export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: ReviewLifecycle,
-  rsi: RsiLifecycle, releaseLifecycle: ReleaseLifecycle) {
+  rsi: RsiLifecycle) {
   const { apparatus, options, controller, backgroundErrors, tasks, registry, owner, parentOf,
     nativeEvents, work, scheduler, evaluation } = runtime
   const { acceptanceFor, restoreJudgement } = reviewLifecycle
   const { taskSignal, rsiStatus, closeRoot, stopRsiWork, rsiRootOf, schedule } = rsi
-  const { validateChampion } = releaseLifecycle
   // A live projection, never a persisted counter. Follow acceptance evidence
   // branches back to the same root whose native sessions the guard counts.
   const stepBudget: TaskDriver['stepBudget'] = async (agentId, session) => {
@@ -112,7 +110,7 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
       if (review !== undefined) await scheduler.advance(review.reviewId)
       if (task === undefined || taskSignal(task.taskId).aborted) return
       const run = Object.values(task.runs).at(-1)
-      if (run?.status !== 'running' || run.stage !== 'working') return
+      if (run?.status !== 'running') return
       declareCaller(apparatus, task.responsibility!.agentId)
       await apparatus.tasks
         .forAgent(task.responsibility!.agentId)
@@ -432,7 +430,6 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
                 { ...input, taskId: task.taskId },
                 signal,
                 acceptanceFor(agent),
-                () => validateChampion(taskStateOf(apparatus, task.taskId), agent, signal),
               )
             } finally {
               const root = rsiRootOf(task.taskId)

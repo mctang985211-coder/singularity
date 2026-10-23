@@ -32,6 +32,7 @@ const yaml = nativeRequire('js-yaml')
 const packageRequire = createRequire(join(root, 'host.mjs'))
 const { BasicCompactionEngine } = await dshModule('@deepseek-ai/dsh-compaction-basic')
 const { mountCampaignMemory } = await import(pathToFileURL(packageRequire.resolve('@dangosys/dsh-singularity-next')).href)
+const { executionProfile } = await import(pathToFileURL(join(checkout, 'assembly/src/execution-profile.ts')).href)
 const declarations = []
 for (const id of ['singularity-root', 'singularity-next', 'singularity-review', 'singularity-improve']) {
   const patch = yaml.load(await readFile(join(checkout, 'assembly/presets', id + '.patch.yml'), 'utf8'), { schema: entryListSchema })
@@ -121,6 +122,14 @@ try {
     results.push({ id, registered: compact.constructor.name, durableSummaries: summaries.length })
   }
   assert.equal(compactors.size, 4)
+  const profile = await executionProfile(ctx.agents.get(SessionId('singularity-root')), { get: name => ctx.get(name) },
+    { dir: root, references: [], verifiers: [] }, 1)
+  assert.equal(profile.complete, true, JSON.stringify(profile.missing))
+  assert.equal(profile.profile.presets.length, 3)
+  for (const name of ['@deepseek-ai/dsh-compaction-basic', '@deepseek-ai/dsh-command-compact', '@deepseek-ai/dsh-compaction-tool-result-pruner']) {
+    assert.match(profile.profile.implementations[name], /^[a-f0-9]{64}$/)
+    assert(profile.profile.presets.every(preset => preset.sources.some(source => source.moduleName === name)), name)
+  }
   assert.equal(ctx.get('compaction'), undefined)
   assert.equal(ctx.get('toolResultPruner'), undefined)
   assert.equal(model.requests.filter(request => request.purpose === 'compaction').length, 4)

@@ -41,7 +41,8 @@ function fixture() {
   const baseline = evaluation(h0, 100), candidate = evaluation(h1, 50)
   const evaluations = new Map([[baseline.evaluationId, baseline], [candidate.evaluationId, candidate]])
   let status = 'running', rootStatus = 'running'
-  const task = () => ({ taskId: 'campaign', transfer, runs: { analysis: { status, stage: 'working', relatedTo: { taskId: 'root', runId: 'business' } } } })
+  let stage = 'submitted'
+  const task = () => ({ taskId: 'campaign', transfer, runs: { analysis: { status, stage, relatedTo: { taskId: 'root', runId: 'business' } } } })
   const root = () => ({ taskId: 'root', runs: {}, rsi: { status: rootStatus } })
   const apparatus = { domain: { suite }, store: { load: () => ({ statesOf: (protocol: string) =>
     protocol === TASK_PROTOCOL ? new Map([['campaign', task() as unknown as TaskState]]) : protocol === MEASURE_PROTOCOL ? evaluations : new Map(),
@@ -49,14 +50,14 @@ function fixture() {
   }) } } as unknown as Apparatus
   ports.draft.mockResolvedValue({ payload: { revisionId: h1.revisionId, contentDigest: h1.digest, draftDigest: 'f'.repeat(64),
     basis: { kind: 'decision', evaluationId: candidate.evaluationId, expected: h0.revisionId } } })
-  return { baseline, candidate, fail: () => { status = 'failed' }, endRoot: (outcome: string) => { rootStatus = outcome },
+  return { baseline, candidate, apparatus, fail: () => { status = 'failed' }, authoring: () => { stage = 'working' }, endRoot: (outcome: string) => { rootStatus = outcome },
     change: (edit: Partial<TransferState>) => { transfer = { ...transfer, ...edit } },
     release: () => releaseMethod(apparatus, {}, {} as never, 'release', { roundId }, new AbortController().signal) }
 }
 
 beforeEach(() => {
   Object.values(ports).forEach(port => port.mockReset())
-  ports.review.mockResolvedValue({ reviewId: 'independent-publication-review' })
+  ports.review.mockResolvedValue({ reviewId: 'independent-publication-review', verdict: 'pass' })
 })
 
 it('publishes only after recomputing independent paired evidence for the frozen champion', async () => {
@@ -67,12 +68,33 @@ it('publishes only after recomputing independent paired evidence for the frozen 
   expect(ports.publish).toHaveBeenCalledWith(expect.objectContaining({ expected: 'h0', to: 'h1' }))
 })
 
+it('refuses publication without a suite even when a local round declares a winner', async () => {
+  const held = fixture()
+  Object.assign(held.apparatus.domain, { suite: undefined })
+  await expect(held.release()).rejects.toThrow('publication requires a suite')
+  expect(ports.draft).not.toHaveBeenCalled()
+  expect(ports.review).not.toHaveBeenCalled()
+  expect(ports.publish).not.toHaveBeenCalled()
+})
+
+it('requires a sealed report before publication and retains a negative independent review without approving', async () => {
+  const held = fixture()
+  held.authoring()
+  await expect(held.release()).rejects.toThrow('publication requires its submitted RSI Run')
+  expect(ports.draft).not.toHaveBeenCalled()
+  const submitted = fixture()
+  ports.review.mockResolvedValue({ reviewId: 'negative-publication-review', verdict: 'partial' })
+  await expect(submitted.release()).resolves.toEqual({ revision: h1, approvalId: null })
+  expect(ports.approve).not.toHaveBeenCalled()
+  expect(ports.publish).not.toHaveBeenCalled()
+})
+
 it.each(['entry', 'review', 'approval'] as const)('refuses publication when its analysis ends at %s', async boundary => {
   const held = fixture()
   if (boundary === 'entry') held.fail()
-  if (boundary === 'review') ports.review.mockImplementation(async () => { held.fail(); return { reviewId: 'completed-review' } })
+  if (boundary === 'review') ports.review.mockImplementation(async () => { held.fail(); return { reviewId: 'completed-review', verdict: 'pass' } })
   if (boundary === 'approval') ports.approve.mockImplementation(async () => { held.fail() })
-  await expect(held.release()).rejects.toThrow('publication requires its working RSI Run')
+  await expect(held.release()).rejects.toThrow('publication requires its submitted RSI Run')
   expect(ports.publish).not.toHaveBeenCalled()
 })
 
