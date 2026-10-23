@@ -46,15 +46,17 @@ root 在合同证据足够时选择 verified direct-child 产物提交，组合�
 
 没有把无 suite 的既有发布路径冒充迁移保证，也没有补做完整 pilot、跨机器复现或硬件消融。这些仍是原计划中明确的缺口。
 
-## 环境准备的有限交付
+## 环境准备的最小边界
 
-`scripts/env-setup.mjs` 将 setup 模板从约 4067 降至 2024 UTF-8 bytes（约减半）；默认源码地图从 17 个入口缩到 8 个，移除长篇计划、宿主实现和 CLI 源码。只按需读取有关接口。env setup 仍是一个普通 DSH headless session，不增加调度器。
+当前默认只准备同领域多任务内容、验收标准、评分策略和 Agent 试分工具。任务 contract 放在 suite 中，评分规则和调用帮助归 scorer；不预设 Method、Skill、TaskTemplate、任务分解、独立 Task、求解器或启动/验证脚手架。未用的 inputs/templates/verifiers 可省略，显式 null 等错误值仍拒绝；宿主直接提供空 Method seed，由 Singularity 自行探索 RSI。
 
-生成包须将加权折中写清楚，单项硬门写入 criteria；不要求全局最优、持续超过最新分数或成功变体配额。baseline、不同有效候选和无效候选足以验证评分区分。root 协调、worker 执行；领域资产不复制系统协议；验证通过后写 review/manifest 并结束。审核文件只保留简短结果和限制，公式/算例与源码来源引用已有包文件和 context map，删除重复抄写要求。启动示例明确 `evaluationParallelism=1` 是 host config 字段。凭据未修改。
+删除默认 `SETUP_REVIEW.md` 和重复评分手册；检查结果留在原生 session 最终答复与 `.env-setup/run.json`。manifest 只要求 version/domain/files；旧 task/review 字段可选且仍须列入 files。既有路径、摘要冻结与日志隔离保留，没有新增验证框架或调度器。详见 [env setup](env-setup.md)。
+
+按同一 WORKSPACE/REQUEST 占位和 checkout 路径计算：`4518d0c` 的提示/接口材料 2040 + 3062 = 5102 bytes；`232ec46` 为 1397 + 2314 = 3711 bytes，减少约 27%。源码入口从八个缩至四个，附最小结构与独立验收语义供直接使用，扩展时才查源码。该数字不包含原生 DSH 提示和历史消息，不等于完整请求成本。
 
 ## 体积与验证范围
 
-同一 DSH 装配下，仅统计 Singularity policy 与自有工具 schema 的 JSON UTF-8 bytes，不含原生工具、历史消息、dispatch 或 runtime context：
+以下为 `4518d0c` 在同一 DSH 装配下的统计，仅统计 Singularity policy 与自有工具 schema 的 JSON UTF-8 bytes，不含原生工具、历史消息、dispatch 或 runtime context：
 
 | 角色 | 原 policy + tools | 新 policy + tools |
 |---|---:|---:|
@@ -65,18 +67,31 @@ root 在合同证据足够时选择 verified direct-child 产物提交，组合�
 
 review 的静态片段略增，因为原本散落在 dispatch/context 的用途区分被集中到 policy；这些外部重复文本已经删除。该表不是完整请求 token 数，也不证明运行成本同比下降。
 
-本轮修改涉及的生产源码、preset 和 setup 入口合计净删 11891 bytes（包含新增的单一 policy 文件；不含测试、文档及构建产物）。复杂 chip 优化没有重跑，不能据此声称已提高其收束率或得到 RSI 领域收益。
+`4518d0c` 相对本轮检查点的生产源码、preset 和 setup 入口合计净删 11891 bytes（包含新增的单一 policy 文件；不含测试、文档及构建产物）。复杂 chip 优化没有重跑，不能据此声称已提高其收束率或得到 RSI 领域收益。
 
 ## 新运行与工程验证
 
-证据根目录：`/home/ROXY/singularity-next/simplification-validation-20261023/`。模型沿用现有 LiteLLM 路由 `cn:deepseek-v4.1-flash`，评测并行度 1；没有修改凭据，也没有启动并行评测。
+较早证据位于 `/home/ROXY/singularity-next/simplification-validation-20261023/`：`business-r4` 的 root `task-27b2f07e820e9da2` 自主委派一子任务并通过独立 root 验收，合计 33 步；各角色收到共享预算，显式/自动 mem 均为零。此前创建时序、persona 与手写启动参数失败保留在相邻目录。旧 setup 使用中间版本，80 步/118 次调用、20,673B 审核文件、12,803B 验证脚本、15 个文件且无 suite；其源码漂移见 `setup-source-drift.json`，不能充当固定源码的前后对照。
 
-`business-r4/` 使用主仓显式参考领域，learning=false，新 control `simplification-business-r4-20261023`。根 `task-27b2f07e820e9da2` 自主委派一个完整子任务，子产物独立 verified 后调用 root submit，再通过独立 root acceptance，于 cutoff30 closed accepted。`report.json` 与 `native-evidence.json` 记录 root 10、worker 6、child review 7、root review 10，合计 33 个原生步骤（含提交后的终局回答，不等同封存 comparison cost）。所有角色实际输入均出现共享预算，显式 mem 调用与自动父摘要均为零。完成后停止本次拥有的临时宿主，保留会话与证据。
+本次证据位于 `/home/ROXY/singularity-next/minimal-env-validation-20261023/`。沿用既有 LiteLLM 模型/凭据，评测并行度 1。相同的小型 JSON 聚合请求产生 evolve 求和、validation 去重计数、heldout 最大值三个独立 family/source，各一 trial。两轮 builder 自主退出，均未批准或自行部署：
 
-这只是一个小业务交付闭环，没有执行模型 RSI、硬件搜索或统计对照，不能从一次成功推导成本降低或长期收束改善。此前失败的 `business/`、`business-r3/` 保留原记录：分别暴露创建时序与 persona schema 错误；另有一次手写启动脚本漏传 contractFor 的 goal，属于实验脚本错误。
+| 实跑版本 | session | 步数/工具调用 | manifest 文件/总字节 |
+|---|---|---:|---:|
+| `96523dc` | `session-26671c46-01d1-489d-b714-14a2ef591a63` | 56 / 77 | 9 / 22179 |
+| `232ec46` | `session-c82d7ccb-f77f-4f2b-aecf-a155c87f031e` | 36 / 58 | 7 / 8818 |
 
-`environment/` 的普通 setup session `session-d68fc320-6016-42d1-a209-02abfa305fe3` 自主退出，exitCode=0，approval=pending；没有启动宿主、Task 或 RSI。它用了 80 步、118 次工具调用，审核文档 20673 bytes、验证脚本 12803 bytes，仍明显偏重。独立重跑 `node verify.mjs` 通过 manifest、domain/contract/method、verifier 的正反 selftest 和评分样例：464B 基线质量 1，107B 有效候选质量 4.336449，123B 无效候选为 business-failure。15 个包文件无符号链接，未批准或部署；没有 suite，不提供迁移证据。
+第二轮包缩小约 60%，只含声明、suite、三个输入、score CLI 和 manifest，没有 Method/Skill/TaskTemplate、独立 Task、审核手册或启动/验证脚本。规则与帮助放在 score CLI。两次输入字节和模型轨迹不同，第一轮退出前 wrapper 曾继续编辑（已载入函数、保存的提示和四个映射接口未变），第二轮另有原生 300 秒 stream idle timeout 重试；这些是描述性记录，不是固定源码的严格成本 A/B 对照。逐文件摘要见 `builder-v2-evidence.json`，最终七个文件摘要均未改变。独立 `loadDomain/matrixOf` 与三任务正反/缺失试分通过，结果分别为 10、4、-3，正确 1、错误/缺失 0，见 `independent-score-check.json`。
 
-这次 setup 启动于约 3 KB 提示、15 个源码入口的中间版本。其读源码和反复润色记录促成最终 2 KB / 8 入口及删除审核文档重复抄写要求；最终版本只完成工程检查，尚无新的模型运行成本或收束率数据。期间本轮代码工作也改变了 source map 中的 `assembly/src/index.ts` 和 `docs/env-setup.md`，格式接口未变；生成审核的来源说明没有完整覆盖宿主源码漂移，以实验根的 `setup-source-drift.json` 为准。不能把这次并行开发中的 setup 当作固定源码下的前后对照。
+`runtime/` 使用 `232ec46` 启动临时宿主，不配置 methodFile；宿主创建空 seed（`empty-seed.json`）。CLI suite 只启动第一个 evolve 业务 root `task-89b90105488b2bbd`；它委派一个 child，实际调用公共 CLI，再主动提交并独立 accepted。业务 root、child、两次独立验收的原生步骤分别为 9、6、8、8；各角色收到共享步数，显式与自动 mem 均为零。封存原生轨迹 472919B，RSI subject 9231B，轨迹正文按需读取。
 
-工程检查：build 通过；93 文件、1027 项测试通过；修正 persona 后另行通过真实 persona 的原生装配测试；最终 setup 模板的 6 项入口测试通过；最终 8 项 gates 通过；`git diff --check` 通过。测试中的 TypeScript mutation 反例会刻意输出类型错误，测试自身均通过。这些结果只证明覆盖的工程行为。
+RSI 实跑暴露 authoring 规则页缺少可填写模板：Agent 先读规则，后来还跨文件查格式，直到读取默认 search 才取得模板。`19884ec` 把模板和规则合并到同一按需页，默认 search 只给 authoring ref，静态 authoring 读取也不再计算反馈。原生结构集成测试从该分页页取得模板、填入真实证据并通过提案准入；该页面调整尚未新跑模型，不据此宣称步数减少。
+
+同一运行还暴露 capabilities 参数歧义：root 为普通 CLI 搜索不存在的 Method 绑定名。最后只删短 `skills`/`capabilities` 的 DSH schema 说明，明确它们可选，原生工具和公开 CLI 无需绑定；没有增加默认 Method、全局提示或 helper。运行进程仍使用启动时已载入的 `232ec46`，后续页面和 schema 调整只做工程回归，不能宣称其模型收益已验证。
+
+RSI `improve-2afd2edddcec458835c98e11` 冻结一个候选、执行一轮 evolve 对照后主动提交报告，没有为用完六槽而继续添加资产。候选只增加 1011B workflowGuidance，没有 Skill/Tool/模板。baseline/candidate 各一个 trial，均 accepted、quality=1，封存成本分别为 411639/198927 tokens；这个点估计不能归因于修改。独立 reviewer 不收到 workflowGuidance，其成本差占总差约 44%，单 family/单 trial 也不足 paired 统计门槛。
+
+封存后迁移检查实际因九个原生插件缺少 execution-profile 实现证据而返回 `insufficient-evidence`，尚未执行 validation/heldout；不能把它描述成已完成迁移测试或只因样本少拒绝发布。空 seed 仍为发布指针，候选未发布。
+
+最终 cutoff118，报告独立验收 `review-94c8667bb13e2a80d215978a` 完成并判 partial：作者把 reviewer 成本差的 43.8% 写成“most”，又把封存原业务相对重测 baseline 的 39.2% 降幅写成 20.6%。宿主据此将 improve 和 root RSI 标为 failed，业务 root 仍为 verified；没有将主动收尾或单轮成本点估计冒充 RSI 成功。验收用了 31 个原生步骤，仍有明显取证成本，本轮没有通过放松准确性要求消除它。完整状态、原生日志与最终检查保留在 `runtime/{snapshot,report,native-evidence,final-check}.json`；所有 Task 终局后停止本次自建临时宿主，launcher exit 0，未修改原始报告或旧实验。
+
+工程验证：`232ec46` 全量 93 文件/1033 测试通过；后续 authoring 调整的 4 文件/73 项回归及最后 schema 调整的 1 文件/15 项回归通过，最终 build、8 项 gates 与 diff 检查通过。类型 mutation 反例的 TS 错误属于测试预期。上述 suite 是加载、评分与收尾冒烟，不满足迁移发布所需样本，也未重跑复杂 chip 优化。

@@ -36,8 +36,8 @@ const contract = {
         digest: { type: 'string', required: true },
       },
     },
-    skills: { type: 'array', items: { type: 'string' }, description: 'Explicit pinned Skill names for this child; parent bindings are not inherited. Use a template contract or select relevant method.skills.' },
-    capabilities: { type: 'array', items: { type: 'string' }, description: 'Explicit capabilities or pinned method Tool names to bind to this child. Selected Skills also bind their requiredTools.' },
+    skills: { type: 'array', items: { type: 'string' }, description: 'Optional pinned Skill names; parent bindings are not inherited.' },
+    capabilities: { type: 'array', items: { type: 'string' }, description: 'Optional pinned Skill capabilities or method Tool names; omit for native tools/public CLIs. Skills bind requiredTools.' },
     inputs: {
       type: 'array',
       required: true,
