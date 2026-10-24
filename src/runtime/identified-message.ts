@@ -21,9 +21,10 @@ export async function postIdentifiedMessage(
   const registry = (seams.get === undefined ? seams.agents : seams.get('agents')) as ChildSessionSeams['agents']
   const sessionId = typeof target === 'string' ? SessionId(target) : target.session.id
   const agent = typeof target === 'string' ? registry?.get(sessionId) : target
+  // Flush guarantees this prefix. The running agent may append more events while it drains.
+  const eventCount = agent === undefined ? undefined : Number(agent.session.seq)
   if (agent !== undefined && !(await sessions.flush(agent.session)))
     refuse('write-not-durable', `session "${sessionId}" has no durability listener`)
-  const eventCount = agent === undefined ? undefined : Number(agent.session.seq)
   const handle = await persistence.open(sessionId, 'read')
   const sourceDigest = digestOf(message.source)
   const contentDigest = digestOf(message.content)

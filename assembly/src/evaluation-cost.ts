@@ -1,5 +1,5 @@
 import { SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
+import { SessionPersistenceNotFoundError, type SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import type { TokenUsageProjection } from '@deepseek-ai/dsh-token-meter/client'
 import type {} from '@deepseek-ai/dsh-compaction'
 import { REVIEW_PROTOCOL, REVIEW_VERSION, type ReviewRun } from '../../src/review/protocol.ts'
@@ -233,7 +233,14 @@ export async function workflowSteps(
   for (const id of taskSessionsOf(apparatus, rootId)) {
     let events = liveEvents(id)
     if (events === undefined) {
-      const handle = await apparatus.persistence.open(SessionId(id), 'read')
+      let handle: SessionHandle
+      try {
+        handle = await apparatus.persistence.open(SessionId(id), 'read')
+      } catch (error) {
+        // Run registration precedes native session creation. Such a sibling has no steps yet.
+        if (error instanceof SessionPersistenceNotFoundError) continue
+        throw error
+      }
       try {
         events = (await handle.read()).events
       } finally {
