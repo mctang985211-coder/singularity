@@ -99,55 +99,65 @@ function servePanel(ctx: Context): () => void {
 
 export function apply(ctx: Context): void {
   ctx.effect(() => servePanel(ctx))
-  for (const path of [TASKS_PATH, RSI_MEMORY_PATH, CANCEL_PATH]) ctx.effect(() =>
-    ctx.webServer.register({
-      kind: 'exact',
-      path,
-      handler: async (req: IncomingMessage, res: ServerResponse) => {
-        const fence = fenceOf(ctx)
-        if (fence === undefined) {
-          sendJson(res, 403, {
-            code: 'unfenced-route',
-            message: 'this composition provides no connection service, so no request can be shown to be authenticated; the task-read route is not served without a fence',
-          })
-          return
-        }
-        const rejection = fence.requestRejection(req)
-        if (rejection !== undefined) {
-          res.statusCode = rejection
-          res.end()
-          return
-        }
-        const method = path === TASKS_PATH ? 'GET' : 'POST'
-        if (req.method !== method) {
-          res.statusCode = 405
-          res.setHeader('allow', method)
-          res.end()
-          return
-        }
-        if (path === RSI_MEMORY_PATH || path === CANCEL_PATH) {
-          try {
-            const chunks: Buffer[] = []
-            for await (const chunk of req) chunks.push(Buffer.from(chunk))
-            const input = record(JSON.parse(Buffer.concat(chunks).toString('utf8')), 'service request')
-            if (path === CANCEL_PATH) {
-              assertClosedKeys(input, ['sessionId', 'taskId'], 'cancellation')
-              sendJson(res, 200, await ctx.singularity.cancel({ sessionId: nonEmpty(input['sessionId'], 'sessionId'),
-                ...(input['taskId'] === undefined ? {} : { taskId: nonEmpty(input['taskId'], 'taskId') }) }))
-            } else {
-              assertClosedKeys(input, ['sessionId', 'previousRootId'], 'RSI memory link')
-              await ctx.singularity.inheritRsi({ sessionId: nonEmpty(input['sessionId'], 'sessionId'),
-                previousRootId: nonEmpty(input['previousRootId'], 'previousRootId') })
-              sendJson(res, 200, { status: 'linked' })
-            }
-          } catch (error) {
-            if (!(error instanceof SyntaxError || error instanceof ProtocolRefusal)) throw error
-            sendJson(res, 400, { message: String(error) })
+  for (const path of [TASKS_PATH, RSI_MEMORY_PATH, CANCEL_PATH])
+    ctx.effect(() =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path,
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          const fence = fenceOf(ctx)
+          if (fence === undefined) {
+            sendJson(res, 403, {
+              code: 'unfenced-route',
+              message:
+                'this composition provides no connection service, so no request can be shown to be authenticated; the task-read route is not served without a fence',
+            })
+            return
           }
-          return
-        }
-        sendJson(res, 200, await ctx.singularity.read())
-      },
-    }),
-  )
+          const rejection = fence.requestRejection(req)
+          if (rejection !== undefined) {
+            res.statusCode = rejection
+            res.end()
+            return
+          }
+          const method = path === TASKS_PATH ? 'GET' : 'POST'
+          if (req.method !== method) {
+            res.statusCode = 405
+            res.setHeader('allow', method)
+            res.end()
+            return
+          }
+          if (path === RSI_MEMORY_PATH || path === CANCEL_PATH) {
+            try {
+              const chunks: Buffer[] = []
+              for await (const chunk of req) chunks.push(Buffer.from(chunk))
+              const input = record(JSON.parse(Buffer.concat(chunks).toString('utf8')), 'service request')
+              if (path === CANCEL_PATH) {
+                assertClosedKeys(input, ['sessionId', 'taskId'], 'cancellation')
+                sendJson(
+                  res,
+                  200,
+                  await ctx.singularity.cancel({
+                    sessionId: nonEmpty(input['sessionId'], 'sessionId'),
+                    ...(input['taskId'] === undefined ? {} : { taskId: nonEmpty(input['taskId'], 'taskId') }),
+                  }),
+                )
+              } else {
+                assertClosedKeys(input, ['sessionId', 'previousRootId'], 'RSI memory link')
+                await ctx.singularity.inheritRsi({
+                  sessionId: nonEmpty(input['sessionId'], 'sessionId'),
+                  previousRootId: nonEmpty(input['previousRootId'], 'previousRootId'),
+                })
+                sendJson(res, 200, { status: 'linked' })
+              }
+            } catch (error) {
+              if (!(error instanceof SyntaxError || error instanceof ProtocolRefusal)) throw error
+              sendJson(res, 400, { message: String(error) })
+            }
+            return
+          }
+          sendJson(res, 200, await ctx.singularity.read())
+        },
+      }),
+    )
 }

@@ -148,7 +148,10 @@ export class MemoryLog {
       // The kind gate applies to adopting too: a log written by a build that knew a kind this one
       // does not is refused by name, never skipped and never reinterpreted.
       const rule = registry.ruleFor(checked.protocol, checked.version, checked.kind)
-      const payload = rule.parse(checked.payload, `${checked.protocol}@${checked.version} ${checked.kind} #${checked.seq}`)
+      const payload = rule.parse(
+        checked.payload,
+        `${checked.protocol}@${checked.version} ${checked.kind} #${checked.seq}`,
+      )
       log.#apply(checked, payload, log.#advance(checked, payload))
     }
 
@@ -214,7 +217,8 @@ export class MemoryLog {
     })
     const recorded = this.#commands.get(input.commandId)
     if (recorded !== undefined) {
-      if (recorded.requestDigest === requestDigest) return { envelope: recorded.envelope as Envelope<Payload>, fresh: false }
+      if (recorded.requestDigest === requestDigest)
+        return { envelope: recorded.envelope as Envelope<Payload>, fresh: false }
       refuse(
         'command-conflict',
         `command ${JSON.stringify(input.commandId)} already committed ${recorded.envelope.protocol}/${recorded.envelope.kind} #${recorded.envelope.seq} for a different request`,
@@ -313,7 +317,8 @@ export class MemoryLog {
    * a cut never change, so the value read at that cut is the value it will always read.
    */
   stateAt<State>(protocol: string, version: number, subject: string, cut: number): State | undefined {
-    if (cut >= this.#entries.length) return this.#states.get(stateKey(protocol, version))?.get(subject) as State | undefined
+    if (cut >= this.#entries.length)
+      return this.#states.get(stateKey(protocol, version))?.get(subject) as State | undefined
     return foldSubject<State>(this.#registry, this.#entries.slice(0, cut), protocol, version, subject)
   }
 

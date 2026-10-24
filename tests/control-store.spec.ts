@@ -31,13 +31,7 @@ import {
   type ControlEventData,
   type ControlStoreOptions,
 } from '../src/control/session-store.ts'
-import {
-  SCHEDULER_ROLE,
-  TASK_KINDS,
-  TASK_PROTOCOL,
-  TASK_VERSION,
-  type TaskState,
-} from '../src/task/protocol.ts'
+import { SCHEDULER_ROLE, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type TaskState } from '../src/task/protocol.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
 import { SUBJECTS, TASK_ID, contract, taskRegistry } from './task-fixtures.ts'
 
@@ -66,7 +60,11 @@ async function deployment(): Promise<Deployment> {
   return live
 }
 
-function optionsFor(live: Deployment, controlId: string, registry: ProtocolRegistry = taskRegistry()): ControlStoreOptions {
+function optionsFor(
+  live: Deployment,
+  controlId: string,
+  registry: ProtocolRegistry = taskRegistry(),
+): ControlStoreOptions {
   return { persistence: live.persistence, controlId, registry, subjects: SUBJECTS }
 }
 
@@ -78,7 +76,11 @@ async function storedControlEvents(root: string): Promise<Record<string, unknown
     for (const line of (await readFile(join(root, file), 'utf8')).split('\n')) {
       if (line.trim() === '') continue
       const parsed: unknown = JSON.parse(line)
-      if (parsed !== null && typeof parsed === 'object' && (parsed as Record<string, unknown>)['type'] === CONTROL_EVENT_TYPE)
+      if (
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        (parsed as Record<string, unknown>)['type'] === CONTROL_EVENT_TYPE
+      )
         events.push(parsed as Record<string, unknown>)
     }
   }
@@ -93,7 +95,9 @@ async function plantControlEvent(live: Deployment, controlId: string, data: unkn
     createdAt: Date.now(),
     isSeeded: false,
   })
-  await handle.append([{ type: CONTROL_EVENT_TYPE, seq: SessionSeq(0), time: Date.now(), data: data as ControlEventData, ignorable: true }])
+  await handle.append([
+    { type: CONTROL_EVENT_TYPE, seq: SessionSeq(0), time: Date.now(), data: data as ControlEventData, ignorable: true },
+  ])
   await handle.flush()
   await handle.close()
 }
@@ -125,9 +129,11 @@ const PROBE_V1: ProtocolSpec<{ readonly numbers: readonly number[] }> = {
       nested: {},
       emitter: 'writer',
       parse: (raw, where) => {
-        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) refuse('malformed-payload', `${where} must be an object`)
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
+          refuse('malformed-payload', `${where} must be an object`)
         const n = (raw as Record<string, unknown>)['n']
-        if (typeof n !== 'number' || !Number.isFinite(n)) refuse('malformed-payload', `${where}.n must be a finite number`)
+        if (typeof n !== 'number' || !Number.isFinite(n))
+          refuse('malformed-payload', `${where}.n must be a finite number`)
         return { n }
       },
       reduce: (state, _envelope, payload) => ({ numbers: [...state.numbers, payload.n] }),
@@ -167,14 +173,21 @@ describe('the control store over a real session', () => {
     // members, carrying the sealed envelope under the first sequence of our own chain.
     const stored = await storedControlEvents(live.root)
     const carried = ((stored[0]?.['data'] ?? {}) as ControlEventData).payload
-    expect([stored.length, stored[0]?.['ignorable'], Object.keys((stored[0]?.['data'] ?? {}) as ControlEventData).sort(), carried.digest, carried.seq])
-      .toEqual([1, true, ['kind', 'payload', 'protocol', 'version'], admitted.digest, 0])
+    expect([
+      stored.length,
+      stored[0]?.['ignorable'],
+      Object.keys((stored[0]?.['data'] ?? {}) as ControlEventData).sort(),
+      carried.digest,
+      carried.seq,
+    ]).toEqual([1, true, ['kind', 'payload', 'protocol', 'version'], admitted.digest, 0])
 
     // A second store over the same session adopts the same fact and folds the same state.
     const successor = await ControlSessionStore.open(optionsFor(live, 'graph-1'))
     const adopted = successor.load()
-    expect([adopted.entries().map(entry => entry.digest), adopted.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest])
-      .toEqual([[admitted.digest], before.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest])
+    expect([
+      adopted.entries().map(entry => entry.digest),
+      adopted.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest,
+    ]).toEqual([[admitted.digest], before.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest])
     await successor.close()
   })
 
@@ -217,12 +230,22 @@ describe('the control store over a real session', () => {
       {
         id: 'unknown-kind',
         code: 'unknown-kind',
-        data: { protocol: CONTROL_PROTOCOL, version: CONTROL_VERSION, kind: 'task/slammed', payload: plantedEnvelope('task/slammed', TASK_VERSION) },
+        data: {
+          protocol: CONTROL_PROTOCOL,
+          version: CONTROL_VERSION,
+          kind: 'task/slammed',
+          payload: plantedEnvelope('task/slammed', TASK_VERSION),
+        },
       },
       {
         id: 'unknown-version',
         code: 'version-mismatch',
-        data: { protocol: CONTROL_PROTOCOL, version: CONTROL_VERSION, kind: TASK_KINDS.admitted, payload: plantedEnvelope(TASK_KINDS.admitted, TASK_VERSION + 1) },
+        data: {
+          protocol: CONTROL_PROTOCOL,
+          version: CONTROL_VERSION,
+          kind: TASK_KINDS.admitted,
+          payload: plantedEnvelope(TASK_KINDS.admitted, TASK_VERSION + 1),
+        },
       },
       {
         id: 'unknown-field',
@@ -248,7 +271,12 @@ describe('the control store over a real session', () => {
       {
         id: 'kind-mismatch',
         code: 'malformed-payload',
-        data: { protocol: CONTROL_PROTOCOL, version: CONTROL_VERSION, kind: 'run/started', payload: plantedEnvelope(TASK_KINDS.admitted, TASK_VERSION) },
+        data: {
+          protocol: CONTROL_PROTOCOL,
+          version: CONTROL_VERSION,
+          kind: 'run/started',
+          payload: plantedEnvelope(TASK_KINDS.admitted, TASK_VERSION),
+        },
       },
     ]
 
@@ -260,7 +288,9 @@ describe('the control store over a real session', () => {
 
     // The refused open released the write lease: the next attempt refuses the same record by name
     // rather than reporting an owned session.
-    expect((await asyncRefusalOf(() => ControlSessionStore.open(optionsFor(live, 'unknown-kind')))).code).toBe<RefusalCode>('unknown-kind')
+    expect(
+      (await asyncRefusalOf(() => ControlSessionStore.open(optionsFor(live, 'unknown-kind')))).code,
+    ).toBe<RefusalCode>('unknown-kind')
   })
 
   it('refuses a payload whose content identity JSON could not round-trip, before anything is written', async () => {
@@ -271,7 +301,14 @@ describe('the control store over a real session', () => {
       registry: probeRegistry(),
       subjects: { writer: 'writer-1' },
     })
-    const request = { commandId: 'cmd-0', protocol: 'probe', version: 1, kind: 'noted', subject: 'probe-a', payload: { n: -0 } }
+    const request = {
+      commandId: 'cmd-0',
+      protocol: 'probe',
+      version: 1,
+      kind: 'noted',
+      subject: 'probe-a',
+      payload: { n: -0 },
+    }
 
     // `-0` and `0` are distinct numbers that JSON writes identically, so this stack refuses it in
     // the content identity itself — before DSH's materializer could ever see it — and records
@@ -280,7 +317,9 @@ describe('the control store over a real session', () => {
     const inMemoryRefusal = await asyncRefusalOf(() => inMemory.emit(request))
     expect([inMemoryRefusal.code, inMemory.entries().length]).toEqual(['not-lossless-json', 0])
     // DSH refuses it one layer down, for the same reason.
-    expect(() => materializeAppendBatch([{ type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: -0 } }])).toThrow(TypeError)
+    expect(() =>
+      materializeAppendBatch([{ type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: -0 } }]),
+    ).toThrow(TypeError)
 
     const storeRefusal = await asyncRefusalOf(() => store.emit(request))
     expect([storeRefusal.code, store.load().entries().length]).toEqual(['not-lossless-json', 0])
@@ -300,7 +339,14 @@ describe('the control store over a real session', () => {
       registry: probeRegistry(),
       subjects: { writer: 'writer-1' },
     })
-    const request = { commandId: 'cmd-lost', protocol: 'probe', version: 1, kind: 'noted', subject: 'probe-a', payload: { n: 1 } }
+    const request = {
+      commandId: 'cmd-lost',
+      protocol: 'probe',
+      version: 1,
+      kind: 'noted',
+      subject: 'probe-a',
+      payload: { n: 1 },
+    }
 
     const committed = await store.emit(request)
     // The reply never reached the caller; re-delivering the same command must return that fact and
@@ -310,7 +356,9 @@ describe('the control store over a real session', () => {
     expect(store.load().entries()).toHaveLength(1)
 
     // A different request under the same command id is refused, and appends nothing either.
-    expect((await asyncRefusalOf(() => store.emit({ ...request, payload: { n: 2 } }))).code).toBe<RefusalCode>('command-conflict')
+    expect((await asyncRefusalOf(() => store.emit({ ...request, payload: { n: 2 } }))).code).toBe<RefusalCode>(
+      'command-conflict',
+    )
     expect(await storedControlEvents(live.root)).toHaveLength(1)
     await store.close()
   })
@@ -323,13 +371,22 @@ describe('the control store over a real session', () => {
 
     // A role this deployment holds no trusted identity for cannot emit.
     const orphan = await ControlSessionStore.open({ ...optionsFor(live, 'no-subject'), subjects: {} })
-    const request = { commandId: 'cmd-orphan', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.admitted, subject: TASK_ID, payload: { contract: contract() } }
+    const request = {
+      commandId: 'cmd-orphan',
+      protocol: TASK_PROTOCOL,
+      version: TASK_VERSION,
+      kind: TASK_KINDS.admitted,
+      subject: TASK_ID,
+      payload: { contract: contract() },
+    }
     expect((await asyncRefusalOf(() => orphan.emit(request))).code).toBe<RefusalCode>('unknown-emitter-role')
     expect(await storedControlEvents(live.root)).toHaveLength(0)
     await orphan.close()
 
     // A closed store records nothing rather than writing after its lease is gone.
     await orphan.close()
-    expect((await asyncRefusalOf(() => orphan.emit({ ...request, commandId: 'cmd-closed' }))).code).toBe<RefusalCode>('write-not-durable')
+    expect((await asyncRefusalOf(() => orphan.emit({ ...request, commandId: 'cmd-closed' }))).code).toBe<RefusalCode>(
+      'write-not-durable',
+    )
   })
 })

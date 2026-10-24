@@ -40,13 +40,21 @@ import {
 let counter = 0
 function fact(kind: string, payload: unknown): EmitInput {
   counter += 1
-  return { commandId: `bind-${counter}`, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind, subject: TASK_ID, payload,
+  return {
+    commandId: `bind-${counter}`,
+    protocol: TASK_PROTOCOL,
+    version: TASK_VERSION,
+    kind,
+    subject: TASK_ID,
+    payload,
   }
 }
 
 const admitted = (value: TaskContract = contract()): EmitInput => fact(TASK_KINDS.admitted, { contract: value })
-const assigned = (agentId: string, agentIdentity: string): EmitInput => fact(TASK_KINDS.assigned, { agentId, agentIdentity })
-const reassigned = (from: string, agentId: string, agentIdentity: string): EmitInput => fact(TASK_KINDS.reassigned, { from, agentId, agentIdentity })
+const assigned = (agentId: string, agentIdentity: string): EmitInput =>
+  fact(TASK_KINDS.assigned, { agentId, agentIdentity })
+const reassigned = (from: string, agentId: string, agentIdentity: string): EmitInput =>
+  fact(TASK_KINDS.reassigned, { from, agentId, agentIdentity })
 const started = (): EmitInput => fact(TASK_KINDS.runStarted, { purpose: 'solve', runId: 'run-1', revision: REVISION })
 const INPUTS = [{ name: 'fixture/words.txt', digest: 'f'.repeat(64) }]
 const bubble = (inputs = INPUTS): EmitInput =>
@@ -70,7 +78,8 @@ const bubbleWith = (overrides: Record<string, unknown>): EmitInput =>
     conditions: BUBBLE_CONDITIONS,
     ...overrides,
   })
-const judged = (options: { runId?: string; inputDigests?: readonly { readonly name: string; readonly digest: string }[] } = {},
+const judged = (
+  options: { runId?: string; inputDigests?: readonly { readonly name: string; readonly digest: string }[] } = {},
 ): EmitInput =>
   fact(TASK_KINDS.evidenceProduced, {
     reviewId: 'review-1',
@@ -93,7 +102,9 @@ describe('only the agent currently answerable may start work', () => {
     const log = logWith()
     await log.emit(admitted())
     const refusal = await asyncRefusalOf(() => log.emit(started()))
-    expect(refusal).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining('no agent is responsible'),
+    expect(refusal).toMatchObject({
+      code: 'not-responsible',
+      detail: expect.stringContaining('no agent is responsible'),
     })
   })
 
@@ -161,7 +172,8 @@ describe('the execution context says what actually ran', () => {
     const state = foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     const recorded = state!.runs['run-1']!.bubble!
     expect(recorded.model).toEqual(model)
-    expect(contextDigestOf(recorded)).not.toBe(contextDigestOf({ ...recorded, model: { provider: 'provider', model: 'region/model/name' } }),
+    expect(contextDigestOf(recorded)).not.toBe(
+      contextDigestOf({ ...recorded, model: { provider: 'provider', model: 'region/model/name' } }),
     )
   })
 
@@ -174,7 +186,7 @@ describe('the execution context says what actually ran', () => {
     { provider: 'provider', model: '' },
     { provider: 3, model: 'model' },
     { provider: 'provider', model: 'model', route: 'extra' },
-  ])('refuses an incomplete or widened model route %j before committing', async (model) => {
+  ])('refuses an incomplete or widened model route %j before committing', async model => {
     const log = logWith()
     for (const command of [admitted(), assigned('agent-1', SCHEDULER), started()]) await log.emit(command)
     expect(await asyncRefusalOf(() => log.emit(bubbleWith({ model })))).toMatchObject({ code: 'malformed-payload' })
@@ -208,15 +220,20 @@ describe('the execution context says what actually ran', () => {
     expect(widened).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('closed') })
 
     // A tool's content identity is a digest, not a version string that happens to look right.
-    expect(refusalOf(() => log.emit(bubbleWith({ tools: [{ name: 'count', version: '1', implementationDigest: 'v1' }] }))).code,
+    expect(
+      refusalOf(() => log.emit(bubbleWith({ tools: [{ name: 'count', version: '1', implementationDigest: 'v1' }] })))
+        .code,
     ).toBe<RefusalCode>('malformed-payload')
     // Two tools under one name are one tool, and a repeated condition is stated once.
-    expect(refusalOf(() => log.emit(bubbleWith({ tools: [BUBBLE_TOOLS[0], BUBBLE_TOOLS[0]] }))).code).toBe<RefusalCode>('malformed-payload',
+    expect(refusalOf(() => log.emit(bubbleWith({ tools: [BUBBLE_TOOLS[0], BUBBLE_TOOLS[0]] }))).code).toBe<RefusalCode>(
+      'malformed-payload',
     )
-    expect(refusalOf(() => log.emit(bubbleWith({ conditions: ['no-network', 'no-network'] }))).code).toBe<RefusalCode>('malformed-payload',
+    expect(refusalOf(() => log.emit(bubbleWith({ conditions: ['no-network', 'no-network'] }))).code).toBe<RefusalCode>(
+      'malformed-payload',
     )
     // The workspace is closed by `nested.workspace`, the set the declaration hands that reader.
-    expect(refusalOf(() => log.emit(bubbleWith({ workspace: { kind: 'git', ref: 'refs/heads/main', note: 'extra' } }))).code,
+    expect(
+      refusalOf(() => log.emit(bubbleWith({ workspace: { kind: 'git', ref: 'refs/heads/main', note: 'extra' } }))).code,
     ).toBe<RefusalCode>('malformed-payload')
     expect(log.entries()).toHaveLength(3)
   })
@@ -229,7 +246,10 @@ describe('the execution context says what actually ran', () => {
     log.emit(bubble())
 
     const state = foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
-    expect([state?.runs['run-1']?.bubble?.model, state?.runs['run-1']?.bubble?.tools, state?.runs['run-1']?.bubble?.conditions,
+    expect([
+      state?.runs['run-1']?.bubble?.model,
+      state?.runs['run-1']?.bubble?.tools,
+      state?.runs['run-1']?.bubble?.conditions,
     ]).toEqual([BUBBLE_MODEL, BUBBLE_TOOLS, BUBBLE_CONDITIONS])
   })
 })
@@ -243,12 +263,14 @@ describe('a verdict is bound to the inputs the run declared', () => {
     await log.emit(bubble())
 
     // A different digest for the same input name: the input was swapped after the run began.
-    const swapped = await asyncRefusalOf(() => log.emit(judged({ inputDigests: [{ name: 'fixture/words.txt', digest: 'a'.repeat(64) }] })),
+    const swapped = await asyncRefusalOf(() =>
+      log.emit(judged({ inputDigests: [{ name: 'fixture/words.txt', digest: 'a'.repeat(64) }] })),
     )
     expect(swapped.code).toBe<RefusalCode>('evidence-input-mismatch')
 
     // A different number of inputs is refused too: "the same inputs" is total, not partial.
-    const extra = await asyncRefusalOf(() => log.emit(judged({ inputDigests: [...INPUTS, { name: 'other', digest: 'a'.repeat(64) }] })),
+    const extra = await asyncRefusalOf(() =>
+      log.emit(judged({ inputDigests: [...INPUTS, { name: 'other', digest: 'a'.repeat(64) }] })),
     )
     expect(extra.code).toBe<RefusalCode>('evidence-input-mismatch')
 
@@ -263,7 +285,9 @@ describe('a verdict is bound to the inputs the run declared', () => {
     await log.emit(assigned('agent-1', SCHEDULER))
     await log.emit(started())
     const refusal = await asyncRefusalOf(() => log.emit(judged()))
-    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('execution context was never declared'),
+    expect(refusal).toMatchObject({
+      code: 'illegal-transition',
+      detail: expect.stringContaining('execution context was never declared'),
     })
   })
 
@@ -274,7 +298,9 @@ describe('a verdict is bound to the inputs the run declared', () => {
     await log.emit(started())
     await log.emit(bubble())
     const twice = await asyncRefusalOf(() => log.emit(bubble()))
-    expect(twice).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('second execution context'),
+    expect(twice).toMatchObject({
+      code: 'illegal-transition',
+      detail: expect.stringContaining('second execution context'),
     })
 
     const settled = logWith()
@@ -315,7 +341,9 @@ describe('a verdict is bound to the inputs the run declared', () => {
     await log.emit(assigned('agent-1', SCHEDULER))
     await log.emit(started())
     await log.emit(bubble())
-    const widened = await asyncRefusalOf(() => log.emit(judged({ inputDigests: [{ name: 'fixture/words.txt', digest: 'f'.repeat(64), note: 'extra' }] as never }),
+    const widened = await asyncRefusalOf(() =>
+      log.emit(
+        judged({ inputDigests: [{ name: 'fixture/words.txt', digest: 'f'.repeat(64), note: 'extra' }] as never }),
       ),
     )
     expect(widened).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('note') })

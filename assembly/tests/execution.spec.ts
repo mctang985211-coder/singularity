@@ -9,7 +9,9 @@ import { createExecution, type Admission, type TurnFailure, type TurnFailureHand
 
 function deferred() {
   let resolve!: () => void
-  const promise = new Promise<void>(done => { resolve = done })
+  const promise = new Promise<void>(done => {
+    resolve = done
+  })
   return { promise, resolve }
 }
 function harness(admission: Admission = () => undefined, onTurnFailure: TurnFailureHandler = () => undefined) {
@@ -23,12 +25,23 @@ function harness(admission: Admission = () => undefined, onTurnFailure: TurnFail
   const leave = agents.enter(agent, undefined)
   const execution = createExecution(ctx, admission, onTurnFailure)
   const input = (name: string, callId: string, extra: Partial<ToolExecutionInput> = {}): ToolExecutionInput => ({
-    name, callId: ToolCallId(callId), arguments: {}, agent, signal: new AbortController().signal, ...extra,
+    name,
+    callId: ToolCallId(callId),
+    arguments: {},
+    agent,
+    signal: new AbortController().signal,
+    ...extra,
   })
-  const register = (name: string, execute: (exec: ToolRunContext) => Promise<string>) => tools.register(defineTool({
-    name, description: name, parameters: {}, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    execute: (_args, exec) => execute(exec),
-  }))
+  const register = (name: string, execute: (exec: ToolRunContext) => Promise<string>) =>
+    tools.register(
+      defineTool({
+        name,
+        description: name,
+        parameters: {},
+        output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+        execute: (_args, exec) => execute(exec),
+      }),
+    )
   return { ctx, agents, sessions, session, tools, agent, execution, input, register, leave }
 }
 
@@ -36,13 +49,21 @@ describe('the DSH execution port', () => {
   it('flushes the exact session only after its reported failure is durable', async () => {
     const commit = deferred()
     let durable = false
-    const h = harness(undefined, async () => { await commit.promise; durable = true })
-    h.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'SERVER', message: 'provider 503' } } })
+    const h = harness(undefined, async () => {
+      await commit.promise
+      durable = true
+    })
+    h.session.append('turn/end', {
+      turn: 1,
+      reason: { kind: 'error', error: { code: 'SERVER', message: 'provider 503' } },
+    })
     const other = h.sessions.create(SessionId('other'))
     await h.sessions.flush(other)
     const flushed = h.sessions.flush(h.session)
     let returned = false
-    void flushed.then(() => { returned = true })
+    void flushed.then(() => {
+      returned = true
+    })
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(returned).toBe(false)
     expect(durable).toBe(false)
@@ -53,15 +74,22 @@ describe('the DSH execution port', () => {
   })
 
   it('propagates failure persistence errors through the native flush barrier', async () => {
-    const h = harness(undefined, async () => { throw new Error('failure append failed') })
-    h.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'SERVER', message: 'provider 503' } } })
+    const h = harness(undefined, async () => {
+      throw new Error('failure append failed')
+    })
+    h.session.append('turn/end', {
+      turn: 1,
+      reason: { kind: 'error', error: { code: 'SERVER', message: 'provider 503' } },
+    })
     await expect(h.sessions.flush(h.session)).rejects.toThrow('failure append failed')
     await expect(h.execution.close()).rejects.toThrow('failure append failed')
   })
 
   it('uses the native turn ending without replacing its structured failure with agent/error', async () => {
     const failures: TurnFailure[] = []
-    const h = harness(undefined, failure => { failures.push(failure) })
+    const h = harness(undefined, failure => {
+      failures.push(failure)
+    })
     h.session.append('turn/start', { turn: 1 })
     h.ctx.emit('agent/error', { agent: h.agent, turn: 1, step: 0, error: new Error('terminated') })
     expect(failures).toHaveLength(0)
@@ -73,7 +101,9 @@ describe('the DSH execution port', () => {
 
   it('forwards error and abort endings from the exact live agent session through one failure port', async () => {
     const failures: TurnFailure[] = []
-    const h = harness(undefined, failure => { failures.push(failure) })
+    const h = harness(undefined, failure => {
+      failures.push(failure)
+    })
     h.session.append('turn/start', { turn: 1 })
     const error = { kind: 'error' as const, error: { message: 'stream_read_error', code: 'PI_AI_ERROR' } }
     const ended = h.session.append('turn/end', { turn: 1, reason: error })
@@ -89,10 +119,15 @@ describe('the DSH execution port', () => {
 
   it('does not turn unrelated sessions, normal endings, or replay repair markers into runtime failures', async () => {
     const failures: TurnFailure[] = []
-    const h = harness(undefined, failure => { failures.push(failure) })
+    const h = harness(undefined, failure => {
+      failures.push(failure)
+    })
     const unrelated = h.sessions.create(SessionId('unrelated'))
     unrelated.append('turn/start', { turn: 1 })
-    unrelated.append('turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'other failure', code: 'UNKNOWN' } } })
+    unrelated.append('turn/end', {
+      turn: 1,
+      reason: { kind: 'error', error: { message: 'other failure', code: 'UNKNOWN' } },
+    })
     for (const [index, kind] of (['completed', 'blocked', 'interrupted', 'forked'] as const).entries()) {
       h.session.append('turn/start', { turn: index + 1 })
       h.session.append('turn/end', { turn: index + 1, reason: { kind } })
@@ -106,7 +141,9 @@ describe('the DSH execution port', () => {
 
   it('turns a turn ended at the output ceiling into one runtime failure', async () => {
     const failures: TurnFailure[] = []
-    const h = harness(undefined, failure => { failures.push(failure) })
+    const h = harness(undefined, failure => {
+      failures.push(failure)
+    })
     h.session.append('turn/start', { turn: 1 })
     const capped = h.session.append('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
     expect(failures).toEqual([{ sessionId: 'root', turn: 1, seq: Number(capped.seq), reason: { kind: 'max-tokens' } }])
@@ -115,7 +152,9 @@ describe('the DSH execution port', () => {
 
   it('rejects a stale session whose id now belongs to another registry agent', async () => {
     const failures: TurnFailure[] = []
-    const h = harness(undefined, failure => { failures.push(failure) })
+    const h = harness(undefined, failure => {
+      failures.push(failure)
+    })
     h.leave()
     const replacement = { ...h.agent, session: Session.create(h.session.id) } as Agent
     h.agents.enter(replacement, undefined)
@@ -127,16 +166,24 @@ describe('the DSH execution port', () => {
 
   it('removes the failure feed before its own cancellation drains borrowed work', async () => {
     const failures: TurnFailure[] = []
-    const h = harness(undefined, failure => { failures.push(failure) })
+    const h = harness(undefined, failure => {
+      failures.push(failure)
+    })
     const started = deferred()
     h.session.append('turn/start', { turn: 1 })
     h.register('write', async exec => {
       h.execution.assertCaller(exec)
       started.resolve()
-      await new Promise<void>(resolve => exec.signal.addEventListener('abort', () => {
-        h.session.append('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'disposed' } } })
-        resolve()
-      }, { once: true }))
+      await new Promise<void>(resolve =>
+        exec.signal.addEventListener(
+          'abort',
+          () => {
+            h.session.append('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'disposed' } } })
+            resolve()
+          },
+          { once: true },
+        ),
+      )
       return 'write'
     })
     const pending = h.tools.execute(h.input('write', 'write'))
@@ -151,7 +198,9 @@ describe('the DSH execution port', () => {
     h.register('bind', async exec => {
       expect(h.execution.assertCaller(exec)).toBe(h.agent)
       expect(() => h.execution.assertCaller({ ...exec, agent: { ...h.agent } })).toThrow('unknown-emitter-role')
-      expect(() => h.execution.assertCaller({ ...exec, agent: undefined } as unknown as ToolRunContext)).toThrow('unknown-emitter-role')
+      expect(() => h.execution.assertCaller({ ...exec, agent: undefined } as unknown as ToolRunContext)).toThrow(
+        'unknown-emitter-role',
+      )
       return 'bound'
     })
     expect((await h.tools.execute(h.input('bind', 'bind'))).isError).toBe(false)
@@ -160,10 +209,15 @@ describe('the DSH execution port', () => {
 
   it('checks the committed admission decision after policy and leaves read calls available', async () => {
     let submitted = false
-    const h = harness(exec => submitted && exec.name !== 'status' ? 'run admission is closed' : undefined)
+    const h = harness(exec => (submitted && exec.name !== 'status' ? 'run admission is closed' : undefined))
     const calls: string[] = []
     h.ctx.on('tools/pre-execute', async () => ({ kind: 'allow' }))
-    for (const name of ['write', 'status']) h.register(name, async exec => { h.execution.assertCaller(exec); calls.push(name); return name })
+    for (const name of ['write', 'status'])
+      h.register(name, async exec => {
+        h.execution.assertCaller(exec)
+        calls.push(name)
+        return name
+      })
     expect((await h.tools.execute(h.input('write', 'before'))).isError).toBe(false)
     submitted = true
     const denied = await h.tools.execute(h.input('write', 'after'))
@@ -176,12 +230,23 @@ describe('the DSH execution port', () => {
 
   it('refuses an earlier granted call that reaches dispatch after the run closes', async () => {
     let submitted = false
-    const h = harness(() => submitted ? 'run admission is closed' : undefined)
+    const h = harness(() => (submitted ? 'run admission is closed' : undefined))
     const granted = deferred()
     const continueDispatch = deferred()
     let wrote = false
-    h.ctx.on('tools/execute', async (_exec, next) => { granted.resolve(); await continueDispatch.promise; return await next() }, { prepend: true })
-    h.register('write', async () => { wrote = true; return 'write' })
+    h.ctx.on(
+      'tools/execute',
+      async (_exec, next) => {
+        granted.resolve()
+        await continueDispatch.promise
+        return await next()
+      },
+      { prepend: true },
+    )
+    h.register('write', async () => {
+      wrote = true
+      return 'write'
+    })
     const pending = h.tools.execute(h.input('write', 'write'))
     await granted.promise
     submitted = true
@@ -197,13 +262,21 @@ describe('the DSH execution port', () => {
     const releaseSibling = deferred()
     const submitStarted = deferred()
     const submitDrained = deferred()
-    h.register('write', async () => { siblingStarted.resolve(); await releaseSibling.promise; return 'write' })
+    h.register('write', async () => {
+      siblingStarted.resolve()
+      await releaseSibling.promise
+      return 'write'
+    })
     h.register('submit', async exec => {
       h.execution.assertCaller(exec)
       submitStarted.resolve()
       const release = await h.execution.drain(exec)
-      try { submitDrained.resolve(); return 'submit' }
-      finally { release() }
+      try {
+        submitDrained.resolve()
+        return 'submit'
+      } finally {
+        release()
+      }
     })
     h.register('transport', async exec => {
       const extra = { parent: exec.token, rootCallId: exec.rootCallId }
@@ -229,7 +302,11 @@ describe('the DSH execution port', () => {
     const fail = deferred()
     const draining = deferred()
     h.ctx.on('tools/execute', async (exec, next) => {
-      if (exec.name === 'write') { started.resolve(); await fail.promise; throw new Error('dispatch drain failed') }
+      if (exec.name === 'write') {
+        started.resolve()
+        await fail.promise
+        throw new Error('dispatch drain failed')
+      }
       return await next()
     })
     h.register('write', async () => 'unused')
@@ -257,7 +334,16 @@ describe('the DSH execution port', () => {
     h.register('write', async exec => {
       h.execution.assertCaller(exec)
       started.resolve()
-      await new Promise<void>(resolve => exec.signal.addEventListener('abort', () => { stopped = true; resolve() }, { once: true }))
+      await new Promise<void>(resolve =>
+        exec.signal.addEventListener(
+          'abort',
+          () => {
+            stopped = true
+            resolve()
+          },
+          { once: true },
+        ),
+      )
       return 'write'
     })
     const inFlight = h.tools.execute(h.input('write', 'write'))
@@ -270,4 +356,29 @@ describe('the DSH execution port', () => {
     expect((await inFlight).isError).toBe(true)
     expect(() => h.execution.assertCaller({ agent: h.agent } as ToolRunContext)).toThrow('illegal-transition')
   })
+})
+
+it('holds delegation and sealing until owned background writers settle, then permits retry', async () => {
+  const h = harness()
+  let running = true
+  h.ctx.provide('jobs', {
+    list: () => (running ? [{ id: 'bash-1', owner: h.session.id, status: 'running' }] : []),
+  } as never)
+  h.register('singularity_decompose_task', async exec => {
+    const release = await h.execution.drain(exec)
+    release()
+    return 'admitted'
+  })
+  try {
+    const denied = await h.tools.execute(h.input('singularity_decompose_task', 'pending-job'))
+    expect(denied.isError).toBe(true)
+    expect(JSON.stringify(denied)).toContain('Collect or cancel background jobs')
+    running = false
+    const accepted = await h.tools.execute(h.input('singularity_decompose_task', 'after-cleanup'))
+    expect(accepted.isError).not.toBe(true)
+    expect(JSON.stringify(accepted)).toContain('admitted')
+  } finally {
+    await h.execution.close()
+    await h.ctx.fiber.dispose()
+  }
 })

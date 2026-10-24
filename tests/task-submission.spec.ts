@@ -25,12 +25,16 @@ const submission = {
   inputDigests: BUBBLE_INPUTS,
   files: {
     artifact: fileAttachment(ARTIFACT, 'artifact.json'),
-    inputs: BUBBLE_INPUTS.map((i) => ({ name: i.name, attachment: fileAttachment(i.digest, i.name) })),
+    inputs: BUBBLE_INPUTS.map(i => ({ name: i.name, attachment: fileAttachment(i.digest, i.name) })),
   },
   source: { sessionId: 'session-1', eventCount: 7, digest: '3'.repeat(64) },
 }
 const fact = (value: unknown = submission, commandId = 'submit'): EmitInput => ({
-  commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/submitted', subject: TASK_ID,
+  commandId,
+  protocol: TASK_PROTOCOL,
+  version: TASK_VERSION,
+  kind: 'run/submitted',
+  subject: TASK_ID,
   payload: { runId: RUN_ID, submission: value },
 })
 async function working() {
@@ -44,7 +48,8 @@ describe('atomic artifact submission', () => {
   it('records frozen files and transcript in one fact and replays the same receipt after settlement', async () => {
     const log = await working(),
       event = await log.emit(fact())
-    expect(state(log).runs[RUN_ID]).toMatchObject({ stage: 'submitted',
+    expect(state(log).runs[RUN_ID]).toMatchObject({
+      stage: 'submitted',
       submission,
       request: { id: 'call-1', digest: '1'.repeat(64) },
     })
@@ -67,15 +72,20 @@ describe('atomic artifact submission', () => {
   it('rejects foreign ownership, changed inputs and later context without committing', async () => {
     const log = await working(),
       count = log.count
-    expect(await asyncRefusalOf(() => log.emit({ ...fact(), as: 'stranger' }))).toMatchObject({ code: 'not-responsible',
+    expect(await asyncRefusalOf(() => log.emit({ ...fact(), as: 'stranger' }))).toMatchObject({
+      code: 'not-responsible',
     })
-    expect(await asyncRefusalOf(() => log.emit(fact({ ...submission, inputDigests: [], files: { ...submission.files, inputs: [] } })),
+    expect(
+      await asyncRefusalOf(() =>
+        log.emit(fact({ ...submission, inputDigests: [], files: { ...submission.files, inputs: [] } })),
       ),
     ).toMatchObject({ code: 'evidence-input-mismatch' })
     expect(log.count).toBe(count)
     await log.emit(fact())
     expect(await asyncRefusalOf(() => log.emit(bubbleOpened()))).toMatchObject({ code: 'illegal-transition' })
-    expect(await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER, 'pass', { artifactDigest: '5'.repeat(64) })),
+    expect(
+      await asyncRefusalOf(() =>
+        log.emit(judged('correctness', UNIT_VERIFIER, 'pass', { artifactDigest: '5'.repeat(64) })),
       ),
     ).toMatchObject({ code: 'evidence-input-mismatch' })
   })
@@ -95,8 +105,9 @@ describe('atomic artifact submission', () => {
       { ...submission, files: { ...files, inputs: [] } },
       { ...submission, files: { ...files, inputs: [input, input] } },
       { ...submission, files: { ...files, inputs: [{ ...input, name: 'other' }] } },
-      ...[-1, 1.5, NaN, Infinity, '1'].map((bytes) => ({
-        ...submission, files: { ...files, artifact: { ...files.artifact, bytes } },
+      ...[-1, 1.5, NaN, Infinity, '1'].map(bytes => ({
+        ...submission,
+        files: { ...files, artifact: { ...files.artifact, bytes } },
       })),
     ]
     for (const value of malformed) {

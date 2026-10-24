@@ -96,7 +96,10 @@ afterEach(async () => {
 describe('the load-time seam assertion', () => {
   it('refuses a context missing every seam, naming each one', () => {
     const refusal = refusalOf(() => assertRuntimeSeams({} as Seams))
-    expect(refusal).toMatchObject({ code: 'malformed-declaration', detail: expect.stringContaining('ctx.sessionPersistence') })
+    expect(refusal).toMatchObject({
+      code: 'malformed-declaration',
+      detail: expect.stringContaining('ctx.sessionPersistence'),
+    })
     expect(refusal.detail).toContain('ctx.sessionPersistence')
   })
 
@@ -176,7 +179,10 @@ describe('a seam read inside a plugin that did not inject it', () => {
         })()
       },
     })
-    expect(inside['refusal']).toMatchObject({ code: 'malformed-declaration', detail: expect.stringContaining('ctx.sessions') })
+    expect(inside['refusal']).toMatchObject({
+      code: 'malformed-declaration',
+      detail: expect.stringContaining('ctx.sessions'),
+    })
   })
 })
 
@@ -218,21 +224,35 @@ describe('creating and resuming', () => {
     const context = new Context()
     await context.plugin(SessionStore)
     const live = harness()
-    const parent = { session: { id: SessionId('business-root'), header: { delegationDepth: depth } } } as unknown as Agent
+    const parent = {
+      session: { id: SessionId('business-root'), header: { delegationDepth: depth } },
+    } as unknown as Agent
     const create = live.seams['agents'] as AgentRegistry
     create.create = async options => {
       expect(options.parentAgent).toBe(parent)
       const session = context.sessions.create(options.sessionId, { meta: options.meta! })
-      expect(session.header).toMatchObject({ cwd: '/isolated/task/run', parentSession: 'business-root',
-        origin: 'subagent', delegationDepth: (depth ?? 0) + 1, agentPreset: 'singularity-next' })
+      expect(session.header).toMatchObject({
+        cwd: '/isolated/task/run',
+        parentSession: 'business-root',
+        origin: 'subagent',
+        delegationDepth: (depth ?? 0) + 1,
+        agentPreset: 'singularity-next',
+      })
       return handleFor(options.sessionId, live.disposed, { failures: 0, error: undefined }) as never
     }
     try {
-      await openAgentSession(live.context, { agentId: 'managed-lineage', resume: false, parent,
-        cwd: '/isolated/task/run', preset: 'singularity-next' })
+      await openAgentSession(live.context, {
+        agentId: 'managed-lineage',
+        resume: false,
+        parent,
+        cwd: '/isolated/task/run',
+        preset: 'singularity-next',
+      })
       await closeAgentSession('managed-lineage')
       expect(live.disposed).toEqual(['singularity:agent:managed-lineage'])
-    } finally { await context.fiber.dispose() }
+    } finally {
+      await context.fiber.dispose()
+    }
   })
 
   it('retains live parent ownership when resuming legacy child history without rewriting its header', async () => {
@@ -251,28 +271,43 @@ describe('creating and resuming', () => {
 
   it('refuses resume when the exact session has no persisted history', async () => {
     const live = harness()
-    await expect(openAgentSession(live.context, { agentId: 'never-created', resume: true })).rejects.toThrow('resume requires persisted history')
+    await expect(openAgentSession(live.context, { agentId: 'never-created', resume: true })).rejects.toThrow(
+      'resume requires persisted history',
+    )
     expect(live.calls).toEqual([])
   })
 
   it('resumes a persisted session for the same exact id and reports resumed', async () => {
     const live = harness({ persisted: true })
     const opened = await openAgentSession(live.context, { agentId: 'persisted', resume: true })
-    expect([opened.resumed, opened.sessionId, live.calls]).toEqual([true, 'singularity:agent:persisted', [{ kind: 'resume', sessionId: 'singularity:agent:persisted' }]])
+    expect([opened.resumed, opened.sessionId, live.calls]).toEqual([
+      true,
+      'singularity:agent:persisted',
+      [{ kind: 'resume', sessionId: 'singularity:agent:persisted' }],
+    ])
     await closeAgentSession('persisted')
   })
 
   it('refuses a fresh create over persisted history instead of overwriting it', async () => {
     const live = harness({ persisted: true })
     const refusal = await asyncRefusalOf(() => openAgentSession(live.context, { agentId: 'taken', resume: false }))
-    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('singularity:agent:taken') })
+    expect(refusal).toMatchObject({
+      code: 'illegal-transition',
+      detail: expect.stringContaining('singularity:agent:taken'),
+    })
     expect(live.calls).toHaveLength(0)
   })
 
   it('names the write lease when resume finds another live handle holding it', async () => {
-    const live = harness({ persisted: true, resumeFails: new SessionAlreadyOwnedError(SessionId('singularity:agent:held')) })
+    const live = harness({
+      persisted: true,
+      resumeFails: new SessionAlreadyOwnedError(SessionId('singularity:agent:held')),
+    })
     const refusal = await asyncRefusalOf(() => openAgentSession(live.context, { agentId: 'held', resume: true }))
-    expect(refusal).toMatchObject({ code: 'concurrent-writer', detail: expect.stringContaining('singularity:agent:held') })
+    expect(refusal).toMatchObject({
+      code: 'concurrent-writer',
+      detail: expect.stringContaining('singularity:agent:held'),
+    })
   })
 
   it('propagates an unnamed repair failure with its original identity', async () => {
@@ -320,7 +355,10 @@ describe('closing', () => {
     await openAgentSession(live.context, { agentId: 'stubborn', resume: false })
 
     const failure = await asyncRefusalOf(() => closeAgentSession('stubborn'))
-    expect(failure).toMatchObject({ code: 'write-not-durable', detail: expect.stringContaining('teardown listener failed') })
+    expect(failure).toMatchObject({
+      code: 'write-not-durable',
+      detail: expect.stringContaining('teardown listener failed'),
+    })
     expect(live.disposed).toHaveLength(0)
 
     // The failed claim stayed registered, so a second close really releases the lease.
@@ -347,7 +385,9 @@ describe('closing', () => {
     const second = harness()
     await openAgentSession(first.context, { agentId: 'one-lease', resume: false })
 
-    const refusal = await asyncRefusalOf(() => openAgentSession(second.context, { agentId: 'one-lease', resume: false }))
+    const refusal = await asyncRefusalOf(() =>
+      openAgentSession(second.context, { agentId: 'one-lease', resume: false }),
+    )
     expect(refusal.code).toBe<RefusalCode>('concurrent-writer')
     expect(second.disposed).toEqual([])
 

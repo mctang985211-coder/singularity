@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-jobs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import { assertContiguous } from '@deepseek-ai/dsh-session-persistence'
@@ -50,7 +51,9 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     borrowed.add(agent)
     return agent
   }
-  const wait = async (entries: readonly { readonly done: Promise<void>; readonly failure?: { readonly error: unknown } }[]): Promise<void> => {
+  const wait = async (
+    entries: readonly { readonly done: Promise<void>; readonly failure?: { readonly error: unknown } }[],
+  ): Promise<void> => {
     await Promise.all(entries.map(entry => entry.done))
     const failed = entries.find(entry => entry.failure !== undefined)
     if (failed?.failure !== undefined) throw failed.failure.error
@@ -68,7 +71,9 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     const original = exec.signal
     exec.signal = AbortSignal.any([original, controller.signal])
     let resolve!: () => void
-    const done = new Promise<void>(settled => { resolve = settled })
+    const done = new Promise<void>(settled => {
+      resolve = settled
+    })
     const entry: ActiveExecution = { exec, controller, done }
     active.set(exec.token, entry)
     try {
@@ -86,12 +91,17 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     const previous = failedTurns.get(agent)
     if (ctx.agents.get(agent.id) !== agent || (previous?.turn ?? -1) >= failure.turn) return
     const pending: { turn: number; done: Promise<void>; failure?: { readonly error: unknown } } = {
-      turn: failure.turn, done: Promise.resolve(),
+      turn: failure.turn,
+      done: Promise.resolve(),
     }
     failedTurns.set(agent, pending)
     pending.done = Promise.all([previous?.done, (async () => onTurnFailure(failure))()]).then(
-      () => { if (previous?.failure !== undefined) pending.failure = previous.failure },
-      error => { pending.failure = { error } },
+      () => {
+        if (previous?.failure !== undefined) pending.failure = previous.failure
+      },
+      error => {
+        pending.failure = { error }
+      },
     )
   }
   const ended = ctx.on('session/event', (session, event) => {
@@ -107,14 +117,20 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     const pending = agent?.session === session ? failedTurns.get(agent) : undefined
     if (pending !== undefined) await wait([pending])
   })
-  const close = (): Promise<void> => closing ??= (async () => {
-    closed = true
-    ended()
-    const granted = [...active.values()].filter(entry => entry.exec.agent !== undefined && borrowed.has(entry.exec.agent))
-    for (const entry of granted) entry.controller.abort(new Error('the execution port has closed'))
-    try { await Promise.all([wait(granted), wait([...failedTurns.values()])]) }
-    finally { flushing() }
-  })()
+  const close = (): Promise<void> =>
+    (closing ??= (async () => {
+      closed = true
+      ended()
+      const granted = [...active.values()].filter(
+        entry => entry.exec.agent !== undefined && borrowed.has(entry.exec.agent),
+      )
+      for (const entry of granted) entry.controller.abort(new Error('the execution port has closed'))
+      try {
+        await Promise.all([wait(granted), wait([...failedTurns.values()])])
+      } finally {
+        flushing()
+      }
+    })())
   ctx.effect(function* () {
     yield guard
     yield listen
@@ -126,6 +142,20 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
     assertCaller,
     drain: async exec => {
       const agent = assertCaller(exec)
+      const assertJobsSettled = () => {
+        const liveJobs =
+          ctx
+            .get('jobs')
+            ?.list(agent.session.id)
+            .filter(job => job.owner === agent.session.id && (job.status === 'running' || job.status === 'stopping')) ??
+          []
+        if (liveJobs.length)
+          refuse(
+            'illegal-transition',
+            `Collect or cancel background jobs before delegation, blocking questions or submission: ${liveJobs.map(job => job.id).join(', ')}. Use job_output while active, or job_list/job_kill for cleanup, then retry.`,
+          )
+      }
+      assertJobsSettled()
       if (sealing.has(agent)) refuse('illegal-transition', 'submission is already sealing this execution')
       sealing.add(agent)
       const ancestors = new Set<ToolExecutionToken>()
@@ -136,18 +166,26 @@ export function createExecution(ctx: Context, admission: Admission, onTurnFailur
       }
       try {
         await wait([...active.values()].filter(entry => entry.exec.agent === agent && !ancestors.has(entry.exec.token)))
-      } catch (error) { sealing.delete(agent); throw error }
-      return () => { sealing.delete(agent) }
+        assertJobsSettled()
+      } catch (error) {
+        sealing.delete(agent)
+        throw error
+      }
+      return () => {
+        sealing.delete(agent)
+      }
     },
     sealTranscript: async exec => {
       const agent = assertCaller(exec)
       const sessionId = String(agent.session.id)
       const eventCount = Number(agent.session.seq)
-      if (!await ctx.sessions.flush(agent.session)) refuse('write-not-durable', `session "${sessionId}" has no durability listener`)
+      if (!(await ctx.sessions.flush(agent.session)))
+        refuse('write-not-durable', `session "${sessionId}" has no durability listener`)
       const handle = await ctx.sessionPersistence.open(SessionId(sessionId), 'read')
       try {
         const { events } = await handle.read(0, eventCount)
-        if (events.length !== eventCount) refuse('write-not-durable', `session "${sessionId}" did not persist the sealed ${eventCount} events`)
+        if (events.length !== eventCount)
+          refuse('write-not-durable', `session "${sessionId}" did not persist the sealed ${eventCount} events`)
         assertContiguous(handle.id, events, 0)
         return { sessionId, eventCount, digest: digestOf({ sessionId, eventCount, events }) }
       } finally {

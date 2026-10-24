@@ -32,8 +32,23 @@ import {
   type RefusalCode,
 } from '../src/index.ts'
 import { ControlSessionStore } from '../src/control/session-store.ts'
-import { declareEnvironmentProtocol, ENVIRONMENT_KINDS, ENVIRONMENT_PROTOCOL, ENVIRONMENT_ROLE, ENVIRONMENT_VERSION, PUBLISHER_ROLE, type EnvironmentState } from '../src/environment/protocol.ts'
-import { APPROVER_ROLE, declareReleaseProtocol, RELEASE_KINDS, RELEASE_PROTOCOL, RELEASE_VERSION, releaseDraftOf } from '../src/release/protocol.ts'
+import {
+  declareEnvironmentProtocol,
+  ENVIRONMENT_KINDS,
+  ENVIRONMENT_PROTOCOL,
+  ENVIRONMENT_ROLE,
+  ENVIRONMENT_VERSION,
+  PUBLISHER_ROLE,
+  type EnvironmentState,
+} from '../src/environment/protocol.ts'
+import {
+  APPROVER_ROLE,
+  declareReleaseProtocol,
+  RELEASE_KINDS,
+  RELEASE_PROTOCOL,
+  RELEASE_VERSION,
+  releaseDraftOf,
+} from '../src/release/protocol.ts'
 import { SCHEDULER_ROLE } from '../src/task/protocol.ts'
 import { createReleaseCommands } from '../src/release/commands.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
@@ -101,13 +116,33 @@ function headOf(log: MemoryLog, subject = ENVIRONMENT): string | undefined {
 }
 
 /** A hand-framed environment fact, as a log written by another build looks to a fold. */
-function sealed(seq: number, kind: string, payload: unknown, prevDigest: string | null, subject = ENVIRONMENT): Envelope {
+function sealed(
+  seq: number,
+  kind: string,
+  payload: unknown,
+  prevDigest: string | null,
+  subject = ENVIRONMENT,
+): Envelope {
   const switchFact = kind === ENVIRONMENT_KINDS.pointerSwitched
-  return sealEnvelope({ protocol: ENVIRONMENT_PROTOCOL, version: ENVIRONMENT_VERSION, kind, subject, commandId: `hand-${seq}`, emitter: switchFact ? PUBLISHER_ROLE : ENVIRONMENT_ROLE, actor: switchFact ? PUBLISHER : ACTOR, at: `2026-10-10T00:00:0${seq}.000Z`, seq, prevDigest, payload })
+  return sealEnvelope({
+    protocol: ENVIRONMENT_PROTOCOL,
+    version: ENVIRONMENT_VERSION,
+    kind,
+    subject,
+    commandId: `hand-${seq}`,
+    emitter: switchFact ? PUBLISHER_ROLE : ENVIRONMENT_ROLE,
+    actor: switchFact ? PUBLISHER : ACTOR,
+    at: `2026-10-10T00:00:0${seq}.000Z`,
+    seq,
+    prevDigest,
+    payload,
+  })
 }
 
 function foldedEnvironment(entries: readonly Envelope[], subject = ENVIRONMENT): EnvironmentState | undefined {
-  return foldSubjects<EnvironmentState>(environmentRegistry(), entries, ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION).get(subject)
+  return foldSubjects<EnvironmentState>(environmentRegistry(), entries, ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION).get(
+    subject,
+  )
 }
 
 const deployments: { context: Context; root: string }[] = []
@@ -127,33 +162,70 @@ async function live(): Promise<ControlSessionStore> {
   const registry = new ProtocolRegistry()
   declareEnvironmentProtocol(registry)
   declareReleaseProtocol(registry)
-  return ControlSessionStore.open({ persistence: context.sessionPersistence, controlId: 'pointer', registry, subjects: SUBJECTS })
+  return ControlSessionStore.open({
+    persistence: context.sessionPersistence,
+    controlId: 'pointer',
+    registry,
+    subjects: SUBJECTS,
+  })
 }
 
 function environmentStateOf(store: ControlSessionStore, subject = ENVIRONMENT): EnvironmentState | undefined {
   return store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, subject)
 }
 
-async function createRevision(store: ControlSessionStore, revisionId: string, manifest: unknown, subject = ENVIRONMENT): Promise<string> {
-  await store.emit({ commandId: `create-${subject}-${revisionId}`, protocol: ENVIRONMENT_PROTOCOL, version: ENVIRONMENT_VERSION, kind: ENVIRONMENT_KINDS.revisionCreated, subject, payload: { revisionId, manifest } })
+async function createRevision(
+  store: ControlSessionStore,
+  revisionId: string,
+  manifest: unknown,
+  subject = ENVIRONMENT,
+): Promise<string> {
+  await store.emit({
+    commandId: `create-${subject}-${revisionId}`,
+    protocol: ENVIRONMENT_PROTOCOL,
+    version: ENVIRONMENT_VERSION,
+    kind: ENVIRONMENT_KINDS.revisionCreated,
+    subject,
+    payload: { revisionId, manifest },
+  })
   const revision = environmentStateOf(store, subject)?.revisions[revisionId]
   if (revision === undefined) throw new Error(`revision ${revisionId} was not created`)
   return revision.contentDigest
 }
 
-
 /** Trusted approval fixture for pointer command and reducer tests. */
-async function approve(store: ControlSessionStore, environmentId: string, revisionId: string, digest: string): Promise<void> {
-  const draft = await createReleaseCommands({ store }).draft({ commandId: `draft-${environmentId}-${revisionId}`, revision: { environmentId, revisionId, digest } })
-  await store.emit({ commandId: `approve-${environmentId}-${revisionId}`, protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION,
-    kind: RELEASE_KINDS.approved, subject: environmentId, payload: {
-      revisionId, draftDigest: (draft.payload as { draftDigest: string }).draftDigest,
-      approvedBy: REVIEWER, approvalId: `review-${environmentId}-${revisionId}`,
-    } })
+async function approve(
+  store: ControlSessionStore,
+  environmentId: string,
+  revisionId: string,
+  digest: string,
+): Promise<void> {
+  const draft = await createReleaseCommands({ store }).draft({
+    commandId: `draft-${environmentId}-${revisionId}`,
+    revision: { environmentId, revisionId, digest },
+  })
+  await store.emit({
+    commandId: `approve-${environmentId}-${revisionId}`,
+    protocol: RELEASE_PROTOCOL,
+    version: RELEASE_VERSION,
+    kind: RELEASE_KINDS.approved,
+    subject: environmentId,
+    payload: {
+      revisionId,
+      draftDigest: (draft.payload as { draftDigest: string }).draftDigest,
+      approvedBy: REVIEWER,
+      approvalId: `review-${environmentId}-${revisionId}`,
+    },
+  })
 }
 
 function publish(store: ControlSessionStore, to: string, expected = '', environmentId = ENVIRONMENT): Promise<unknown> {
-  return createReleaseCommands({ store }).publish({ commandId: `publish-${environmentId}-${to}`, environmentId, expected, to })
+  return createReleaseCommands({ store }).publish({
+    commandId: `publish-${environmentId}-${to}`,
+    environmentId,
+    expected,
+    to,
+  })
 }
 
 describe('the pointer is a compare-and-swap, decided by the reducer', () => {
@@ -173,7 +245,11 @@ describe('the pointer is a compare-and-swap, decided by the reducer', () => {
     await log.emit(switched(R1, R2))
     // Based on a head that has already moved: the switch is refused, not re-based onto R2.
     const refusal = await asyncRefusalOf(() => log.emit(switched(R1, R2)))
-    expect([refusal.code, refusal.detail.includes('"r0001"'), refusal.detail.includes('"r0002"')]).toEqual(['illegal-transition', true, true])
+    expect([refusal.code, refusal.detail.includes('"r0001"'), refusal.detail.includes('"r0002"')]).toEqual([
+      'illegal-transition',
+      true,
+      true,
+    ])
     // Refused, not repaired: the fact is not in the log and the head did not move.
     expect([log.count, headOf(log)]).toEqual([4, R2])
   })
@@ -191,7 +267,11 @@ describe('the pointer is a compare-and-swap, decided by the reducer', () => {
     await log.emit(create(R1, MANIFEST))
     const refusal = await asyncRefusalOf(() => log.emit(switched('', R3)))
     // The refusal names what does exist, so the missing creation is visible as a missing fact.
-    expect([refusal.code, refusal.detail.includes(R3), refusal.detail.includes(R1)]).toEqual(['unknown-revision', true, true])
+    expect([refusal.code, refusal.detail.includes(R3), refusal.detail.includes(R1)]).toEqual([
+      'unknown-revision',
+      true,
+      true,
+    ])
     expect(headOf(log)).toBeUndefined()
   })
 
@@ -215,7 +295,12 @@ describe('the pointer is a compare-and-swap, decided by the reducer', () => {
     const log = emittingLog()
     await log.emit(create(R1, MANIFEST))
     const bad = (payload: unknown): EmitInput => ({ ...switched('', R1), payload })
-    for (const payload of [{ expected: '', to: '' }, { expected: null, to: R1 }, { expected: '', to: R1, generation: 1 }, { expected: '' }])
+    for (const payload of [
+      { expected: '', to: '' },
+      { expected: null, to: R1 },
+      { expected: '', to: R1, generation: 1 },
+      { expected: '' },
+    ])
       expect((await asyncRefusalOf(() => log.emit(bad(payload)))).code).toBe<RefusalCode>('malformed-payload')
   })
 })
@@ -248,10 +333,18 @@ describe('the fold re-checks the switch, so a log from another build is refused 
     await log.emit(switched(R1, R2))
     // A second fold of the same facts, with its own registry: the head is not carried anywhere.
     const refolded = foldedEnvironment(log.entries())
-    expect([refolded?.pointer, refolded]).toEqual([R2, log.stateAt<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT, log.count)])
+    expect([refolded?.pointer, refolded]).toEqual([
+      R2,
+      log.stateAt<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT, log.count),
+    ])
     // And the pointer is not a member of any payload: it is only ever folded from `pointer/switched`.
-    const pointerFacts = log.entriesOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION).filter(entry => entry.kind === ENVIRONMENT_KINDS.pointerSwitched)
-    expect([pointerFacts.length, pointerFacts.every(entry => !Object.hasOwn(entry.payload as object, 'pointer'))]).toEqual([2, true])
+    const pointerFacts = log
+      .entriesOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)
+      .filter(entry => entry.kind === ENVIRONMENT_KINDS.pointerSwitched)
+    expect([
+      pointerFacts.length,
+      pointerFacts.every(entry => !Object.hasOwn(entry.payload as object, 'pointer')),
+    ]).toEqual([2, true])
   })
 })
 
@@ -260,24 +353,42 @@ describe('the command boundary decides the half the reducer cannot see', () => {
     const store = await live()
     const digest = await createRevision(store, R1, MANIFEST)
     const commands = createReleaseCommands({ store })
-    const publish = (commandId: string) => commands.publish({ commandId, environmentId: ENVIRONMENT, expected: '', to: R1 })
+    const publish = (commandId: string) =>
+      commands.publish({ commandId, environmentId: ENVIRONMENT, expected: '', to: R1 })
 
     const undrafted = await asyncRefusalOf(() => publish('publish-undrafted'))
-    expect(undrafted).toMatchObject({ code: 'unapproved-revision', detail: expect.stringContaining('no draft is on the table') })
+    expect(undrafted).toMatchObject({
+      code: 'unapproved-revision',
+      detail: expect.stringContaining('no draft is on the table'),
+    })
     expect(environmentStateOf(store)?.pointer).toBeUndefined()
 
     await commands.draft({ commandId: 'draft-1', revision: { environmentId: ENVIRONMENT, revisionId: R1, digest } })
     const unapproved = await asyncRefusalOf(() => publish('publish-unapproved'))
-    expect(unapproved).toMatchObject({ code: 'unapproved-revision', detail: expect.stringContaining('carries no approval') })
+    expect(unapproved).toMatchObject({
+      code: 'unapproved-revision',
+      detail: expect.stringContaining('carries no approval'),
+    })
   })
 
   it('moves the head onto an approved revision, and the fact is the publisher’s', async () => {
     const store = await live()
     await approve(store, ENVIRONMENT, R1, await createRevision(store, R1, MANIFEST))
 
-    const envelope = await createReleaseCommands({ store }).publish({ commandId: 'publish-1', environmentId: ENVIRONMENT, expected: '', to: R1 })
+    const envelope = await createReleaseCommands({ store }).publish({
+      commandId: 'publish-1',
+      environmentId: ENVIRONMENT,
+      expected: '',
+      to: R1,
+    })
 
-    expect([envelope.kind, envelope.subject, envelope.emitter, envelope.actor, envelope.payload]).toEqual([ENVIRONMENT_KINDS.pointerSwitched, ENVIRONMENT, PUBLISHER_ROLE, PUBLISHER, { expected: '', to: R1 }])
+    expect([envelope.kind, envelope.subject, envelope.emitter, envelope.actor, envelope.payload]).toEqual([
+      ENVIRONMENT_KINDS.pointerSwitched,
+      ENVIRONMENT,
+      PUBLISHER_ROLE,
+      PUBLISHER,
+      { expected: '', to: R1 },
+    ])
     expect(environmentStateOf(store)?.pointer).toBe(R1)
     // The head is derived from the log, not stored beside it.
     expect(foldedEnvironment(store.load().entries())?.pointer).toBe(R1)
@@ -289,9 +400,31 @@ describe('the command boundary decides the half the reducer cannot see', () => {
     // A release this build did not write — an adopted log, or content prepared outside the store and
     // referenced before it existed (U05). The draft names r0001 at content the environment never
     // created, and the reducer cannot see that: only the publish precondition can.
-    const forged = releaseDraftOf({ environmentId: ENVIRONMENT, revisionId: R1, digest: digestOf(OTHER_MANIFEST) }, { kind: 'bootstrap' })
-    await store.emit({ commandId: 'forged-draft', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.drafted, subject: ENVIRONMENT, payload: forged })
-    await store.emit({ commandId: 'forged-approval', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.approved, subject: ENVIRONMENT, payload: { revisionId: forged.revisionId, draftDigest: forged.draftDigest, approvedBy: REVIEWER, approvalId: 'audit-forged' } })
+    const forged = releaseDraftOf(
+      { environmentId: ENVIRONMENT, revisionId: R1, digest: digestOf(OTHER_MANIFEST) },
+      { kind: 'bootstrap' },
+    )
+    await store.emit({
+      commandId: 'forged-draft',
+      protocol: RELEASE_PROTOCOL,
+      version: RELEASE_VERSION,
+      kind: RELEASE_KINDS.drafted,
+      subject: ENVIRONMENT,
+      payload: forged,
+    })
+    await store.emit({
+      commandId: 'forged-approval',
+      protocol: RELEASE_PROTOCOL,
+      version: RELEASE_VERSION,
+      kind: RELEASE_KINDS.approved,
+      subject: ENVIRONMENT,
+      payload: {
+        revisionId: forged.revisionId,
+        draftDigest: forged.draftDigest,
+        approvedBy: REVIEWER,
+        approvalId: 'audit-forged',
+      },
+    })
 
     const refusal = await asyncRefusalOf(() => publish(store, R1))
     expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining(ENVIRONMENT) })
@@ -330,7 +463,10 @@ describe('the command boundary decides the half the reducer cannot see', () => {
     expect([won.length, lost.length]).toEqual([1, 1])
     expect(lost[0]?.reason?.refusal?.code).toBe<RefusalCode>('illegal-transition')
     // One fact, one head, and it is the winner's target: the loser was refused, not re-based.
-    const pointerFacts = store.load().entriesOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION).filter(entry => entry.kind === ENVIRONMENT_KINDS.pointerSwitched)
+    const pointerFacts = store
+      .load()
+      .entriesOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)
+      .filter(entry => entry.kind === ENVIRONMENT_KINDS.pointerSwitched)
     expect([pointerFacts.length, pointerFacts[0]?.commandId]).toEqual([1, won[0]?.value.commandId])
     expect(environmentStateOf(store)?.pointer).toBe((won[0]?.value.payload as { to: string }).to)
   })
@@ -339,12 +475,20 @@ describe('the command boundary decides the half the reducer cannot see', () => {
 describe('environment@2 is the one conditional owner, and version 1 is refused by name', () => {
   it('declares the switch as conditional and atomic, both kinds at version 2, nothing at version 1', () => {
     const registry = environmentRegistry()
-    expect(registry.ruleFor(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT_KINDS.pointerSwitched).guarantees).toEqual({ appended: true, conditional: true, atomicFact: true })
+    expect(
+      registry.ruleFor(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT_KINDS.pointerSwitched).guarantees,
+    ).toEqual({ appended: true, conditional: true, atomicFact: true })
     expect(registry.conditionalOwner()).toBe(ENVIRONMENT_PROTOCOL)
     expect(registry.versionsOf(ENVIRONMENT_PROTOCOL)).toEqual([2])
-    expect(registry.kindsOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)).toEqual([...Object.values(ENVIRONMENT_KINDS)].sort())
+    expect(registry.kindsOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)).toEqual(
+      [...Object.values(ENVIRONMENT_KINDS)].sort(),
+    )
     // Named: the refusal says which version *is* declared, so "upgrade or stay" is actionable.
     const refusal = refusalOf(() => registry.ruleFor(ENVIRONMENT_PROTOCOL, 1, ENVIRONMENT_KINDS.revisionCreated))
-    expect([refusal.code, refusal.detail.includes('declared at 2'), refusal.detail.includes('version 1')]).toEqual(['version-mismatch', true, true])
+    expect([refusal.code, refusal.detail.includes('declared at 2'), refusal.detail.includes('version 1')]).toEqual([
+      'version-mismatch',
+      true,
+      true,
+    ])
   })
 })

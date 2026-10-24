@@ -19,12 +19,12 @@ const { dshModule, DSH_INSTALLED } = await import(pathToFileURL(join(checkout, '
 const [{ Context }, { Loader, Group }, { entryListSchema }, { default: Presets },
   { default: Llm }, { default: Sessions, SessionId }, { default: Projections },
   { default: SystemPrompt }, { default: Tools, defineTool }, { default: Commands },
-  { default: Agents }, { default: Persistence }, { default: Fs }, { default: Subprocess }, { default: Attachments }, { default: AgentLoop }, { default: Skills }, ShellEnv, { default: TokenMeter }, LlmRetry] =
+  { default: Agents }, { default: Persistence }, { default: Fs }, { default: Subprocess }, { default: Attachments }, { default: AgentLoop }, { default: Skills }, ShellEnv, { default: TokenMeter }, LlmRetry, { default: Jobs }, { default: Web }, { default: Bash }] =
   await Promise.all(['@deepseek-ai/cordis', '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include',
     '@deepseek-ai/dsh-agent-preset-registry', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session',
     '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools',
     '@deepseek-ai/dsh-commands', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-session-persistence-jsonl',
-    '@deepseek-ai/dsh-fs-local', '@deepseek-ai/dsh-subprocess-local', '@deepseek-ai/dsh-attachment-local', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-skill', '@deepseek-ai/dsh-shell-env', '@deepseek-ai/dsh-token-meter', '@deepseek-ai/dsh-llm-retry'].map(dshModule))
+    '@deepseek-ai/dsh-fs-local', '@deepseek-ai/dsh-subprocess-local', '@deepseek-ai/dsh-attachment-local', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-skill', '@deepseek-ai/dsh-shell-env', '@deepseek-ai/dsh-token-meter', '@deepseek-ai/dsh-llm-retry', '@deepseek-ai/dsh-jobs-local', '@deepseek-ai/dsh-web', '@deepseek-ai/dsh-bash-local'].map(dshModule))
 const yaml = createRequire(join(DSH_INSTALLED, 'cordis-plugin-include/package.json'))('js-yaml')
 const pkg = createRequire(join(root, 'host.mjs'))
 const host = await import(pathToFileURL(pkg.resolve('@dangosys/dsh-singularity-next')).href)
@@ -32,7 +32,7 @@ const web = await import(pathToFileURL(pkg.resolve('@dangosys/dsh-singularity-ne
 const rows = []
 for (const id of ['singularity-root', 'singularity-next', 'singularity-review', 'singularity-improve']) {
   const row = yaml.load(await readFile(join(checkout, 'assembly/presets', id + '.patch.yml'), 'utf8'), { schema: entryListSchema })[0].insert[0]
-  rows.push({ ...row, config: { ...row.config, plugins: row.config.plugins.filter(plugin => ['persona', 'singularity-agent'].includes(plugin.id)) } })
+  rows.push(row)
 }
 const config = join(root, 'cordis.yml')
 await writeFile(config, yaml.dump(rows, { schema: entryListSchema, noRefs: true }))
@@ -42,8 +42,9 @@ const probe = name => defineTool({ name, description: 'Execution probe', paramet
   output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
   execute: async () => { mutations++; return 'executed' } })
 try {
-  for (const plugin of [Llm, Sessions, Projections, SystemPrompt, Tools, Commands, Agents, Subprocess, Skills, ShellEnv, TokenMeter]) await ctx.plugin(plugin)
+  for (const plugin of [Llm, Sessions, Projections, SystemPrompt, Tools, Commands, Agents, Subprocess, Skills, ShellEnv, TokenMeter, Jobs, Web]) await ctx.plugin(plugin)
   await ctx.plugin(Fs, { cwd: root })
+  await ctx.plugin(Bash, { cwd: root })
   await ctx.plugin(Attachments, { dshHome: root })
   await ctx.plugin(Persistence, { root: join(root, 'sessions'), compression: 'none' })
   await ctx.plugin(AgentLoop, { agents: [] })
@@ -71,7 +72,7 @@ try {
   }
   assert.equal((await request('/singularity/rsi-memory', 'GET')).statusCode, 405)
   assert.equal((await request('/singularity/rsi-memory', 'POST', false)).statusCode, 401)
-  assert.equal(JSON.parse((await request('/singularity/tasks', 'GET')).body).formatVersion, 13)
+  assert.equal(JSON.parse((await request('/singularity/tasks', 'GET')).body).formatVersion, 15)
   await ctx.loader.create({ name: '@deepseek-ai/cordis-plugin-include', config: { path: pathToFileURL(config).href } })
   await ctx.loader.await()
   ctx.tools.register(probe('deployment_probe'))
@@ -80,6 +81,7 @@ try {
   assert.equal(ctx.agentPresets.serviceFor(agent, 'singularityAgentRole'), 'root')
   assert.equal((await request('/singularity/rsi-memory', 'POST', true, { sessionId: 'root', previousRootId: 'unknown' })).statusCode, 400)
   assert.equal(ctx.tools.get('deployment_probe', agent), undefined)
+  ctx.skills.register({ name: 'ambient-only', source: 'runtime', description: 'Unfrozen deployment skill', content: 'MUST NEVER ENTER TASK CONTEXT' })
   // Own-scope tools bypass native restrict(), even when they were registered after agent/created.
   for (const name of ['bash', 'pwsh']) agent.ctx.tools.register(probe(name))
   const prompt = await ctx.systemPrompt.assemble({ scope: agent })
@@ -113,6 +115,11 @@ try {
     setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'singularity-next') } })
   const childPrompt = await ctx.systemPrompt.assemble({ scope: child })
   assert.equal(ctx.agentPresets.serviceFor(child, 'singularityAgentRole'), 'task')
+  assert(!childPrompt.tools.some(tool => tool.name === 'present'))
+  const ambient = await ctx.tools.execute({ name: 'skill', agent: child, arguments: { name: 'ambient-only' }, callId: 'ambient-refusal', signal: new AbortController().signal })
+  assert(ambient.isError, JSON.stringify(ambient))
+  assert(!JSON.stringify(childPrompt).includes('MUST NEVER ENTER TASK CONTEXT'))
+  assert(!childPrompt.tools.some(tool => tool.name === 'deployment_probe'))
   for (const name of ['bash', 'write', 'edit', 'singularity_decompose_task']) assert(childPrompt.tools.some(tool => tool.name === name), name)
   const childProtocol = childPrompt.sections.find(section => section.name === 'singularity:protocol').text
   assert(!childProtocol.includes('You must decompose'))
@@ -226,11 +233,11 @@ try {
   for (const kind of ['search', 'method', 'subject', 'trajectory', 'round', 'roots', 'sessions', 'usage', 'steps']) assert(improveRead.kind.enum.includes(kind), kind)
   assert.equal(improveRead.rootId.type, 'string')
   assert.equal(improveRead.eventSeq.type, 'integer')
-  assert(improveRead.kind.description.includes('phase'))
+  assert(improveRead.kind.description.includes('executionPhase'))
   assert(!systemText(childRequest).includes(rootProtocol), 'Child inherited root-only coordination instructions')
   const submitFields = request => Object.keys(request.tools.find(tool => tool.name === 'singularity_submit').parameters.properties).sort()
   assert.deepEqual(submitFields(parentRequest), ['sourceRunId', 'sourceTaskId'])
-  assert.deepEqual(submitFields(childRequest), ['path'])
+  assert.deepEqual(submitFields(childRequest), ['path', 'sourceRunId', 'sourceTaskId'])
   assert.deepEqual(submitFields(reviewRequest), ['findings'])
   const reviewSubmit = reviewRequest.tools.find(tool => tool.name === 'singularity_submit').parameters
   assert.deepEqual(reviewSubmit.required, ['findings'])
@@ -256,7 +263,10 @@ try {
   const directory = await ctx.tools.execute({ name: 'singularity_memory', agent: assigned, arguments: {}, callId: 'optional-memory-index', signal: new AbortController().signal })
   assert(!directory.isError, JSON.stringify(directory))
   assert(!JSON.stringify(directory).includes(inheritedDecision), 'The directory must not copy background narrative')
-  const index = JSON.parse(directory.value)
+  assert.equal(JSON.parse(directory.value).total, 0)
+  const prepared = await ctx.tools.execute({ name: 'singularity_memory', agent: assigned, arguments: { prepare: true }, callId: 'optional-memory-prepare', signal: new AbortController().signal })
+  assert(!prepared.isError && JSON.stringify(prepared).includes(inheritedDecision), JSON.stringify(prepared))
+  const index = JSON.parse((await ctx.tools.execute({ name: 'singularity_memory', agent: assigned, arguments: {}, callId: 'prepared-index', signal: new AbortController().signal })).value)
   assert.equal(index.total, 1)
   assert.equal(index.inherited, index.entries[0].ref)
   const summaryRequests = () => requests.filter(request => request.messages[0]?.content.some(block =>
@@ -280,6 +290,29 @@ try {
   assert(pendingPrompt.tools.every(tool => pendingAllowed.has(tool.name)), JSON.stringify(pendingPrompt.tools.map(tool => tool.name)))
   assert(pendingPrompt.tools.some(tool => tool.name === 'singularity_decompose_task'))
   assert(!pendingPrompt.tools.some(tool => tool.name === 'singularity_submit'))
+  assert(!JSON.stringify(pendingPrompt.contexts).includes('job_list'))
+  assert(!responsibility.responsibility.next.includes('job_list'))
+  const nested = await ctx.tools.execute({ name: 'singularity_decompose_task', agent: assigned,
+    callId: 'nested-waiting-policy', signal: new AbortController().signal, arguments: { children: [{
+      key: 'bounded-evidence', contract: { goal: 'Resolve the bounded evidence question for the assigned investigation.',
+        artifact: 'evidence.txt', inputs: [], criteria: [{ criterionId: 'evidence', statement: 'An honest bounded evidence finding.' }] },
+      requirement: 'required', dependsOn: [], supports: ['finding'], maxRuns: 1 }] } })
+  assert(!nested.isError && !JSON.stringify(nested).includes('refused'), JSON.stringify(nested))
+  const nestedState = await ctx.singularity.read()
+  const grandchild = nestedState.tasks.find(task => task.goal === 'Resolve the bounded evidence question for the assigned investigation.')
+  await ctx.agents.get(SessionId(grandchild.sessionId)).whenIdle()
+  const taskWaiting = await ctx.systemPrompt.assemble({ scope: assigned, agent: assigned })
+  for (const name of ['bash', 'pwsh', 'write', 'edit', 'skill', 'job_output', 'singularity_run_method', 'singularity_submit']) {
+    assert(!taskWaiting.tools.some(tool => tool.name === name), name)
+    assert(!taskWaiting.sections.some(section => section.name === 'tool:' + name), name)
+    const denied = await ctx.tools.execute({ name, agent: assigned, arguments: {}, callId: 'waiting-' + name, signal: new AbortController().signal })
+    assert(denied.isError, JSON.stringify({name,denied}))
+  }
+  assert(!taskWaiting.sections.some(section => section.name === 'tool:jobs'))
+  assert(taskWaiting.tools.some(tool => tool.name === 'job_list'))
+  assert(taskWaiting.tools.some(tool => tool.name === 'job_kill'))
+  const cleanup = await ctx.tools.execute({ name: 'job_list', agent: assigned, arguments: {}, callId: 'waiting-job-cleanup', signal: new AbortController().signal })
+  assert(!cleanup.isError, JSON.stringify(cleanup))
   const nativeTimeout = globalThis.setTimeout
   let retryWaits = 0
   // Speed up native retry waits while leaving JSONL persistence timers intact.
@@ -308,7 +341,7 @@ try {
   const backgroundChild = beforeProviderFailure.tasks.find(task => task.goal === 'Investigate provider-child')
   assert(requests.some(request => request.sessionId === backgroundChild.sessionId), 'Business execution must start without a background call')
   const failedMemory = await ctx.tools.execute({ name: 'singularity_memory', agent: ctx.agents.get(SessionId(backgroundChild.sessionId)),
-    arguments: {}, callId: 'failed-background-index', signal: new AbortController().signal })
+    arguments: { prepare: true }, callId: 'failed-background-index', signal: new AbortController().signal })
   assert(!failedMemory.isError, JSON.stringify(failedMemory))
   const summaryLog = await ctx.sessionPersistence.open(brokenParent.session.id, 'read')
   try {
@@ -319,7 +352,7 @@ try {
     assert.equal(events.filter(event => event.type === 'singularity/parent-memory-failed').length, 1)
     assert.equal(events.filter(event => event.type === 'llm/retry').length, 0)
   } finally { await summaryLog.close() }
-  const failedDirectory = JSON.parse(failedMemory.value)
+  const failedDirectory = JSON.parse((await ctx.tools.execute({ name: 'singularity_memory', agent: ctx.agents.get(SessionId(backgroundChild.sessionId)), arguments: {}, callId: 'failure-read-directory', signal: new AbortController().signal })).value)
   assert(failedDirectory.entries.some(entry => entry.ref === failedDirectory.inherited && entry.status === 'failed' && entry.error.includes('temporarily unavailable')),
     JSON.stringify(failedDirectory))
   const taskRequest = goal => JSON.stringify({ learning: false, contract: {
@@ -372,6 +405,17 @@ try {
   assert.equal(healthy.session.snapshotEvents().findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
   globalThis.setTimeout = nativeTimeout
   assert(!('budget' in ctx.singularity), 'The host must not install a campaign budget gate')
+  const { auditRequests } = await import(pathToFileURL(join(checkout, 'scripts/context-audit.mjs')).href)
+  const capture = { schemaVersion: 1, kind: 'offline-native-fixture', requests: [parentRequest, childRequest, reviewRequest, improveRequest] }
+  const contextAudit = auditRequests(capture)
+  assert.equal(contextAudit.requests.length, 4)
+  assert(contextAudit.requests.every(row => row.systemBytes > 0 && row.toolsBytes > 0 && row.serializedRequestBytes > row.systemBytes))
+  if (process.env.SINGULARITY_CONTEXT_CAPTURE) await writeFile(process.env.SINGULARITY_CONTEXT_CAPTURE, JSON.stringify(capture, null, 2) + '\\n')
+  const { exportNative } = await import(pathToFileURL(join(checkout, 'scripts/evidence-export.mjs')).href)
+  const exported = await exportNative({ persistence: ctx.sessionPersistence, attachments: ctx.attachments, controlId: 'root-tools', output: join(root, 'evidence-export') })
+  assert(exported.files.some(file => file.category === 'control'))
+  assert(exported.files.some(file => file.category === 'trajectory'))
+  assert(exported.files.some(file => file.category === 'artifact'))
   console.log('all four role protocols and RSI schemas delivered; root confined reads pass; own mutations denied; child execution retained; on-demand optional parent memory and pending responsibility pass')
 } finally { await ctx.fiber.dispose() }
 `
@@ -384,6 +428,10 @@ it('delivers all four native role protocols and RSI schemas with root restrictio
     const script = join(root, 'host.mjs')
     await writeFile(script, smoke)
     const { stdout } = await run(process.execPath, [script, checkout, root], { timeout: 20_000 })
-    expect(stdout.trim()).toBe('all four role protocols and RSI schemas delivered; root confined reads pass; own mutations denied; child execution retained; on-demand optional parent memory and pending responsibility pass')
-  } finally { await rm(root, { recursive: true, force: true }) }
+    expect(stdout.trim()).toBe(
+      'all four role protocols and RSI schemas delivered; root confined reads pass; own mutations denied; child execution retained; on-demand optional parent memory and pending responsibility pass',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 }, 25_000)

@@ -9,8 +9,8 @@ import type { ProductionInput, VerifierCommand } from './production.ts'
 export type VerifierCommandInput = ProductionInput
 
 export interface VerifierCommandRequest {
-    readonly command: VerifierCommand
-    readonly artifactPath: string
+  readonly command: VerifierCommand
+  readonly artifactPath: string
   readonly inputs?: readonly VerifierCommandInput[]
 }
 
@@ -42,7 +42,10 @@ function messageOf(error: unknown): string {
 
 function requireRecord(value: unknown, field: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
-    refuse('malformed-payload', `${field} must be an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`)
+    refuse(
+      'malformed-payload',
+      `${field} must be an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`,
+    )
   return value as Record<string, unknown>
 }
 
@@ -73,22 +76,37 @@ function readInputs(raw: unknown): readonly VerifierCommandInput[] {
     assertClosedKeys(input, INPUT_MEMBERS, where)
     const path = requireText(input['path'], `${where}.path`)
     if (!isAbsolute(path))
-      refuse('malformed-payload', `${where}.path must be an absolute path, got ${JSON.stringify(path)}; the adapter reads bytes, not names`)
-    return { name: requireText(input['name'], `${where}.name`), digest: requireText(input['digest'], `${where}.digest`), path }
+      refuse(
+        'malformed-payload',
+        `${where}.path must be an absolute path, got ${JSON.stringify(path)}; the adapter reads bytes, not names`,
+      )
+    return {
+      name: requireText(input['name'], `${where}.name`),
+      digest: requireText(input['digest'], `${where}.digest`),
+      path,
+    }
   })
 }
 
 async function digestOfFile(path: string, what: string): Promise<string> {
   try {
-    return createHash('sha256').update(await readFile(path)).digest('hex')
+    return createHash('sha256')
+      .update(await readFile(path))
+      .digest('hex')
   } catch (error) {
-    refuse('evidence-input-mismatch', `${what} could not be read (${messageOf(error)}); a judgement cannot name bytes that are not there`)
+    refuse(
+      'evidence-input-mismatch',
+      `${what} could not be read (${messageOf(error)}); a judgement cannot name bytes that are not there`,
+    )
   }
 }
 
-async function hashInputs(inputs: readonly VerifierCommandInput[]): Promise<readonly { name: string; digest: string }[]> {
+async function hashInputs(
+  inputs: readonly VerifierCommandInput[],
+): Promise<readonly { name: string; digest: string }[]> {
   const digests: { name: string; digest: string }[] = []
-  for (const input of inputs) digests.push({ name: input.name, digest: await digestOfFile(input.path, `input "${input.name}"`) })
+  for (const input of inputs)
+    digests.push({ name: input.name, digest: await digestOfFile(input.path, `input "${input.name}"`) })
   return digests
 }
 
@@ -97,23 +115,36 @@ function clip(value: string): string {
   return oneLine.length <= 240 ? oneLine : `…${oneLine.slice(-240)}`
 }
 
-function describe(invocation: VerifierInvocation, outcome: VerifierProcessOutcome, inputs: readonly VerifierCommandInput[]): string {
+function describe(
+  invocation: VerifierInvocation,
+  outcome: VerifierProcessOutcome,
+  inputs: readonly VerifierCommandInput[],
+): string {
   const line = invocation.shell ? invocation.command : invocation.argv.join(' ')
-  const declared = inputs.length === 0 ? 'no declared inputs' : `declared inputs ${inputs.map(input => `${input.name}=${input.digest.slice(0, 12)}…`).join(', ')}`
+  const declared =
+    inputs.length === 0
+      ? 'no declared inputs'
+      : `declared inputs ${inputs.map(input => `${input.name}=${input.digest.slice(0, 12)}…`).join(', ')}`
   const where =
-    outcome.exitCode === null ? `did not run${outcome.failure === undefined ? '' : ` (${outcome.failure})`}` : `exited ${outcome.exitCode}`
+    outcome.exitCode === null
+      ? `did not run${outcome.failure === undefined ? '' : ` (${outcome.failure})`}`
+      : `exited ${outcome.exitCode}`
   const noise = outcome.stderr.trim() === '' ? '' : `; stderr: ${clip(outcome.stderr)}`
   return `"${line}" ${where}; ${declared}${noise}`
 }
 
-export async function runVerifierCommand(request: VerifierCommandRequest, runProcess: VerifierProcess): Promise<VerifierCommandResult> {
+export async function runVerifierCommand(
+  request: VerifierCommandRequest,
+  runProcess: VerifierProcess,
+): Promise<VerifierCommandResult> {
   const source = requireRecord(request, 'request')
   assertClosedKeys(source, REQUEST_MEMBERS, 'request')
   const command = requireCommand(source['command'], 'request.command')
   const artifactPath = requireText(source['artifactPath'], 'request.artifactPath')
   const inputs = readInputs(source['inputs'])
 
-  const invocation: VerifierInvocation = typeof command === 'string' ? { shell: true, command } : { shell: false, argv: command }
+  const invocation: VerifierInvocation =
+    typeof command === 'string' ? { shell: true, command } : { shell: false, argv: command }
   const outcome = await runProcess(invocation)
   if (outcome.failure !== undefined || outcome.exitCode === null)
     throw new Error(outcome.failure ?? 'verifier execution ended without an exit code')
@@ -121,7 +152,16 @@ export async function runVerifierCommand(request: VerifierCommandRequest, runPro
   const inputDigests = await hashInputs(inputs)
 
   return {
-    verdict: outcome.exitCode === 0 ? 'pass' : outcome.exitCode === 3 ? 'partial' : outcome.exitCode === 4 ? 'unknown' : outcome.exitCode === 1 ? 'fail' : 'unknown',
+    verdict:
+      outcome.exitCode === 0
+        ? 'pass'
+        : outcome.exitCode === 3
+          ? 'partial'
+          : outcome.exitCode === 4
+            ? 'unknown'
+            : outcome.exitCode === 1
+              ? 'fail'
+              : 'unknown',
     artifactDigest,
     inputDigests,
     detail: describe(invocation, outcome, inputs),

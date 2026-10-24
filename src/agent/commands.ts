@@ -37,7 +37,12 @@ export interface AgentNodeCommands {
    * for; neither is checked here beyond the protocol's own closed shape, because what a role means is
    * a deployment's business and what a session can do is the runtime's.
    */
-  open(input: { readonly commandId: string; readonly agentId: string; readonly sessionId: string; readonly role: string }): Promise<Envelope>
+  open(input: {
+    readonly commandId: string
+    readonly agentId: string
+    readonly sessionId: string
+    readonly role: string
+  }): Promise<Envelope>
 }
 
 export function createAgentNodeCommands(options: AgentNodeCommandOptions): AgentNodeCommands {

@@ -21,12 +21,7 @@ export {
   type Envelope,
   type EnvelopeBody,
 } from './protocol/envelope.ts'
-export {
-  defineKind,
-  ProtocolRegistry,
-  type Guarantees,
-  type KindRule,
-  type ProtocolSpec } from './protocol/registry.ts'
+export { defineKind, ProtocolRegistry, type Guarantees, type KindRule, type ProtocolSpec } from './protocol/registry.ts'
 export { MemoryLog, type Decision, type EmitInput, type LogOptions } from './protocol/memory-log.ts'
 export { foldSubject, foldSubjects } from './protocol/fold.ts'
 
@@ -125,9 +120,7 @@ export {
   type TaskView,
 } from './task/view.ts'
 
-export {
-  assertPinnedRevision,
-  projectBindings } from './environment/binding.ts'
+export { assertPinnedRevision, projectBindings } from './environment/binding.ts'
 export {
   declareEnvironmentProtocol,
   ENVIRONMENT_KINDS,
@@ -221,10 +214,7 @@ export {
   type ReleaseDraft,
   type ReleaseState,
 } from './release/protocol.ts'
-export {
-  createReleaseCommands,
-  type ReleaseCommandOptions,
-  type ReleaseCommands } from './release/commands.ts'
+export { createReleaseCommands, type ReleaseCommandOptions, type ReleaseCommands } from './release/commands.ts'
 
 export {
   assertVerifierRunnable,

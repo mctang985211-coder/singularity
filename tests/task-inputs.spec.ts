@@ -3,15 +3,35 @@ import { UNIT_IMPLEMENTATION } from './task-fixtures.ts'
 import { reviewedVerdict } from './command-fixtures.ts'
 import { describe, expect, it } from 'vitest'
 
-import { assertContractShape, CONTRACT_MEMBERS, foldSubject, MemoryLog, TASK_PROTOCOL, TASK_VERSION, type TaskState,
+import {
+  assertContractShape,
+  CONTRACT_MEMBERS,
+  foldSubject,
+  MemoryLog,
+  TASK_PROTOCOL,
+  TASK_VERSION,
+  type TaskState,
 } from '../src/index.ts'
 import { AGENT, commandsFor, createRevision, deployment, openAgent, pin } from './command-fixtures.ts'
 import { asyncRefusalOf, refusalOf } from './fixtures.ts'
-import { admitted, ARTIFACT, assigned, BUBBLE_INPUTS, bubbleOpened, contract, fileAttachment, started, SUBJECTS, TASK_ID, taskRegistry,
+import {
+  admitted,
+  ARTIFACT,
+  assigned,
+  BUBBLE_INPUTS,
+  bubbleOpened,
+  contract,
+  fileAttachment,
+  started,
+  SUBJECTS,
+  TASK_ID,
+  taskRegistry,
 } from './task-fixtures.ts'
 
 const TEMPLATE = { id: 'word-counter', digest: '1'.repeat(64) }
-const PROTECTED = { name: 'fixture/words.txt', source: { kind: 'protected', ref: 'words', digest: 'f'.repeat(64) },
+const PROTECTED = {
+  name: 'fixture/words.txt',
+  source: { kind: 'protected', ref: 'words', digest: 'f'.repeat(64) },
 } as const
 const typedContract = (inputs: readonly unknown[] = [PROTECTED]) => ({ ...contract(), template: TEMPLATE, inputs })
 
@@ -32,7 +52,10 @@ describe('the task fixes its template and input sources at admission', () => {
     ['unknown source', typedContract([{ name: PROTECTED.name, source: { kind: 'workspace', ref: 'words' } }])],
     ['protected digest', typedContract([{ ...PROTECTED, source: { ...PROTECTED.source, digest: 'later' } }])],
     ['protected widening', typedContract([{ ...PROTECTED, source: { ...PROTECTED.source, taskId: 'producer' } }])],
-    ['artifact widening', typedContract([{ name: 'in/artifact.txt', source: { kind: 'artifact', taskId: 'producer', digest: 'f'.repeat(64) } },
+    [
+      'artifact widening',
+      typedContract([
+        { name: 'in/artifact.txt', source: { kind: 'artifact', taskId: 'producer', digest: 'f'.repeat(64) } },
       ]),
     ],
     ['missing producer', typedContract([{ name: 'in/artifact.txt', source: { kind: 'artifact' } }])],
@@ -43,7 +66,9 @@ describe('the task fixes its template and input sources at admission', () => {
   it('refuses its own artifact as an input before recording a Task', async () => {
     const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
     const declared = typedContract([{ name: 'in/artifact.txt', source: { kind: 'artifact', taskId: TASK_ID } }])
-    expect(await asyncRefusalOf(() => log.emit({ ...admitted(), payload: { contract: declared } }))).toMatchObject({ code: 'malformed-contract', detail: expect.stringContaining('own artifact'),
+    expect(await asyncRefusalOf(() => log.emit({ ...admitted(), payload: { contract: declared } }))).toMatchObject({
+      code: 'malformed-contract',
+      detail: expect.stringContaining('own artifact'),
     })
     expect(log.count).toBe(0)
   })
@@ -63,10 +88,13 @@ describe('a Bubble binds exactly the inputs its Task declared', () => {
     await log.emit(started())
     const before = log.count
     const fact = bubbleOpened()
-    expect(await asyncRefusalOf(() => log.emit({ ...fact, payload: { ...(fact.payload as object), inputs } })),
+    expect(
+      await asyncRefusalOf(() => log.emit({ ...fact, payload: { ...(fact.payload as object), inputs } })),
     ).toMatchObject({ code: 'evidence-input-mismatch' })
     expect(log.count).toBe(before)
-    expect(foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.runs['run-1']?.bubble,
+    expect(
+      foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.runs['run-1']
+        ?.bubble,
     ).toBeUndefined()
   })
 })
@@ -87,49 +115,88 @@ async function inputDeployment(stage: ProducerStage, sourceTaskId = PRODUCER) {
     await commands.assign({ commandId: 'assign-producer', taskId: PRODUCER, agentId: AGENT })
     await commands.startRun({
       purpose: 'solve',
-      commandId: 'start-producer', taskId: PRODUCER, runId: 'p1', revision: pin(live),
+      commandId: 'start-producer',
+      taskId: PRODUCER,
+      runId: 'p1',
+      revision: pin(live),
     })
-    await commands.openBubble({ commandId: 'bubble-producer', taskId: PRODUCER, runId: 'p1', inputs: BUBBLE_INPUTS,
-      workspace: { kind: 'dir', ref: '/producer' }, model: { provider: 'test', model: 'model' }, tools: [], conditions: [],
+    await commands.openBubble({
+      commandId: 'bubble-producer',
+      taskId: PRODUCER,
+      runId: 'p1',
+      inputs: BUBBLE_INPUTS,
+      workspace: { kind: 'dir', ref: '/producer' },
+      model: { provider: 'test', model: 'model' },
+      tools: [],
+      conditions: [],
     })
     if (stage !== 'working') {
-      await commands.submitRun({ commandId: 'seal-producer', taskId: PRODUCER, runId: 'p1', submission: {
-        requestId: 'submit-producer', requestDigest: '2'.repeat(64),
+      await commands.submitRun({
+        commandId: 'seal-producer',
+        taskId: PRODUCER,
+        runId: 'p1',
+        submission: {
+          requestId: 'submit-producer',
+          requestDigest: '2'.repeat(64),
           artifactDigest: ARTIFACT,
           inputDigests: BUBBLE_INPUTS,
           files: {
             artifact: fileAttachment(ARTIFACT, 'artifact.json'),
-            inputs: BUBBLE_INPUTS.map((input) => ({ name: input.name, attachment: fileAttachment(input.digest, 'words.txt'),
+            inputs: BUBBLE_INPUTS.map(input => ({
+              name: input.name,
+              attachment: fileAttachment(input.digest, 'words.txt'),
             })),
+          },
+          source: { sessionId: 'producer-session', eventCount: 0, digest: '4'.repeat(64) },
         },
-        source: { sessionId: 'producer-session', eventCount: 0, digest: '4'.repeat(64) },
-      },
       })
     }
     if (stage === 'sealed-verified' || stage === 'sealed-failed') {
       const criterion = producerContract.criteria[0]!
-      await reviewedVerdict(live, commands, { commandId: 'judge-producer', taskId: PRODUCER, verdict: {
+      await reviewedVerdict(live, commands, {
+        commandId: 'judge-producer',
+        taskId: PRODUCER,
+        verdict: {
           reviewId: 'review-1',
           verifierRef: UNIT_VERIFIER,
           verifierVersion: '1',
-          runId: 'p1', criterionId: criterion.criterionId,
-        implementationDigest: UNIT_IMPLEMENTATION, verdict: stage === 'sealed-failed' ? 'fail' : 'pass', artifactDigest: ARTIFACT, inputDigests: BUBBLE_INPUTS,
+          runId: 'p1',
+          criterionId: criterion.criterionId,
+          implementationDigest: UNIT_IMPLEMENTATION,
+          verdict: stage === 'sealed-failed' ? 'fail' : 'pass',
+          artifactDigest: ARTIFACT,
+          inputDigests: BUBBLE_INPUTS,
         },
       })
       await commands.settle({ commandId: 'settle-producer', taskId: PRODUCER, runId: 'p1' })
     }
   }
-  await commands.admit({ commandId: 'admit-consumer', taskId: CONSUMER,
-    contract: { ...typedContract([{ name: INPUT, source: { kind: 'artifact', taskId: sourceTaskId } }]), criteria: producerContract.criteria,
+  await commands.admit({
+    commandId: 'admit-consumer',
+    taskId: CONSUMER,
+    contract: {
+      ...typedContract([{ name: INPUT, source: { kind: 'artifact', taskId: sourceTaskId } }]),
+      criteria: producerContract.criteria,
     },
   })
   await commands.assign({ commandId: 'assign-consumer', taskId: CONSUMER, agentId: AGENT })
   await commands.startRun({
     purpose: 'solve',
-    commandId: 'start-consumer', taskId: CONSUMER, runId: 'c1', revision: pin(live),
+    commandId: 'start-consumer',
+    taskId: CONSUMER,
+    runId: 'c1',
+    revision: pin(live),
   })
-  const bubble = (digest = ARTIFACT, producerRunId: string | undefined = 'p1') => commands.openBubble({ commandId: 'bubble-consumer', taskId: CONSUMER, runId: 'c1',
-    inputs: [{ name: INPUT, digest, ...(producerRunId === undefined ? {} : { producerRunId }) }], workspace: { kind: 'dir', ref: '/consumer' }, model: { provider: 'test', model: 'model' }, tools: [], conditions: [],
+  const bubble = (digest = ARTIFACT, producerRunId: string | undefined = 'p1') =>
+    commands.openBubble({
+      commandId: 'bubble-consumer',
+      taskId: CONSUMER,
+      runId: 'c1',
+      inputs: [{ name: INPUT, digest, ...(producerRunId === undefined ? {} : { producerRunId }) }],
+      workspace: { kind: 'dir', ref: '/consumer' },
+      model: { provider: 'test', model: 'model' },
+      tools: [],
+      conditions: [],
     })
   return { live, commands, bubble }
 }
@@ -137,78 +204,142 @@ async function inputDeployment(stage: ProducerStage, sourceTaskId = PRODUCER) {
 describe('artifact inputs require a verified, sealed producer at the command boundary', () => {
   it('does not substitute another verified Task even when its artifact has the expected digest', async () => {
     const { bubble } = await inputDeployment('sealed-verified', 'another-producer')
-    expect(await asyncRefusalOf(bubble)).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining('another-producer'),
+    expect(await asyncRefusalOf(bubble)).toMatchObject({
+      code: 'evidence-input-mismatch',
+      detail: expect.stringContaining('another-producer'),
     })
   })
 
   it.each(['missing', 'working', 'submitted', 'sealed-failed'] as const)(
     'refuses the %s producer without recording a Bubble',
-    async (stage) => {
-    const { live, bubble } = await inputDeployment(stage)
-    const before = live.store.load().entries().length
-    expect(await asyncRefusalOf(bubble)).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining(PRODUCER),
+    async stage => {
+      const { live, bubble } = await inputDeployment(stage)
+      const before = live.store.load().entries().length
+      expect(await asyncRefusalOf(bubble)).toMatchObject({
+        code: 'evidence-input-mismatch',
+        detail: expect.stringContaining(PRODUCER),
       })
-    expect(live.store.load().entries()).toHaveLength(before)
-  },
+      expect(live.store.load().entries()).toHaveLength(before)
+    },
   )
 
   it('refuses bytes from a different artifact even after its producer verifies', async () => {
     const { live, bubble } = await inputDeployment('sealed-verified')
     expect(await asyncRefusalOf(() => bubble('5'.repeat(64)))).toMatchObject({ code: 'evidence-input-mismatch' })
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CONSUMER)?.runs['c1']?.bubble,
+    expect(
+      live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CONSUMER)?.runs['c1']?.bubble,
     ).toBeUndefined()
     await bubble()
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CONSUMER)?.runs['c1']?.bubble?.inputs,
+    expect(
+      live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CONSUMER)?.runs['c1']?.bubble?.inputs,
     ).toEqual([{ name: INPUT, digest: ARTIFACT, producerRunId: 'p1' }])
   })
 
-  it.each(['', 'unknown-run'])('refuses producer Run %j even when another verified Run has matching bytes', async (runId) => {
-    const { bubble } = await inputDeployment('sealed-verified')
-    expect(await asyncRefusalOf(() => bubble(ARTIFACT, runId))).toMatchObject({ code: runId === '' ? 'malformed-payload' : 'evidence-input-mismatch' })
-  })
+  it.each(['', 'unknown-run'])(
+    'refuses producer Run %j even when another verified Run has matching bytes',
+    async runId => {
+      const { bubble } = await inputDeployment('sealed-verified')
+      expect(await asyncRefusalOf(() => bubble(ARTIFACT, runId))).toMatchObject({
+        code: runId === '' ? 'malformed-payload' : 'evidence-input-mismatch',
+      })
+    },
+  )
 
   it('requires an explicit producer Run without guessing from its digest', async () => {
     const { commands } = await inputDeployment('sealed-verified')
-    expect(await asyncRefusalOf(() => commands.openBubble({ commandId: 'bubble-missing-source', taskId: CONSUMER,
-      runId: 'c1', inputs: [{ name: INPUT, digest: ARTIFACT }], workspace: { kind: 'dir', ref: '/consumer' },
-      model: { provider: 'test', model: 'model' }, tools: [], conditions: [],
-    }))).toMatchObject({ code: 'evidence-input-mismatch' })
+    expect(
+      await asyncRefusalOf(() =>
+        commands.openBubble({
+          commandId: 'bubble-missing-source',
+          taskId: CONSUMER,
+          runId: 'c1',
+          inputs: [{ name: INPUT, digest: ARTIFACT }],
+          workspace: { kind: 'dir', ref: '/consumer' },
+          model: { provider: 'test', model: 'model' },
+          tools: [],
+          conditions: [],
+        }),
+      ),
+    ).toMatchObject({ code: 'evidence-input-mismatch' })
   })
 
   it('retains the selected verified Run when another Run later verifies the same bytes', async () => {
     const { live, commands, bubble } = await inputDeployment('sealed-verified')
-    await commands.startRun({ commandId: 'start-p2', taskId: PRODUCER, runId: 'p2', purpose: 'solve', revision: pin(live) })
-    await commands.openBubble({ commandId: 'bubble-p2', taskId: PRODUCER, runId: 'p2', inputs: BUBBLE_INPUTS,
-      workspace: { kind: 'dir', ref: '/p2' }, model: { provider: 'test', model: 'model' }, tools: [], conditions: [] })
-    const original = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PRODUCER)!.runs['p1']!.submission!
-    await commands.submitRun({ commandId: 'seal-p2', taskId: PRODUCER, runId: 'p2', submission: {
-      ...original, requestId: 'p2', requestDigest: '5'.repeat(64), source: { ...original.source, eventCount: 1 },
-    } })
+    await commands.startRun({
+      commandId: 'start-p2',
+      taskId: PRODUCER,
+      runId: 'p2',
+      purpose: 'solve',
+      revision: pin(live),
+    })
+    await commands.openBubble({
+      commandId: 'bubble-p2',
+      taskId: PRODUCER,
+      runId: 'p2',
+      inputs: BUBBLE_INPUTS,
+      workspace: { kind: 'dir', ref: '/p2' },
+      model: { provider: 'test', model: 'model' },
+      tools: [],
+      conditions: [],
+    })
+    const original = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PRODUCER)!.runs['p1']!
+      .submission!
+    await commands.submitRun({
+      commandId: 'seal-p2',
+      taskId: PRODUCER,
+      runId: 'p2',
+      submission: {
+        ...original,
+        requestId: 'p2',
+        requestDigest: '5'.repeat(64),
+        source: { ...original.source, eventCount: 1 },
+      },
+    })
     expect(await asyncRefusalOf(() => bubble(ARTIFACT, 'p2'))).toMatchObject({ code: 'evidence-input-mismatch' })
-    await reviewedVerdict(live, commands, { commandId: 'judge-p2', taskId: PRODUCER, verdict: {
-      runId: 'p2', reviewId: 'review-p2', criterionId: contract().criteria[0]!.criterionId,
-      verifierRef: UNIT_VERIFIER, verifierVersion: '1', implementationDigest: UNIT_IMPLEMENTATION,
-      verdict: 'pass', artifactDigest: ARTIFACT, inputDigests: BUBBLE_INPUTS,
-    } })
+    await reviewedVerdict(live, commands, {
+      commandId: 'judge-p2',
+      taskId: PRODUCER,
+      verdict: {
+        runId: 'p2',
+        reviewId: 'review-p2',
+        criterionId: contract().criteria[0]!.criterionId,
+        verifierRef: UNIT_VERIFIER,
+        verifierVersion: '1',
+        implementationDigest: UNIT_IMPLEMENTATION,
+        verdict: 'pass',
+        artifactDigest: ARTIFACT,
+        inputDigests: BUBBLE_INPUTS,
+      },
+    })
     await commands.settle({ commandId: 'settle-p2', taskId: PRODUCER, runId: 'p2' })
     await bubble()
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CONSUMER)!.runs['c1']!.bubble!.inputs[0])
-      .toEqual({ name: INPUT, digest: ARTIFACT, producerRunId: 'p1' })
+    expect(
+      live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CONSUMER)!.runs['c1']!.bubble!.inputs[0],
+    ).toEqual({ name: INPUT, digest: ARTIFACT, producerRunId: 'p1' })
   })
 
   it('observes a producer settlement committed ahead of it in the same queue', async () => {
     const { live, commands, bubble } = await inputDeployment('submitted')
     const criterion = contract().criteria[0]!
-    await reviewedVerdict(live, commands, { commandId: 'judge-producer', taskId: PRODUCER, verdict: {
+    await reviewedVerdict(live, commands, {
+      commandId: 'judge-producer',
+      taskId: PRODUCER,
+      verdict: {
         reviewId: 'review-1',
         verifierRef: UNIT_VERIFIER,
         verifierVersion: '1',
-        runId: 'p1', criterionId: criterion.criterionId,
-      implementationDigest: UNIT_IMPLEMENTATION, verdict: 'pass', artifactDigest: ARTIFACT, inputDigests: BUBBLE_INPUTS,
+        runId: 'p1',
+        criterionId: criterion.criterionId,
+        implementationDigest: UNIT_IMPLEMENTATION,
+        verdict: 'pass',
+        artifactDigest: ARTIFACT,
+        inputDigests: BUBBLE_INPUTS,
       },
     })
     await Promise.all([commands.settle({ commandId: 'settle-producer', taskId: PRODUCER, runId: 'p1' }), bubble()])
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CONSUMER)?.runs['c1']?.bubble?.inputs[0]?.digest,
+    expect(
+      live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CONSUMER)?.runs['c1']?.bubble?.inputs[0]
+        ?.digest,
     ).toBe(ARTIFACT)
   })
 })

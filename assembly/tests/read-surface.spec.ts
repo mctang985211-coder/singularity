@@ -20,7 +20,7 @@ import { fixtureReview } from './review-fixture.ts'
 import { attachmentsAt, FakePersistence, agentFor, execFor, fakeExecution, factsOf } from './seam.ts'
 const roots: string[] = []
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })))
+  await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true })))
 })
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'free-task-'))
@@ -31,7 +31,8 @@ async function setup() {
       root,
       await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
       medium as never,
-      attachmentsAt(root), testProjections,
+      attachmentsAt(root),
+      testProjections,
     ),
     agent = agentFor('worker', 'worker'),
     caller = callerOf(agent),
@@ -41,7 +42,7 @@ async function setup() {
 it('runs and independently reviews a one-off investigation without minting a method Revision', async () => {
   const h = await setup(),
     method = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!.revision
-  const before = factsOf(h.medium).filter((f) => f.kind === 'revision/created').length
+  const before = factsOf(h.medium).filter(f => f.kind === 'revision/created').length
   const plan = await decompose(h.apparatus, { advance: async () => [] }, h.caller, {
     taskId: h.proposal.taskId,
     children: [
@@ -57,7 +58,8 @@ it('runs and independently reviews a one-off investigation without minting a met
         },
         dependsOn: [],
         supports: ['letters'],
-        maxRuns: 1, requirement: 'required' as const,
+        maxRuns: 1,
+        requirement: 'required' as const,
       },
     ],
   })
@@ -78,7 +80,10 @@ it('runs and independently reviews a one-off investigation without minting a met
   expect(
     (
       await submit(
-        h.apparatus, fakeExecution(() => undefined), caller, execFor(agent, 'answer'),
+        h.apparatus,
+        fakeExecution(() => undefined),
+        caller,
+        execFor(agent, 'answer'),
         { taskId: childId, path: 'finding.json' },
         new AbortController().signal,
         fixtureReview(h.apparatus),
@@ -86,37 +91,60 @@ it('runs and independently reviews a one-off investigation without minting a met
     ).verdict,
   ).toBe('pass')
   expect(child.contract!.template).toBeUndefined()
-  expect(factsOf(h.medium).filter((f) => f.kind === 'revision/created')).toHaveLength(before)
+  expect(factsOf(h.medium).filter(f => f.kind === 'revision/created')).toHaveLength(before)
   const history = await historyOf(h.apparatus, [], h.caller.agentId)
-  expect(history.tasks.find((t) => t.taskId === childId)).not.toHaveProperty('goal')
-  expect(history.tasks.find((t) => t.taskId === childId)!.runs[0]!.artifact).toMatchObject({ name: 'finding.json' })
+  expect(history.tasks.find(t => t.taskId === childId)).not.toHaveProperty('goal')
+  expect(history.tasks.find(t => t.taskId === childId)!.runs[0]!.artifact).toMatchObject({ name: 'finding.json' })
   expect((await readArtifact(h.apparatus, childId)).text).toContain('hypothesis')
-  const terminal = factsOf(h.medium).findLast((fact) => fact.subject === childId && fact.kind === 'run/verified')!
+  const terminal = factsOf(h.medium).findLast(fact => fact.subject === childId && fact.kind === 'run/verified')!
   const events: SessionEvent[] = []
-  const message = schedulerMessage({ kind: 'singularity', purpose: 'plan-outcome', controlId: h.apparatus.controlId,
-    parentTaskId: h.proposal.taskId, taskId: childId, runId: run.runId, factSeq: terminal.seq }, 'child evidence settled')
+  const message = schedulerMessage(
+    {
+      kind: 'singularity',
+      purpose: 'plan-outcome',
+      controlId: h.apparatus.controlId,
+      parentTaskId: h.proposal.taskId,
+      taskId: childId,
+      runId: run.runId,
+      factSeq: terminal.seq,
+    },
+    'child evidence settled',
+  )
   let waits = 0
-  const session = { sessionId: h.caller.sessionId, wait: async () => {
-    waits++
-    if (waits === 2) events.push({ seq: SessionSeq(events.length), time: 0, type: 'agent/inbox/spliced',
-      data: { target: 'next-turn', start: 0, inserted: [message] } } as SessionEvent)
-    if (waits === 3) events.push({ seq: SessionSeq(events.length), time: 0, type: 'user/message', data: message } as SessionEvent)
-    if (waits === 4) {
-      await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '35')
-      await submit(
-        h.apparatus,
-        fakeExecution(() => undefined),
-        h.caller,
-        execFor(h.agent, 'answer'),
-        { taskId: h.proposal.taskId, path: h.proposal.contract.artifact },
-        new AbortController().signal,
-        fixtureReview(h.apparatus),
-      )
-    }
-  } } as ChildSession
-  const persistence = { open: async () => ({ read: async () => ({ events }), close: async () => undefined }) } as unknown as SessionPersistence
-  expect((await waitForTask({ ...h.apparatus, persistence }, h.proposal.taskId, session, new AbortController().signal)).status)
-    .toBe('verified')
+  const session = {
+    sessionId: h.caller.sessionId,
+    wait: async () => {
+      waits++
+      if (waits === 2)
+        events.push({
+          seq: SessionSeq(events.length),
+          time: 0,
+          type: 'agent/inbox/spliced',
+          data: { target: 'next-turn', start: 0, inserted: [message] },
+        } as SessionEvent)
+      if (waits === 3)
+        events.push({ seq: SessionSeq(events.length), time: 0, type: 'user/message', data: message } as SessionEvent)
+      if (waits === 4) {
+        await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '35')
+        await submit(
+          h.apparatus,
+          fakeExecution(() => undefined),
+          h.caller,
+          execFor(h.agent, 'answer'),
+          { taskId: h.proposal.taskId, path: h.proposal.contract.artifact },
+          new AbortController().signal,
+          fixtureReview(h.apparatus),
+        )
+      }
+    },
+  } as ChildSession
+  const persistence = {
+    open: async () => ({ read: async () => ({ events }), close: async () => undefined }),
+  } as unknown as SessionPersistence
+  expect(
+    (await waitForTask({ ...h.apparatus, persistence }, h.proposal.taskId, session, new AbortController().signal))
+      .status,
+  ).toBe('verified')
   expect(waits).toBe(4)
   await h.apparatus.store.close()
 })
@@ -126,77 +154,157 @@ it('refuses exact ancestor responsibilities even under fresh child keys and temp
   await expect(
     decompose(h.apparatus, { advance: async () => [] }, h.caller, {
       taskId: h.proposal.taskId,
-      children: [{ key: 'again', contract, dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const }],
+      children: [
+        { key: 'again', contract, dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const },
+      ],
     }),
   ).rejects.toThrow('repeats an ancestor')
-  expect(factsOf(h.medium).filter((f) => f.kind === 'task/admitted')).toHaveLength(1)
+  expect(factsOf(h.medium).filter(f => f.kind === 'task/admitted')).toHaveLength(1)
   await h.apparatus.store.close()
 })
 it('waits for a committed round outcome to enter and finish its native turn before diagnosing a missing report', async () => {
   const h = await setup(),
-    analysis = await propose(h.apparatus, { ...h.caller, agentId: 'analysis', sessionId: 'analysis' }, 'analysis',
-      { goal: 'analyze methods' }, { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } })
-  const fact = (commandId: string, kind: string, payload: unknown, as?: string) => h.apparatus.store.emit({
-    commandId, kind, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: analysis.taskId, payload,
-    ...(as === undefined ? {} : { as }),
-  })
+    analysis = await propose(
+      h.apparatus,
+      { ...h.caller, agentId: 'analysis', sessionId: 'analysis' },
+      'analysis',
+      { goal: 'analyze methods' },
+      { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } },
+    )
+  const fact = (commandId: string, kind: string, payload: unknown, as?: string) =>
+    h.apparatus.store.emit({
+      commandId,
+      kind,
+      protocol: TASK_PROTOCOL,
+      version: TASK_VERSION,
+      subject: analysis.taskId,
+      payload,
+      ...(as === undefined ? {} : { as }),
+    })
   const method = taskStateOf(h.apparatus, analysis.taskId).runs[analysis.runId]!.revision
-  await fact('request:notification', 'rsi/round-requested', {
-    runId: analysis.runId, roundId: 'notification', round: 1, incumbent: method, candidates: [method],
-  }, 'agent:analysis')
-  const outcome = await fact('round-settled:notification', 'rsi/round-settled',
-    { roundId: 'notification', status: 'failed', error: 'insufficient evidence' })
-  const message = schedulerMessage({ kind: 'singularity', purpose: 'plan-outcome', controlId: h.apparatus.controlId,
-    parentTaskId: analysis.taskId, taskId: analysis.taskId, runId: analysis.runId, factSeq: outcome.seq }, 'outcome')
+  await fact(
+    'request:notification',
+    'rsi/round-requested',
+    {
+      runId: analysis.runId,
+      roundId: 'notification',
+      round: 1,
+      incumbent: method,
+      candidates: [method],
+    },
+    'agent:analysis',
+  )
+  const outcome = await fact('round-settled:notification', 'rsi/round-settled', {
+    roundId: 'notification',
+    status: 'failed',
+    error: 'insufficient evidence',
+  })
+  const message = schedulerMessage(
+    {
+      kind: 'singularity',
+      purpose: 'plan-outcome',
+      controlId: h.apparatus.controlId,
+      parentTaskId: analysis.taskId,
+      taskId: analysis.taskId,
+      runId: analysis.runId,
+      factSeq: outcome.seq,
+    },
+    'outcome',
+  )
   const events: SessionEvent[] = []
-  const persistence = { open: async () => ({ read: async () => ({ events }), close: async () => undefined }) } as unknown as SessionPersistence
+  const persistence = {
+    open: async () => ({ read: async () => ({ events }), close: async () => undefined }),
+  } as unknown as SessionPersistence
   let waits = 0
-  const session = { sessionId: 'analysis', wait: async () => {
-    waits++
-    if (waits === 2) events.push({ seq: SessionSeq(events.length), time: 0, type: 'agent/inbox/spliced',
-      data: { target: 'next-turn', start: 0, inserted: [message] } } as SessionEvent)
-    if (waits === 3) events.push({ seq: SessionSeq(events.length), time: 0, type: 'user/message', data: message } as SessionEvent)
-    if (waits === 4) events.push({ seq: SessionSeq(events.length), time: 0, type: 'turn/end', data: {} } as SessionEvent)
-  } } as ChildSession
-  await expect(waitForTask({ ...h.apparatus, persistence }, analysis.taskId, session, new AbortController().signal))
-    .resolves.toMatchObject({ status: 'failed', failureCause: 'business', failureReason: expect.stringContaining('stopped without submitting') })
+  const session = {
+    sessionId: 'analysis',
+    wait: async () => {
+      waits++
+      if (waits === 2)
+        events.push({
+          seq: SessionSeq(events.length),
+          time: 0,
+          type: 'agent/inbox/spliced',
+          data: { target: 'next-turn', start: 0, inserted: [message] },
+        } as SessionEvent)
+      if (waits === 3)
+        events.push({ seq: SessionSeq(events.length), time: 0, type: 'user/message', data: message } as SessionEvent)
+      if (waits === 4)
+        events.push({ seq: SessionSeq(events.length), time: 0, type: 'turn/end', data: {} } as SessionEvent)
+    },
+  } as ChildSession
+  await expect(
+    waitForTask({ ...h.apparatus, persistence }, analysis.taskId, session, new AbortController().signal),
+  ).resolves.toMatchObject({
+    status: 'failed',
+    failureCause: 'business',
+    failureReason: expect.stringContaining('stopped without submitting'),
+  })
   expect(waits).toBe(4)
   await h.apparatus.store.close()
 })
 
 it('ends an idle RSI Run without a submission or pending coordination instead of polling indefinitely', async () => {
   const h = await setup()
-  const analysis = await propose(h.apparatus, { ...h.caller, agentId: 'analysis', sessionId: 'analysis' }, 'idle-analysis',
-    { goal: 'analyze methods' }, { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } })
+  const analysis = await propose(
+    h.apparatus,
+    { ...h.caller, agentId: 'analysis', sessionId: 'analysis' },
+    'idle-analysis',
+    { goal: 'analyze methods' },
+    { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } },
+  )
   let waits = 0
-  const session = { sessionId: 'analysis', wait: async () => { waits++ } } as ChildSession
-  const persistence = { open: async () => ({ read: async () => ({ events: [] }), close: async () => undefined }) } as unknown as SessionPersistence
-  const wait = () => waitForTask({ ...h.apparatus, persistence }, analysis.taskId, session, new AbortController().signal)
+  const session = {
+    sessionId: 'analysis',
+    wait: async () => {
+      waits++
+    },
+  } as ChildSession
+  const persistence = {
+    open: async () => ({ read: async () => ({ events: [] }), close: async () => undefined }),
+  } as unknown as SessionPersistence
+  const wait = () =>
+    waitForTask({ ...h.apparatus, persistence }, analysis.taskId, session, new AbortController().signal)
   try {
-    await expect(wait()).resolves.toMatchObject({ status: 'failed', failureCause: 'business',
-      failureReason: 'the native agent stopped without submitting after coordination settled' })
+    await expect(wait()).resolves.toMatchObject({
+      status: 'failed',
+      failureCause: 'business',
+      failureReason: 'the native agent stopped without submitting after coordination settled',
+    })
     expect(waits).toBe(1)
     const failures = factsOf(h.medium).filter(fact => fact.subject === analysis.taskId && fact.kind === 'run/failed')
     expect(failures).toHaveLength(1)
     await expect(wait()).resolves.toMatchObject({ runId: analysis.runId, status: 'failed' })
-    expect(factsOf(h.medium).filter(fact => fact.subject === analysis.taskId && fact.kind === 'run/failed')).toEqual(failures)
-  } finally { await h.apparatus.store.close() }
+    expect(factsOf(h.medium).filter(fact => fact.subject === analysis.taskId && fact.kind === 'run/failed')).toEqual(
+      failures,
+    )
+  } finally {
+    await h.apparatus.store.close()
+  }
 })
-
 
 it('reads large sealed findings in explicit UTF-8 pages without copying them into task history', async () => {
   const h = await setup()
   const text = '边界证据'.repeat(10_000)
   await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), text)
-  await submit(h.apparatus, fakeExecution(() => undefined), h.caller, execFor(h.agent, 'large-report'),
-    { taskId: h.proposal.taskId, path: h.proposal.contract.artifact }, new AbortController().signal, fixtureReview(h.apparatus))
+  await submit(
+    h.apparatus,
+    fakeExecution(() => undefined),
+    h.caller,
+    execFor(h.agent, 'large-report'),
+    { taskId: h.proposal.taskId, path: h.proposal.contract.artifact },
+    new AbortController().signal,
+    fixtureReview(h.apparatus),
+  )
   const history = await historyOf(h.apparatus, [], h.caller.agentId)
   expect(JSON.stringify(history.tasks)).not.toContain(text)
-  let from = 0, read = ''
+  let from = 0,
+    read = ''
   while (from < Buffer.byteLength(text)) {
     const page = await readArtifact(h.apparatus, h.proposal.taskId, h.proposal.runId, from, 16_384)
     expect(Buffer.byteLength(page.text)).toBeLessThanOrEqual(16_384)
-    read += page.text; from = page.next
+    read += page.text
+    from = page.next
   }
   expect(read).toBe(text)
   await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), 'changed after submission')
@@ -210,20 +318,36 @@ it('reads large sealed findings in explicit UTF-8 pages without copying them int
 it('keeps validation and heldout Tasks outside proposer reads and prepared memory scope', async () => {
   const h = await setup()
   const caller = { ...h.caller, agentId: 'analysis', sessionId: 'analysis' }
-  const analysis = await propose(h.apparatus, caller, 'analysis-private', { goal: 'analyze methods' },
-    { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } })
+  const analysis = await propose(
+    h.apparatus,
+    caller,
+    'analysis-private',
+    { goal: 'analyze methods' },
+    { purpose: 'improve', relatedTo: { taskId: h.proposal.taskId, runId: h.proposal.runId } },
+  )
   for (const split of ['evolve', 'validation', 'heldout'] as const) {
-    const trial = await propose(h.apparatus, { ...h.caller, agentId: `trial-${split}`, sessionId: `trial-${split}` }, split,
-      { goal: `private-${split}` }, { purpose: 'evaluation', relatedTo: { taskId: analysis.taskId, runId: analysis.runId },
-        case: { caseId: split, familyId: split, split } })
+    const trial = await propose(
+      h.apparatus,
+      { ...h.caller, agentId: `trial-${split}`, sessionId: `trial-${split}` },
+      split,
+      { goal: `private-${split}` },
+      {
+        purpose: 'evaluation',
+        relatedTo: { taskId: analysis.taskId, runId: analysis.runId },
+        case: { caseId: split, familyId: split, split },
+      },
+    )
     const request = readForAgent(h.apparatus, 'analysis', { kind: 'task', ref: trial.taskId })
     if (split === 'evolve') await expect(request).resolves.toMatchObject({ taskId: trial.taskId })
     else {
       await expect(request).rejects.toThrow('outside this evidence scope')
-      await expect(readForAgent(h.apparatus, 'analysis', { kind: 'trajectory', rootId: trial.taskId,
-        ref: `trial-${split}` })).rejects.toThrow('closed subject')
+      await expect(
+        readForAgent(h.apparatus, 'analysis', { kind: 'trajectory', rootId: trial.taskId, ref: `trial-${split}` }),
+      ).rejects.toThrow('closed subject')
     }
-    await expect(readForAgent(h.apparatus, `trial-${split}`, { kind: 'task', ref: trial.taskId })).resolves.toMatchObject({ taskId: trial.taskId })
+    await expect(
+      readForAgent(h.apparatus, `trial-${split}`, { kind: 'task', ref: trial.taskId }),
+    ).resolves.toMatchObject({ taskId: trial.taskId })
   }
   await h.apparatus.store.close()
 })
@@ -231,28 +355,51 @@ it('keeps validation and heldout Tasks outside proposer reads and prepared memor
 it('pages related Task indexes without replaying contracts, verdicts or historical Run bodies', async () => {
   const h = await setup()
   // This index fixture has control facts but no modeled execution steps.
-  const reading = { ...h.apparatus, persistence: { open: async () => ({
-    read: async () => ({ events: [] }), close: async () => undefined,
-  }) } as unknown as SessionPersistence }
+  const reading = {
+    ...h.apparatus,
+    persistence: {
+      open: async () => ({
+        read: async () => ({ events: [] }),
+        close: async () => undefined,
+      }),
+    } as unknown as SessionPersistence,
+  }
   const oldRun = taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]!
   const failure = 'Old diagnostic evidence. '.repeat(1000)
-  await h.apparatus.tasks.forAgent(h.caller.agentId).failRun({ commandId: 'old-failure', taskId: h.proposal.taskId,
-    runId: oldRun.runId, reason: failure })
+  await h.apparatus.tasks
+    .forAgent(h.caller.agentId)
+    .failRun({ commandId: 'old-failure', taskId: h.proposal.taskId, runId: oldRun.runId, reason: failure })
   const current = await startAttempt(h.apparatus, h.caller, h.proposal.taskId, 'retry', oldRun.revision)
   const goal = 'Detailed local investigation context. '.repeat(200)
-  await decompose(h.apparatus, { advance: async () => [] }, h.caller, { taskId: h.proposal.taskId,
-    children: Array.from({ length: 25 }, (_, index) => ({ key: 'child-' + index,
-      contract: { goal: `${index}: ${goal}`, artifact: 'finding.txt', inputs: [],
-        criteria: [{ criterionId: 'finding', statement: 'A reproducible finding' }] },
-      dependsOn: [], supports: ['letters'], maxRuns: 1, requirement: 'required' as const })) })
-  type Summary = { total: number; from: number; next: number | null;
-    tasks: { taskId: string; parentId: string | null; sessionId: string; runs: { runId: string; status: string }[] }[] }
-  const first = await readForAgent(reading, h.caller.agentId) as Summary
+  await decompose(h.apparatus, { advance: async () => [] }, h.caller, {
+    taskId: h.proposal.taskId,
+    children: Array.from({ length: 25 }, (_, index) => ({
+      key: 'child-' + index,
+      contract: {
+        goal: `${index}: ${goal}`,
+        artifact: 'finding.txt',
+        inputs: [],
+        criteria: [{ criterionId: 'finding', statement: 'A reproducible finding' }],
+      },
+      dependsOn: [],
+      supports: ['letters'],
+      maxRuns: 1,
+      requirement: 'required' as const,
+    })),
+  })
+  type Summary = {
+    total: number
+    from: number
+    next: number | null
+    tasks: { taskId: string; parentId: string | null; sessionId: string; runs: { runId: string; status: string }[] }[]
+  }
+  const first = (await readForAgent(reading, h.caller.agentId)) as Summary
   expect(first).toMatchObject({ total: 26, from: 0, next: 20 })
   expect(first.tasks).toHaveLength(20)
-  expect(first.tasks.find(task => task.taskId === h.proposal.taskId)!.runs)
-    .toEqual([{ runId: current.runId, status: 'running', stage: 'working', artifactDigest: undefined }])
-  const second = await readForAgent(reading, h.caller.agentId, { kind: 'summary', from: first.next! }) as Summary
+  expect(first.tasks.find(task => task.taskId === h.proposal.taskId)!.runs).toEqual([
+    { runId: current.runId, status: 'running', stage: 'working', artifactDigest: undefined },
+  ])
+  const second = (await readForAgent(reading, h.caller.agentId, { kind: 'summary', from: first.next! })) as Summary
   expect(second).toMatchObject({ total: 26, from: 20, next: null })
   expect(second.tasks).toHaveLength(6)
   expect(new Set([...first.tasks, ...second.tasks].map(task => task.taskId)).size).toBe(26)
@@ -260,11 +407,15 @@ it('pages related Task indexes without replaying contracts, verdicts or historic
   expect(text.length).toBeLessThan(12_000)
   for (const excluded of [goal, failure, 'contractDigest', 'source', 'verdicts']) expect(text).not.toContain(excluded)
   const childId = second.tasks[0]!.taskId
-  expect(await readForAgent(h.apparatus, h.caller.agentId, { kind: 'task', ref: childId }))
-    .toMatchObject({ contract: { goal: expect.stringContaining(goal) } })
-  expect((await readForAgent(reading, h.caller.agentId, { kind: 'summary', count: 100 }) as Summary).tasks)
-    .toHaveLength(26)
+  expect(await readForAgent(h.apparatus, h.caller.agentId, { kind: 'task', ref: childId })).toMatchObject({
+    contract: { goal: expect.stringContaining(goal) },
+  })
+  expect(
+    ((await readForAgent(reading, h.caller.agentId, { kind: 'summary', count: 100 })) as Summary).tasks,
+  ).toHaveLength(26)
   for (const range of [{ from: -1 }, { count: 0 }, { count: 101 }, { from: 0.5 }])
-    await expect(readForAgent(h.apparatus, h.caller.agentId, { kind: 'summary', ...range })).rejects.toThrow('summary range')
+    await expect(readForAgent(h.apparatus, h.caller.agentId, { kind: 'summary', ...range })).rejects.toThrow(
+      'summary range',
+    )
   await h.apparatus.store.close()
 })

@@ -5,7 +5,7 @@ export type ZoomTier = 'work' | 'map' | 'glyph'
 
 export function useZoomTier(): ZoomTier {
   const ref = useRef<ZoomTier>('work')
-  return useRfStore((s) => {
+  return useRfStore(s => {
     const z = s.transform[2]
     const cur = ref.current
     if (cur === 'work') {

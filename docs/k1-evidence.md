@@ -1,5 +1,7 @@
 # K1 交回材料：逐条证据
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 > 历史核心纵切实测；路径/行号/小节号对应当时基线，当前产品出口见 [assembly-blueprint](assembly-blueprint.md)。 历史正文按基线保留。
 
 > 对应 [`review.md`](review.md) §6 的 K1 12 场景。每条的形态是**观测**，不是声明：给出跑什么、看到什么、证据在哪一行。

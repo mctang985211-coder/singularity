@@ -68,9 +68,20 @@ describe('the task slice', () => {
 
     // One read of the view: the admitted contract, the phase it settled in, its criteria in contract
     // order, and its one run - pinned to a revision by the trusted scheduler identity.
-    expect(view).toMatchObject({ taskId: TASK_ID, goal: 'implement a word counter', phase: 'verified', criteria: [{ criterionId: 'correctness' }, { criterionId: 'limits' }], runs: [{ status: 'verified', emitter: 'scheduler', actor: SCHEDULER, revision: { revisionId: 'r0001' } }], })
+    expect(view).toMatchObject({
+      taskId: TASK_ID,
+      goal: 'implement a word counter',
+      phase: 'verified',
+      criteria: [{ criterionId: 'correctness' }, { criterionId: 'limits' }],
+      runs: [{ status: 'verified', emitter: 'scheduler', actor: SCHEDULER, revision: { revisionId: 'r0001' } }],
+    })
     // Every verdict names the verifier that decided it and pins the artifact content it was formed on.
-    expect(view.runs[0]?.verdicts.map((verdict) => [verdict.criterionId, verdict.verdict, verdict.decidedBy, verdict.artifactDigest,
+    expect(
+      view.runs[0]?.verdicts.map(verdict => [
+        verdict.criterionId,
+        verdict.verdict,
+        verdict.decidedBy,
+        verdict.artifactDigest,
       ]),
     ).toEqual([
       ['correctness', 'pass', `${UNIT_VERIFIER}@1`, ARTIFACT],
@@ -100,21 +111,33 @@ describe('the task slice', () => {
     // The receipt answers to the contract it is derived under - digested here from the contract the
     // fixture admitted, not read back out of the state the projection also reads - and its bound is
     // the seven facts the slice committed, a hand-counted literal rather than the array's length.
-    expect(receipt).toMatchObject({ status: 'verified', executor: { emitter: 'scheduler', actor: SCHEDULER }, contractDigest: contractDigest(contract()), cutoff: 7,
+    expect(receipt).toMatchObject({
+      status: 'verified',
+      executor: { emitter: 'scheduler', actor: SCHEDULER },
+      contractDigest: contractDigest(contract()),
+      cutoff: 7,
     })
     // Re-deriving from the prefix the bound names gives the same receipt: the two are one computation.
-    expect(receiptDigest(projectReceipt(registry, held.slice(0, receipt.cutoff), TASK_ID, RUN_ID))).toBe(receiptDigest(receipt),
+    expect(receiptDigest(projectReceipt(registry, held.slice(0, receipt.cutoff), TASK_ID, RUN_ID))).toBe(
+      receiptDigest(receipt),
     )
     // Each criterion carries the verifier that decided it and the artifact content it judged.
     expect(
-      receipt.criteria.map((entry) => [entry.criterionId, entry.verdict, `${entry.verifierRef}@${entry.verifierVersion}`, entry.artifactDigest,
+      receipt.criteria.map(entry => [
+        entry.criterionId,
+        entry.verdict,
+        `${entry.verifierRef}@${entry.verifierVersion}`,
+        entry.artifactDigest,
       ]),
     ).toEqual([
       ['correctness', 'pass', `${UNIT_VERIFIER}@1`, ARTIFACT],
       ['limits', 'pass', `${INTEGRATION_VERIFIER}@1`, ARTIFACT],
     ])
     // Both criteria were judged on the declared inputs, so the consumption is the judged one.
-    expect(receipt.consumption).toEqual({ basis: 'judged', inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' },
+    expect(receipt.consumption).toEqual({
+      basis: 'judged',
+      inputs: BUBBLE_INPUTS,
+      workspace: { kind: 'git', ref: 'refs/heads/main' },
     })
   })
 
@@ -135,8 +158,8 @@ describe('the task slice', () => {
       })
     }
     const held = log.entries()
-    const taskFacts = held.filter((entry) => entry.subject === TASK_ID)
-    expect([held.length, taskFacts.map((entry) => entry.seq)]).toEqual([14, [0, 2, 4, 6, 8, 10, 12]])
+    const taskFacts = held.filter(entry => entry.subject === TASK_ID)
+    expect([held.length, taskFacts.map(entry => entry.seq)]).toEqual([14, [0, 2, 4, 6, 8, 10, 12]])
 
     expect(projectReceipt(registry, held, TASK_ID, RUN_ID).cutoff).toBe(13)
 
@@ -151,9 +174,10 @@ describe('the task slice', () => {
 
     // Recommitting these commands into another log gives them a different control source.
     const prefix = new MemoryLog(registry, { subjects: SUBJECTS })
-    for (const fact of taskFacts.map((entry) => ({ ...entry, commandId: `prefix-${entry.seq}` }))) await prefix.emit(fact)
+    for (const fact of taskFacts.map(entry => ({ ...entry, commandId: `prefix-${entry.seq}` }))) await prefix.emit(fact)
     expect(projectReceipt(registry, prefix.entries(), TASK_ID, RUN_ID).cutoff).toBe(7)
-    expect(receiptDigest(projectReceipt(registry, prefix.entries(), TASK_ID, RUN_ID))).not.toBe(receiptDigest(projectReceipt(registry, held, TASK_ID, RUN_ID)),
+    expect(receiptDigest(projectReceipt(registry, prefix.entries(), TASK_ID, RUN_ID))).not.toBe(
+      receiptDigest(projectReceipt(registry, held, TASK_ID, RUN_ID)),
     )
   })
 
@@ -209,7 +233,8 @@ describe('the task slice', () => {
     // One fact of a seven-fact log holds no contract, no run and no verdict, so no receipt can be
     // derived from it. The free parameter this replaces accepted "1" beside a head state and handed
     // back the seq-4 verdict under a one-fact claim.
-    expect(refusalOf(() => projectReceipt(registry, log.entries().slice(0, 1), TASK_ID, RUN_ID)).code,
+    expect(
+      refusalOf(() => projectReceipt(registry, log.entries().slice(0, 1), TASK_ID, RUN_ID)).code,
     ).toBe<RefusalCode>('unknown-run')
   })
 
@@ -241,7 +266,10 @@ describe('the task slice', () => {
     await log.emit(started())
     await log.emit(failed('no context was ever declared'))
 
-    expect(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID).consumption).toEqual({ basis: 'declared', inputs: [], workspace: null,
+    expect(projectReceipt(registry, log.entries(), TASK_ID, RUN_ID).consumption).toEqual({
+      basis: 'declared',
+      inputs: [],
+      workspace: null,
     })
   })
 
@@ -269,18 +297,19 @@ describe('the task slice', () => {
     // own digest (so a reader sees *which* code decided a criterion rather than only the name a
     // deployment could re-point), and the run with its environment as well as its revision (a revision
     // id is unique only within one). A line added or hidden anywhere fails the equality.
-    expect(text).toBe([
-      `Task ${TASK_ID} — phase verified`,
-      `  goal: implement a word counter`,
-      `  contract ${view.contractDigest.slice(0, 12)}… admitted by ${SCHEDULER} at ${view.admittedAt}`,
-      `  criteria (2):`,
+    expect(text).toBe(
+      [
+        `Task ${TASK_ID} — phase verified`,
+        `  goal: implement a word counter`,
+        `  contract ${view.contractDigest.slice(0, 12)}… admitted by ${SCHEDULER} at ${view.admittedAt}`,
+        `  criteria (2):`,
         `    - correctness: counts match the golden file`,
         `    - limits: rejects input over 1 MiB`,
-      `  runs (1):`,
-      `    - ${RUN_ID}: verified by ${SCHEDULER} (role scheduler) on ${REVISION.environmentId} revision ${REVISION.revisionId} (${REVISION.digest.slice(0, 12)}…)`,
-      `        correctness: pass by ${UNIT_VERIFIER}@1 on artifact ${ARTIFACT.slice(0, 12)}…`,
-      `        limits: pass by ${INTEGRATION_VERIFIER}@1 on artifact ${ARTIFACT.slice(0, 12)}…`,
-    ].join('\n'),
+        `  runs (1):`,
+        `    - ${RUN_ID}: verified by ${SCHEDULER} (role scheduler) on ${REVISION.environmentId} revision ${REVISION.revisionId} (${REVISION.digest.slice(0, 12)}…)`,
+        `        correctness: pass by ${UNIT_VERIFIER}@1 on artifact ${ARTIFACT.slice(0, 12)}…`,
+        `        limits: pass by ${INTEGRATION_VERIFIER}@1 on artifact ${ARTIFACT.slice(0, 12)}…`,
+      ].join('\n'),
     )
   })
 
@@ -292,7 +321,13 @@ describe('the task slice', () => {
 
     // The only way to store a receipt would be a kind for it, and the protocol declares none.
     const refusal = refusalOf(() =>
-      log.emit({ commandId: 'receipt', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'receipt/sealed', subject: TASK_ID, payload: {},
+      log.emit({
+        commandId: 'receipt',
+        protocol: TASK_PROTOCOL,
+        version: TASK_VERSION,
+        kind: 'receipt/sealed',
+        subject: TASK_ID,
+        payload: {},
       }),
     )
     expect(refusal.code).toBe<RefusalCode>('unknown-kind')
@@ -306,13 +341,21 @@ describe('the task slice', () => {
     await log.emit(started())
     await log.emit(bubbleOpened())
     await log.emit(judged('correctness', UNIT_VERIFIER, 'fail'))
-    await log.emit({ commandId: 'fail-1', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/failed', subject: TASK_ID, payload: { runId: RUN_ID, cause: 'runtime' },
+    await log.emit({
+      commandId: 'fail-1',
+      protocol: TASK_PROTOCOL,
+      version: TASK_VERSION,
+      kind: 'run/failed',
+      subject: TASK_ID,
+      payload: { runId: RUN_ID, cause: 'runtime' },
     })
 
     const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     if (state === undefined) throw new Error('expected a folded task')
     // Both readings of the settled run say failed, rather than reading a failure out of a missing value ...
-    expect([projectTask(state).phase, projectReceipt(registry, log.entries(), TASK_ID, RUN_ID).status]).toEqual(['failed', 'failed',
+    expect([projectTask(state).phase, projectReceipt(registry, log.entries(), TASK_ID, RUN_ID).status]).toEqual([
+      'failed',
+      'failed',
     ])
     // ... and the failure recorded no reason, so the projection reports none instead of inventing one.
     expect(projectTask(state).runs[0]?.failureReason).toBeNull()

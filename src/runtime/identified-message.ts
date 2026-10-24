@@ -7,16 +7,21 @@ import { digestOf } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ChildSessionSeams } from './child-session.ts'
 
-export async function postIdentifiedMessage(seams: Pick<ChildSessionSeams, 'sessions' | 'sessionPersistence' | 'agents' | 'get'>, target: Agent | string, message: UserMessage,
-  post?: (message: UserMessage) => void | Promise<void>): Promise<'posted' | 'pending' | 'entered'> {
+export async function postIdentifiedMessage(
+  seams: Pick<ChildSessionSeams, 'sessions' | 'sessionPersistence' | 'agents' | 'get'>,
+  target: Agent | string,
+  message: UserMessage,
+  post?: (message: UserMessage) => void | Promise<void>,
+): Promise<'posted' | 'pending' | 'entered'> {
   const sessions = (seams.get === undefined ? seams.sessions : seams.get('sessions')) as SessionStore | undefined
-  const persistence = (seams.get === undefined ? seams.sessionPersistence : seams.get('sessionPersistence')) as SessionPersistence | undefined
+  const persistence = (seams.get === undefined ? seams.sessionPersistence : seams.get('sessionPersistence')) as
+    SessionPersistence | undefined
   if (sessions === undefined || persistence === undefined)
     refuse('malformed-declaration', 'identified delivery requires native sessions and session persistence')
   const registry = (seams.get === undefined ? seams.agents : seams.get('agents')) as ChildSessionSeams['agents']
   const sessionId = typeof target === 'string' ? SessionId(target) : target.session.id
   const agent = typeof target === 'string' ? registry?.get(sessionId) : target
-  if (agent !== undefined && !await sessions.flush(agent.session))
+  if (agent !== undefined && !(await sessions.flush(agent.session)))
     refuse('write-not-durable', `session "${sessionId}" has no durability listener`)
   const eventCount = agent === undefined ? undefined : Number(agent.session.seq)
   const handle = await persistence.open(sessionId, 'read')
@@ -24,7 +29,8 @@ export async function postIdentifiedMessage(seams: Pick<ChildSessionSeams, 'sess
   const contentDigest = digestOf(message.content)
   const matches = (candidate: UserMessage): boolean => {
     if (digestOf(candidate.source) !== sourceDigest) return false
-    if (digestOf(candidate.content) !== contentDigest) refuse('command-conflict', 'the native message source was posted with different content')
+    if (digestOf(candidate.content) !== contentDigest)
+      refuse('command-conflict', 'the native message source was posted with different content')
     return true
   }
   let seen = false
@@ -41,10 +47,16 @@ export async function postIdentifiedMessage(seams: Pick<ChildSessionSeams, 'sess
         inbox[event.data.target].splice(event.data.start, event.data.removedCount ?? 0, ...event.data.inserted)
       } else if (event.type === 'user/message' && matches(event.data)) entered = true
     }
-  } finally { await handle.close() }
+  } finally {
+    await handle.close()
+  }
   if (entered) return 'entered'
   if (Object.values(inbox).some(messages => messages.some(matches))) {
-    if (agent === undefined) refuse('illegal-transition', 'the native pending instruction has no resident activation; its external result is unconfirmed')
+    if (agent === undefined)
+      refuse(
+        'illegal-transition',
+        'the native pending instruction has no resident activation; its external result is unconfirmed',
+      )
     agent.wake()
     return 'pending'
   }
@@ -52,7 +64,7 @@ export async function postIdentifiedMessage(seams: Pick<ChildSessionSeams, 'sess
   if (post === undefined) agent!.followup(message)
   else await post(message)
   const live = typeof target === 'string' ? registry?.get(sessionId) : target
-  if (live !== undefined && !await sessions.flush(live.session))
+  if (live !== undefined && !(await sessions.flush(live.session)))
     refuse('write-not-durable', `session "${sessionId}" has no durability listener`)
   return 'posted'
 }

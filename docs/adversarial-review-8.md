@@ -1,5 +1,7 @@
 # adversarial-review-8.md —— 第八轮：审的是 `00f861f8d017f7d049f37aa3e317b410fbe46c05`（HEAD）。机制仍然是真的，围着它的三条规则各有一个新出口
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 **`00f861f8d017f7d049f37aa3e317b410fbe46c05` 的干净副本。只读；基线全部自己重测。**
 
 - `node scripts/gates.mjs` → **21/21 绿**；`node scripts/gates.mjs --probe` → `gate self-test: OK`

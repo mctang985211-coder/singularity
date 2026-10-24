@@ -56,12 +56,18 @@ export function declareAgentProtocol(registry: ProtocolRegistry): void {
         parse: raw => {
           const where = `${AGENT_KINDS.opened} payload`
           if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
-            refuse('malformed-payload', `${where} must be an object, got ${raw === null ? 'null' : Array.isArray(raw) ? 'an array' : typeof raw}`)
+            refuse(
+              'malformed-payload',
+              `${where} must be an object, got ${raw === null ? 'null' : Array.isArray(raw) ? 'an array' : typeof raw}`,
+            )
           const source = raw as Record<string, unknown>
           const field = (key: string): string => {
             const value = source[key]
             if (typeof value !== 'string' || value.length === 0)
-              refuse('malformed-payload', `${where}.${key} must be a non-empty string, got ${value === null ? 'null' : typeof value}`)
+              refuse(
+                'malformed-payload',
+                `${where}.${key} must be a non-empty string, got ${value === null ? 'null' : typeof value}`,
+              )
             return value
           }
           return { agentId: field('agentId'), role: field('role'), sessionId: field('sessionId') }

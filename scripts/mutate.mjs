@@ -34,7 +34,10 @@ const claims = JSON.parse(readFileSync(join(ROOT, LEDGER), 'utf8')).claims
 /** A copy of this tree, sharing nothing but the installed packages. */
 function copyOfTree() {
   const copy = mkdtempSync(join(tmpdir(), 'mutate-'))
-  cpSync(ROOT, copy, { recursive: true, filter: source => !source.split(sep).includes('node_modules') && !source.split(sep).includes('.git') })
+  cpSync(ROOT, copy, {
+    recursive: true,
+    filter: source => !source.split(sep).includes('node_modules') && !source.split(sep).includes('.git'),
+  })
   symlinkSync(join(ROOT, 'node_modules'), join(copy, 'node_modules'))
   return copy
 }
@@ -53,11 +56,26 @@ function apply(copy, claim) {
 /** What one claim's command did, with a non-zero exit reported rather than thrown. */
 function judge(claim, copy) {
   const vitest = join(ROOT, 'node_modules/vitest/vitest.mjs')
-  const [file, ...args] = claim.run.kind === 'vitest' ? [process.execPath, vitest, 'run', ...claim.run.args] : [process.execPath, ...claim.run.args]
+  const [file, ...args] =
+    claim.run.kind === 'vitest'
+      ? [process.execPath, vitest, 'run', ...claim.run.args]
+      : [process.execPath, ...claim.run.args]
   try {
-    return { status: 0, output: execFileSync(file, args, { cwd: copy, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 600000 }) }
+    return {
+      status: 0,
+      output: execFileSync(file, args, {
+        cwd: copy,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 600000,
+      }),
+    }
   } catch (error) {
-    return { status: typeof error.status === 'number' ? error.status : 1, output: `${error.stdout ?? ''}${error.stderr ?? ''}${error.message ?? ''}` }
+    return {
+      status: typeof error.status === 'number' ? error.status : 1,
+      output: `${error.stdout ?? ''}${error.stderr ?? ''}${error.message ?? ''}`,
+    }
   }
 }
 
@@ -71,12 +89,32 @@ function verdictOf(claim, { status, output }) {
   if (status === 0)
     return recorded === 'missed'
       ? { verdict: 'missed', detail: `not caught, as this row records; the full output is ${log}` }
-      : { verdict: 'MISSED', detail: `the command passed under the mutation, so the rule this claim names is not what would catch it; the full output is ${log}` }
-  if (NEVER_JUDGED.test(output)) return { verdict: 'broken', detail: 'the command never reached its checks (a suite that would not collect or a module that would not load), which is not a catch' }
-  if (!output.includes(claim.witness)) return { verdict: 'broken', detail: `exited ${status} without printing the witness ${JSON.stringify(claim.witness)}, so it failed for another reason; the full output is ${log}` }
-  if (recorded === 'missed') return { verdict: 'BROKEN', detail: 'this row records a mutation nothing catches, and the command now fails: the limitation is gone, so the row is out of date' }
+      : {
+          verdict: 'MISSED',
+          detail: `the command passed under the mutation, so the rule this claim names is not what would catch it; the full output is ${log}`,
+        }
+  if (NEVER_JUDGED.test(output))
+    return {
+      verdict: 'broken',
+      detail:
+        'the command never reached its checks (a suite that would not collect or a module that would not load), which is not a catch',
+    }
+  if (!output.includes(claim.witness))
+    return {
+      verdict: 'broken',
+      detail: `exited ${status} without printing the witness ${JSON.stringify(claim.witness)}, so it failed for another reason; the full output is ${log}`,
+    }
+  if (recorded === 'missed')
+    return {
+      verdict: 'BROKEN',
+      detail:
+        'this row records a mutation nothing catches, and the command now fails: the limitation is gone, so the row is out of date',
+    }
   const evidence = [...output.matchAll(/^\s*(?:FAIL|×)\s+(.+)$/gm)].map(match => match[1].trim())
-  return { verdict: 'caught', detail: evidence.slice(0, 2).join(' | ') || `exited ${status} and printed ${JSON.stringify(claim.witness)}` }
+  return {
+    verdict: 'caught',
+    detail: evidence.slice(0, 2).join(' | ') || `exited ${status} and printed ${JSON.stringify(claim.witness)}`,
+  }
 }
 
 function runOne(claim) {
@@ -95,13 +133,17 @@ function runOne(claim) {
 const args = process.argv.slice(2)
 if (args.length === 0 || args.includes('--list')) {
   for (const claim of claims) console.log(`  ${claim.id.padEnd(32)} ${claim.rule}`)
-  console.log(`\n${claims.length} claim(s) in ${LEDGER}; every one runs in a copy of this tree, and no path under it is opened for writing`)
+  console.log(
+    `\n${claims.length} claim(s) in ${LEDGER}; every one runs in a copy of this tree, and no path under it is opened for writing`,
+  )
   console.log('run one: node scripts/mutate.mjs <id>   run all: node scripts/mutate.mjs --all')
 } else {
   const unknown = args.filter(arg => arg !== '--all' && !claims.some(claim => claim.id === arg))
   for (const id of unknown) console.log(`  ${id}: no claim with that id (see --list)`)
   const selected = args.includes('--all') ? claims : claims.filter(claim => args.includes(claim.id))
-  console.log(`${selected.length} claim(s), each applied to its own copy of this tree; nothing here is written under the repository\n`)
+  console.log(
+    `${selected.length} claim(s), each applied to its own copy of this tree; nothing here is written under the repository\n`,
+  )
   const results = []
   for (const claim of selected) {
     const result = runOne(claim)
@@ -110,7 +152,10 @@ if (args.length === 0 || args.includes('--list')) {
   }
   const failed = results.filter(result => result.verdict !== 'caught' && result.verdict !== 'missed')
   const missed = results.filter(result => result.verdict === 'missed')
-  console.log(`\n${results.length} claim(s): ${results.length - failed.length - missed.length} caught, ${missed.length} recorded miss(es), ${failed.length} not`)
-  for (const { claim, verdict, detail } of failed) console.log(`  ${verdict.toUpperCase()}  ${claim.id} — ${claim.rule}: ${detail}`)
+  console.log(
+    `\n${results.length} claim(s): ${results.length - failed.length - missed.length} caught, ${missed.length} recorded miss(es), ${failed.length} not`,
+  )
+  for (const { claim, verdict, detail } of failed)
+    console.log(`  ${verdict.toUpperCase()}  ${claim.id} — ${claim.rule}: ${detail}`)
   process.exitCode = failed.length > 0 || unknown.length > 0 ? 1 : 0
 }

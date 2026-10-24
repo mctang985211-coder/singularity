@@ -36,7 +36,11 @@ describe('a deployment may declare a role after open, and only one identity per 
     const created = await commands.createRevision(request)
 
     expect([before.code, created.actor]).toEqual(['unknown-emitter-role', IDENTITY])
-    expect(live.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT)?.revisions[REVISION]).toBeDefined()
+    expect(
+      live.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT)?.revisions[
+        REVISION
+      ],
+    ).toBeDefined()
   })
 
   it('is a no-op when the same key is declared again with the same identity', async () => {
@@ -52,7 +56,11 @@ describe('a deployment may declare a role after open, and only one identity per 
 
     // Unchanged, and still the identity the table already held: a re-declaration neither refuses nor
     // re-points the key, and the log stamps the same actor it would have.
-    expect([live.store.identityOf(ENVIRONMENT_ROLE), created.actor, created.kind]).toEqual([IDENTITY, IDENTITY, ENVIRONMENT_KINDS.revisionCreated])
+    expect([live.store.identityOf(ENVIRONMENT_ROLE), created.actor, created.kind]).toEqual([
+      IDENTITY,
+      IDENTITY,
+      ENVIRONMENT_KINDS.revisionCreated,
+    ])
   })
 
   it('refuses the same key with a different identity, and keeps the identity it had', async () => {
@@ -67,9 +75,9 @@ describe('a deployment may declare a role after open, and only one identity per 
   it('refuses an empty key or an empty identity', async () => {
     const live = await deployment()
 
-    expect([refusalOf(() => live.store.declareSubject('', IDENTITY)).code, refusalOf(() => live.store.declareSubject('role-x', '')).code]).toEqual([
-      'malformed-declaration',
-      'malformed-declaration',
-    ])
+    expect([
+      refusalOf(() => live.store.declareSubject('', IDENTITY)).code,
+      refusalOf(() => live.store.declareSubject('role-x', '')).code,
+    ]).toEqual(['malformed-declaration', 'malformed-declaration'])
   })
 })

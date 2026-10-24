@@ -12,14 +12,18 @@ import { resolveRetryPolicy, type RetryPolicyConfig } from '@deepseek-ai/dsh-llm
 const checkout = fileURLToPath(new URL('../../', import.meta.url))
 const buildScript = fileURLToPath(new URL('../build.mjs', import.meta.url))
 const run = promisify(execFile)
-const { buildAssembly, checkBuild,
+const {
+  buildAssembly,
+  checkBuild,
 }: {
   buildAssembly(root: string): Promise<void>
   checkBuild(root: string): Promise<void>
 } = await import(buildScript)
 
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'singularity-build-'))
@@ -27,26 +31,55 @@ async function fixture() {
   await cp(join(checkout, 'assembly/src'), join(root, 'assembly/src'), { recursive: true })
   await cp(join(checkout, 'src'), join(root, 'src'), { recursive: true })
   await mkdir(join(root, 'scripts'))
-  for (const file of ['deploy.mjs', 'dsh-control-runtime.mjs', 'host-config.mjs']) await cp(join(checkout, 'scripts', file), join(root, 'scripts', file))
+  for (const file of ['deploy.mjs', 'dsh-control-runtime.mjs', 'host-config.mjs', 'bundle-notices.mjs'])
+    await cp(join(checkout, 'scripts', file), join(root, 'scripts', file))
   await cp(join(checkout, 'deployment/profile'), join(root, 'deployment/profile'), { recursive: true })
   await symlink(join(checkout, 'node_modules'), join(root, 'node_modules'))
-  for (const file of ['package.json', 'pnpm-lock.yaml', 'dsh-baseline.json']) await cp(join(checkout, file), join(root, file))
+  for (const file of [
+    'package.json',
+    'pnpm-lock.yaml',
+    'dsh-baseline.json',
+    'tsconfig.native.json',
+    'LICENSE',
+    'NOTICE',
+  ])
+    await cp(join(checkout, file), join(root, file))
+  await cp(join(checkout, 'third_party'), join(root, 'third_party'), { recursive: true })
   await cp(join(checkout, 'assembly/package.json'), join(root, 'assembly/package.json'))
   await cp(join(checkout, 'assembly/presets'), join(root, 'assembly/presets'), { recursive: true })
   for (const file of ['client.js', 'panel.html', 'cordis.patch.yml', 'build.mjs'])
     await cp(join(checkout, 'assembly', file), join(root, 'assembly', file))
   await cp(join(checkout, 'assembly/frontend'), join(root, 'assembly/frontend'), { recursive: true })
   const paths = JSON.parse(await readFile(join(checkout, 'tsconfig.json'), 'utf8')).compilerOptions.paths
-  const compilerOptions = { baseUrl: root, paths, module: 'nodenext', target: 'es2023', strict: true, noEmit: true, skipLibCheck: true,
+  const compilerOptions = {
+    baseUrl: root,
+    paths,
+    module: 'nodenext',
+    target: 'es2023',
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
     allowImportingTsExtensions: true,
   }
-  await writeFile(join(root, 'tsconfig.json'), JSON.stringify({ extends: './.singularity/tsconfig.host.json', compilerOptions, include: ['src'] }))
-  const assemblyPaths = JSON.parse(await readFile(join(checkout, 'assembly/tsconfig.json'), 'utf8')).compilerOptions.paths
-  await writeFile(join(root, 'assembly/tsconfig.json'), JSON.stringify({ extends: '../.singularity/tsconfig.host.json', compilerOptions: { ...compilerOptions, paths: assemblyPaths }, include: ['src'] }),
+  await writeFile(
+    join(root, 'tsconfig.json'),
+    JSON.stringify({ extends: './.singularity/tsconfig.host.json', compilerOptions, include: ['src'] }),
+  )
+  const assemblyPaths = JSON.parse(await readFile(join(checkout, 'assembly/tsconfig.json'), 'utf8')).compilerOptions
+    .paths
+  await writeFile(
+    join(root, 'assembly/tsconfig.json'),
+    JSON.stringify({
+      extends: '../.singularity/tsconfig.host.json',
+      compilerOptions: { ...compilerOptions, paths: assemblyPaths },
+      include: ['src'],
+    }),
   )
   await writeFile(join(root, 'src/value.ts'), 'export const value: number = 1\n')
-  for (const entry of ['index', 'agent', 'web']) await writeFile(join(root, `assembly/src/${entry}.ts`),
-    `import { value } from '../../src/value.ts'\nexport function apply() { return value }\n`,
+  for (const entry of ['index', 'agent', 'web'])
+    await writeFile(
+      join(root, `assembly/src/${entry}.ts`),
+      `import { value } from '../../src/value.ts'\nexport function apply() { return value }\n`,
     )
   return root
 }
@@ -57,13 +90,26 @@ describe('the deployable build', () => {
     await buildAssembly(root)
     await expect(checkBuild(root)).resolves.toBeUndefined()
     const home = join(root, 'private-home')
-    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') } })
-    const profile = JSON.parse(await readFile(join(home, 'profiles/singularity-next-web/package.json'), 'utf8')) as { name: string }
+    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], {
+      env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') },
+    })
+    const profile = JSON.parse(await readFile(join(home, 'profiles/singularity-next-web/package.json'), 'utf8')) as {
+      name: string
+    }
     expect(profile.name).toBe('singularity-next-web')
   }, 30_000)
 
-  it.each(['src/value.ts', 'assembly/client.js', 'assembly/frontend/panel.tsx', 'assembly/lib/web.js'])(
-    'rejects changed %s even if its modification time is preserved', async (file) => {
+  it.each([
+    'src/value.ts',
+    'assembly/client.js',
+    'assembly/frontend/panel.tsx',
+    'assembly/lib/web.js',
+    'NOTICE',
+    'third_party/rrsi/LICENSE',
+    'assembly/lib/licenses/dsh-LICENSE',
+  ])(
+    'rejects changed %s even if its modification time is preserved',
+    async file => {
       const root = await fixture()
       await buildAssembly(root)
       const path = join(root, file)
@@ -71,23 +117,30 @@ describe('the deployable build', () => {
       await writeFile(path, (await readFile(path, 'utf8')) + '\n// changed after build\n')
       await utimes(path, previous.atime, previous.mtime)
       await expect(checkBuild(root)).rejects.toThrow(/changed|stale/)
-    }, 30_000,
+    },
+    30_000,
   )
 
-  it.each(['assembly/lib/web.js', 'assembly/client.js'])('rejects the missing %s export', async (file) => {
-    const root = await fixture()
-    await buildAssembly(root)
-    await rm(join(root, file))
-    await expect(checkBuild(root)).rejects.toThrow()
-  }, 30_000,
+  it.each(['assembly/lib/web.js', 'assembly/client.js'])(
+    'rejects the missing %s export',
+    async file => {
+      const root = await fixture()
+      await buildAssembly(root)
+      await rm(join(root, file))
+      await expect(checkBuild(root)).rejects.toThrow()
+    },
+    30_000,
   )
 
-  it.each(['src/value.ts', 'assembly/src/agent.ts'])('rejects a type error in %s before writing build output', async (file) => {
-    const root = await fixture()
-    await writeFile(join(root, file), 'export const invalid: number = "type error"\n')
-    await expect(buildAssembly(root)).rejects.toThrow()
-    await expect(stat(join(root, 'assembly/lib'))).rejects.toMatchObject({ code: 'ENOENT' })
-  }, 30_000,
+  it.each(['src/value.ts', 'assembly/src/agent.ts'])(
+    'rejects a type error in %s before writing build output',
+    async file => {
+      const root = await fixture()
+      await writeFile(join(root, file), 'export const invalid: number = "type error"\n')
+      await expect(buildAssembly(root)).rejects.toThrow()
+      await expect(stat(join(root, 'assembly/lib'))).rejects.toMatchObject({ code: 'ENOENT' })
+    },
+    30_000,
   )
 
   it('rejects stale deployment before replacing the existing private profile', async () => {
@@ -98,9 +151,11 @@ describe('the deployable build', () => {
     await mkdir(profile, { recursive: true })
     await writeFile(join(profile, 'sentinel'), 'existing deployment')
     await writeFile(join(root, 'src/value.ts'), 'export const value = 2\n')
-    await expect(run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') } }),
-    )
-      .rejects.toThrow(/stale/)
+    await expect(
+      run(process.execPath, [join(root, 'scripts/deploy.mjs')], {
+        env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') },
+      }),
+    ).rejects.toThrow(/stale/)
     expect(await readFile(join(profile, 'sentinel'), 'utf8')).toBe('existing deployment')
   }, 30_000)
 
@@ -108,7 +163,9 @@ describe('the deployable build', () => {
     const root = await fixture()
     await buildAssembly(root)
     const home = join(root, 'private-home')
-    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], { env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') } })
+    await run(process.execPath, [join(root, 'scripts/deploy.mjs')], {
+      env: { ...process.env, DSH_HOME: home, SINGULARITY_DOMAIN: join(checkout, 'domain/reference') },
+    })
     const patch = await readFile(join(home, 'profiles/singularity-next-web/cordis.patch.yml'), 'utf8')
     // The plugin's Config marks all of these required and an id-targeted patch replaces the whole
     // config, so a template without them composes a row the host refuses to activate — and that
@@ -122,7 +179,10 @@ describe('the deployable build', () => {
     const bundle = await readFile(join(checkout, 'assembly/cordis.patch.yml'), 'utf8')
     const { hostRequire } = await import(new URL('../../scripts/host-config.mjs', import.meta.url).href)
     const yaml = createRequire(hostRequire().resolve('@deepseek-ai/cordis-plugin-include/package.json'))('js-yaml')
-    const rows = yaml.load(deployment, { schema: entryListSchema }) as { id: string; config?: { providers?: Record<string, { retryPolicy?: RetryPolicyConfig }> } }[]
+    const rows = yaml.load(deployment, { schema: entryListSchema }) as {
+      id: string
+      config?: { providers?: Record<string, { retryPolicy?: RetryPolicyConfig }> }
+    }[]
     const providers = rows.find(row => row.id === 'llm-pi-ai')!.config!.providers!
     expect(Object.keys(providers).length).toBeGreaterThan(0)
     for (const [name, provider] of Object.entries(providers)) {

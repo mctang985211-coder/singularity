@@ -25,7 +25,7 @@ import { sha256 } from './ids.ts'
 import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { assertRunFile } from './workspace.ts'
 import type { ProductionVerdict } from '../../src/verifier/production.ts'
-import { outcomesAnswered, planOutcomeOf } from './read.ts'
+import { outcomesAnswered, planOutcomeOf, readForAgent } from './read.ts'
 import { reviewInputsOf } from './inputs.ts'
 import { searchView } from './rsi-history.ts'
 import { foldSubjects } from '../../src/protocol/fold.ts'
@@ -37,10 +37,11 @@ import type { ControlSnapshot } from './snapshot.ts'
 import type { RsiEvidence } from './rsi-proposal.ts'
 import type { textPage } from './pages.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
+import { reviewGuidanceFor } from './prompts.ts'
 
 export const SUBJECT_INPUT = 'singularity-subject'
 // RRSI critic.py reviews intent/content before evaluation; it never solves a task.
-export const methodReviewTools = new Set(['read', 'glob', 'grep', 'singularity_read', 'singularity_submit'])
+export { methodReviewTools } from './tool-policy.ts'
 export interface ReviewWitness {
   readonly reviewId: string
   readonly subjectDigest: string
@@ -52,7 +53,7 @@ export interface ReviewWitness {
 }
 export function reviewOf(apparatus: Apparatus, agentId: string): ReviewRun | undefined {
   return [...apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()].findLast(
-    (r) => r.agentId === agentId,
+    r => r.agentId === agentId,
   )
 }
 export interface FrozenInputProducer {
@@ -71,8 +72,10 @@ export interface FrozenRsiEvidence {
   readonly cutoff: number
   readonly rootId: string | null
   readonly sourceTrace: FileAttachmentRef | null
-  readonly citations: readonly { readonly reference: RsiEvidence
-    readonly page: ReturnType<typeof textPage> & { readonly seq: number; readonly type: string } }[]
+  readonly citations: readonly {
+    readonly reference: RsiEvidence
+    readonly page: ReturnType<typeof textPage> & { readonly seq: number; readonly type: string }
+  }[]
   readonly rounds: readonly {
     readonly request: NonNullable<TaskState['rounds']>[number]
     readonly snapshot: ControlSnapshot['rounds'][number] | null
@@ -83,85 +86,152 @@ export interface FrozenRsiEvidence {
 /** The report can cite only evidence available before its own submission, not later validation. */
 async function reportEvidence(apparatus: Apparatus, taskId: string, run: RunState): Promise<FrozenRsiEvidence> {
   const facts = apparatus.store.load().entries()
-  const submitted = facts.find(fact => fact.subject === taskId && fact.kind === 'run/submitted' &&
-    (fact.payload as { runId: string }).runId === run.runId)
+  const submitted = facts.find(
+    fact =>
+      fact.subject === taskId &&
+      fact.kind === 'run/submitted' &&
+      (fact.payload as { runId: string }).runId === run.runId,
+  )
   if (submitted === undefined) refuse('illegal-transition', 'report evidence requires a sealed submission')
   const entries = facts.filter(fact => fact.seq <= submitted.seq)
   const tasks = foldSubjects<TaskState>(apparatus.registry, entries, TASK_PROTOCOL, TASK_VERSION)
   const strategies = foldSubjects<RoundState>(apparatus.registry, entries, STRATEGY_PROTOCOL, STRATEGY_VERSION)
   const measurements = foldSubjects<EvaluationState>(apparatus.registry, entries, MEASURE_PROTOCOL, MEASURE_VERSION)
   const reviews = foldSubjects<ReviewRun>(apparatus.registry, entries, REVIEW_PROTOCOL, REVIEW_VERSION)
-  const task = tasks.get(taskId)!, citations = new Map<string, FrozenRsiEvidence['citations'][number]>()
-  const revisions = new Set(task.search?.batches?.flatMap(batch => batch.outcomes.flatMap(outcome => outcome.revision?.digest ?? [])))
+  const task = tasks.get(taskId)!,
+    citations = new Map<string, FrozenRsiEvidence['citations'][number]>()
+  const revisions = new Set(
+    task.search?.batches?.flatMap(batch => batch.outcomes.flatMap(outcome => outcome.revision?.digest ?? [])),
+  )
   for (const digest of revisions) {
     const reviewId = `review-${sha256(`${apparatus.controlId}/proposal:${taskId}:${digest}`).slice(0, 24)}`
     const review = reviews.get(reviewId)
     if (review?.target.kind !== 'proposal' || review.target.assetsDigest !== digest) continue
-    const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as { nativeEvidence?: FrozenRsiEvidence['citations'] }
+    const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as {
+      nativeEvidence?: FrozenRsiEvidence['citations']
+    }
     for (const citation of subject.nativeEvidence ?? []) citations.set(digestOf(citation), citation)
   }
   const rootId = run.relatedTo?.taskId ?? null
-  return { cutoff: submitted.seq + 1, rootId, sourceTrace: rootId === null ? null : tasks.get(rootId)?.rsi?.trace ?? null,
+  return {
+    cutoff: submitted.seq + 1,
+    rootId,
+    sourceTrace: rootId === null ? null : (tasks.get(rootId)?.rsi?.trace ?? null),
     citations: [...citations.values()],
-    rounds: (tasks.get(taskId)!.rounds ?? []).filter(request => request.runId === run.runId).map(request => {
-      const strategy = strategies.get(request.roundId)
-      const evaluations = [...measurements.values()].filter(state => (state.matrix === undefined || state.matrix.split === 'evolve') &&
-        (state.evaluationId === `${request.roundId}:bootstrap:evaluation` ||
-          state.evaluationId.startsWith(`${request.roundId}:`) && /^\d+:candidate:evaluation$/.test(state.evaluationId.slice(request.roundId.length + 1))))
-      const baseline = evaluations.find(state => state.evaluationId === `${request.roundId}:bootstrap:evaluation`)
-      return { request, evaluations, snapshot: strategy === undefined ? null : {
-        roundId: strategy.roundId, plan: strategy.plan, submissions: strategy.submissions, decision: strategy.decision ?? null,
-        evaluations: evaluations.map(state => ({ evaluationId: state.evaluationId, state, report: projectEvaluation(state),
-          paired: baseline?.matrix && state.matrix && state !== baseline ? pairedReport(baseline, state) : null })),
-      } }
-    }) }
+    rounds: (tasks.get(taskId)!.rounds ?? [])
+      .filter(request => request.runId === run.runId)
+      .map(request => {
+        const strategy = strategies.get(request.roundId)
+        const evaluations = [...measurements.values()].filter(
+          state =>
+            (state.matrix === undefined || state.matrix.split === 'evolve') &&
+            (state.evaluationId === `${request.roundId}:bootstrap:evaluation` ||
+              (state.evaluationId.startsWith(`${request.roundId}:`) &&
+                /^\d+:candidate:evaluation$/.test(state.evaluationId.slice(request.roundId.length + 1)))),
+        )
+        const baseline = evaluations.find(state => state.evaluationId === `${request.roundId}:bootstrap:evaluation`)
+        return {
+          request,
+          evaluations,
+          snapshot:
+            strategy === undefined
+              ? null
+              : {
+                  roundId: strategy.roundId,
+                  plan: strategy.plan,
+                  submissions: strategy.submissions,
+                  decision: strategy.decision ?? null,
+                  evaluations: evaluations.map(state => ({
+                    evaluationId: state.evaluationId,
+                    state,
+                    report: projectEvaluation(state),
+                    paired:
+                      baseline?.matrix && state.matrix && state !== baseline ? pairedReport(baseline, state) : null,
+                  })),
+                },
+        }
+      }),
+  }
 }
-export async function acceptanceSubject(apparatus: Apparatus, taskId: string, run: RunState,
+export async function acceptanceSubject(
+  apparatus: Apparatus,
+  taskId: string,
+  run: RunState,
   checks: readonly ProductionVerdict[],
 ) {
   const task = taskStateOf(apparatus, taskId)
-  const inputProducers: FrozenInputProducer[] = task.contract!.inputs.flatMap((input) => {
+  const inputProducers: FrozenInputProducer[] = task.contract!.inputs.flatMap(input => {
     if (input.source.kind !== 'artifact') return []
-    const bound = run.bubble?.inputs.find((bound) => bound.name === input.name)
-    const attachment = run.submission!.files.inputs.find((file) => file.name === input.name)?.attachment
+    const bound = run.bubble?.inputs.find(bound => bound.name === input.name)
+    const attachment = run.submission!.files.inputs.find(file => file.name === input.name)?.attachment
     const producer = taskStateOf(apparatus, input.source.taskId)
     const held = bound?.producerRunId === undefined ? undefined : producer.runs[bound.producerRunId]
-    if (held?.status !== 'verified' || held.submission === undefined || attachment === undefined ||
-      attachment.attachmentId !== `sha256:${bound?.digest}` || held.submission.artifactDigest !== bound?.digest)
+    if (
+      held?.status !== 'verified' ||
+      held.submission === undefined ||
+      attachment === undefined ||
+      attachment.attachmentId !== `sha256:${bound?.digest}` ||
+      held.submission.artifactDigest !== bound?.digest
+    )
       refuse('evidence-input-mismatch', `input "${input.name}" has no exact verified producer Run binding`)
-    return [{ name: input.name, taskId: producer.taskId, contract: producer.contract!, runId: held.runId,
-      revision: held.revision, status: 'verified', artifact: held.submission.files.artifact,
-      artifactDigest: held.submission.artifactDigest, source: held.submission.source, evidence: held.evidence }]
+    return [
+      {
+        name: input.name,
+        taskId: producer.taskId,
+        contract: producer.contract!,
+        runId: held.runId,
+        revision: held.revision,
+        status: 'verified',
+        artifact: held.submission.files.artifact,
+        artifactDigest: held.submission.artifactDigest,
+        source: held.submission.source,
+        evidence: held.evidence,
+      },
+    ]
   })
   return {
     purpose: 'acceptance',
-    taskId, runId: run.runId, contract: task.contract,
+    taskId,
+    runId: run.runId,
+    contract: task.contract,
     artifact: run.submission!.files.artifact,
     artifactDigest: run.submission!.artifactDigest,
     checks,
     inputs: run.submission!.files.inputs,
     inputProducers,
     ...(run.purpose === 'improve' ? { rsiEvidence: await reportEvidence(apparatus, taskId, run) } : {}),
-    ...(task.search === undefined ? {} : { search: searchView(apparatus, task), rounds: task.rounds ?? [], transfer: task.transfer ?? null }),
+    ...(task.search === undefined
+      ? {}
+      : { search: searchView(apparatus, task), rounds: task.rounds ?? [], transfer: task.transfer ?? null }),
     source: run.submission!.source,
-    contributions: task.decomposition?.children.map((child) => {
-      const state = taskStateOf(apparatus, child.taskId)
-      const held = Object.values(state.runs).findLast((run) => run.status === 'verified') ?? Object.values(state.runs).at(-1)
-      return { taskId: child.taskId, goal: state.contract!.goal, supports: child.supports,
-        runId: held?.runId, status: held?.status, artifact: held?.submission?.files.artifact,
-        artifactDigest: held?.submission?.artifactDigest, source: held?.submission?.source, evidence: held?.evidence }
-    }) ?? [],
+    contributions:
+      task.decomposition?.children.map(child => {
+        const state = taskStateOf(apparatus, child.taskId)
+        const held =
+          Object.values(state.runs).findLast(run => run.status === 'verified') ?? Object.values(state.runs).at(-1)
+        return {
+          taskId: child.taskId,
+          goal: state.contract!.goal,
+          supports: child.supports,
+          runId: held?.runId,
+          status: held?.status,
+          artifact: held?.submission?.files.artifact,
+          artifactDigest: held?.submission?.artifactDigest,
+          source: held?.submission?.source,
+          evidence: held?.evidence,
+        }
+      }) ?? [],
   }
 }
 export function witnessOf(review: ReviewRun): ReviewWitness {
   if (review.status !== 'completed')
     refuse('unapproved-revision', 'review has no completed judgment: ' + review.failure)
   const findings = review.findings!
-  const verdict = findings.every((f) => f.verdict === 'pass')
+  const verdict = findings.every(f => f.verdict === 'pass')
     ? 'pass'
-    : findings.some((f) => f.verdict === 'fail')
+    : findings.some(f => f.verdict === 'fail')
       ? 'fail'
-      : findings.some((f) => f.verdict === 'unknown')
+      : findings.some(f => f.verdict === 'unknown')
         ? 'unknown'
         : 'partial'
   return {
@@ -171,40 +241,91 @@ export function witnessOf(review: ReviewRun): ReviewWitness {
     agentId: review.agentId,
     verdict,
     findings,
-    detail: findings.map((f) => `${f.criterionId}: ${f.detail}`).join('\n'),
+    detail: findings.map(f => `${f.criterionId}: ${f.detail}`).join('\n'),
   }
 }
-export async function submitReview(apparatus: Apparatus, assignment: ReviewRun, rawFindings: unknown): Promise<ReviewWitness> {
+export async function submitReview(
+  apparatus: Apparatus,
+  assignment: ReviewRun,
+  rawFindings: unknown,
+): Promise<ReviewWitness> {
   const review = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, assignment.reviewId)
   if (review === undefined || review.agentId !== assignment.agentId)
     refuse('not-responsible', 'only the assigned reviewer can submit findings')
   declareCaller(apparatus, review.agentId)
   const findings = readFindings(rawFindings)
   if (review.status === 'completed') {
-    if (digestOf(findings) !== digestOf(review.findings)) refuse('command-conflict', 'review already completed with different findings')
+    if (digestOf(findings) !== digestOf(review.findings))
+      refuse('command-conflict', 'review already completed with different findings')
     return witnessOf(review)
   }
-  if (findings.length !== review.criteria.length || review.criteria.some(c => !findings.some(f => f.criterionId === c.criterionId)))
-    refuse('unadjudicated-criterion', `decide each criterion exactly once: ${JSON.stringify(review.criteria.map(c => c.criterionId))}`)
+  if (
+    findings.length !== review.criteria.length ||
+    review.criteria.some(c => !findings.some(f => f.criterionId === c.criterionId))
+  )
+    refuse(
+      'unadjudicated-criterion',
+      `decide each criterion exactly once: ${JSON.stringify(review.criteria.map(c => c.criterionId))}`,
+    )
   const subject = JSON.parse((await sealedBytes(apparatus, review.subject)).toString('utf8')) as {
     checks?: readonly ProductionVerdict[]
   }
+  for (const finding of findings)
+    if (
+      finding.verdict === 'pass' &&
+      finding.evidence.length === 0 &&
+      !subject.checks?.some(check => check.criterionId === finding.criterionId && check.verdict === 'pass')
+    )
+      refuse(
+        'unadjudicated-criterion',
+        'a passing semantic finding needs subject/file/event evidence or a passing protected check; empty evidence may describe an unresolved judgment, not prove success',
+      )
   for (const check of subject.checks ?? [])
-    if (check.verdict !== 'pass' && findings.some((f) => f.criterionId === check.criterionId && f.verdict === 'pass'))
+    if (check.verdict !== 'pass' && findings.some(f => f.criterionId === check.criterionId && f.verdict === 'pass'))
       refuse('unapproved-revision', 'a passing judgment cannot override a failed protected check')
+  for (const reference of findings.flatMap(finding => finding.evidence)) {
+    if (typeof reference === 'string') continue
+    await readForAgent(apparatus, review.agentId, {
+      kind: 'trajectory',
+      ref: reference.sessionId,
+      eventSeq: reference.eventSeq,
+      from: reference.from ?? 0,
+      count: reference.count ?? 8192,
+      ...(reference.rootId === undefined ? {} : { rootId: reference.rootId }),
+    })
+  }
   await createReviewCommands(apparatus.store).complete(
     `review-complete:${review.reviewId}`,
     review.reviewId,
     findings,
-    await apparatus.attachments.saveFile({ name: 'review.json', data: Buffer.from(JSON.stringify({
-      reviewId: review.reviewId, target: review.target, subjectDigest: review.subjectDigest, findings,
-    }, null, 2) + '\n') }),
+    await apparatus.attachments.saveFile({
+      name: 'review.json',
+      data: Buffer.from(
+        JSON.stringify(
+          {
+            reviewId: review.reviewId,
+            target: review.target,
+            subjectDigest: review.subjectDigest,
+            findings,
+          },
+          null,
+          2,
+        ) + '\n',
+      ),
+    }),
     `agent:${review.agentId}`,
   )
   return witnessOf(apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, review.reviewId)!)
 }
-export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSeams, parent: Agent,
-  operationId: string, subject: unknown, signal: AbortSignal, method?: RevisionRef, requirePass = true,
+export async function reviewSubject(
+  apparatus: Apparatus,
+  seams: ChildSessionSeams,
+  parent: Agent,
+  operationId: string,
+  subject: unknown,
+  signal: AbortSignal,
+  method?: RevisionRef,
+  requirePass = true,
   criteria?: readonly AcceptanceCriterion[],
   target?: ReviewTarget,
 ): Promise<ReviewWitness> {
@@ -244,16 +365,17 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
           {
             criterionId: 'publication-approved',
             statement:
-              'The exact frozen candidate is a reusable domain method supported by independent comparable results, actual asset use and complete costs under the protected requirements.',
+              'The exact frozen candidate is a reusable domain method supported by independent comparable results and actual asset use under the protected requirements. Recorded costs and missing samples are disclosed; cost completeness and cost increases do not gate approval.',
           },
         ]
       }
     }
     const id = String(agentSessionIdOf(reviewId))
     const key = declareCaller(apparatus, id)
-  await apparatus.agents.open({ commandId: `agent:${id}`, agentId: id, sessionId: id, role: 'review' })
-  const route = parent.session.requestHeader()?.config ?? parent.options
-  if (route.provider === undefined || route.model === undefined) refuse('malformed-declaration', 'reviewer requires an explicit model route')
+    await apparatus.agents.open({ commandId: `agent:${id}`, agentId: id, sessionId: id, role: 'review' })
+    const route = parent.session.requestHeader()?.config ?? parent.options
+    if (route.provider === undefined || route.model === undefined)
+      refuse('malformed-declaration', 'reviewer requires an explicit model route')
     method ??= publishedMethod(apparatus) ?? (await seedMethod(apparatus))
     await commands.start(`review-start:${reviewId}`, reviewId, {
       target,
@@ -264,7 +386,8 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
       sessionId: id,
       identity: apparatus.store.identityOf(key)!,
       workspace: join(apparatus.workspaceRoot, 'reviews', reviewId),
-      method, model: { provider: route.provider, model: route.model },
+      method,
+      model: { provider: route.provider, model: route.model },
     })
     review = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!
   }
@@ -276,54 +399,61 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
     let session: Awaited<ReturnType<typeof openChildSession>> | undefined
     const stop = () => session?.stop()
     try {
-    await mkdir(review.workspace, { recursive: true })
-    await restoreFrozen(review.workspace, 'subject.json', await sealedBytes(apparatus, review.subject))
-    const data = subject as {
-      artifact?: import('@deepseek-ai/dsh-attachment').FileAttachmentRef
-      inputs?: readonly { name: string; attachment: import('@deepseek-ai/dsh-attachment').FileAttachmentRef }[]
-    }
-    for (const [name, ref] of [
-      ...(data.artifact === undefined ? [] : [['submitted-artifact', data.artifact] as const]),
-      ...(data.inputs ?? []).map((input) => [join('inputs', input.name), input.attachment] as const),
-    ]) {
-      await restoreFrozen(review.workspace, name, await sealedBytes(apparatus, ref))
-    }
-    session = await openChildSession(seams, {
-      agentId: reviewId,
-      cwd: review.workspace,
-      parent,
-      preset: 'singularity-review',
-      model: review.model, signal, message: schedulerMessage({ kind: 'singularity', purpose: 'dispatch', controlId: apparatus.controlId,
-      parentTaskId: operationId,
-          taskId: reviewId,
-          runId: reviewId,
-          factSeq: 0,
-        },
-        JSON.stringify({
-          reviewId,
-          purpose: review.target.kind,
-          assignment: 'subject.json',
-          criteria: review.criteria,
-          method: review.method,
-          reads: { subject: { kind: 'subject' }, method: { kind: 'method' }, evidence: { kind: 'trajectory' } },
-          artifact: data.artifact === undefined ? undefined : 'submitted-artifact',
-          inputs: (data.inputs ?? []).map(({ name }) => ({ name, path: join('inputs', name) })),
-          evidenceInputs: reviewInputsOf(review, data).map(({ name, source }) => ({ name, source })),
-          output: {
-            tool: 'singularity_submit',
-            arguments: {
-              findings: review.criteria.map((c) => ({
-                criterionId: c.criterionId,
-                verdict: 'unknown',
-                detail: '<supported finding or exact missing evidence>',
-                evidence: ['<actual subject field, native page or file reference>'],
-              })),
-            },
+      await mkdir(review.workspace, { recursive: true })
+      await restoreFrozen(review.workspace, 'subject.json', await sealedBytes(apparatus, review.subject))
+      const data = subject as {
+        artifact?: import('@deepseek-ai/dsh-attachment').FileAttachmentRef
+        inputs?: readonly { name: string; attachment: import('@deepseek-ai/dsh-attachment').FileAttachmentRef }[]
+      }
+      for (const [name, ref] of [
+        ...(data.artifact === undefined ? [] : [['submitted-artifact', data.artifact] as const]),
+        ...(data.inputs ?? []).map(input => [join('inputs', input.name), input.attachment] as const),
+      ]) {
+        await restoreFrozen(review.workspace, name, await sealedBytes(apparatus, ref))
+      }
+      session = await openChildSession(seams, {
+        agentId: reviewId,
+        cwd: review.workspace,
+        parent,
+        preset: 'singularity-review',
+        model: review.model,
+        signal,
+        message: schedulerMessage(
+          {
+            kind: 'singularity',
+            purpose: 'dispatch',
+            controlId: apparatus.controlId,
+            parentTaskId: operationId,
+            taskId: reviewId,
+            runId: reviewId,
+            factSeq: 0,
           },
-        }),
-      ),
-    })
-  signal.addEventListener('abort', stop, { once: true })
+          JSON.stringify({
+            reviewId,
+            purpose: review.target.kind,
+            guidance: reviewGuidanceFor(review.target.kind),
+            assignment: 'subject.json',
+            criteria: review.criteria,
+            method: review.method,
+            reads: { subject: { kind: 'subject' }, method: { kind: 'method' }, evidence: { kind: 'trajectory' } },
+            artifact: data.artifact === undefined ? undefined : 'submitted-artifact',
+            inputs: (data.inputs ?? []).map(({ name }) => ({ name, path: join('inputs', name) })),
+            evidenceInputs: reviewInputsOf(review, data).map(({ name, source }) => ({ name, source })),
+            output: {
+              tool: 'singularity_submit',
+              arguments: {
+                findings: review.criteria.map(c => ({
+                  criterionId: c.criterionId,
+                  verdict: 'unknown',
+                  detail: '<supported finding or exact missing evidence>',
+                  evidence: ['<actual subject field, native page or file reference>'],
+                })),
+              },
+            },
+          }),
+        ),
+      })
+      signal.addEventListener('abort', stop, { once: true })
       while (
         apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!.status === 'running'
       ) {
@@ -331,16 +461,21 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
         signal.throwIfAborted()
         const held = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!
         const plan = projectPlan(
-            held.reviewId,
-            held.criteria,
-            held.children,
-            apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION),
-          )
-        if (held.status === 'running' && plan.children.every(childSettled) &&
-          (plan.children.length === 0 || await outcomesAnswered(apparatus, session.sessionId,
-            held.reviewId, [planOutcomeOf(apparatus, plan)!.seq])))
-            refuse('illegal-transition', 'reviewer stopped without a judgment')
-        if (held.status === 'running') await new Promise((resolve) => setTimeout(resolve, 100))
+          held.reviewId,
+          held.criteria,
+          held.children,
+          apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION),
+        )
+        if (
+          held.status === 'running' &&
+          plan.children.every(childSettled) &&
+          (plan.children.length === 0 ||
+            (await outcomesAnswered(apparatus, session.sessionId, held.reviewId, [
+              planOutcomeOf(apparatus, plan)!.seq,
+            ])))
+        )
+          refuse('illegal-transition', 'reviewer stopped without a judgment')
+        if (held.status === 'running') await new Promise(resolve => setTimeout(resolve, 100))
       }
     } catch (error) {
       if (
@@ -349,8 +484,9 @@ export async function reviewSubject(apparatus: Apparatus, seams: ChildSessionSea
         apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!.status === 'running'
       )
         await commands.fail(`review-failed:${reviewId}`, reviewId, String(error))
-    throw error
-  } finally { signal.removeEventListener('abort', stop)
+      throw error
+    } finally {
+      signal.removeEventListener('abort', stop)
       session?.stop()
       await session?.close()
     }

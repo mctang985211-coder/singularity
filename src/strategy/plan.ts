@@ -25,13 +25,25 @@ export interface RoundPlan {
 
 const APPENDED = { appended: true } as const
 const WEIGHTS_MEMBERS = ['quality', 'cost'] as const
-const OPENED_MEMBERS = ['campaignId', 'round', 'incumbent', 'productionHead', 'candidates', 'historyCutoff', 'caliber', 'weights'] as const
+const OPENED_MEMBERS = [
+  'campaignId',
+  'round',
+  'incumbent',
+  'productionHead',
+  'candidates',
+  'historyCutoff',
+  'caliber',
+  'weights',
+] as const
 
 /** A non-negative integer. Absent, fractional, negative and non-numeric are all refusals. */
 export function count(source: Record<string, unknown>, key: string, where: string): number {
   const value = source[key]
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0)
-    refuse('malformed-payload', `${where}.${key} must be an integer >= 0, got ${value === undefined ? 'nothing' : JSON.stringify(value)}`)
+    refuse(
+      'malformed-payload',
+      `${where}.${key} must be an integer >= 0, got ${value === undefined ? 'nothing' : JSON.stringify(value)}`,
+    )
   return value
 }
 
@@ -39,26 +51,50 @@ export function count(source: Record<string, unknown>, key: string, where: strin
 export function requirePlan(state: RoundState, where: string): RoundPlan {
   const plan = state.plan
   if (plan === undefined)
-    refuse('illegal-transition', `${where} reached round "${state.roundId}", which has no opening fact: a slot count, a budget, a frozen cutoff and a caliber cannot be inferred after the fact`)
+    refuse(
+      'illegal-transition',
+      `${where} reached round "${state.roundId}", which has no opening fact: a slot count, a budget, a frozen cutoff and a caliber cannot be inferred after the fact`,
+    )
   return plan
 }
 
-function openedPayload(raw: unknown, where: string, nested: { readonly incumbent: MemberSet; readonly weights: MemberSet }): RoundPlan {
+function openedPayload(
+  raw: unknown,
+  where: string,
+  nested: { readonly incumbent: MemberSet; readonly weights: MemberSet },
+): RoundPlan {
   const source = record(raw, where)
   const round = count(source, 'round', where)
-  if (round < 1) refuse('malformed-payload', `${where}.round must be an integer >= 1, got ${round}; round numbering is explicit, never a count of history entries`)
+  if (round < 1)
+    refuse(
+      'malformed-payload',
+      `${where}.round must be an integer >= 1, got ${round}; round numbering is explicit, never a count of history entries`,
+    )
   const candidates = count(source, 'candidates', where)
-  if (candidates < 1) refuse('malformed-payload', `${where}.candidates must be at least 1, got ${candidates}: a round with no slot has no candidate to decide`)
+  if (candidates < 1)
+    refuse(
+      'malformed-payload',
+      `${where}.candidates must be at least 1, got ${candidates}: a round with no slot has no candidate to decide`,
+    )
   const weights = record(source['weights'], `${where}.weights`)
   assertClosedKeys(weights, nested.weights, `${where}.weights`)
   const quality = weights['quality']
   const cost = weights['cost']
-  for (const [key, value] of [['quality', quality], ['cost', cost]] as const) {
+  for (const [key, value] of [
+    ['quality', quality],
+    ['cost', cost],
+  ] as const) {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0)
-      refuse('malformed-payload', `${where}.weights.${key} must be a finite number >= 0, got ${JSON.stringify(value ?? null)}`)
+      refuse(
+        'malformed-payload',
+        `${where}.weights.${key} must be a finite number >= 0, got ${JSON.stringify(value ?? null)}`,
+      )
   }
   if (quality === 0)
-    refuse('malformed-payload', `${where}.weights.quality is 0: a round weighting quality at nothing cannot prefer a better candidate to a worse one`)
+    refuse(
+      'malformed-payload',
+      `${where}.weights.quality is 0: a round weighting quality at nothing cannot prefer a better candidate to a worse one`,
+    )
 
   return {
     ...(source['productionHead'] === undefined ? {} : { productionHead: maybeText(source, 'productionHead', where)! }),

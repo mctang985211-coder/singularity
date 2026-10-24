@@ -3,8 +3,10 @@ import type { Node, Edge } from '@xyflow/react'
 import type { ControlSnapshot } from '../src/snapshot.ts'
 import type { AgentData, ChatRow } from './types.ts'
 export type FlowNode = Node<AgentData & Record<string, unknown>, 'agent'>
-export type FlowEdge = Edge<{ kind: 'decomposition' | 'dependency' | 'artifact' | 'review' | 'improve' | 'evaluation'
-  brief: string }>
+export type FlowEdge = Edge<{
+  kind: 'decomposition' | 'dependency' | 'artifact' | 'review' | 'improve' | 'evaluation'
+  brief: string
+}>
 interface State {
   snapshot: ControlSnapshot | null
   nodes: FlowNode[]
@@ -16,25 +18,48 @@ interface State {
   receive(snapshot: ControlSnapshot): void
 }
 export const useStore = create<State>((set, get) => ({
-  snapshot: null, nodes: [], edges: [], selectedId: null, error: null,
+  snapshot: null,
+  nodes: [],
+  edges: [],
+  selectedId: null,
+  error: null,
   chat: { sessionId: null, rows: [], error: null },
-  setSelected: (id) => {
+  setSelected: id => {
     set({ selectedId: id, chat: { sessionId: null, rows: [], error: null } })
-    const task = get().snapshot?.tasks.find((task) => task.taskId === id)
-    window.parent.postMessage({ type: 'singularity:open', sessionId: task?.sessionId ?? get().snapshot?.reviews.find((r) => r.reviewId === id)?.sessionId ?? null,
+    const task = get().snapshot?.tasks.find(task => task.taskId === id)
+    window.parent.postMessage(
+      {
+        type: 'singularity:open',
+        sessionId: task?.sessionId ?? get().snapshot?.reviews.find(r => r.reviewId === id)?.sessionId ?? null,
       },
       location.origin,
     )
   },
-  receive: (snapshot) => {
-    if (snapshot.formatVersion !== 13) throw new Error('Unsupported Singularity snapshot')
-    const childIds = new Set(snapshot.plans.flatMap((plan) => plan.children.map((child) => child.taskId)))
-    const nodes: FlowNode[] = snapshot.tasks.map((task) => {
+  receive: snapshot => {
+    if (snapshot.formatVersion !== 15) throw new Error('Unsupported Singularity snapshot')
+    const childIds = new Set(snapshot.plans.flatMap(plan => plan.children.map(child => child.taskId)))
+    const nodes: FlowNode[] = snapshot.tasks.map(task => {
       const geometry = snapshot.geometry[task.taskId]!
-      return { id: task.taskId, type: 'agent', position: { x: geometry.x, y: geometry.y }, selected: task.taskId === get().selectedId,
-        data: { name: task.goal, root: task.purpose === 'solve' && !childIds.has(task.taskId), width: geometry.width, height: geometry.height,
-          status: task.phase === 'verified' ? 'done' : task.phase === 'failed' ? 'failed'
-            : task.coordination.waiting !== null ? 'waiting' : task.phase === 'running' ? 'running' : 'idle',
+      return {
+        id: task.taskId,
+        type: 'agent',
+        position: { x: geometry.x, y: geometry.y },
+        selected: task.taskId === get().selectedId,
+        data: {
+          name: task.goal,
+          root: task.purpose === 'solve' && !childIds.has(task.taskId),
+          width: geometry.width,
+          height: geometry.height,
+          status:
+            task.phase === 'verified'
+              ? 'done'
+              : task.phase === 'failed'
+                ? 'failed'
+                : task.coordination.waiting !== null
+                  ? 'waiting'
+                  : task.phase === 'running'
+                    ? 'running'
+                    : 'idle',
         },
       }
     })
@@ -46,7 +71,7 @@ export const useStore = create<State>((set, get) => ({
         position: { x: geometry.x, y: geometry.y },
         selected: review.reviewId === get().selectedId,
         data: {
-          name: '审核 · ' + review.criteria.map((c) => c.statement).join('; '),
+          name: '审核 · ' + review.criteria.map(c => c.statement).join('; '),
           root: false,
           width: geometry.width,
           height: geometry.height,
@@ -54,22 +79,44 @@ export const useStore = create<State>((set, get) => ({
         },
       })
     }
-    const edges: FlowEdge[] = snapshot.plans.flatMap((plan) =>
-      plan.children.flatMap((child) => [
-      { id: `${plan.parentTaskId}/${child.taskId}`, source: plan.parentTaskId, target: child.taskId, type: 'agent', data: { kind: 'decomposition' as const, brief: child.supports.join(', ') },
+    const edges: FlowEdge[] = snapshot.plans.flatMap(plan =>
+      plan.children.flatMap(child => [
+        {
+          id: `${plan.parentTaskId}/${child.taskId}`,
+          source: plan.parentTaskId,
+          target: child.taskId,
+          type: 'agent',
+          data: { kind: 'decomposition' as const, brief: child.supports.join(', ') },
         },
-        ...child.dependsOn.map((producer) => ({ id: `${producer}->${child.taskId}`, source: producer, target: child.taskId, type: 'agent', data: { kind: 'dependency' as const, brief: '依赖' },
+        ...child.dependsOn.map(producer => ({
+          id: `${producer}->${child.taskId}`,
+          source: producer,
+          target: child.taskId,
+          type: 'agent',
+          data: { kind: 'dependency' as const, brief: '依赖' },
         })),
       ]),
     )
-    for (const task of snapshot.tasks) for (const input of task.runs.at(-1)?.inputSources ?? [])
-      if (input.source.kind === 'artifact') edges.push({
-        id: `${input.source.taskId}=>${task.taskId}:${input.name}`, source: input.source.taskId, target: task.taskId, type: 'agent',
-        data: { kind: 'artifact', brief: `产物 ${input.name}` },
-      })
-    for (const task of snapshot.tasks) if (task.relatedTo !== null) edges.push({
-      id: `${task.relatedTo.taskId}/${task.taskId}`, source: task.relatedTo.taskId, target: task.taskId, type: 'agent',
-      data: { kind: task.purpose === 'improve' ? 'improve' : task.purpose === 'evaluation' ? 'evaluation' : 'review', brief: task.purpose,
+    for (const task of snapshot.tasks)
+      for (const input of task.runs.at(-1)?.inputSources ?? [])
+        if (input.source.kind === 'artifact')
+          edges.push({
+            id: `${input.source.taskId}=>${task.taskId}:${input.name}`,
+            source: input.source.taskId,
+            target: task.taskId,
+            type: 'agent',
+            data: { kind: 'artifact', brief: `产物 ${input.name}` },
+          })
+    for (const task of snapshot.tasks)
+      if (task.relatedTo !== null)
+        edges.push({
+          id: `${task.relatedTo.taskId}/${task.taskId}`,
+          source: task.relatedTo.taskId,
+          target: task.taskId,
+          type: 'agent',
+          data: {
+            kind: task.purpose === 'improve' ? 'improve' : task.purpose === 'evaluation' ? 'evaluation' : 'review',
+            brief: task.purpose,
           },
         })
     for (const review of snapshot.reviews)
@@ -89,7 +136,9 @@ export function pathIds(selected: string | null, edges: FlowEdge[]): Set<string>
   let changed = true
   while (changed) {
     changed = false
-    for (const edge of edges) if (ids.has(edge.target) && !ids.has(edge.source)) { ids.add(edge.source)
+    for (const edge of edges)
+      if (ids.has(edge.target) && !ids.has(edge.source)) {
+        ids.add(edge.source)
         changed = true
       }
   }

@@ -5,3 +5,6 @@ assembly/lib/
 .singularity/
 __pycache__/
 *.py[cod]
+
+coverage/
+artifacts/

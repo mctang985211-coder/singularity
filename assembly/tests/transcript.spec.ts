@@ -27,11 +27,26 @@ async function harness() {
   const agent = { id: session.id, session, ctx } as unknown as Agent
   ctx.agents.enter(agent, undefined)
   let onFlush = () => undefined
-  ctx.on('session/flush', () => { onFlush() }, { prepend: true })
+  ctx.on(
+    'session/flush',
+    () => {
+      onFlush()
+    },
+    { prepend: true },
+  )
   return {
-    ctx, session, writer, exec: { agent } as ToolRunContext,
-    execution: createExecution(ctx, () => undefined, () => undefined),
-    duringFlush: (callback: () => undefined) => { onFlush = callback },
+    ctx,
+    session,
+    writer,
+    exec: { agent } as ToolRunContext,
+    execution: createExecution(
+      ctx,
+      () => undefined,
+      () => undefined,
+    ),
+    duringFlush: (callback: () => undefined) => {
+      onFlush = callback
+    },
   }
 }
 
@@ -46,9 +61,16 @@ describe('the sealed transcript source', () => {
   it('uses a durable fixed prefix while the live log appends during flush, without taking another write lease', async () => {
     const h = await harness()
     const first = h.session.append('turn/start', { turn: 1 })
-    h.duringFlush(() => { h.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } }); return undefined })
+    h.duringFlush(() => {
+      h.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      return undefined
+    })
     const source = await h.execution.sealTranscript(h.exec)
-    expect(source).toEqual({ sessionId: 'root', eventCount: 1, digest: digestOf({ sessionId: 'root', eventCount: 1, events: [first] }) })
+    expect(source).toEqual({
+      sessionId: 'root',
+      eventCount: 1,
+      digest: digestOf({ sessionId: 'root', eventCount: 1, events: [first] }),
+    })
     expect(h.session.seq).toBe(2)
     expect((await h.writer.read()).events).toHaveLength(2)
     await h.writer.flush()
@@ -56,7 +78,9 @@ describe('the sealed transcript source', () => {
 
   it('propagates a flush failure and never returns a content reference', async () => {
     const h = await harness()
-    h.ctx.on('session/flush', async () => { throw new Error('checkpoint failed') })
+    h.ctx.on('session/flush', async () => {
+      throw new Error('checkpoint failed')
+    })
     await expect(h.execution.sealTranscript(h.exec)).rejects.toThrow('checkpoint failed')
   })
 
@@ -82,7 +106,10 @@ describe('the sealed transcript source', () => {
     const h = await harness()
     const read = await h.ctx.sessionPersistence.open(h.session.id, 'read')
     const close = read.close.bind(read)
-    vi.spyOn(read, 'close').mockImplementation(async () => { await close(); throw new Error('read close failed') })
+    vi.spyOn(read, 'close').mockImplementation(async () => {
+      await close()
+      throw new Error('read close failed')
+    })
     vi.spyOn(h.ctx.sessionPersistence, 'open').mockResolvedValue(read)
     await expect(h.execution.sealTranscript(h.exec)).rejects.toThrow('read close failed')
   })

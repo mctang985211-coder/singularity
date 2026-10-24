@@ -7,6 +7,7 @@
  * `quality = 1` for `trials = 2, missing = 1`: the absent slot filled nothing, so one lucky
  * repetition read as a complete measurement. Here the denominator is the plan's, and `trial/missed`
  * is a kind because absence is a fact somebody recorded rather than a gap a reader has to notice.
+ * Its optional cost preserves usage recorded before that absence was established.
  *
  * **Why the metric's implementation is also the emitter.** A trial is emitted by
  * `verifier:<ref>@<version>`, the role discipline `evidence/produced` uses, and the identity members
@@ -40,14 +41,9 @@ import { digest, maybeText, record, revisionRef, REVISION_MEMBERS, text } from '
 import type { EvaluationMatrix } from './suite.ts'
 
 export const MEASURE_PROTOCOL = 'measure'
-/**
- * Version 3. The caliber's execution context covers the run's declared `inputs` as well as the
- * model, the tool digests and the conditions: two candidates measured on different datasets are not
- * answers to the same question. Version 2 covered the context without the inputs, and version 1
- * covered the run identity itself. Older versions are refused by name with no compatibility layer —
- * comparability is a historical interpretation, and it moved.
- */
-export const MEASURE_VERSION = 5
+/** Version 5 freezes suite matrices and scored business failures; infrastructure and review
+ * uncertainty remain named misses. v3 added input identity to the comparison context. */
+export const MEASURE_VERSION = 6
 
 export const MEASURE_KINDS = {
   evaluationOpened: 'evaluation/opened',
@@ -136,6 +132,8 @@ export interface FailedTrial {
 export interface MissedTrial {
   readonly slot: number
   readonly reason: string
+  /** Usage already recorded before interruption or an inconclusive review. */
+  readonly cost?: number
   readonly verifierRef: string
   readonly verifierVersion: string
 }
@@ -207,11 +205,16 @@ function metricOf(raw: unknown, where: string, members: MemberSet): EvaluationMe
   assertClosedKeys(source, members, where)
   const direction = source['direction']
   if (direction !== 'higher' && direction !== 'lower')
-    refuse('malformed-payload', `${where}.direction must be "higher" or "lower", got ${JSON.stringify(direction ?? null)}`,
+    refuse(
+      'malformed-payload',
+      `${where}.direction must be "higher" or "lower", got ${JSON.stringify(direction ?? null)}`,
     )
   // `measured` is an acceptance criterion, so it is closed by the criterion shape's own declaration
   // rather than by a set kept here: the kind that declares a metric declares no nested set for it.
-  return { measured: assertCriterionShape(source['measured'], `${where}.measured`, CRITERION_MEMBERS), unit: text(source, 'unit', where), direction,
+  return {
+    measured: assertCriterionShape(source['measured'], `${where}.measured`, CRITERION_MEMBERS),
+    unit: text(source, 'unit', where),
+    direction,
   }
 }
 
@@ -257,19 +260,35 @@ function runOf(raw: unknown, where: string): EvaluationRun {
 export function matrixShape(raw: unknown): EvaluationMatrix {
   const row = record(raw, 'evaluation matrix')
   assertClosedKeys(row, ['suiteDigest', 'executionProfileDigest', 'split', 'slots'], 'evaluation matrix')
-  if (!['evolve', 'validation', 'heldout'].includes(String(row['split'])) || !Array.isArray(row['slots']) || row['slots'].length === 0)
+  if (
+    !['evolve', 'validation', 'heldout'].includes(String(row['split'])) ||
+    !Array.isArray(row['slots']) ||
+    row['slots'].length === 0
+  )
     refuse('malformed-payload', 'matrix requires a split and planned slots')
   const slots = row['slots'].map((raw, index) => {
     const slot = record(raw, `matrix slot ${index}`)
     assertClosedKeys(slot, ['caseId', 'familyId', 'contractDigest', 'trial', 'weight'], 'matrix slot')
-    const trial = finite(slot, 'trial', 'matrix slot'), weight = finite(slot, 'weight', 'matrix slot')
-    if (!Number.isSafeInteger(trial) || trial < 0 || weight <= 0) refuse('malformed-payload', 'matrix trial and weight invalid')
-    return { caseId: text(slot, 'caseId', 'matrix slot'), familyId: text(slot, 'familyId', 'matrix slot'),
-      contractDigest: digest(slot, 'contractDigest', 'matrix slot'), trial, weight }
+    const trial = finite(slot, 'trial', 'matrix slot'),
+      weight = finite(slot, 'weight', 'matrix slot')
+    if (!Number.isSafeInteger(trial) || trial < 0 || weight <= 0)
+      refuse('malformed-payload', 'matrix trial and weight invalid')
+    return {
+      caseId: text(slot, 'caseId', 'matrix slot'),
+      familyId: text(slot, 'familyId', 'matrix slot'),
+      contractDigest: digest(slot, 'contractDigest', 'matrix slot'),
+      trial,
+      weight,
+    }
   })
-  if (new Set(slots.map(slot => `${slot.caseId}:${slot.trial}`)).size !== slots.length) refuse('malformed-payload', 'duplicate matrix slot')
-  return { suiteDigest: digest(row, 'suiteDigest', 'matrix'), executionProfileDigest: digest(row, 'executionProfileDigest', 'matrix'),
-    split: row['split'] as EvaluationMatrix['split'], slots }
+  if (new Set(slots.map(slot => `${slot.caseId}:${slot.trial}`)).size !== slots.length)
+    refuse('malformed-payload', 'duplicate matrix slot')
+  return {
+    suiteDigest: digest(row, 'suiteDigest', 'matrix'),
+    executionProfileDigest: digest(row, 'executionProfileDigest', 'matrix'),
+    split: row['split'] as EvaluationMatrix['split'],
+    slots,
+  }
 }
 
 function missedOf(raw: unknown, where: string): MissedTrial {
@@ -277,6 +296,7 @@ function missedOf(raw: unknown, where: string): MissedTrial {
   return {
     slot: finite(source, 'slot', where),
     reason: text(source, 'reason', where),
+    ...(source['cost'] === undefined ? {} : { cost: finite(source, 'cost', where) }),
     verifierRef: text(source, 'verifierRef', where),
     verifierVersion: text(source, 'verifierVersion', where),
   }
@@ -285,7 +305,8 @@ function missedOf(raw: unknown, where: string): MissedTrial {
 function constraintOf(raw: unknown, where: string, verdictMembers: MemberSet): ConstraintCheck {
   const source = record(raw, where)
   const met = source['met']
-  if (typeof met !== 'boolean') refuse('malformed-payload', `${where}.met must be a boolean, got ${met === null ? 'null' : typeof met}`)
+  if (typeof met !== 'boolean')
+    refuse('malformed-payload', `${where}.met must be a boolean, got ${met === null ? 'null' : typeof met}`)
   const detail = maybeText(source, 'detail', where)
   const rawVerdict = source['verdict']
   let verdict
@@ -322,26 +343,35 @@ interface Plan {
 function requirePlan(state: EvaluationState, where: string, evaluationId: string): Plan {
   const { trials, metric, judgement } = state
   if (trials === undefined || metric === undefined || judgement === undefined)
-    refuse('illegal-transition', `${where} arrived before evaluation "${evaluationId}" carried a measurement plan; open the evaluation before anything is measured in it`,
+    refuse(
+      'illegal-transition',
+      `${where} arrived before evaluation "${evaluationId}" carried a measurement plan; open the evaluation before anything is measured in it`,
     )
   return { trials, metric, judgement }
 }
 
 function requireSlot(trials: number, slot: number, where: string): void {
   if (!Number.isInteger(slot) || slot < 0 || slot >= trials)
-    refuse('illegal-transition', `${where} names trial slot ${String(slot)}, but the plan has slots 0..${trials - 1}; a run outside the frozen plan is not a repetition of it`,
+    refuse(
+      'illegal-transition',
+      `${where} names trial slot ${String(slot)}, but the plan has slots 0..${trials - 1}; a run outside the frozen plan is not a repetition of it`,
     )
 }
 
 function requireEmptySlot(state: EvaluationState, slot: number, where: string): void {
-  if (state.failed?.some(entry => entry.slot === slot)) refuse('evidence-conflict', `${where} records a settled failed trial again`)
-  const observation = state.observed.find((entry) => entry.slot === slot)
+  if (state.failed?.some(entry => entry.slot === slot))
+    refuse('evidence-conflict', `${where} records a settled failed trial again`)
+  const observation = state.observed.find(entry => entry.slot === slot)
   if (observation !== undefined)
-    refuse('evidence-conflict', `${where} records trial slot ${slot} again; it already carries the observation ${String(observation.quality)} from ${observation.verifierRef}@${observation.verifierVersion}, and one slot carries one observation`,
+    refuse(
+      'evidence-conflict',
+      `${where} records trial slot ${slot} again; it already carries the observation ${String(observation.quality)} from ${observation.verifierRef}@${observation.verifierVersion}, and one slot carries one observation`,
     )
-  const miss = state.missed.find((entry) => entry.slot === slot)
+  const miss = state.missed.find(entry => entry.slot === slot)
   if (miss !== undefined)
-    refuse('evidence-conflict', `${where} records trial slot ${slot} again; it was already declared missed (${JSON.stringify(miss.reason)}), and one slot carries one outcome`,
+    refuse(
+      'evidence-conflict',
+      `${where} records trial slot ${slot} again; it was already declared missed (${JSON.stringify(miss.reason)}), and one slot carries one outcome`,
     )
 }
 
@@ -349,17 +379,23 @@ function requireEmptySlot(state: EvaluationState, slot: number, where: string): 
 function requireEmitterRole(envelope: Envelope, criterion: VerifierCriterion, subject: string, where: string): void {
   const role = verifierRoleOf({ verifierRef: criterion.verifierRef, verifierVersion: criterion.verifierVersion })
   if (envelope.emitter !== role)
-    refuse('wrong-verifier', `${where} was emitted by ${envelope.emitter}, but ${subject} names ${role}; a number is a measurement only when the implementation that criterion names produced it`,
+    refuse(
+      'wrong-verifier',
+      `${where} was emitted by ${envelope.emitter}, but ${subject} names ${role}; a number is a measurement only when the implementation that criterion names produced it`,
     )
 }
 
 /** The content half: a rebuilt implementation keeping its name does not inherit the numbers. */
-function requireImplementationDigest(implementationDigest: string, criterion: VerifierCriterion,
+function requireImplementationDigest(
+  implementationDigest: string,
+  criterion: VerifierCriterion,
   subject: string,
   where: string,
 ): void {
   if (implementationDigest !== criterion.implementationDigest)
-    refuse('wrong-verifier', `${where} came from the implementation ${implementationDigest.slice(0, 12)}…, but ${subject} names ${criterion.implementationDigest.slice(0, 12)}…`,
+    refuse(
+      'wrong-verifier',
+      `${where} came from the implementation ${implementationDigest.slice(0, 12)}…, but ${subject} names ${criterion.implementationDigest.slice(0, 12)}…`,
     )
 }
 
@@ -370,7 +406,8 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
     kinds: {
       [MEASURE_KINDS.evaluationOpened]: defineKind<
         EvaluationState,
-        { baseline: RevisionRef
+        {
+          baseline: RevisionRef
           candidate: RevisionRef
           run: EvaluationRun
           context: string
@@ -386,31 +423,43 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
           run: MemberSet
           metric: MemberSet
           weights: MemberSet
-          judgement: MemberSet }
+          judgement: MemberSet
+        }
       >({
         guarantees: { appended: true },
         members: ['baseline', 'candidate', 'run', 'context', 'metric', 'weights', 'trials', 'judgement', 'matrix'],
         // The shapes inside this payload, by the member that holds each, handed to the reader that
         // closes it: `judgement[]` goes to `contract.ts`'s criterion reader, and each entry there is
         // the declaration rather than a copy the reader keeps.
-        nested: { baseline: REVISION_MEMBERS, candidate: REVISION_MEMBERS, run: RUN_MEMBERS, metric: METRIC_MEMBERS, weights: WEIGHTS_MEMBERS, judgement: CRITERION_MEMBERS,
+        nested: {
+          baseline: REVISION_MEMBERS,
+          candidate: REVISION_MEMBERS,
+          run: RUN_MEMBERS,
+          metric: METRIC_MEMBERS,
+          weights: WEIGHTS_MEMBERS,
+          judgement: CRITERION_MEMBERS,
         },
         emitter: SCHEDULER_ROLE,
         parse: (raw, where, nested) => {
           const source = record(raw, where)
           const trials = finite(source, 'trials', where)
           if (!Number.isInteger(trials) || trials < 1)
-            refuse('malformed-payload', `${where}.trials must be an integer >= 1, got ${String(trials)}; a plan with no slots has no denominator, so nothing could be reported complete or missing`,
+            refuse(
+              'malformed-payload',
+              `${where}.trials must be an integer >= 1, got ${String(trials)}; a plan with no slots has no denominator, so nothing could be reported complete or missing`,
             )
           const metric = metricOf(source['metric'], `${where}.metric`, nested.metric)
           const judgement = criterionList(source['judgement'], `${where}.judgement`, nested.judgement)
-          if (judgement.some((criterion) => criterion.criterionId === metric.measured.criterionId))
-            refuse('malformed-contract', `${where} judges "${metric.measured.criterionId}" as a hard constraint and measures it as the metric; a constraint nobody trades off and a number that is traded off are two criteria`,
+          if (judgement.some(criterion => criterion.criterionId === metric.measured.criterionId))
+            refuse(
+              'malformed-contract',
+              `${where} judges "${metric.measured.criterionId}" as a hard constraint and measures it as the metric; a constraint nobody trades off and a number that is traded off are two criteria`,
             )
           const run = record(source['run'], `${where}.run`)
           assertClosedKeys(run, nested.run, `${where}.run`)
           const matrix = source['matrix'] === undefined ? undefined : matrixShape(source['matrix'])
-          if (matrix !== undefined && matrix.slots.length !== trials) refuse('malformed-payload', 'matrix must cover every planned trial')
+          if (matrix !== undefined && matrix.slots.length !== trials)
+            refuse('malformed-payload', 'matrix must cover every planned trial')
           return {
             ...(matrix === undefined ? {} : { matrix }),
             baseline: revisionRef(source['baseline'], `${where}.baseline`, nested.baseline),
@@ -426,7 +475,9 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
         reduce: (state, envelope, payload) => {
           const where = `${MEASURE_KINDS.evaluationOpened} #${envelope.seq}`
           if (state.trials !== undefined)
-            refuse('illegal-transition', `${where} opens a second measurement plan for evaluation "${envelope.subject}"; a measurement has one frozen plan, so redrafting one is a new evaluation id`,
+            refuse(
+              'illegal-transition',
+              `${where} opens a second measurement plan for evaluation "${envelope.subject}"; a measurement has one frozen plan, so redrafting one is a new evaluation id`,
             )
           return {
             ...state,
@@ -446,14 +497,25 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
 
       [MEASURE_KINDS.trialRecorded]: defineKind<EvaluationState, TrialRecord, { inputDigests: MemberSet }>({
         guarantees: { appended: true },
-        members: ['slot', 'quality', 'cost', 'artifactDigest', 'inputDigests', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail', 'run', 'guardsMet',
+        members: [
+          'slot',
+          'quality',
+          'cost',
+          'artifactDigest',
+          'inputDigests',
+          'verifierRef',
+          'verifierVersion',
+          'implementationDigest',
+          'detail',
+          'run',
+          'guardsMet',
         ],
         // `inputDigests[]` is closed by `inputList`, which is handed this one set; the declaration is
         // what closes each entry.
         nested: { inputDigests: BUBBLE_INPUT_MEMBERS },
         // The role *is* the implementation: a deployment must hold that verifier's identity to emit
         // its numbers, and the log refuses the fact when it does not.
-        emitter: (payload) => verifierRoleOf(payload),
+        emitter: payload => verifierRoleOf(payload),
         parse: (raw, where, nested) => trialOf(raw, where, nested.inputDigests),
         reduce: (state, envelope, payload) => {
           const where = `${MEASURE_KINDS.trialRecorded} #${envelope.seq}`
@@ -469,16 +531,41 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
 
       [MEASURE_KINDS.trialFailed]: defineKind<EvaluationState, FailedTrial, {}>({
         guarantees: { appended: true },
-        members: ['slot', 'quality', 'cost', 'status', 'reason', 'run', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail', 'guardsMet'], nested: {},
+        members: [
+          'slot',
+          'quality',
+          'cost',
+          'status',
+          'reason',
+          'run',
+          'verifierRef',
+          'verifierVersion',
+          'implementationDigest',
+          'detail',
+          'guardsMet',
+        ],
+        nested: {},
         emitter: payload => verifierRoleOf(payload),
         parse: (raw, where) => {
-          const row = record(raw, where), status = row['status'], detail = maybeText(row, 'detail', where), cost = maybeFinite(row, 'cost', where)
-          if (status !== 'no-submission' && status !== 'business-failure') refuse('malformed-payload', 'failed trial requires an ordinary business outcome')
-          return { slot: finite(row, 'slot', where), quality: finite(row, 'quality', where), status,
-            reason: text(row, 'reason', where), run: runOf(row['run'], where), verifierRef: text(row, 'verifierRef', where),
-            verifierVersion: text(row, 'verifierVersion', where), implementationDigest: digest(row, 'implementationDigest', where),
-            ...(cost === undefined ? {} : { cost }), ...(detail === undefined ? {} : { detail }),
-            ...(row['guardsMet'] === undefined ? {} : { guardsMet: guardFlag(row['guardsMet']) }) }
+          const row = record(raw, where),
+            status = row['status'],
+            detail = maybeText(row, 'detail', where),
+            cost = maybeFinite(row, 'cost', where)
+          if (status !== 'no-submission' && status !== 'business-failure')
+            refuse('malformed-payload', 'failed trial requires an ordinary business outcome')
+          return {
+            slot: finite(row, 'slot', where),
+            quality: finite(row, 'quality', where),
+            status,
+            reason: text(row, 'reason', where),
+            run: runOf(row['run'], where),
+            verifierRef: text(row, 'verifierRef', where),
+            verifierVersion: text(row, 'verifierVersion', where),
+            implementationDigest: digest(row, 'implementationDigest', where),
+            ...(cost === undefined ? {} : { cost }),
+            ...(detail === undefined ? {} : { detail }),
+            ...(row['guardsMet'] === undefined ? {} : { guardsMet: guardFlag(row['guardsMet']) }),
+          }
         },
         reduce: (state, envelope, payload) => {
           const plan = requirePlan(state, 'failed trial', envelope.subject)
@@ -492,16 +579,18 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
 
       [MEASURE_KINDS.trialMissed]: defineKind<EvaluationState, MissedTrial, {}>({
         guarantees: { appended: true },
-        members: ['slot', 'reason', 'verifierRef', 'verifierVersion'],
+        members: ['slot', 'reason', 'cost', 'verifierRef', 'verifierVersion'],
         nested: {},
-        emitter: (payload) => verifierRoleOf(payload),
-        parse: (raw) => missedOf(raw, `${MEASURE_KINDS.trialMissed} payload`),
+        emitter: payload => verifierRoleOf(payload),
+        parse: raw => missedOf(raw, `${MEASURE_KINDS.trialMissed} payload`),
         reduce: (state, envelope, payload) => {
           const where = `${MEASURE_KINDS.trialMissed} #${envelope.seq}`
           const plan = requirePlan(state, where, envelope.subject)
           requireSlot(plan.trials, payload.slot, where)
           requireEmptySlot(state, payload.slot, where)
-          // A miss carries no number, so there is no content to bind: the identity that must hold is
+          if (payload.cost !== undefined && payload.cost < 0)
+            refuse('malformed-payload', `${where}.cost must be nonnegative`)
+          // A miss carries no quality/artifact, so the identity that must hold is
           // the role, which is how a deployment that cannot run the metric cannot report the gap.
           requireEmitterRole(envelope, plan.metric.measured, `the metric "${plan.metric.measured.criterionId}"`, where)
           return { ...state, missed: [...state.missed, payload] }
@@ -510,24 +599,36 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
 
       [MEASURE_KINDS.constraintChecked]: defineKind<EvaluationState, ConstraintCheck, { verdict: MemberSet }>({
         guarantees: { appended: true },
-        members: ['criterionId', 'met', 'artifactDigest', 'verifierRef', 'verifierVersion', 'implementationDigest', 'verdict', 'detail',
+        members: [
+          'criterionId',
+          'met',
+          'artifactDigest',
+          'verifierRef',
+          'verifierVersion',
+          'implementationDigest',
+          'verdict',
+          'detail',
         ],
         // The citation inside `verdict` is closed by the set this declaration hands the reader, so a
         // citation cannot grow a member the recorded verdict never carried.
         nested: { verdict: VERDICT_CITATION_MEMBERS },
-        emitter: (payload) => verifierRoleOf(payload),
+        emitter: payload => verifierRoleOf(payload),
         parse: (raw, where, nested) => constraintOf(raw, where, nested.verdict),
         reduce: (state, envelope, payload) => {
           const where = `${MEASURE_KINDS.constraintChecked} #${envelope.seq}`
           const plan = requirePlan(state, where, envelope.subject)
-          const criterion = plan.judgement.find((entry) => entry.criterionId === payload.criterionId)
+          const criterion = plan.judgement.find(entry => entry.criterionId === payload.criterionId)
           if (criterion === undefined)
-            refuse('unknown-criterion', `${where} checks hard constraint "${payload.criterionId}", which this evaluation's judgement does not declare (declared: ${plan.judgement.map((entry) => entry.criterionId).join(', ') || 'none'})`,
+            refuse(
+              'unknown-criterion',
+              `${where} checks hard constraint "${payload.criterionId}", which this evaluation's judgement does not declare (declared: ${plan.judgement.map(entry => entry.criterionId).join(', ') || 'none'})`,
             )
           // Bound to the bytes the numbers came from: a report that measures one artifact and clears
           // its constraints on another is two reports, and neither of them is this evaluation's.
-          if (!state.observed.some((entry) => entry.artifactDigest === payload.artifactDigest))
-            refuse('evidence-input-mismatch', `${where} checks hard constraint "${payload.criterionId}" on artifact ${payload.artifactDigest.slice(0, 12)}…, which no observation of this evaluation was formed on (observed: ${state.observed.map((entry) => `${entry.artifactDigest.slice(0, 12)}…`).join(', ') || 'nothing yet'}); check the constraint on the bytes the measurement was formed on`,
+          if (!state.observed.some(entry => entry.artifactDigest === payload.artifactDigest))
+            refuse(
+              'evidence-input-mismatch',
+              `${where} checks hard constraint "${payload.criterionId}" on artifact ${payload.artifactDigest.slice(0, 12)}…, which no observation of this evaluation was formed on (observed: ${state.observed.map(entry => `${entry.artifactDigest.slice(0, 12)}…`).join(', ') || 'nothing yet'}); check the constraint on the bytes the measurement was formed on`,
             )
           // A cited verdict is a verdict about *these* bytes. The judgment itself lives in `task@5`;
           // what is refused here is a citation of one artifact inside an evaluation measured on
@@ -536,10 +637,14 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
           // criterion it measures, so requiring the two to be equal would make a citation impossible
           // in exactly the case this member exists for — the digest already carries the criterion id.
           if (payload.verdict !== undefined && payload.verdict.artifactDigest !== payload.artifactDigest)
-            refuse('evidence-input-mismatch', `${where} cites verdict "${payload.verdict.criterionId}" of artifact ${payload.verdict.artifactDigest.slice(0, 12)}… while checking artifact ${payload.artifactDigest.slice(0, 12)}…; a verdict cites the bytes it judged, and a check clears the bytes it measured`,
+            refuse(
+              'evidence-input-mismatch',
+              `${where} cites verdict "${payload.verdict.criterionId}" of artifact ${payload.verdict.artifactDigest.slice(0, 12)}… while checking artifact ${payload.artifactDigest.slice(0, 12)}…; a verdict cites the bytes it judged, and a check clears the bytes it measured`,
             )
-          if (state.checks.some((entry) => entry.criterionId === payload.criterionId))
-            refuse('evidence-conflict', `${where} checks hard constraint "${payload.criterionId}" again; one constraint is checked once, and a re-check is a new evaluation id`,
+          if (state.checks.some(entry => entry.criterionId === payload.criterionId))
+            refuse(
+              'evidence-conflict',
+              `${where} checks hard constraint "${payload.criterionId}" again; one constraint is checked once, and a re-check is a new evaluation id`,
             )
           const subject = `hard constraint "${criterion.criterionId}"`
           requireEmitterRole(envelope, criterion, subject, where)

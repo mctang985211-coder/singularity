@@ -1,4 +1,3 @@
-
 import type { Envelope } from '../protocol/envelope.ts'
 import { foldSubjects } from '../protocol/fold.ts'
 import { ProtocolRegistry } from '../protocol/registry.ts'
@@ -30,7 +29,8 @@ export function unconsumedMethods(
   for (const task of foldSubjects<TaskState>(FOLD, belowCutoff, TASK_PROTOCOL, TASK_VERSION).values()) {
     for (const run of Object.values(task.runs)) {
       if (run.revision.environmentId !== environmentId || run.revision.revisionId !== revisionId) continue
-      for (const record of run.consumed) if (record.mode === 'read' || record.mode === 'invoked') consumed.add(record.method)
+      for (const record of run.consumed)
+        if (record.mode === 'read' || record.mode === 'invoked') consumed.add(record.method)
     }
   }
   return declared.filter(method => !consumed.has(method))

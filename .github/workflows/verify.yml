@@ -1,13 +1,35 @@
 name: Offline verification
 on:
+  pull_request:
+  push:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify:core
+      - run: pnpm coverage:core
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-coverage
+          path: coverage/core
+          retention-days: 14
   verify:
     # Restricted dependency: the operator provisions an authorized, isolated runner.
-    # No pull_request trigger: untrusted code must not run on an internal host.
+    # Manual only; pull requests run core checks on the public runner.
     runs-on: [self-hosted, singularity-dsh]
+    if: github.event_name == 'workflow_dispatch'
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

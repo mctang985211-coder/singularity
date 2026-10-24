@@ -16,7 +16,7 @@ const ledger = readFileSync(join(ROOT, 'docs/divergence-ledger.md'), 'utf8')
 function scenarioOf(vector) {
   const defaults = corpus.defaults
   const input = vector.input
-  const candidates = input.candidates.map((raw) => ({
+  const candidates = input.candidates.map(raw => ({
     ...defaults.candidate,
     ...raw,
     measurement: raw.measurement === null ? null : { ...defaults.measurement, ...raw.measurement },
@@ -31,7 +31,7 @@ function scenarioOf(vector) {
 }
 
 function shapeOf(selection, outcomes) {
-  return { winner: selection.winner, admitted: outcomes.map((outcome) => outcome.admitted) }
+  return { winner: selection.winner, admitted: outcomes.map(outcome => outcome.admitted) }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -49,7 +49,8 @@ function canonical(value) {
   return JSON.stringify(value, (key, entry) =>
     entry === null || typeof entry !== 'object' || Array.isArray(entry)
       ? entry
-      : Object.fromEntries(Object.entries(entry).sort(([left], [right]) => (left < right ? -1 : 1))))
+      : Object.fromEntries(Object.entries(entry).sort(([left], [right]) => (left < right ? -1 : 1))),
+  )
 }
 
 /** The comparable part of a vector's expectation: `reasonIncludes` is checked as a substring set. */
@@ -58,10 +59,12 @@ function expectationOf(expected) {
   return { winner: expected.winner, admitted: expected.admitted }
 }
 
-const references = Object.fromEntries(corpus.vectors.map(vector => {
-  if (vector.upstream?.value === undefined) throw new Error('Missing frozen upstream outcome: ' + vector.id)
-  return [vector.id, vector.upstream.value]
-}))
+const references = Object.fromEntries(
+  corpus.vectors.map(vector => {
+    if (vector.upstream?.value === undefined) throw new Error('Missing frozen upstream outcome: ' + vector.id)
+    return [vector.id, vector.upstream.value]
+  }),
+)
 
 function compareNovelty(vector) {
   return {
@@ -74,18 +77,21 @@ function compareSelect(vector) {
   const plan = scenarioOf(vector)
   const selection = select(plan.candidates, plan.history, plan.calibration, plan.weights)
   const outcomes = [...selection.outcomes].sort((left, right) => left.slot - right.slot)
-  const reasons = Object.fromEntries(outcomes.map((outcome) => [String(outcome.slot), outcome.reason]))
+  const reasons = Object.fromEntries(outcomes.map(outcome => [String(outcome.slot), outcome.reason]))
   // The two sides must be looking at the same round: the incumbent implied by a slot's measurement
   // and its frozen gain has to be the incumbent the upstream side is given. `frozenOverride` marks
   // the vectors that break that on purpose (the R03 re-derived head), and a missing gain has
   // nothing to check.
   if (vector.frozenOverride !== true) {
     for (const candidate of plan.candidates) {
-      const delta = plan.history.deltas.find((entry) => entry.slot === candidate.slot)
+      const delta = plan.history.deltas.find(entry => entry.slot === candidate.slot)
       if (candidate.measurement === null || delta === undefined) continue
       const implied = candidate.measurement.quality - delta.deltaQuality
       if (Math.abs(implied - plan.upstream.incumbentQuality) > 1e-9) {
-        fail(vector.id, `slot ${candidate.slot} implies incumbent ${implied}, but the upstream side is given ${plan.upstream.incumbentQuality}`)
+        fail(
+          vector.id,
+          `slot ${candidate.slot} implies incumbent ${implied}, but the upstream side is given ${plan.upstream.incumbentQuality}`,
+        )
       }
     }
   }
@@ -130,19 +136,33 @@ for (const vector of corpus.vectors) {
   if (agreed) agreements += 1
   else divergences += 1
   if (vector.kind === 'deterministic' || vector.kind === 'upstream-native') {
-    if (!agreed) fail(vector.id, `tagged ${vector.kind} but the port and upstream disagree: port ${canonical(actual)} vs upstream ${canonical(reference)}`)
+    if (!agreed)
+      fail(
+        vector.id,
+        `tagged ${vector.kind} but the port and upstream disagree: port ${canonical(actual)} vs upstream ${canonical(reference)}`,
+      )
   } else if (vector.kind === 'port-adapted') {
-    if (!ledger.includes(`\`${vector.id}\``)) fail(vector.id, 'tagged port-adapted but docs/divergence-ledger.md has no row naming it')
-    if (agreed) fail(vector.id, `tagged port-adapted but both sides agree (${canonical(actual)}); the tag or the input is wrong`)
+    if (!ledger.includes(`\`${vector.id}\``))
+      fail(vector.id, 'tagged port-adapted but docs/divergence-ledger.md has no row naming it')
+    if (agreed)
+      fail(vector.id, `tagged port-adapted but both sides agree (${canonical(actual)}); the tag or the input is wrong`)
   } else {
     fail(vector.id, `unknown tag ${vector.kind}`)
   }
 }
 
-const unexplained = divergences - corpus.vectors.filter((vector) => vector.kind === 'port-adapted').length
+const unexplained = divergences - corpus.vectors.filter(vector => vector.kind === 'port-adapted').length
 if (unexplained > 0) fail('corpus', `${unexplained} divergence(s) come from vectors that are not tagged port-adapted`)
-notes.push(`functions: ${Object.entries(functionCounts).map(([name, count]) => `${count} ${name}`).join(', ')}`)
-notes.push(`tags: ${Object.entries(tagCounts).map(([tag, count]) => `${count} ${tag}`).join(', ')}`)
+notes.push(
+  `functions: ${Object.entries(functionCounts)
+    .map(([name, count]) => `${count} ${name}`)
+    .join(', ')}`,
+)
+notes.push(
+  `tags: ${Object.entries(tagCounts)
+    .map(([tag, count]) => `${count} ${tag}`)
+    .join(', ')}`,
+)
 notes.push(`agreement with frozen RRSI outcomes: ${agreements} agree, ${divergences} diverge`)
 notes.push(`frozen reference coverage: ${Object.keys(references).length} vector(s)`)
 
@@ -152,4 +172,6 @@ if (failures.length > 0) {
   process.exit(1)
 }
 for (const note of notes) console.log(`  ${note}`)
-console.log(`strategy-vectors: OK (${corpus.vectors.length} vectors, ${divergences} divergence(s) all explained in docs/divergence-ledger.md)`)
+console.log(
+  `strategy-vectors: OK (${corpus.vectors.length} vectors, ${divergences} divergence(s) all explained in docs/divergence-ledger.md)`,
+)

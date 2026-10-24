@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "kind": "research",
+  "experimentId": "REPLACE-WITH-REGISTERED-ID",
+  "claim": "workflow-generalization",
+  "model": { "provider": "REPLACE", "model": "REPLACE", "revisionVisibility": "unavailable", "revision": null },
+  "costUnit": "tokens",
+  "arms": [
+    {
+      "id": "h0",
+      "kind": "frozen",
+      "method": { "path": "methods/initial.json", "sha256": "REPLACE", "digest": "REPLACE" },
+      "candidateBudget": 0,
+      "stepBudget": 1024
+    },
+    {
+      "id": "workflow",
+      "kind": "workflow",
+      "method": { "path": "methods/initial.json", "sha256": "REPLACE", "digest": "REPLACE" },
+      "candidateBudget": 6,
+      "stepBudget": 1024
+    }
+  ],
+  "tasks": [],
+  "trials": 2,
+  "order": "alternating-forward-reverse",
+  "primaryMetric": "root-accepted-and-all-hard-guards",
+  "missingRule": "retain-and-withhold-inference",
+  "stoppingRule": "fixed-schedule-no-optional-stop",
+  "environment": { "path": "environment/approved-manifest.json", "sha256": "REPLACE" },
+  "analysis": {
+    "method": "paired-family-bootstrap-95",
+    "seed": 20261024,
+    "resamples": 10000,
+    "minimumFamilies": 3,
+    "sampleSizeRationale": "REPLACE with independent-pilot variance, target effect/power or precision, and chosen independent family count. Three is only an engineering floor.",
+    "independentPilot": { "path": "pilot/variance.json", "sha256": "REPLACE" }
+  },
+  "redaction": { "statement": "REPLACE with the actual private archive and sharing/redaction scope", "omitted": [] }
+}

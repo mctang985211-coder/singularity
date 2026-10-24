@@ -1,5 +1,7 @@
 # RRSI 上游源码对照（逐条带行号）
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 - 上游：[google-research/rrsi](https://github.com/google-research/rrsi) @ `be50316`，本地 `/home/ROXY/code/rrsi`
 - 目的：阶段 E（RRSI 闭环）要照上游接，所以对照必须是**读过代码的**
 - 本文只有两类陈述：**我本人读到的行**、以及明确标注为**未读**的部分

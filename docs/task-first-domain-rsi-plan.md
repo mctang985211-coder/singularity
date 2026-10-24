@@ -1,5 +1,9 @@
 # Task 为一等公民的 Workflow RSI：终局实施计划
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
+> 历史设计与施工记录：协议版本和证据范围以各节日期为准；当前行为合同见[架构入口](architecture.md)。
+
 审查日期：2026-10-17（Asia/Shanghai）。代码基线：`4314487`。
 RRSI 对照：本机 `../rrsi`，commit `be50316e1db05914068a973f322770ef08ed7ba1`。
 实施更新：2026-10-20。**已有 Task/Workflow、多任务矩阵、有界稀疏搜索与独立迁移发布链路。`184556` 报告 accepted 但六槽零 round；已按真实 Agent 输入/输出修复异步推进、工具读取与审核提示。letters 完成两轮测评、发布、恢复与报告验收，后续业务消费发布版本并 accepted。Buckyball cutoff551 已完成一轮与报告验收，结果 insufficient-evidence、无发布：候选 A 质量不变而成本增加 43.66%；B 因私有检查被错误委派且业务失败误归 runtime 丢失一次观察。现已分离公开任务规范/私有验证配方并修正失败传播，工程及真实工具链复验通过，尚未新跑模型 RSI。证据见 [RSI 修复取证](rsi-repair-evidence.md)，报告关闭不代表领域收益。** 当时 Task v23 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，只接纳新图。每批冻结 1–3 个候选、每候选一个机制、最多六槽、repair=0；KISS 稀疏模式，不宣称实现退火。DSH 继续拥有会话、重试、用量与持久化。完整逐题 pilot 与研究出口仍以第 9 节为准。

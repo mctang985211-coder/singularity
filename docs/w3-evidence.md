@@ -1,5 +1,7 @@
 # W3/W4：领域分解与封存产物合同
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 当前使用 Task v8。letters 的父模板 `count-source` 保留原保护输入；`extract-letters` 独立验收保序 ASCII 字母，
 `count-letters` 独立验收封存字母的 decimal 计数。child 的 `supports` 只说明工作关系，父判据由父自己的 verified Run 接受。
 

@@ -5,4 +5,7 @@ export interface AgentData {
   width: number
   height: number
 }
-export interface ChatRow { role: string; text: string }
+export interface ChatRow {
+  role: string
+  text: string
+}

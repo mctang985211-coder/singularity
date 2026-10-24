@@ -68,7 +68,10 @@
         "upstreamNormalize": { "declared": "prompt", "diff": "+++ b/harness/skills/x.md\n- old text\n+ new text\n" }
       },
       "expected": 0,
-      "upstream": { "call": "novelty([normalize('prompt', a text-only diff under skills/)], {}) -> novelty(['skill'], {})", "value": 1 },
+      "upstream": {
+        "call": "novelty([normalize('prompt', a text-only diff under skills/)], {}) -> novelty(['skill'], {})",
+        "value": 1
+      },
       "portNote": "ADR tightening #5: upstream recovers a component from the diff, so a text edit under a `skills/` path is normalized to `skill` and earns novelty 1. The port has no diff input: a class nobody declared and verified is not a class."
     },
     {
@@ -79,10 +82,16 @@
       "input": {
         "assets": ["tool"],
         "acceptedAssets": [],
-        "upstreamNormalize": { "declared": "client_tool", "diff": "+++ b/harness/tools/registry.py\n+     registry.add(tool)\n" }
+        "upstreamNormalize": {
+          "declared": "client_tool",
+          "diff": "+++ b/harness/tools/registry.py\n+     registry.add(tool)\n"
+        }
       },
       "expected": 1,
-      "upstream": { "call": "novelty([normalize('client_tool', a real tool diff)], {}) -> novelty(['prompt'], {})", "value": 0 },
+      "upstream": {
+        "call": "novelty([normalize('client_tool', a real tool diff)], {}) -> novelty(['prompt'], {})",
+        "value": 0
+      },
       "portNote": "ADR tightening #5, the other direction: a real tool change whose file name and text carry no signal from upstream's regex table is downgraded to the non-structural default `prompt`, so upstream loses the novelty the change earned. This is why a declared tag is verified by the candidate adapter against the real diff instead of being recovered from it."
     },
     {
@@ -92,7 +101,10 @@
       "source": "rrsi/components.py:46",
       "input": { "assets": ["template"], "acceptedAssets": [] },
       "expected": 1,
-      "upstream": { "call": "novelty(['prompt'], {}) — a task template has no upstream K member of its own", "value": 0 },
+      "upstream": {
+        "call": "novelty(['prompt'], {}) — a task template has no upstream K member of its own",
+        "value": 0
+      },
       "portNote": "The K axis differs on purpose (ADR 0001): upstream's nine harness components have no `template`, and `prompt` is its default bucket for anything unclassified, so a task template is structural here and non-structural there."
     },
     {
@@ -101,12 +113,14 @@
       "function": "select",
       "source": "tests/test_core.py:99",
       "input": {
-        "history": { "deltas": [
-          { "slot": 0, "deltaQuality": 0.2, "deltaCost": 0 },
-          { "slot": 1, "deltaQuality": 0.1, "deltaCost": 0 },
-          { "slot": 2, "deltaQuality": -0.2, "deltaCost": 0 },
-          { "slot": 3, "deltaQuality": 0, "deltaCost": null }
-        ] },
+        "history": {
+          "deltas": [
+            { "slot": 0, "deltaQuality": 0.2, "deltaCost": 0 },
+            { "slot": 1, "deltaQuality": 0.1, "deltaCost": 0 },
+            { "slot": 2, "deltaQuality": -0.2, "deltaCost": 0 },
+            { "slot": 3, "deltaQuality": 0, "deltaCost": null }
+          ]
+        },
         "candidates": [
           { "slot": 0, "measurement": { "quality": 0.7 }, "upstream": { "components": ["prompt"] } },
           { "slot": 1, "assets": ["skill"], "measurement": { "quality": 0.6 } },
@@ -115,23 +129,35 @@
         ],
         "upstream": { "sStar": 0.55, "delta": 0.05 }
       },
-      "expected": { "winner": 0, "admitted": [true, true, false, false], "reasonIncludes": { "2": "inside the noise band", "3": "not measured" } },
-      "upstream": { "call": "select_round([A(0.7), B(0.6), C(0.3), D(gate_failure=critic_reject)], inc(0.5), S*=0.55, delta=0.05)", "value": { "winner": 0, "admitted": [true, true, false, false] } },
+      "expected": {
+        "winner": 0,
+        "admitted": [true, true, false, false],
+        "reasonIncludes": { "2": "inside the noise band", "3": "not measured" }
+      },
+      "upstream": {
+        "call": "select_round([A(0.7), B(0.6), C(0.3), D(gate_failure=critic_reject)], inc(0.5), S*=0.55, delta=0.05)",
+        "value": { "winner": 0, "admitted": [true, true, false, false] }
+      },
       "portNote": "Upstream rejects C on the S* floor; the port rejects it because a -0.2 gain inside the band cannot pay for a zero cost change. Same verdict on this input, different rule — see `select.sstar-floor.absent` for the input where they part."
     },
     {
       "id": "selection.cost.blocked",
-      "kind": "deterministic",
+      "kind": "port-adapted",
       "function": "select",
       "source": "tests/test_core.py:117",
       "input": {
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0.2, "deltaCost": 8.6 }] },
-        "candidates": [{ "slot": 0, "measurement": { "quality": 0.7, "cost": 9600 }, "upstream": { "components": ["prompt"] } }],
+        "candidates": [
+          { "slot": 0, "measurement": { "quality": 0.7, "cost": 9600 }, "upstream": { "components": ["prompt"] } }
+        ],
         "upstream": { "sStar": 0.55, "delta": 0.05 }
       },
-      "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "cost rule failed" } },
-      "upstream": { "call": "select_round([E(0.7, C=9600)], inc(0.5, C=1000), S*=0.55, delta=0.05) — 8.6 > beta0 + beta1*0.2 = 8.1", "value": { "winner": null, "admitted": [false] } },
-      "portNote": "Upstream's own cost-blocked case; the port refuses a fortiori (the +25% cap binds long before 8.6)."
+      "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "no cost gate" } },
+      "upstream": {
+        "call": "select_round([E(0.7, C=9600)], inc(0.5, C=1000), S*=0.55, delta=0.05) — 8.6 > beta0 + beta1*0.2 = 8.1",
+        "value": { "winner": null, "admitted": [false] }
+      },
+      "portNote": "Known cost increases never veto a measured quality gain."
     },
     {
       "id": "selection.guard.noncompensatory",
@@ -140,25 +166,38 @@
       "source": "tests/test_core.py:123",
       "input": {
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0.2, "deltaCost": 0 }] },
-        "candidates": [{ "slot": 0, "measurement": { "quality": 0.7 }, "constraintsMet": false, "upstream": { "components": ["prompt"] } }],
+        "candidates": [
+          {
+            "slot": 0,
+            "measurement": { "quality": 0.7 },
+            "constraintsMet": false,
+            "upstream": { "components": ["prompt"] }
+          }
+        ],
         "upstream": { "sStar": 0.55, "delta": 0.05 }
       },
       "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "hard constraint violated" } },
-      "upstream": { "call": "select_round([A], inc(0.5), S*=0.55, delta=0.05, guard_fn=lambda: ['valid rate fell'])", "value": { "winner": null, "admitted": [false] } },
+      "upstream": {
+        "call": "select_round([A], inc(0.5), S*=0.55, delta=0.05, guard_fn=lambda: ['valid rate fell'])",
+        "value": { "winner": null, "admitted": [false] }
+      },
       "portNote": "The non-compensating rule in its smallest form: a +0.2 gain that clears the floor and the cost budget still loses to a violated hard constraint."
     },
     {
       "id": "select.cost.capped",
-      "kind": "port-adapted",
+      "kind": "deterministic",
       "function": "select",
       "source": "rrsi/config.py:71",
       "input": {
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0.05, "deltaCost": 0.3 }] },
         "candidates": [{ "slot": 0, "measurement": { "quality": 0.55, "cost": 1300 } }]
       },
-      "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "> budget 0.250" } },
-      "upstream": { "call": "select_round([F(0.55, C=1300)], inc(0.5, C=1000), S*=0.5, delta=0.02) — budget 0.10 + 40*0.05 = 2.10", "value": { "winner": 0, "admitted": [true] } },
-      "portNote": "ADR tightening #2 (counterexample for the +25% cap): beta1 = 40 lets a +5pp gain buy +210% cost, so upstream admits +30%. The port caps the budget at 0.25 and refuses."
+      "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "no cost gate" } },
+      "upstream": {
+        "call": "select_round([F(0.55, C=1300)], inc(0.5, C=1000), S*=0.5, delta=0.02) — budget 0.10 + 40*0.05 = 2.10",
+        "value": { "winner": 0, "admitted": [true] }
+      },
+      "portNote": "The historical 25% ceiling has been removed."
     },
     {
       "id": "select.cost.cap-boundary",
@@ -169,22 +208,28 @@
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0.05, "deltaCost": 0.25 }] },
         "candidates": [{ "slot": 0, "measurement": { "quality": 0.55, "cost": 1250 } }]
       },
-      "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "<= budget 0.250" } },
-      "upstream": { "call": "select_round([F(0.55, C=1250)], inc(0.5, C=1000), S*=0.5, delta=0.02)", "value": { "winner": 0, "admitted": [true] } },
-      "portNote": "The cap is an inclusive ceiling, not a strict bound: +25.0% passes, and it is the largest increase the gaining branch can buy."
+      "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "no cost gate" } },
+      "upstream": {
+        "call": "select_round([F(0.55, C=1250)], inc(0.5, C=1000), S*=0.5, delta=0.02)",
+        "value": { "winner": 0, "admitted": [true] }
+      },
+      "portNote": "There is no special boundary at 25%; this quality gain is admitted."
     },
     {
       "id": "select.cost.unknown.gaining",
-      "kind": "port-adapted",
+      "kind": "deterministic",
       "function": "select",
       "source": "rrsi/evaluate.py:131",
       "input": {
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0.05, "deltaCost": null }] },
         "candidates": [{ "slot": 0, "measurement": { "quality": 0.55, "cost": null } }]
       },
-      "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "cost change unknown" } },
-      "upstream": { "call": "select_round([G(0.55, C=None)], inc(0.5, C=1000), S*=0.5, delta=0.02) — relative_cost_change(None, 1000) == 0.0", "value": { "winner": 0, "admitted": [true] } },
-      "portNote": "ADR tightening #4 (counterexample for the silent 0.0): upstream turns an unknown cost side into 0.0 and the gaining branch passes on a budget of 2.10. The port refuses."
+      "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "no cost gate" } },
+      "upstream": {
+        "call": "select_round([G(0.55, C=None)], inc(0.5, C=1000), S*=0.5, delta=0.02) — relative_cost_change(None, 1000) == 0.0",
+        "value": { "winner": 0, "admitted": [true] }
+      },
+      "portNote": "Missing cost never vetoes a measured quality gain."
     },
     {
       "id": "select.cost.unknown.in-band",
@@ -195,22 +240,28 @@
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0, "deltaCost": null }] },
         "candidates": [{ "slot": 0, "assets": ["skill", "tool"], "measurement": { "quality": 0.5, "cost": null } }]
       },
-      "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "cost change unknown" } },
-      "upstream": { "call": "select_round([H(0.5, C=None, components=[skill, memory])], inc(0.5, C=1000), S*=0.5, delta=0.02) — shaped 0 - 0 + 0.5*2 = +1.0", "value": { "winner": 0, "admitted": [true] } },
-      "portNote": "The in-band face of tightening #4: with dC read as 0.0 and nu = 2, upstream's shaped rule is +1.0 and the candidate is admitted with no cost observation at all. The port refuses before the branch is chosen."
+      "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "inside the noise band" } },
+      "upstream": {
+        "call": "select_round([H(0.5, C=None, components=[skill, memory])], inc(0.5, C=1000), S*=0.5, delta=0.02) — shaped 0 - 0 + 0.5*2 = +1.0",
+        "value": { "winner": 0, "admitted": [true] }
+      },
+      "portNote": "Unknown cost is not a veto: this neutral candidate has neither quality gain nor recorded savings."
     },
     {
       "id": "select.noise.inside-band.costly",
-      "kind": "deterministic",
+      "kind": "port-adapted",
       "function": "select",
       "source": "rrsi/selection.py:90",
       "input": {
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0.015, "deltaCost": 0.24 }] },
         "candidates": [{ "slot": 0, "measurement": { "quality": 0.515, "cost": 1240 } }]
       },
-      "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "inside the noise band 0.0200 (measured)" } },
-      "upstream": { "call": "select_round([K(0.515, C=1240)], inc(0.5, C=1000), S*=0.5, delta=0.02) — shaped 100*0.015 - 15*0.24 = -2.1", "value": { "winner": null, "admitted": [false] } },
-      "portNote": "A gain inside the band is not a gain: the same +24% cost that passes outside the band (see `select.noise.outside-band.costly`) is refused here."
+      "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "no cost gate" } },
+      "upstream": {
+        "call": "select_round([K(0.515, C=1240)], inc(0.5, C=1000), S*=0.5, delta=0.02) — shaped 100*0.015 - 15*0.24 = -2.1",
+        "value": { "winner": null, "admitted": [false] }
+      },
+      "portNote": "Positive in-band quality gain is no longer penalized by increased cost."
     },
     {
       "id": "select.noise.outside-band.costly",
@@ -222,7 +273,10 @@
         "candidates": [{ "slot": 0, "measurement": { "quality": 0.54, "cost": 1240 } }]
       },
       "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "outside the noise band" } },
-      "upstream": { "call": "select_round([L(0.54, C=1240)], inc(0.5, C=1000), S*=0.5, delta=0.02) — budget 2.10", "value": { "winner": 0, "admitted": [true] } },
+      "upstream": {
+        "call": "select_round([L(0.54, C=1240)], inc(0.5, C=1000), S*=0.5, delta=0.02) — budget 2.10",
+        "value": { "winner": 0, "admitted": [true] }
+      },
       "portNote": "The band is the whole difference from the previous vector: +0.04 clears it, +0.015 does not."
     },
     {
@@ -234,9 +288,12 @@
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0, "deltaCost": -0.1 }] },
         "candidates": [{ "slot": 0, "measurement": { "quality": 0.5, "cost": 900 } }]
       },
-      "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "100*dS - 15*dC = +1.5000" } },
-      "upstream": { "call": "cost_rule(0.0, -0.10, 0, 0.02) — shaped 100*0 - 15*(-0.10) = +1.5", "value": { "winner": 0, "admitted": [true] } },
-      "portNote": "Cost relief is the currency an in-band candidate pays with, and both sides price it the same way."
+      "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "100*dS + 15*saving = +1.5000" } },
+      "upstream": {
+        "call": "cost_rule(0.0, -0.10, 0, 0.02) — shaped 100*0 - 15*(-0.10) = +1.5",
+        "value": { "winner": 0, "admitted": [true] }
+      },
+      "portNote": "Recorded savings still support improvement at preserved quality."
     },
     {
       "id": "select.noise.neutral",
@@ -247,9 +304,12 @@
         "history": { "deltas": [{ "slot": 0, "deltaQuality": 0, "deltaCost": 0 }] },
         "candidates": [{ "slot": 0, "measurement": { "quality": 0.5 } }]
       },
-      "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "<= 0 (novelty never enters this rule)" } },
-      "upstream": { "call": "cost_rule(0.0, 0.0, 0, 0.02) — shaped 0.0, and the rule is a strict inequality", "value": { "winner": null, "admitted": [false] } },
-      "portNote": "A candidate that changed nothing measurable and cost the same buys nothing, on either side."
+      "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "<= 0" } },
+      "upstream": {
+        "call": "cost_rule(0.0, 0.0, 0, 0.02) — shaped 0.0, and the rule is a strict inequality",
+        "value": { "winner": null, "admitted": [false] }
+      },
+      "portNote": "No quality gain or recorded savings means no improvement."
     },
     {
       "id": "select.in-band.novelty-cannot-buy",
@@ -261,7 +321,10 @@
         "candidates": [{ "slot": 0, "assets": ["skill", "tool"], "measurement": { "quality": 0.5 } }]
       },
       "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "novelty never enters this rule" } },
-      "upstream": { "call": "cost_rule(0.0, 0.0, 1, 0.02) — shaped 0.5*1 = +0.5 > 0, admitted on novelty alone; the harness maps the two asset classes to [skill, client_tool], so nu = 2 and shaped = +1.0", "value": { "winner": 0, "admitted": [true] } },
+      "upstream": {
+        "call": "cost_rule(0.0, 0.0, 1, 0.02) — shaped 0.5*1 = +0.5 > 0, admitted on novelty alone; the harness maps the two asset classes to [skill, client_tool], so nu = 2 and shaped = +1.0",
+        "value": { "winner": 0, "admitted": [true] }
+      },
       "portNote": "ADR tightening #3 (counterexample for w_n*nu): upstream admits a candidate with no measured gain and no cost relief because it touches two never-accepted structural classes. The port never lets novelty buy admission; the tie it might have broken is broken by slot number instead."
     },
     {
@@ -270,17 +333,22 @@
       "function": "select",
       "source": "rrsi/selection.py:136",
       "input": {
-        "history": { "deltas": [
-          { "slot": 0, "deltaQuality": 0.2, "deltaCost": 0 },
-          { "slot": 1, "deltaQuality": 0.2, "deltaCost": 0 }
-        ] },
+        "history": {
+          "deltas": [
+            { "slot": 0, "deltaQuality": 0.2, "deltaCost": 0 },
+            { "slot": 1, "deltaQuality": 0.2, "deltaCost": 0 }
+          ]
+        },
         "candidates": [
           { "slot": 1, "measurement": { "quality": 0.7 } },
           { "slot": 0, "measurement": { "quality": 0.7 } }
         ]
       },
       "expected": { "winner": 0, "admitted": [true, true] },
-      "upstream": { "call": "select_round([B(0.7), A(0.7)], ...) — max() over equal S' returns the first in iteration order", "value": { "winner": 1, "admitted": [true, true] } },
+      "upstream": {
+        "call": "select_round([B(0.7), A(0.7)], ...) — max() over equal S' returns the first in iteration order",
+        "value": { "winner": 1, "admitted": [true, true] }
+      },
       "portNote": "ADR tightening #3's tie-break (R07: the selection must not depend on completion order): both candidates measured 0.7, so the lowest slot wins. Upstream's argmax returns whichever equal-scoring candidate was iterated first, which is the order the round happened to finish in."
     },
     {
@@ -289,17 +357,26 @@
       "function": "select",
       "source": "rrsi/selection.py:90",
       "input": {
-        "history": { "deltas": [
-          { "slot": 0, "deltaQuality": 0, "deltaCost": -0.1 },
-          { "slot": 1, "deltaQuality": 0, "deltaCost": -0.1 }
-        ] },
+        "history": {
+          "deltas": [
+            { "slot": 0, "deltaQuality": 0, "deltaCost": -0.1 },
+            { "slot": 1, "deltaQuality": 0, "deltaCost": -0.1 }
+          ]
+        },
         "candidates": [
           { "slot": 1, "assets": ["skill", "tool"], "measurement": { "quality": 0.5, "cost": 900 } },
           { "slot": 0, "measurement": { "quality": 0.5, "cost": 900 } }
         ]
       },
-      "expected": { "winner": 0, "admitted": [true, true], "reasonIncludes": { "1": "novelty never enters this rule" } },
-      "upstream": { "call": "select_round([B(0.7, nu=2), A(0.7, nu=0)], ...) — both admissible, first iterated wins", "value": { "winner": 1, "admitted": [true, true] } },
+      "expected": {
+        "winner": 0,
+        "admitted": [true, true],
+        "reasonIncludes": { "1": "novelty never enters this rule" }
+      },
+      "upstream": {
+        "call": "select_round([B(0.7, nu=2), A(0.7, nu=0)], ...) — both admissible, first iterated wins",
+        "value": { "winner": 1, "admitted": [true, true] }
+      },
       "portNote": "Both admissible and equal on quality: the two-novel-class slot is not preferred. Upstream's in-band term would pay it +w_n*nu, and the previous port's tie-break ranked novelty first."
     },
     {
@@ -308,17 +385,22 @@
       "function": "select",
       "source": "rrsi/selection.py:101",
       "input": {
-        "history": { "deltas": [
-          { "slot": 0, "deltaQuality": 0.9, "deltaCost": 0 },
-          { "slot": 1, "deltaQuality": 0.2, "deltaCost": 0 }
-        ] },
+        "history": {
+          "deltas": [
+            { "slot": 0, "deltaQuality": 0.9, "deltaCost": 0 },
+            { "slot": 1, "deltaQuality": 0.2, "deltaCost": 0 }
+          ]
+        },
         "candidates": [
           { "slot": 0, "measurement": null },
           { "slot": 1, "measurement": { "quality": 0.7 } }
         ]
       },
       "expected": { "winner": 1, "admitted": [false, true], "reasonIncludes": { "0": "not measured" } },
-      "upstream": { "call": "select_round([D(ev=None), A(0.7)], inc(0.5), ...) — a candidate without a measurement is refused", "value": { "winner": 1, "admitted": [false, true] } },
+      "upstream": {
+        "call": "select_round([D(ev=None), A(0.7)], inc(0.5), ...) — a candidate without a measurement is refused",
+        "value": { "winner": 1, "admitted": [false, true] }
+      },
       "portNote": "An unmeasured slot is refused with its own reason, and a frozen delta for it changes nothing."
     },
     {
@@ -327,17 +409,26 @@
       "function": "select",
       "source": "rrsi/selection.py:101",
       "input": {
-        "history": { "deltas": [
-          { "slot": 0, "deltaQuality": 0.4, "deltaCost": 0 },
-          { "slot": 1, "deltaQuality": 0.1, "deltaCost": 0 }
-        ] },
+        "history": {
+          "deltas": [
+            { "slot": 0, "deltaQuality": 0.4, "deltaCost": 0 },
+            { "slot": 1, "deltaQuality": 0.1, "deltaCost": 0 }
+          ]
+        },
         "candidates": [
-          { "slot": 0, "measurement": { "quality": 0.9 }, "inadmissible": "caliber-mismatch: measured under a different caliber digest" },
+          {
+            "slot": 0,
+            "measurement": { "quality": 0.9 },
+            "inadmissible": "caliber-mismatch: measured under a different caliber digest"
+          },
           { "slot": 1, "measurement": { "quality": 0.6 } }
         ]
       },
       "expected": { "winner": 1, "admitted": [false, true], "reasonIncludes": { "0": "caliber-mismatch" } },
-      "upstream": { "call": "select_round([gate_failure='caliber-mismatch', B(0.6)], ...)", "value": { "winner": 1, "admitted": [false, true] } },
+      "upstream": {
+        "call": "select_round([gate_failure='caliber-mismatch', B(0.6)], ...)",
+        "value": { "winner": 1, "admitted": [false, true] }
+      },
       "portNote": "The caller's named reason is carried into the outcome verbatim, so a report can say why a high scorer was never compared."
     },
     {
@@ -346,17 +437,26 @@
       "function": "select",
       "source": "rrsi/evaluate.py:53",
       "input": {
-        "history": { "deltas": [
-          { "slot": 0, "deltaQuality": 0.4, "deltaCost": 0 },
-          { "slot": 1, "deltaQuality": 0.1, "deltaCost": 0 }
-        ] },
+        "history": {
+          "deltas": [
+            { "slot": 0, "deltaQuality": 0.4, "deltaCost": 0 },
+            { "slot": 1, "deltaQuality": 0.1, "deltaCost": 0 }
+          ]
+        },
         "candidates": [
           { "slot": 0, "measurement": { "quality": 0.9, "missing": 1, "denominator": 2 } },
           { "slot": 1, "measurement": { "quality": 0.6 } }
         ]
       },
-      "expected": { "winner": 1, "admitted": [false, true], "reasonIncludes": { "0": "incomplete measurement: 1 of 2" } },
-      "upstream": { "call": "select_round([N(0.9, missing=1), B(0.6)], inc(0.5), ...) — upstream has no missing gate", "value": { "winner": 0, "admitted": [true, true] } },
+      "expected": {
+        "winner": 1,
+        "admitted": [false, true],
+        "reasonIncludes": { "0": "incomplete measurement: 1 of 2" }
+      },
+      "upstream": {
+        "call": "select_round([N(0.9, missing=1), B(0.6)], inc(0.5), ...) — upstream has no missing gate",
+        "value": { "winner": 0, "admitted": [true, true] }
+      },
       "portNote": "R06: upstream's `missing` is the scorer's obligation (evaluate.py:53 materialises a missing trial as reward 0.0) and only counts (evaluate.py:114); the judge never sees it. The port refuses an incomplete measurement outright, so a candidate cannot win on a run whose denominator was never filled."
     },
     {
@@ -369,7 +469,10 @@
         "candidates": [{ "slot": 0, "measurement": { "quality": 0.9, "missing": 1, "denominator": 2 } }]
       },
       "expected": { "winner": null, "admitted": [false], "reasonIncludes": { "0": "keep the denominator" } },
-      "upstream": { "call": "select_round([N(0.9, missing=1)], inc(0.5), S*=0.5, delta=0.02)", "value": { "winner": 0, "admitted": [true] } },
+      "upstream": {
+        "call": "select_round([N(0.9, missing=1)], inc(0.5), S*=0.5, delta=0.02)",
+        "value": { "winner": 0, "admitted": [true] }
+      },
       "portNote": "No admissible candidate means winner: null, which keeps the incumbent — even when the only candidate is the one with the missing trial."
     },
     {
@@ -383,7 +486,10 @@
         "upstream": { "sStar": 0.6, "delta": 0.02 }
       },
       "expected": { "winner": 0, "admitted": [true], "reasonIncludes": { "0": "+8.5000" } },
-      "upstream": { "call": "select_round([M(0.45, C=100)], inc(0.5, C=1000), S*=0.6, delta=0.02) — floor 0.58", "value": { "winner": null, "admitted": [false] } },
+      "upstream": {
+        "call": "select_round([M(0.45, C=100)], inc(0.5, C=1000), S*=0.6, delta=0.02) — floor 0.58",
+        "value": { "winner": null, "admitted": [false] }
+      },
       "portNote": "The one divergence that is a gap rather than a tightening: upstream refuses S' < S* - delta outright, and S* is not an input of §11's `select`, so a candidate below the round's incumbent can still be admitted for a large enough cost saving (the in-band rate is the caller's exchange rate). If a round wants the S* floor, the caller must say so in `inadmissible` — see the report."
     },
     {
@@ -392,11 +498,13 @@
       "function": "select",
       "source": "rrsi/selection.py:136",
       "input": {
-        "history": { "deltas": [
-          { "slot": 0, "deltaQuality": 0.1, "deltaCost": 0 },
-          { "slot": 1, "deltaQuality": 0.3, "deltaCost": 0 },
-          { "slot": 2, "deltaQuality": 0.2, "deltaCost": 0 }
-        ] },
+        "history": {
+          "deltas": [
+            { "slot": 0, "deltaQuality": 0.1, "deltaCost": 0 },
+            { "slot": 1, "deltaQuality": 0.3, "deltaCost": 0 },
+            { "slot": 2, "deltaQuality": 0.2, "deltaCost": 0 }
+          ]
+        },
         "candidates": [
           { "slot": 2, "measurement": { "quality": 0.7 } },
           { "slot": 0, "measurement": { "quality": 0.6 } },
@@ -404,27 +512,35 @@
         ]
       },
       "expected": { "winner": 1, "admitted": [true, true, true] },
-      "upstream": { "call": "select_round([C(0.7), A(0.6), B(0.8)], ...) — argmax S' over the admissible set", "value": { "winner": 1, "admitted": [true, true, true] } },
+      "upstream": {
+        "call": "select_round([C(0.7), A(0.6), B(0.8)], ...) — argmax S' over the admissible set",
+        "value": { "winner": 1, "admitted": [true, true, true] }
+      },
       "portNote": "The winner is the highest measured quality, whatever order the slots arrived in."
     },
     {
       "id": "select.no-winner",
-      "kind": "deterministic",
+      "kind": "port-adapted",
       "function": "select",
       "source": "rrsi/selection.py:133",
       "input": {
-        "history": { "deltas": [
-          { "slot": 0, "deltaQuality": 0, "deltaCost": 0 },
-          { "slot": 1, "deltaQuality": 0.01, "deltaCost": 0.2 }
-        ] },
+        "history": {
+          "deltas": [
+            { "slot": 0, "deltaQuality": 0, "deltaCost": 0 },
+            { "slot": 1, "deltaQuality": 0.01, "deltaCost": 0.2 }
+          ]
+        },
         "candidates": [
           { "slot": 0, "measurement": { "quality": 0.5 } },
           { "slot": 1, "measurement": { "quality": 0.51, "cost": 1200 } }
         ]
       },
-      "expected": { "winner": null, "admitted": [false, false], "reasonIncludes": { "1": "-2.0000 <= 0" } },
-      "upstream": { "call": "select_round([A(0.5), B(0.51, C=1200)], inc(0.5, C=1000), S*=0.5, delta=0.02) — shaped 1.0 - 3.0 = -2.0", "value": { "winner": null, "admitted": [false, false] } },
-      "portNote": "No admissible candidate means winner: null and the incumbent is kept, not that the least bad candidate wins. A +0.01 gain inside the band cannot fund the +20% cost it asks for."
+      "expected": { "winner": 1, "admitted": [false, true], "reasonIncludes": { "1": "no cost gate" } },
+      "upstream": {
+        "call": "select_round([A(0.5), B(0.51, C=1200)], inc(0.5, C=1000), S*=0.5, delta=0.02) — shaped 1.0 - 3.0 = -2.0",
+        "value": { "winner": null, "admitted": [false, false] }
+      },
+      "portNote": "Slot one has a positive quality gain; increased cost cannot veto it. Slot zero is neutral."
     }
   ]
 }

@@ -39,9 +39,15 @@ import {
 describe('the one version gate', () => {
   it('refuses an unknown protocol, then an unknown version, then an unknown kind', async () => {
     const log = openDemoLog()
-    expect((await asyncRefusalOf(() => log.emit({ ...opened(), protocol: 'nope' }))).code).toBe<RefusalCode>('unknown-protocol')
-    expect((await asyncRefusalOf(() => log.emit({ ...opened(), version: 7 }))).code).toBe<RefusalCode>('version-mismatch')
-    expect((await asyncRefusalOf(() => log.emit({ ...opened(), kind: 'slammed' }))).code).toBe<RefusalCode>('unknown-kind')
+    expect((await asyncRefusalOf(() => log.emit({ ...opened(), protocol: 'nope' }))).code).toBe<RefusalCode>(
+      'unknown-protocol',
+    )
+    expect((await asyncRefusalOf(() => log.emit({ ...opened(), version: 7 }))).code).toBe<RefusalCode>(
+      'version-mismatch',
+    )
+    expect((await asyncRefusalOf(() => log.emit({ ...opened(), kind: 'slammed' }))).code).toBe<RefusalCode>(
+      'unknown-kind',
+    )
     // The gate runs before the append: nothing reached the disk.
     expect(log.entries()).toHaveLength(0)
   })
@@ -79,31 +85,79 @@ describe('the guarantee vocabulary', () => {
   it('composes: a fact may be appended, business-atomic and conditional at once', () => {
     const registry = new ProtocolRegistry()
     registry.declare('pointer', 1, POINTER_V1)
-    expect(registry.ruleFor('pointer', 1, 'switched').guarantees).toEqual({ appended: true, conditional: true, atomicFact: true })
+    expect(registry.ruleFor('pointer', 1, 'switched').guarantees).toEqual({
+      appended: true,
+      conditional: true,
+      atomicFact: true,
+    })
     expect(registry.conditionalOwner()).toBe('pointer')
   })
 
   it('refuses a guarantee combination that cannot hold', () => {
     const registry = new ProtocolRegistry()
-    const derivedAndAppended: ProtocolSpec<unknown> = { initialState: {}, kinds: { x: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, derived: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
+    const derivedAndAppended: ProtocolSpec<unknown> = {
+      initialState: {},
+      kinds: {
+        x: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: true, derived: true },
+          members: [],
+          nested: {},
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+      },
+    }
     expect(refusalOf(() => registry.declare('demo', 1, derivedAndAppended)).code).toBe<RefusalCode>('unknown-guarantee')
-    const conditionalOnly: ProtocolSpec<unknown> = { initialState: {}, kinds: { y: defineKind<unknown, Record<string, never>>({ guarantees: { appended: false, conditional: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
+    const conditionalOnly: ProtocolSpec<unknown> = {
+      initialState: {},
+      kinds: {
+        y: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: false, conditional: true },
+          members: [],
+          nested: {},
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+      },
+    }
     expect(refusalOf(() => registry.declare('demo', 1, conditionalOnly)).code).toBe<RefusalCode>('unknown-guarantee')
   })
 
   it('refuses a derived kind at the log boundary: derived state is folded, never written', async () => {
     const registry = new ProtocolRegistry()
-    registry.declare<{ total: number }>('demo', 2, { initialState: { total: 0 }, kinds: {
-      counted: defineKind<{ total: number }, { by: number }>({ guarantees: { appended: true }, members: ['by'], nested: {}, emitter: 'writer', parse: raw => {
-        const by = (raw as { by?: unknown }).by
-        if (typeof by !== 'number' || !Number.isInteger(by)) refuse('malformed-payload', 'counted.by must be an integer')
-        return { by }
-      }, reduce: (state, _envelope, payload) => ({ total: state.total + payload.by }) }),
-      summary: defineKind<{ total: number }, Record<string, never>>({ guarantees: { appended: false, derived: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }),
-    } })
+    registry.declare<{ total: number }>('demo', 2, {
+      initialState: { total: 0 },
+      kinds: {
+        counted: defineKind<{ total: number }, { by: number }>({
+          guarantees: { appended: true },
+          members: ['by'],
+          nested: {},
+          emitter: 'writer',
+          parse: raw => {
+            const by = (raw as { by?: unknown }).by
+            if (typeof by !== 'number' || !Number.isInteger(by))
+              refuse('malformed-payload', 'counted.by must be an integer')
+            return { by }
+          },
+          reduce: (state, _envelope, payload) => ({ total: state.total + payload.by }),
+        }),
+        summary: defineKind<{ total: number }, Record<string, never>>({
+          guarantees: { appended: false, derived: true },
+          members: [],
+          nested: {},
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+      },
+    })
     const log = new MemoryLog(registry, { subjects: DEMO_SUBJECTS })
     await log.emit({ commandId: 'c1', protocol: 'demo', version: 2, kind: 'counted', subject: 's', payload: { by: 3 } })
-    const refusal = await asyncRefusalOf(() => log.emit({ commandId: 'c2', protocol: 'demo', version: 2, kind: 'summary', subject: 's', payload: {} }))
+    const refusal = await asyncRefusalOf(() =>
+      log.emit({ commandId: 'c2', protocol: 'demo', version: 2, kind: 'summary', subject: 's', payload: {} }),
+    )
     expect(refusal.code).toBe<RefusalCode>('derived-not-persistable')
     expect(foldSubject<{ total: number }>(registry, log.entries(), 'demo', 2, 's')).toEqual({ total: 3 })
   })
@@ -111,7 +165,19 @@ describe('the guarantee vocabulary', () => {
   it('allows exactly one conditional-update owner, and a refused claim leaves none behind', () => {
     const registry = new ProtocolRegistry()
     registry.declare('pointer', 1, POINTER_V1)
-    const rival: ProtocolSpec<unknown> = { initialState: {}, kinds: { moved: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, conditional: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }) } }
+    const rival: ProtocolSpec<unknown> = {
+      initialState: {},
+      kinds: {
+        moved: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: true, conditional: true },
+          members: [],
+          nested: {},
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+      },
+    }
     expect(refusalOf(() => registry.declare('rival', 1, rival)).code).toBe<RefusalCode>('second-conditional-owner')
     expect(registry.conditionalOwner()).toBe('pointer')
   })
@@ -121,29 +187,80 @@ describe('declaration is all-or-nothing', () => {
   /** The reviewer's counterexample: the owner was claimed before the rest was validated. */
   it('leaves no conditional owner behind when a later kind is invalid', () => {
     const registry = new ProtocolRegistry()
-    const spec: ProtocolSpec<unknown> = { initialState: {}, kinds: {
-      claims: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, conditional: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }),
-      broken: defineKind<unknown, Record<string, never>>({ guarantees: { appended: true, bogus: true } as unknown as Guarantees, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state }),
-    } }
+    const spec: ProtocolSpec<unknown> = {
+      initialState: {},
+      kinds: {
+        claims: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: true, conditional: true },
+          members: [],
+          nested: {},
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+        broken: defineKind<unknown, Record<string, never>>({
+          guarantees: { appended: true, bogus: true } as unknown as Guarantees,
+          members: [],
+          nested: {},
+          emitter: 'writer',
+          parse: () => ({}),
+          reduce: state => state,
+        }),
+      },
+    }
     expect(refusalOf(() => registry.declare('broken-protocol', 1, spec)).code).toBe<RefusalCode>('unknown-guarantee')
-    expect([registry.conditionalOwner(), refusalOf(() => registry.versionsOf('broken-protocol')).code]).toEqual([undefined, 'unknown-protocol'])
+    expect([registry.conditionalOwner(), refusalOf(() => registry.versionsOf('broken-protocol')).code]).toEqual([
+      undefined,
+      'unknown-protocol',
+    ])
   })
 
   it('refuses a declaration it cannot honour, all before publishing', () => {
     const registry = new ProtocolRegistry()
-    expect([refusalOf(() => registry.declare('demo', 0, DEMO_V1)).code, refusalOf(() => registry.declare('', 1, DEMO_V1)).code, refusalOf(() => registry.declare('demo', 1, { initialState: {}, kinds: {} })).code]).toEqual(['malformed-declaration', 'malformed-declaration', 'malformed-declaration'])
-    registry.declare<Gate>('demo', 1, { initialState: { open: false, bumps: 0 }, kinds: { opened: defineKind<Gate, Record<string, never>, {}>({ guarantees: { appended: true }, members: [], nested: {}, emitter: () => '', parse: () => ({}), reduce: () => ({ open: true, bumps: 0 }) }) } })
+    expect([
+      refusalOf(() => registry.declare('demo', 0, DEMO_V1)).code,
+      refusalOf(() => registry.declare('', 1, DEMO_V1)).code,
+      refusalOf(() => registry.declare('demo', 1, { initialState: {}, kinds: {} })).code,
+    ]).toEqual(['malformed-declaration', 'malformed-declaration', 'malformed-declaration'])
+    registry.declare<Gate>('demo', 1, {
+      initialState: { open: false, bumps: 0 },
+      kinds: {
+        opened: defineKind<Gate, Record<string, never>, {}>({
+          guarantees: { appended: true },
+          members: [],
+          nested: {},
+          emitter: () => '',
+          parse: () => ({}),
+          reduce: () => ({ open: true, bumps: 0 }),
+        }),
+      },
+    })
     // A rule that names no closed member set cannot be enforced or read, so it is not a declaration —
     // and neither is one built around `defineKind`, whose declared set nothing would enforce.
     const rules = {
       bare: { guarantees: { appended: true }, emitter: () => '', parse: () => ({}), reduce: () => ({}) },
-      unbranded: { guarantees: { appended: true }, members: [], nested: {}, emitter: () => '', parse: () => ({}), reduce: () => ({}) },
+      unbranded: {
+        guarantees: { appended: true },
+        members: [],
+        nested: {},
+        emitter: () => '',
+        parse: () => ({}),
+        reduce: () => ({}),
+      },
     } as unknown as Record<string, KindRule<unknown>>
     expect(
-      ['bare', 'unbranded'].map(name => refusalOf(() => registry.declare(name, 1, { initialState: {}, kinds: { opened: rules[name] as KindRule<unknown> } })).code),
+      ['bare', 'unbranded'].map(
+        name =>
+          refusalOf(() =>
+            registry.declare(name, 1, { initialState: {}, kinds: { opened: rules[name] as KindRule<unknown> } }),
+          ).code,
+      ),
     ).toEqual(['malformed-declaration', 'malformed-declaration'])
     // A duplicate is refused, and the original declaration still answers.
-    expect([refusalOf(() => registry.declare('demo', 1, DEMO_V1)).code, registry.kindsOf('demo', 1)]).toEqual(['duplicate-declaration', ['opened']])
+    expect([refusalOf(() => registry.declare('demo', 1, DEMO_V1)).code, registry.kindsOf('demo', 1)]).toEqual([
+      'duplicate-declaration',
+      ['opened'],
+    ])
   })
 })
 
@@ -158,10 +275,19 @@ describe('the declared value is the enforced one', () => {
    */
   it('refuses a spread copy of a branded rule, because identity is not copyable', () => {
     const registry = new ProtocolRegistry()
-    const rule = defineKind<unknown, Record<string, never>>({ guarantees: { appended: true }, members: [], nested: {}, emitter: 'writer', parse: () => ({}), reduce: state => state })
+    const rule = defineKind<unknown, Record<string, never>>({
+      guarantees: { appended: true },
+      members: [],
+      nested: {},
+      emitter: 'writer',
+      parse: () => ({}),
+      reduce: state => state,
+    })
     const copied = { ...rule, parse: () => ({ leaked: true }) } as KindRule<unknown>
     registry.declare('probe', 1, { initialState: {}, kinds: { 'probe/kind': rule } })
-    expect(refusalOf(() => registry.declare('copied', 1, { initialState: {}, kinds: { 'probe/kind': copied } })).code).toBe<RefusalCode>('malformed-declaration')
+    expect(
+      refusalOf(() => registry.declare('copied', 1, { initialState: {}, kinds: { 'probe/kind': copied } })).code,
+    ).toBe<RefusalCode>('malformed-declaration')
     expect(registry.kindsOf('probe', 1)).toEqual(['probe/kind'])
   })
 
@@ -173,7 +299,14 @@ describe('the declared value is the enforced one', () => {
    */
   it('freezes the declared member set where defineKind built it, so nothing can widen it afterwards', () => {
     const registry = new ProtocolRegistry()
-    const rule = defineKind<unknown, Record<string, unknown>>({ guarantees: { appended: true }, members: ['alpha'], nested: {}, emitter: 'writer', parse: raw => raw as Record<string, unknown>, reduce: state => state })
+    const rule = defineKind<unknown, Record<string, unknown>>({
+      guarantees: { appended: true },
+      members: ['alpha'],
+      nested: {},
+      emitter: 'writer',
+      parse: raw => raw as Record<string, unknown>,
+      reduce: state => state,
+    })
     registry.declare('probe', 1, { initialState: {}, kinds: { 'probe/kind': rule } })
     let widening = 'widened'
     try {
@@ -181,7 +314,11 @@ describe('the declared value is the enforced one', () => {
     } catch {
       widening = 'refused'
     }
-    expect([widening, rule.members, refusalOf(() => rule.parse({ alpha: 1, operatorNote: 'undeclared' }, 'probe/kind payload')).code]).toEqual(['refused', ['alpha'], 'malformed-payload'])
+    expect([
+      widening,
+      rule.members,
+      refusalOf(() => rule.parse({ alpha: 1, operatorNote: 'undeclared' }, 'probe/kind payload')).code,
+    ]).toEqual(['refused', ['alpha'], 'malformed-payload'])
   })
 })
 
@@ -207,7 +344,14 @@ describe('the emitter discipline', () => {
 describe('command identity', () => {
   it('returns the recorded fact when the same command is delivered twice', async () => {
     const log = openDemoLog()
-    const command: EmitInput = { commandId: 'same-command', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-a', payload: {} }
+    const command: EmitInput = {
+      commandId: 'same-command',
+      protocol: 'demo',
+      version: 1,
+      kind: 'opened',
+      subject: 'gate-a',
+      payload: {},
+    }
     const first = await log.emit(command)
     const again = await log.emit(command)
     expect([again.digest, again.seq]).toEqual([first.digest, first.seq])
@@ -217,8 +361,17 @@ describe('command identity', () => {
 
   it('refuses the same command id carrying a different request', async () => {
     const log = openDemoLog()
-    await log.emit({ commandId: 'c-fixed', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-a', payload: {} })
-    const refusal = await asyncRefusalOf(() => log.emit({ commandId: 'c-fixed', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-b', payload: {} }))
+    await log.emit({
+      commandId: 'c-fixed',
+      protocol: 'demo',
+      version: 1,
+      kind: 'opened',
+      subject: 'gate-a',
+      payload: {},
+    })
+    const refusal = await asyncRefusalOf(() =>
+      log.emit({ commandId: 'c-fixed', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-b', payload: {} }),
+    )
     expect(refusal).toMatchObject({ code: 'command-conflict', detail: expect.stringContaining('c-fixed') })
     expect(log.entries()).toHaveLength(1)
   })
@@ -229,7 +382,14 @@ describe('command identity', () => {
     // otherwise "already committed" is indistinguishable from "never seen", and the domain reducer
     // refuses the redelivery as an illegal transition instead of returning the original result.
     const log = openDemoLog()
-    const command: EmitInput = { commandId: 'lost-reply', protocol: 'demo', version: 1, kind: 'opened', subject: 'gate-a', payload: {} }
+    const command: EmitInput = {
+      commandId: 'lost-reply',
+      protocol: 'demo',
+      version: 1,
+      kind: 'opened',
+      subject: 'gate-a',
+      payload: {},
+    }
     const committed = await log.emit(command)
     const successor = MemoryLog.adopt(log.entries(), demoRegistry(), { subjects: DEMO_SUBJECTS })
     const recovered = await successor.emit(command)
@@ -244,7 +404,14 @@ describe('illegal transitions', () => {
   it('refuses a bump on a closed gate at fold time, and the fold scope decides who is affected', () => {
     const registry = demoRegistry()
     // gate-b is closed and then bumped. No append path would write this, which is the point.
-    const entries = chainOf([{ kind: 'opened', subject: 'gate-a' }, { kind: 'bumped', subject: 'gate-a' }, { kind: 'bumped', subject: 'gate-a' }, { kind: 'opened', subject: 'gate-b' }, { kind: 'closed', subject: 'gate-b' }, { kind: 'bumped', subject: 'gate-b' }])
+    const entries = chainOf([
+      { kind: 'opened', subject: 'gate-a' },
+      { kind: 'bumped', subject: 'gate-a' },
+      { kind: 'bumped', subject: 'gate-a' },
+      { kind: 'opened', subject: 'gate-b' },
+      { kind: 'closed', subject: 'gate-b' },
+      { kind: 'bumped', subject: 'gate-b' },
+    ])
     // foldSubject is the isolation boundary: gate-a still reads, though gate-b's sequence is broken.
     expect(foldSubject<Gate>(registry, entries, 'demo', 1, 'gate-a')).toEqual({ open: true, bumps: 2 })
     // foldSubjects is the whole-store read and fails closed on that same sequence.
@@ -265,10 +432,20 @@ describe('illegal transitions', () => {
     const registry = new ProtocolRegistry()
     registry.declare('pointer', 1, POINTER_V1)
     const log = new MemoryLog(registry, { subjects: DEMO_SUBJECTS })
-    const emit = (commandId: string, expected: string, to: string): EmitInput => ({ commandId, protocol: 'pointer', version: 1, kind: 'switched', subject: 'env-1', payload: { expected, to } })
+    const emit = (commandId: string, expected: string, to: string): EmitInput => ({
+      commandId,
+      protocol: 'pointer',
+      version: 1,
+      kind: 'switched',
+      subject: 'env-1',
+      payload: { expected, to },
+    })
     await log.emit(emit('p1', 'r0001', 'r0002'))
     const stale = await asyncRefusalOf(() => log.emit(emit('p2', 'r0001', 'r0003')))
-    expect(stale).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('active revision is "r0002"') })
+    expect(stale).toMatchObject({
+      code: 'illegal-transition',
+      detail: expect.stringContaining('active revision is "r0002"'),
+    })
     expect(log.stateAt('pointer', 1, 'env-1', log.count)).toEqual({ revision: 'r0002', generation: 1 })
   })
 })

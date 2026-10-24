@@ -55,15 +55,27 @@ function reportOf(raw: unknown, baseline: number): DomainMeasurementOutcome {
   }
   assertClosedKeys(report, ['quality', 'metrics', 'detail'], 'domain measurement report', 'malformed-payload')
   const metrics = record(report['metrics'], 'domain measurement metrics')
-  const values = Object.fromEntries(Object.entries(metrics).map(([name, raw]) => {
-    if (!name.trim()) refuse('malformed-payload', 'measurement metric names must be nonempty')
-    const metric = record(raw, `measurement metric ${name}`)
-    assertClosedKeys(metric, ['value', 'unit'], `measurement metric ${name}`, 'malformed-payload')
-    return [name, { value: finite(metric['value'], `measurement metric ${name}.value`), unit: text(metric, 'unit', `measurement metric ${name}`) }]
-  }))
-  if (report['detail'] !== undefined && typeof report['detail'] !== 'string') refuse('malformed-payload', 'measurement detail must be text')
-  return { quality: finite(finite(report['quality'], 'domain measurement quality') / baseline, 'normalized domain quality'), metrics: values,
-    ...(report['detail'] === undefined ? {} : { detail: report['detail'] as string }) }
+  const values = Object.fromEntries(
+    Object.entries(metrics).map(([name, raw]) => {
+      if (!name.trim()) refuse('malformed-payload', 'measurement metric names must be nonempty')
+      const metric = record(raw, `measurement metric ${name}`)
+      assertClosedKeys(metric, ['value', 'unit'], `measurement metric ${name}`, 'malformed-payload')
+      return [
+        name,
+        {
+          value: finite(metric['value'], `measurement metric ${name}.value`),
+          unit: text(metric, 'unit', `measurement metric ${name}`),
+        },
+      ]
+    }),
+  )
+  if (report['detail'] !== undefined && typeof report['detail'] !== 'string')
+    refuse('malformed-payload', 'measurement detail must be text')
+  return {
+    quality: finite(finite(report['quality'], 'domain measurement quality') / baseline, 'normalized domain quality'),
+    metrics: values,
+    ...(report['detail'] === undefined ? {} : { detail: report['detail'] as string }),
+  }
 }
 
 export async function loadMeasurement(path: string): Promise<DomainMeasurement> {
@@ -76,27 +88,36 @@ export async function loadMeasurement(path: string): Promise<DomainMeasurement> 
     refuse('malformed-declaration', 'domain measurement must export describe and measure functions')
   const description: unknown = await ports['describe']()
   const declared = record(description, 'measurement description')
-  assertClosedKeys(declared, ['baseline', 'digest', 'tools', 'conditions', 'unit', 'direction', 'parameters', 'evaluation'], 'measurement description', 'malformed-declaration',
+  assertClosedKeys(
+    declared,
+    ['baseline', 'digest', 'tools', 'conditions', 'unit', 'direction', 'parameters', 'evaluation'],
+    'measurement description',
+    'malformed-declaration',
   )
   const baseline = declared['baseline']
   if (typeof baseline !== 'number' || !Number.isFinite(baseline) || baseline <= 0)
     refuse('malformed-declaration', 'measurement baseline must be a finite positive value')
   const digest = text(declared, 'digest', 'measurement description')
-  if (!/^[a-f0-9]{64}$/.test(digest)) refuse('malformed-declaration', 'measurement implementation digest must be sha256')
+  if (!/^[a-f0-9]{64}$/.test(digest))
+    refuse('malformed-declaration', 'measurement implementation digest must be sha256')
   const direction = text(declared, 'direction', 'measurement description')
-  if (direction !== 'higher' && direction !== 'lower') refuse('malformed-declaration', 'measurement direction must be higher or lower')
+  if (direction !== 'higher' && direction !== 'lower')
+    refuse('malformed-declaration', 'measurement direction must be higher or lower')
   const tools = list(declared['tools'], 'measurement tools').map((raw, index) => {
     const tool = record(raw, `measurement tools[${index}]`)
     assertClosedKeys(tool, ['name', 'version', 'implementationDigest'], 'measurement tool', 'malformed-declaration')
-    return { name: text(tool, 'name', 'measurement tool'), version: text(tool, 'version', 'measurement tool'),
+    return {
+      name: text(tool, 'name', 'measurement tool'),
+      version: text(tool, 'version', 'measurement tool'),
       implementationDigest: text(tool, 'implementationDigest', 'measurement tool'),
     }
   })
-  const conditions = list(declared['conditions'], 'measurement conditions').map((raw) => {
+  const conditions = list(declared['conditions'], 'measurement conditions').map(raw => {
     if (typeof raw !== 'string') refuse('malformed-declaration', 'measurement conditions must be strings')
     return raw
   })
-  const parameters = declared['parameters'] === undefined ? undefined : record(declared['parameters'], 'measurement parameters')
+  const parameters =
+    declared['parameters'] === undefined ? undefined : record(declared['parameters'], 'measurement parameters')
   if (parameters !== undefined) assertLosslessJson(parameters, 'measurement parameters')
   let evaluation: DomainMeasurement['evaluation']
   if (declared['evaluation'] !== undefined) {
@@ -104,10 +125,21 @@ export async function loadMeasurement(path: string): Promise<DomainMeasurement> 
     assertClosedKeys(policy, ['weights', 'noiseFloor'], 'measurement evaluation', 'malformed-declaration')
     const weights = record(policy['weights'], 'measurement weights')
     assertClosedKeys(weights, ['quality', 'cost'], 'measurement weights', 'malformed-declaration')
-    if (typeof weights['quality'] !== 'number' || !Number.isFinite(weights['quality']) || weights['quality'] <= 0 ||
-      typeof weights['cost'] !== 'number' || !Number.isFinite(weights['cost']) || weights['cost'] < 0 ||
-      typeof policy['noiseFloor'] !== 'number' || !Number.isFinite(policy['noiseFloor']) || policy['noiseFloor'] < 0)
-      refuse('malformed-declaration', 'measurement weights require positive quality, nonnegative cost and nonnegative finite noiseFloor')
+    if (
+      typeof weights['quality'] !== 'number' ||
+      !Number.isFinite(weights['quality']) ||
+      weights['quality'] <= 0 ||
+      typeof weights['cost'] !== 'number' ||
+      !Number.isFinite(weights['cost']) ||
+      weights['cost'] < 0 ||
+      typeof policy['noiseFloor'] !== 'number' ||
+      !Number.isFinite(policy['noiseFloor']) ||
+      policy['noiseFloor'] < 0
+    )
+      refuse(
+        'malformed-declaration',
+        'measurement weights require positive quality, nonnegative cost and nonnegative finite noiseFloor',
+      )
     evaluation = { weights: { quality: weights['quality'], cost: weights['cost'] }, noiseFloor: policy['noiseFloor'] }
   }
   // Bind both the actual calculator bytes and its declared apparatus/coefficients. A formula with
@@ -115,12 +147,28 @@ export async function loadMeasurement(path: string): Promise<DomainMeasurement> 
   if (sha256(await readFile(path)) !== moduleDigest)
     refuse('malformed-declaration', 'measurement module changed while loading; freeze it before evaluation')
   const implementationDigest = digestOf({ module: moduleDigest, description: declared })
-  const measure = ports['measure'] as (source: string, signal: AbortSignal, context?: DomainMeasurementContext) => Promise<unknown>
-  return { module: path, baseline, direction, tools, conditions, unit: text(declared, 'unit', 'measurement description'),
-    ...(parameters === undefined ? {} : { parameters: JSON.parse(JSON.stringify(parameters)) as Record<string, unknown> }),
+  const measure = ports['measure'] as (
+    source: string,
+    signal: AbortSignal,
+    context?: DomainMeasurementContext,
+  ) => Promise<unknown>
+  return {
+    module: path,
+    baseline,
+    direction,
+    tools,
+    conditions,
+    unit: text(declared, 'unit', 'measurement description'),
+    ...(parameters === undefined
+      ? {}
+      : { parameters: JSON.parse(JSON.stringify(parameters)) as Record<string, unknown> }),
     ...(evaluation === undefined ? {} : { evaluation }),
-    criterion: { criterionId: 'domain-quality', statement: 'Measure the submitted implementation under the frozen domain apparatus',
-      verifierRef: 'domain-measurement', verifierVersion: '1', implementationDigest,
+    criterion: {
+      criterionId: 'domain-quality',
+      statement: 'Measure the submitted implementation under the frozen domain apparatus',
+      verifierRef: 'domain-measurement',
+      verifierVersion: '1',
+      implementationDigest,
     },
     measure: async (source, signal, context) => {
       signal.throwIfAborted()

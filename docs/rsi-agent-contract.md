@@ -1,6 +1,6 @@
 # RSI agent 工作合同
 
-更新：2026-10-23（Task v25；仅新图）。节点 system policy 的唯一来源为 [prompts.ts](../assembly/src/prompts.ts)，本文用于人类查阅接口，不附加给 agent。本文说明现有提案、审核与报告入口。`kind=search` 是已有 read 工具的短投影；状态仅从既有 Task/Run/batch/round 事实派生，不新增状态库。解析边界以 [rsi-proposal.ts](../assembly/src/rsi-proposal.ts)、[method.ts](../assembly/src/method.ts)、[review.ts](../assembly/src/review.ts) 为准。
+更新：2026-10-24（Task v27 / Review v8 / snapshot v15；仅新图）。节点 system policy 的唯一来源为 [prompts.ts](../assembly/src/prompts.ts)，本文用于人类查阅接口，不附加给 agent。本文说明现有提案、审核与报告入口。`kind=search` 是已有 read 工具的短投影；状态仅从既有 Task/Run/batch/round 事实派生，不新增状态库。解析边界以 [rsi-proposal.ts](../assembly/src/rsi-proposal.ts)、[method.ts](../assembly/src/method.ts)、[review.ts](../assembly/src/review.ts) 为准。
 
 Singularity 的业务顺序是：root 最少委派 → Task 在自己的 workspace 生成产物 → submit 封存 → 宿主独立验收 → 父任务复用已验证产物。只读参考仓库不是共享工作区；补丁中的目标路径不是可写宿主路径；跨任务交接使用声明的 artifact inputs。RSI 在业务结束后读取这些冻结事实，提案由独立 critic 筛选、宿主跑新业务对照；报告通过与方法收益是两回事。
 
@@ -12,11 +12,11 @@ critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字
 
 审核节点直接调用 `singularity_submit({findings:[{criterionId,verdict,detail,evidence}]})`。Agent 不写 `review.json`，不提交目标、身份或摘要；宿主从当前冻结 ReviewRun 生成带 `reviewId/target/subjectDigest` 的封存结果。工具 schema 与服务边界均拒绝 Agent 增写绑定字段。每项 criterion 恰好判定一次，已有 protected 非 pass 检查仍不能被改判 pass；重复提交相同判定幂等，不同判定冲突。
 
-审核 dispatch 提供实际 `criteria`、`method`、文件路径和 `reads`。`kind=method` 不带 ref 即读当前固定版本；`kind=trajectory` 不带 ref 列出可以直接调用的会话与页参数。提案审核可读宿主已冻结的引用页，不能沿引用任意读取其它事件或历史；报告审核同样只读封存时可用的证据。提案和发布审核仅保留 read/glob/grep、证据读取与判定提交，工作区只读；业务验收审核保留必要的独立执行能力。
+审核 dispatch 只附该用途的 `guidance`，并提供实际 `criteria`、`method`、文件路径和 `reads`。`kind=method` 不带 ref 即读当前固定版本；`kind=trajectory` 不带 ref 列出可以直接调用的会话与页参数。提案审核可读宿主已冻结的引用页，不能沿引用任意读取其它事件或历史；报告审核同样只读封存时可用的证据。提案和发布审核仅保留 read/glob/grep、证据读取与判定提交，工作区只读；业务验收审核保留必要的独立执行能力。
 
 ## 工作顺序
 
-1. 每次开始、恢复或压缩后，先调用 `singularity_read({"kind":"search"})`。短结果给出 `phase`、`next`、`pending`、剩余槽、`nextRound`、evolve `cases`、反馈摘要和 `authoring.ref` 入口。`screening/evaluating/reporting` 时结束 turn，宿主负责推进；`ready` 才能提出新机制或提交报告。工具 `kind` 必填。
+1. 每次开始、恢复或压缩后，先调用 `singularity_read({"kind":"search"})`。短结果给出 `executionPhase`、`searchOutcome`、`reportReview`、`publication`、`businessOutcome`、`next`、`pending`、剩余槽、`nextRound`、evolve `cases`、反馈摘要和 `authoring.ref` 入口。`screening/evaluating/validating/reporting` 时结束 turn，宿主负责推进；`ready` 才能提出新机制或提交报告。工具 `kind` 必填。
 2. 读取 `kind=subject`，沿 `next` 字节偏移直到 `complete=true`。按需读 `trajectory` 索引，复制真实 sessionId 与 seq，再带 `eventSeq` 读事件正文；索引和摘要不能代替原生正文。`kind=method` 读当前资产，带 `from/count` 可按 UTF-8 字节分页；其中不再混入搜索状态、提案模板与完整反馈。
 3. 第一次编辑前读取 `kind=search,ref=authoring` 的全部页面，其中的 `authoring.proposal/report` 提供可填写模板，同页包含 proposal/report 规则和 Method 格式。从可核查发现提出一个独立机制，保留已证成功行为，写出可观察触发条件、反例与迁移假设。允许带来源的公开领域知识和参数化程序；旧题答案、任务 ID、输出与按题分支留在证据中。
 4. 填写 `search.authoring.proposal`，只在 `edit.changes` 写需要改的字段；宿主保留其它资产与冻结源码。保存 1–3 份 JSON，调用 `singularity_propose_method({"paths":["proposal.json"]})`。服从 `nextRound` 的剩余槽；不再要求触及新资产类型或停滞时强制删除。按实证选择最小充分改动，可删冗余指导，无须为了填槽新增 Skill/Tool。整批静态拒绝不冻结、不扣槽；入场后的无效、拒绝、重复或执行失败仍扣槽，`repair=0`。
@@ -28,10 +28,23 @@ critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字
 | ready | Run working，且没有未结批次/轮次 | 作者取证、编辑、提案或报告 |
 | screening | 存在未结冻结批次 | 宿主独立 critic 与 selftest |
 | evaluating | 存在 pending round | 宿主冷启动业务对照与决定 |
-| reporting | 已封存报告，Run 尚未结束 | 宿主按条件验证 champion、发布与报告验收 |
-| completed / failed | Run 已 verified / failed | 终局，不重新开放作者写入 |
+| validating / reporting | 报告已封存，私有验证或报告验收待完成 | 宿主推进 |
+| completed / failed / cancelled | 独立报告判断已结束 / 运行故障 / 取消 | 终局，不重新开放作者写入；业务与测量事实另见五项投影 |
 
-准入、工具 schema、动态上下文和调度使用同一派生状态。proposal-safe 判断候选是否值得安全地测试，不能在评测前要求已测迁移；最终发布仍必须经过原有测量和独立审核。
+准入、工具 schema、动态上下文和调度使用同一派生状态。三项 proposal criteria 分别检查证据与机制、完整性与隔离、保持与可执行性；筛查不能在评测前要求已测迁移，最终发布仍必须经过原有测量和独立审核。状态含义以[当前架构](architecture.md)为准。
+
+## 分类读取与返回合同
+
+| 调用示例 | 返回形状 |
+|---|---|
+| `{"kind":"search"}` | 结构化状态、五项结果、剩余槽、反馈目录与 authoring.ref；仅 RSI 作者可读。 |
+| `{"kind":"search","ref":"authoring"}` | textPage；拼接完整 text 后得到提案/报告模板、格式与规则。feedback 使用相同分页形状。 |
+| `{"kind":"subject"}` | subjectDigest + textPage，读取冻结 subject。 |
+| `{"kind":"trajectory","ref":"<sessionId>"}` | 原生事件索引；不是事件正文或验收证明。 |
+| `{"kind":"trajectory","ref":"<sessionId>","eventSeq":7}` | seq、type + textPage；引用中另有 from/count 时复用相同页范围。 |
+| `{"kind":"method"}` | 业务节点的固定 Method 上下文，或审核/RSI 的 reference、assets；审核不会收到作者模板。审核/RSI 显式分页时返回 reference + textPage。 |
+
+textPage 固定为 `{from,next,complete,totalBytes,text}`。`from/next` 是 UTF-8 字节偏移，沿 next 读取到 complete=true；列表索引的分页单位仍是条目。服务错误返回命名 refusal，不用空结果代替越权。上述形状对应 [read.ts](../assembly/src/read.ts)，无需向通用工具 Schema 增添整本说明。
 
 ## Proposal JSON
 
@@ -54,17 +67,11 @@ critic 收到的是宿主审核投影：`comparison` 首先列出实际修改字
   "edit": {
     "hypothesis": "<可被证据反驳的机制假设>",
     "targets_mode": "<上面同一个机制名>",
-    "why_not_lower_lever": "<为何这一改动层级足够或必要>",
     "trigger_condition": "<可观察的适用条件>",
     "changes": [{ "asset": "workflow", "target": "workflowGuidance", "value": "<通用workflow策略>" }],
     "predicted_affected": ["<引文所在workflow的真实taskId>"],
     "predicted_cases": ["<从cases复制的evolve caseId>"],
     "predicted_families": [],
-    "retroactive_check": {
-      "corrective": "<如何改变已观察失败>",
-      "preservative": "<为何已成功行为得以保留>",
-      "transfer": "<为何可用于同域陌生任务，尚非已测结论>"
-    },
     "regression_risk": "<不适用条件与可能退化>"
   }
 }
@@ -123,15 +130,15 @@ Acceptance、proposal critic 与 publication 直接向 `singularity_submit` 提�
       "criterionId": "<该次实际criterionId>",
       "verdict": "unknown",
       "detail": "<具体判断、依据与仍缺的证据>",
-      "evidence": ["<subject.json中的具体位置或可读证据引用>"]
+      "evidence": ["subject.json:contract", {"sessionId":"<可读sessionId>","eventSeq":0}]
     }
   ]
 }
 ```
 
-`verdict` 只能取 `pass`、`fail`、`partial`、`unknown` 中的一个，默认 `unknown` 是合法值。每条 `detail` 必须有内容，evidence 使用真实引用字符串；诚实的 fail/unknown 也能完成审核。无需生成审核文件。
+`verdict` 只能取 `pass`、`fail`、`partial`、`unknown` 中的一个，默认 `unknown` 是合法值。每条 `detail` 必须有内容，evidence 使用 subject/file 引用字符串，或 `{sessionId,eventSeq,rootId?,from?,count?}` 原生事件引用；结构化引用在提交时核对冻结范围。明确合同失败或缺少必需证明判 fail/partial，无法解决的语义判断用 unknown。诚实的非 pass 也能完成审核。无需生成审核文件。
 
-先把 `subject` 全部分页读完。Proposal critic 使用其中冻结的实际 diff、机制与原生证据页面，不求解、不执行、不修复候选；publication 判断冻结的独立比较、资产消费和完整成本。只有 acceptance 可按需委派取证，且不能把保护检查的非 pass 改成 pass。输出合同不要求额外的总 verdict 或模型自行决定发布。
+先把 `subject` 全部分页读完。Proposal critic 使用其中冻结的实际 diff、机制与原生证据页面，不求解、不执行、不修复候选；publication 判断冻结的独立比较、资产消费和已记录成本（缺样本只作审计，不构成门禁）。只有 acceptance 可按需委派取证，且不能把保护检查的非 pass 改成 pass。输出合同不要求额外的总 verdict 或模型自行决定发布。
 
 ## 实跑核查与修复边界
 

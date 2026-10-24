@@ -1,5 +1,7 @@
 # 装配前质量审核
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 > 历史装配前审核；裁定与当前计划见 [context](context.md) 和 [assembly-blueprint](assembly-blueprint.md)。 历史正文按基线保留。
 
 日期：2026-10-10。审核基线：`singularity-core` **`1a7dc126915bd4efa715ccbf250d54bc1e0ea583`**；旧 Singularity `6a0eddec10519bc8c30ed9c7bb9998865f89754f`；DSH checkout `639ed015397290b3745d163aafe02ffee4aa3f84`，实际宿主 `0.2.0-rc.2`；RRSI `be50316e1db05914068a973f322770ef08ed7ba1`。

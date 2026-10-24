@@ -1,5 +1,7 @@
 # RSI 流程修复取证
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 更新：2026-10-20；修复起点 `7bd91bb`。这是实现与运行记录，施工顺序仍由 [终局计划](task-first-domain-rsi-plan.md) 持有。历史运行、冻结 checkout 和 Buckyball 源树未回写；本次没有回退 Git，保留既有输入、隔离和取消修复。
 
 ## 2026-10-20：Buckyball 已结束，未发布改进

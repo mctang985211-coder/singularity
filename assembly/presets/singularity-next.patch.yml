@@ -31,8 +31,6 @@
               sampleOverCapGlobResults: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
-          - id: skill-filesystem
-            name: '@deepseek-ai/dsh-skill-filesystem'
           - id: tool-skill
             name: '@deepseek-ai/dsh-tool-skill'
           - id: compaction
@@ -60,8 +58,6 @@
             config:
               fetch: true
               searchTimeoutMs: 60000
-          - id: present
-            name: '@deepseek-ai/dsh-tool-present'
           - id: tool-plugin-manager
             name: '@deepseek-ai/dsh-plugin-manager/tools'
             disabled: true

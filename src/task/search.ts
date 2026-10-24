@@ -13,8 +13,17 @@ export interface ProposalBatch {
   readonly batchId: string
   readonly incumbent: RevisionRef
   readonly historyCutoff: number
-  readonly slots: readonly { readonly path: string; readonly contentDigest: string; readonly proposal: FileAttachmentRef }[]
-  readonly outcomes: readonly { readonly slot: number; readonly status: string; readonly detail: string; readonly revision?: RevisionRef }[]
+  readonly slots: readonly {
+    readonly path: string
+    readonly contentDigest: string
+    readonly proposal: FileAttachmentRef
+  }[]
+  readonly outcomes: readonly {
+    readonly slot: number
+    readonly status: string
+    readonly detail: string
+    readonly revision?: RevisionRef
+  }[]
   readonly settled: boolean
 }
 
@@ -35,58 +44,124 @@ function working(state: TaskState, actor: string, runId: string): void {
 export function searchKinds(): Readonly<Record<string, KindRule<TaskState>>> {
   return {
     'rsi/batch-opened': defineKind<TaskState, Omit<ProposalBatch, 'outcomes' | 'settled'>, {}>({
-      guarantees: { appended: true }, emitter: 'scheduler', members: ['batchId', 'incumbent', 'historyCutoff', 'slots'], nested: {},
+      guarantees: { appended: true },
+      emitter: 'scheduler',
+      members: ['batchId', 'incumbent', 'historyCutoff', 'slots'],
+      nested: {},
       parse: raw => {
         const row = record(raw, 'proposal batch')
-        if (!Number.isSafeInteger(row['historyCutoff']) || (row['historyCutoff'] as number) < 0 || !Array.isArray(row['slots']) || !row['slots'].length || row['slots'].length > 3)
+        if (
+          !Number.isSafeInteger(row['historyCutoff']) ||
+          (row['historyCutoff'] as number) < 0 ||
+          !Array.isArray(row['slots']) ||
+          !row['slots'].length ||
+          row['slots'].length > 3
+        )
           refuse('malformed-payload', 'batch needs one to three slots and a nonnegative history cutoff')
         const slots = row['slots'].map(raw => {
           const slot = record(raw, 'batch slot')
           assertClosedKeys(slot, ['path', 'contentDigest', 'proposal'], 'batch slot')
           const contentDigest = digest(slot, 'contentDigest', 'batch slot')
-          return { path: text(slot, 'path', 'batch slot'), contentDigest,
-            proposal: fileAttachmentRef(slot['proposal'], contentDigest, 'batch slot.proposal') }
+          return {
+            path: text(slot, 'path', 'batch slot'),
+            contentDigest,
+            proposal: fileAttachmentRef(slot['proposal'], contentDigest, 'batch slot.proposal'),
+          }
         })
-        if (new Set(slots.map(s => s.contentDigest)).size !== slots.length) refuse('malformed-payload', 'duplicate batch slot')
-        return { batchId: text(row, 'batchId', 'batch'), incumbent: revisionRef(row['incumbent'], 'batch incumbent', REVISION_MEMBERS), historyCutoff: row['historyCutoff'] as number, slots }
+        if (new Set(slots.map(s => s.contentDigest)).size !== slots.length)
+          refuse('malformed-payload', 'duplicate batch slot')
+        return {
+          batchId: text(row, 'batchId', 'batch'),
+          incumbent: revisionRef(row['incumbent'], 'batch incumbent', REVISION_MEMBERS),
+          historyCutoff: row['historyCutoff'] as number,
+          slots,
+        }
       },
       reduce: (state, fact, payload) => {
         const search = state.search
         if (!search) refuse('illegal-transition', 'freeze search before planning proposal slots')
         working(state, fact.actor, search.runId)
         if (state.transfer !== undefined) refuse('illegal-transition', 'search ended; champion is frozen')
-        if (search.batches?.some(b => !b.settled)) refuse('illegal-transition', 'proposal batch is pending; finish the frozen batch first')
-        if (state.rounds?.some(r => r.status === 'pending')) refuse('illegal-transition', 'evaluation is pending; wait for its committed outcome')
+        if (search.batches?.some(b => !b.settled))
+          refuse('illegal-transition', 'proposal batch is pending; finish the frozen batch first')
+        if (state.rounds?.some(r => r.status === 'pending'))
+          refuse('illegal-transition', 'evaluation is pending; wait for its committed outcome')
         if ((search.batches ?? []).reduce((n, b) => n + b.slots.length, 0) + payload.slots.length > search.maxProposals)
           refuse('illegal-transition', 'proposal budget exhausted, including invalid slots')
-        if (search.batches?.some(b => b.batchId === payload.batchId)) refuse('illegal-transition', 'batch was already attempted')
-        return { ...state, search: { ...search, batches: [...(search.batches ?? []), { ...payload, outcomes: [], settled: false }] } }
+        if (search.batches?.some(b => b.batchId === payload.batchId))
+          refuse('illegal-transition', 'batch was already attempted')
+        return {
+          ...state,
+          search: { ...search, batches: [...(search.batches ?? []), { ...payload, outcomes: [], settled: false }] },
+        }
       },
     }),
-    'rsi/batch-slot-settled': defineKind<TaskState, { batchId: string; slot: number; status: string; detail: string; revision?: RevisionRef }, {}>({
-      guarantees: { appended: true }, emitter: 'scheduler', members: ['batchId', 'slot', 'status', 'detail', 'revision'], nested: {},
-      parse: raw => { const row = record(raw, 'batch outcome'), slot = row['slot']; if (!Number.isSafeInteger(slot) || (slot as number) < 0) refuse('malformed-payload', 'invalid batch slot'); return {
-        batchId: text(row, 'batchId', 'batch outcome'), slot: slot as number, status: text(row, 'status', 'batch outcome'), detail: text(row, 'detail', 'batch outcome'),
-        ...(row['revision'] === undefined ? {} : { revision: revisionRef(row['revision'], 'slot revision', REVISION_MEMBERS) }),
-      } },
+    'rsi/batch-slot-settled': defineKind<
+      TaskState,
+      { batchId: string; slot: number; status: string; detail: string; revision?: RevisionRef },
+      {}
+    >({
+      guarantees: { appended: true },
+      emitter: 'scheduler',
+      members: ['batchId', 'slot', 'status', 'detail', 'revision'],
+      nested: {},
+      parse: raw => {
+        const row = record(raw, 'batch outcome'),
+          slot = row['slot']
+        if (!Number.isSafeInteger(slot) || (slot as number) < 0) refuse('malformed-payload', 'invalid batch slot')
+        return {
+          batchId: text(row, 'batchId', 'batch outcome'),
+          slot: slot as number,
+          status: text(row, 'status', 'batch outcome'),
+          detail: text(row, 'detail', 'batch outcome'),
+          ...(row['revision'] === undefined
+            ? {}
+            : { revision: revisionRef(row['revision'], 'slot revision', REVISION_MEMBERS) }),
+        }
+      },
       reduce: (state, fact, payload) => {
-        const search = state.search!, batch = search?.batches?.find(b => b.batchId === payload.batchId)
-        if (batch === undefined || batch.settled || payload.slot >= batch.slots.length || batch.outcomes.some(o => o.slot === payload.slot)) refuse('illegal-transition', 'slot is not pending')
+        const search = state.search!,
+          batch = search?.batches?.find(b => b.batchId === payload.batchId)
+        if (
+          batch === undefined ||
+          batch.settled ||
+          payload.slot >= batch.slots.length ||
+          batch.outcomes.some(o => o.slot === payload.slot)
+        )
+          refuse('illegal-transition', 'slot is not pending')
         working(state, fact.actor, search.runId)
-        return { ...state, search: { ...search, batches: search.batches!.map(b => b === batch ? { ...b, outcomes: [...b.outcomes, payload] } : b) } }
+        return {
+          ...state,
+          search: {
+            ...search,
+            batches: search.batches!.map(b => (b === batch ? { ...b, outcomes: [...b.outcomes, payload] } : b)),
+          },
+        }
       },
     }),
     'rsi/batch-ended': defineKind<TaskState, { batchId: string }, {}>({
-      guarantees: { appended: true }, emitter: 'scheduler', members: ['batchId'], nested: {}, parse: raw => ({ batchId: text(record(raw, 'batch end'), 'batchId', 'batch end') }),
+      guarantees: { appended: true },
+      emitter: 'scheduler',
+      members: ['batchId'],
+      nested: {},
+      parse: raw => ({ batchId: text(record(raw, 'batch end'), 'batchId', 'batch end') }),
       reduce: (state, fact, payload) => {
-        const search = state.search!, batch = search?.batches?.find(b => b.batchId === payload.batchId)
-        if (!batch || batch.settled || batch.outcomes.length !== batch.slots.length) refuse('illegal-transition', 'every planned slot must settle')
+        const search = state.search!,
+          batch = search?.batches?.find(b => b.batchId === payload.batchId)
+        if (!batch || batch.settled || batch.outcomes.length !== batch.slots.length)
+          refuse('illegal-transition', 'every planned slot must settle')
         working(state, fact.actor, search.runId)
-        return { ...state, search: { ...search, batches: search.batches!.map(b => b === batch ? { ...b, settled: true } : b) } }
+        return {
+          ...state,
+          search: { ...search, batches: search.batches!.map(b => (b === batch ? { ...b, settled: true } : b)) },
+        }
       },
     }),
     'rsi/search-opened': defineKind<TaskState, { runId: string; maxProposals: number }, {}>({
-      guarantees: { appended: true }, emitter: 'scheduler', members: ['runId', 'maxProposals'], nested: {},
+      guarantees: { appended: true },
+      emitter: 'scheduler',
+      members: ['runId', 'maxProposals'],
+      nested: {},
       parse: raw => {
         const row = record(raw, 'search')
         const maxProposals = row['maxProposals']

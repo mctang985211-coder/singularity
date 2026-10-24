@@ -36,11 +36,16 @@ export interface MethodSkill {
 }
 export interface MethodTool {
   readonly name: string
+  readonly description?: string
   readonly source: string
-  readonly verifier?: { readonly samples: readonly { readonly name: string
+  readonly verifier?: {
+    readonly samples: readonly {
+      readonly name: string
       readonly artifactContent: string
       readonly inputContent: string
-      readonly expected: 'pass' | 'fail' }[] }
+      readonly expected: 'pass' | 'fail'
+    }[]
+  }
 }
 export interface MethodAssets {
   readonly workflowGuidance: string
@@ -52,8 +57,8 @@ export const METHOD_FORMAT = `Complete Method JSON: {workflowGuidance:string, te
 All four fields are required in a stored Method. RSI reads current assets but submits only edit.changes; the host derives the complete replacement. Do not retype unchanged assets or frozen source in proposals.
 workflowGuidance is explicit reusable workflow advice, empty or at most 8192 UTF-8 bytes. Templates are optional patterns; an empty array is legal. Task contracts own goals, inputs and acceptance.
 Skill: {name:kebab-case, description:string, capabilities:string[], requiredTools:string[], content:string}.
-Tool: {name:kebab-case, source:string, verifier?:{samples:{name:string, artifactContent:string, inputContent:string, expected:'pass'|'fail'}[]}}.
-Tool source is a Node ESM program: frozen input paths appear in contract order starting at argv[2], followed by the candidate path when supplied; stdout is the returned artifact text. singularity_run_method takes {tool,candidatePath?}, with candidatePath naming an existing workspace file. A verifier Tool receives the candidate path at argv[2] followed by frozen input paths, exiting 0 for pass or 1 for fail. Verifier samples and template checks each bind one named input, with both positive and negative samples required.
+Tool: {name:kebab-case, description:string, source:string, verifier?:{samples:{name:string, artifactContent:string, inputContent:string, expected:'pass'|'fail'}[]}}.
+New Tools need a short description stating what they do, when to use them and which input/candidate file they consume. Tool source is a Node ESM program: frozen input paths appear in contract order starting at argv[2], followed by the candidate path when supplied; stdout is the returned artifact text. singularity_run_method takes {tool,candidatePath?}, with candidatePath naming an existing workspace file. A verifier Tool receives the candidate path at argv[2] followed by frozen input paths, exiting 0 for pass or 1 for fail. Verifier samples and template checks each bind one named input, with both positive and negative samples required.
 Template: {id:string, goal:string, artifact:string, inputs:{name:string,source:{kind:'protected',ref:string}|{kind:'artifact',template:string}}[], criteria:{criterionId:string,statement:string}[], skills:string[], capabilities:string[], guidance?:string, applicability?:string, decomposition?:{children:{key:string,template:string,dependsOn:string[],supports:string[],maxRuns:number,requirement:'required'|'exploration'}[]}, checks:{criterionId:string,verifier:string,input:string}[], initial?:{content:string}}.
 goal defines responsibility; guidance gives optional procedure. Template reads return prefilled contracts with concrete input identities; decomposition submits that contract shape with optional template:{id,digest} provenance.
 contract.skills and matching capabilities select Skills; capability names and selected Skills' requiredTools bind Tools. Binding happens at Run admission, even if no tool is called.
@@ -64,130 +69,205 @@ export interface MethodBindings {
   readonly tools: readonly { readonly name: string; readonly digest: string }[]
   readonly gaps: readonly string[]
 }
-export function bindAssets(selection: { readonly skills: readonly string[]; readonly capabilities: readonly string[] }, assets: MethodAssets): MethodBindings {
+export function bindAssets(
+  selection: { readonly skills: readonly string[]; readonly capabilities: readonly string[] },
+  assets: MethodAssets,
+): MethodBindings {
   for (const name of selection.skills)
-    if (!assets.skills.some((skill) => skill.name === name))
+    if (!assets.skills.some(skill => skill.name === name))
       refuse('malformed-declaration', `responsibility requires missing Skill ${name}`)
-  const skills = assets.skills.filter((skill) => selection.skills.includes(skill.name))
+  const skills = assets.skills.filter(skill => selection.skills.includes(skill.name))
   const requested = new Set(selection.capabilities)
   for (const skill of skills) for (const capability of skill.capabilities) requested.delete(capability)
   for (const skill of assets.skills) {
-    if (!skill.capabilities.some((capability) => requested.has(capability))) continue
+    if (!skill.capabilities.some(capability => requested.has(capability))) continue
     skills.push(skill)
     for (const capability of skill.capabilities) requested.delete(capability)
   }
   const tools = assets.tools.filter(
-    (tool) => selection.capabilities.includes(tool.name) || skills.some((skill) => skill.requiredTools.includes(tool.name)),
+    tool => selection.capabilities.includes(tool.name) || skills.some(skill => skill.requiredTools.includes(tool.name)),
   )
   for (const tool of tools) requested.delete(tool.name)
-  return { skills: skills.map((skill) => ({ name: skill.name, digest: digestOf(skill) })),
-    tools: tools.map((tool) => ({ name: tool.name, digest: digestOf(tool) })), gaps: [...requested],
+  return {
+    skills: skills.map(skill => ({ name: skill.name, digest: digestOf(skill) })),
+    tools: tools.map(tool => ({ name: tool.name, digest: digestOf(tool) })),
+    gaps: [...requested],
   }
 }
 export function bindingsForContract(contract: TaskContract, assets: MethodAssets): MethodBindings {
   return bindAssets({ skills: contract.skills ?? [], capabilities: contract.capabilities ?? [] }, assets)
 }
 export function methodToolReferences(apparatus: Apparatus, run: RunState): readonly string[] {
-  return (run.bubble?.tools ?? []).filter((tool) => tool.name.startsWith('method:'))
-    .map((tool) => join(apparatus.workspaceRoot, 'assets', run.revision.digest, `${tool.name.slice(7)}.mjs`))
+  return (run.bubble?.tools ?? [])
+    .filter(tool => tool.name.startsWith('method:'))
+    .map(tool => join(apparatus.workspaceRoot, 'assets', run.revision.digest, `${tool.name.slice(7)}.mjs`))
 }
 export const methodEnvironment = (apparatus: Apparatus): string => `${apparatus.controlId}:methods`
 async function frozenFile(path: string, content: string): Promise<void> {
-  try { await writeFile(path, content, { mode: 0o400, flag: 'wx' }) }
-  catch (error) {
+  try {
+    await writeFile(path, content, { mode: 0o400, flag: 'wx' })
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     if ((await readFile(path, 'utf8')) !== content) refuse('digest-mismatch', 'immutable asset bytes changed: ' + path)
   }
 }
-const names = (value: unknown, where: string): string[] => list(value, where).map((entry) => {
-  if (typeof entry !== 'string' || entry.length === 0) refuse('malformed-declaration', `${where} must contain names`)
-  return entry
-})
+const names = (value: unknown, where: string): string[] =>
+  list(value, where).map(entry => {
+    if (typeof entry !== 'string' || entry.length === 0) refuse('malformed-declaration', `${where} must contain names`)
+    return entry
+  })
 /** Check the replacement envelope before a missing collection can look like asset deletion. */
 export function assertMethodShape(raw: unknown): asserts raw is MethodAssets {
   const content = record(raw, 'method')
   assertClosedKeys(content, ['workflowGuidance', 'templates', 'skills', 'tools'], 'method', 'malformed-declaration')
   const missing = ['workflowGuidance', 'templates', 'skills', 'tools'].filter(key => !Object.hasOwn(content, key))
-  if (missing.length) refuse('malformed-declaration', `Missing ${missing.map(key => `method.${key}`).join(', ')} in stored Method. RSI proposals submit analysis and edit.changes; the host preserves the remaining assets`)
+  if (missing.length)
+    refuse(
+      'malformed-declaration',
+      `Missing ${missing.map(key => `method.${key}`).join(', ')} in stored Method. RSI proposals submit analysis and edit.changes; the host preserves the remaining assets`,
+    )
   if (typeof content['workflowGuidance'] !== 'string' || Buffer.byteLength(content['workflowGuidance']) > 8192)
     refuse('malformed-declaration', 'method.workflowGuidance must be an explicit string of at most 8192 UTF-8 bytes')
   for (const field of ['templates', 'skills', 'tools']) list(content[field], `method.${field}`)
 }
-export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: string,
+export async function parseMethod(
+  domain: Domain,
+  raw: unknown,
+  assetRoot?: string,
 ): Promise<{ assets: MethodAssets; domain: Domain }> {
   assertMethodShape(raw)
   const content = raw
   const skills = content.skills.map((raw, index) => {
-    const path = `method.skills[${index}]`, skill = record(raw, path)
-    assertClosedKeys(skill, ['name', 'description', 'capabilities', 'requiredTools', 'content'], path, 'malformed-declaration',
+    const path = `method.skills[${index}]`,
+      skill = record(raw, path)
+    assertClosedKeys(
+      skill,
+      ['name', 'description', 'capabilities', 'requiredTools', 'content'],
+      path,
+      'malformed-declaration',
     )
     const name = text(skill, 'name', path)
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) refuse('malformed-declaration', `${path}.name must be kebab-case`)
-    return { name, description: text(skill, 'description', path), content: text(skill, 'content', path),
-      capabilities: names(skill['capabilities'], `${path}.capabilities`), requiredTools: names(skill['requiredTools'], `${path}.requiredTools`),
+    return {
+      name,
+      description: text(skill, 'description', path),
+      content: text(skill, 'content', path),
+      capabilities: names(skill['capabilities'], `${path}.capabilities`),
+      requiredTools: names(skill['requiredTools'], `${path}.requiredTools`),
     }
   })
   const tools = content.tools.map((raw, index) => {
-    const path = `method.tools[${index}]`, tool = record(raw, path)
-    assertClosedKeys(tool, ['name', 'source', 'verifier'], path, 'malformed-declaration')
+    const path = `method.tools[${index}]`,
+      tool = record(raw, path)
+    assertClosedKeys(tool, ['name', 'description', 'source', 'verifier'], path, 'malformed-declaration')
     const name = text(tool, 'name', path)
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) refuse('malformed-declaration', `${path}.name must be kebab-case`)
     let verifier: MethodTool['verifier']
     if (tool['verifier'] !== undefined) {
       const declaration = record(tool['verifier'], `${path}.verifier`)
       assertClosedKeys(declaration, ['samples'], `${path}.verifier`, 'malformed-declaration')
-      verifier = { samples: list(declaration['samples'], `${path}.verifier.samples`).map((raw, index) => {
-        const samplePath = `${path}.verifier.samples[${index}]`, sample = record(raw, samplePath)
-        assertClosedKeys(sample, ['name', 'artifactContent', 'inputContent', 'expected'], samplePath, 'malformed-declaration',
+      verifier = {
+        samples: list(declaration['samples'], `${path}.verifier.samples`).map((raw, index) => {
+          const samplePath = `${path}.verifier.samples[${index}]`,
+            sample = record(raw, samplePath)
+          assertClosedKeys(
+            sample,
+            ['name', 'artifactContent', 'inputContent', 'expected'],
+            samplePath,
+            'malformed-declaration',
           )
-        const expected = sample['expected']
-        if (expected !== 'pass' && expected !== 'fail') refuse('malformed-declaration', `${samplePath}.expected must be pass or fail`)
-        const artifactContent = sample['artifactContent'], inputContent = sample['inputContent']
-        if (typeof artifactContent !== 'string' || typeof inputContent !== 'string')
-          refuse('malformed-declaration', `${samplePath}.artifactContent and inputContent must be literal file contents`,
+          const expected = sample['expected']
+          if (expected !== 'pass' && expected !== 'fail')
+            refuse('malformed-declaration', `${samplePath}.expected must be pass or fail`)
+          const artifactContent = sample['artifactContent'],
+            inputContent = sample['inputContent']
+          if (typeof artifactContent !== 'string' || typeof inputContent !== 'string')
+            refuse(
+              'malformed-declaration',
+              `${samplePath}.artifactContent and inputContent must be literal file contents`,
             )
-        return { name: text(sample, 'name', samplePath), artifactContent, inputContent, expected }
-      }),
+          return { name: text(sample, 'name', samplePath), artifactContent, inputContent, expected }
+        }),
       }
     }
-    return { name, source: text(tool, 'source', path), ...(verifier === undefined ? {} : { verifier }) }
+    const description = tool['description'] === undefined ? undefined : text(tool, 'description', path)
+    if (description !== undefined && Buffer.byteLength(description) > 1024)
+      refuse('malformed-declaration', `${path}.description exceeds 1024 UTF-8 bytes`)
+    return {
+      name,
+      ...(description === undefined ? {} : { description }),
+      source: text(tool, 'source', path),
+      ...(verifier === undefined ? {} : { verifier }),
+    }
   })
-  for (const assets of [skills, tools]) if (new Set(assets.map((asset) => asset.name)).size !== assets.length) refuse('malformed-declaration', 'Revision repeats asset names')
-  for (const skill of skills) for (const name of skill.requiredTools)
-    if (!tools.some((tool) => tool.name === name)) refuse('malformed-declaration', `Skill ${skill.name} requires unavailable Tool ${name}`)
+  for (const assets of [skills, tools])
+    if (new Set(assets.map(asset => asset.name)).size !== assets.length)
+      refuse('malformed-declaration', 'Revision repeats asset names')
+  for (const skill of skills)
+    for (const name of skill.requiredTools)
+      if (!tools.some(tool => tool.name === name))
+        refuse('malformed-declaration', `Skill ${skill.name} requires unavailable Tool ${name}`)
   const workflowGuidance = content['workflowGuidance']
-  const assets: MethodAssets = { workflowGuidance, templates: content.templates, skills, tools,
-  }
+  const assets: MethodAssets = { workflowGuidance, templates: content.templates, skills, tools }
   const verifiers = [...domain.verifiers]
-  if (assetRoot === undefined) for (const tool of tools) {
-    if (tool.verifier === undefined) continue
-    if (verifiers.some(verifier => verifier.ref === tool.name)) refuse('malformed-declaration', 'generated verifier cannot replace a protected verifier')
-    const samples = tool.verifier.samples.map((sample, index) => ({ name: sample.name, expected: sample.expected,
-      input: { subject: `${tool.name}:${index}`, artifactDigest: sha256(sample.artifactContent),
-        inputs: [{ name: 'input', digest: sha256(sample.inputContent) }] } }))
-    const verifier = { ref: tool.name, version: sha256(tool.source), implementationDigest: sha256(tool.source),
-      program: `${tool.name}.mjs`, args: ['{artifact}', '{input}'], selftest: { samples },
-      judge: async (): Promise<never> => refuse('illegal-transition', 'unmaterialized verifier cannot execute') }
-    assertVerifierRunnable(verifier)
-    verifiers.push(verifier)
-  }
+  if (assetRoot === undefined)
+    for (const tool of tools) {
+      if (tool.verifier === undefined) continue
+      if (verifiers.some(verifier => verifier.ref === tool.name))
+        refuse('malformed-declaration', 'generated verifier cannot replace a protected verifier')
+      const samples = tool.verifier.samples.map((sample, index) => ({
+        name: sample.name,
+        expected: sample.expected,
+        input: {
+          subject: `${tool.name}:${index}`,
+          artifactDigest: sha256(sample.artifactContent),
+          inputs: [{ name: 'input', digest: sha256(sample.inputContent) }],
+        },
+      }))
+      const verifier = {
+        ref: tool.name,
+        version: sha256(tool.source),
+        implementationDigest: sha256(tool.source),
+        program: `${tool.name}.mjs`,
+        args: ['{artifact}', '{input}'],
+        selftest: { samples },
+        judge: async (): Promise<never> => refuse('illegal-transition', 'unmaterialized verifier cannot execute'),
+      }
+      assertVerifierRunnable(verifier)
+      verifiers.push(verifier)
+    }
   if (assetRoot !== undefined) {
     await mkdir(assetRoot, { recursive: true })
     for (const tool of tools) {
       await frozenFile(join(assetRoot, `${tool.name}.mjs`), tool.source)
       if (tool.verifier === undefined) continue
-      if (verifiers.some((verifier) => verifier.ref === tool.name)) refuse('malformed-declaration', 'generated verifier cannot replace a protected verifier')
+      if (verifiers.some(verifier => verifier.ref === tool.name))
+        refuse('malformed-declaration', 'generated verifier cannot replace a protected verifier')
       const selftest = []
       for (const [index, sample] of tool.verifier.samples.entries()) {
-        const artifact = `${tool.name}-${index}-artifact`, input = `${tool.name}-${index}-input`
+        const artifact = `${tool.name}-${index}-artifact`,
+          input = `${tool.name}-${index}-input`
         await frozenFile(join(assetRoot, artifact), sample.artifactContent)
         await frozenFile(join(assetRoot, input), sample.inputContent)
         selftest.push({ name: sample.name, artifact, argv: [artifact, input], expected: sample.expected })
       }
-      verifiers.push(await verifierOf(assetRoot, { ref: tool.name, version: sha256(tool.source), program: `${tool.name}.mjs`, args: ['{artifact}', '{input}'], selftest,
+      verifiers.push(
+        await verifierOf(
+          assetRoot,
+          {
+            ref: tool.name,
+            version: sha256(tool.source),
+            program: `${tool.name}.mjs`,
+            args: ['{artifact}', '{input}'],
+            selftest,
           },
           'generated verifier',
-          (invocation) => spawnProcess(invocation, undefined, assetRoot, { root: assetRoot, writable: false, protected: [], references: domain.references,
+          invocation =>
+            spawnProcess(invocation, undefined, assetRoot, {
+              root: assetRoot,
+              writable: false,
+              protected: [],
+              references: domain.references,
             }),
         ),
       )
@@ -195,7 +275,8 @@ export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: stri
   }
   const templates = new Map<string, TaskTemplate>()
   for (const [index, rawTemplate] of assets.templates.entries()) {
-    const path = `method.templates[${index}]`, declared = record(rawTemplate, path)
+    const path = `method.templates[${index}]`,
+      declared = record(rawTemplate, path)
     if (declared['initial'] !== undefined && record(declared['initial'], 'template initial')['from'] !== undefined)
       refuse('malformed-declaration', 'Revision initial source must be frozen as initial.content')
     const template = await readTemplate(domain.dir, rawTemplate, verifiers, path)
@@ -204,18 +285,30 @@ export async function parseMethod(domain: Domain, raw: unknown, assetRoot?: stri
     if (template.id === domain.rootTemplate && original !== undefined) {
       for (const field of ['inputs', 'criteria', 'artifact'] as const)
         if (digestOf(original[field]) !== digestOf(template[field]))
-          refuse('malformed-declaration', `${path}.${field}: Revision cannot change protected input or acceptance for template ${template.id}; keep the frozen value`)
-      if (digestOf(original.checks.map(({ criterion, input }) => ({ criterion, input }))) !== digestOf(template.checks.map(({ criterion, input }) => ({ criterion, input }))))
-        refuse('malformed-declaration', `${path}.checks: Revision cannot change protected input or acceptance for template ${template.id}`)
-      if ((template.initial === undefined ? null : sha256(template.initial.bytes)) !==
-        (original.initial === undefined ? null : sha256(original.initial.bytes)))
+          refuse(
+            'malformed-declaration',
+            `${path}.${field}: Revision cannot change protected input or acceptance for template ${template.id}; keep the frozen value`,
+          )
+      if (
+        digestOf(original.checks.map(({ criterion, input }) => ({ criterion, input }))) !==
+        digestOf(template.checks.map(({ criterion, input }) => ({ criterion, input })))
+      )
+        refuse(
+          'malformed-declaration',
+          `${path}.checks: Revision cannot change protected input or acceptance for template ${template.id}`,
+        )
+      if (
+        (template.initial === undefined ? null : sha256(template.initial.bytes)) !==
+        (original.initial === undefined ? null : sha256(original.initial.bytes))
+      )
         refuse('malformed-declaration', 'Revision cannot replace the protected initial root source')
     }
-    for (const skill of template.skills) if (!skills.some((asset) => asset.name === skill)) refuse('malformed-declaration', `template ${template.id} requires missing Skill ${skill}`)
+    for (const skill of template.skills)
+      if (!skills.some(asset => asset.name === skill))
+        refuse('malformed-declaration', `template ${template.id} requires missing Skill ${skill}`)
     templates.set(template.id, template)
   }
-  const loaded: Domain = { ...domain, contractTemplates: domain.templates, templates, verifiers,
-  }
+  const loaded: Domain = { ...domain, contractTemplates: domain.templates, templates, verifiers }
   assertTemplateSources(loaded)
   return { assets, domain: loaded }
 }
@@ -224,20 +317,29 @@ export async function createMethod(apparatus: Apparatus, raw: unknown): Promise<
   const revisionId = `method-${digest.slice(0, 24)}`
   const environmentId = methodEnvironment(apparatus)
   const loaded = await parseMethod(apparatus.domain, raw, join(apparatus.workspaceRoot, 'assets', digest))
-  for (const verifier of loaded.domain.verifiers.filter((held) =>
-    loaded.assets.tools.some((tool) => tool.verifier !== undefined && tool.name === held.ref),
+  for (const verifier of loaded.domain.verifiers.filter(held =>
+    loaded.assets.tools.some(tool => tool.verifier !== undefined && tool.name === held.ref),
   )) {
     assertVerifierRunnable(verifier)
     const selftest = await runVerifierSelftest(verifier)
-    if (selftest.failures.length !== 0) refuse('unregistered-verifier', `generated verifier ${verifier.ref} fails its positive/negative samples: ${JSON.stringify(selftest.failures)}`,
+    if (selftest.failures.length !== 0)
+      refuse(
+        'unregistered-verifier',
+        `generated verifier ${verifier.ref} fails its positive/negative samples: ${JSON.stringify(selftest.failures)}`,
       )
   }
-  await apparatus.environments.createRevision({ commandId: `method:${digest}`, environmentId, revisionId, manifest: loaded.assets,
+  await apparatus.environments.createRevision({
+    commandId: `method:${digest}`,
+    environmentId,
+    revisionId,
+    manifest: loaded.assets,
   })
   for (const verifier of loaded.domain.verifiers) {
-    if (!apparatus.implementations.some((held) => held.implementationDigest === verifier.implementationDigest)) {
+    if (!apparatus.implementations.some(held => held.implementationDigest === verifier.implementationDigest)) {
       apparatus.implementations.push(verifier)
-      apparatus.store.declareSubject(`verifier:${verifier.ref}@${verifier.version}`, `${apparatus.controlId}:verifier:${verifier.ref}@${verifier.version}`,
+      apparatus.store.declareSubject(
+        `verifier:${verifier.ref}@${verifier.version}`,
+        `${apparatus.controlId}:verifier:${verifier.ref}@${verifier.version}`,
       )
     }
   }
@@ -246,9 +348,15 @@ export async function createMethod(apparatus: Apparatus, raw: unknown): Promise<
 export async function seedMethod(apparatus: Apparatus, initial?: unknown): Promise<RevisionRef> {
   const published = publishedMethod(apparatus)
   if (published !== undefined) return published
-  const seed = await createMethod(apparatus, initial ?? { workflowGuidance: '',
-    templates: [...apparatus.domain.templates.values()].map(templateDeclaration), skills: [], tools: [],
-  })
+  const seed = await createMethod(
+    apparatus,
+    initial ?? {
+      workflowGuidance: '',
+      templates: [...apparatus.domain.templates.values()].map(templateDeclaration),
+      skills: [],
+      tools: [],
+    },
+  )
   if (publishedMethod(apparatus) === undefined)
     await apparatus.store.emit({
       commandId: 'seed:initialize',
@@ -260,49 +368,92 @@ export async function seedMethod(apparatus: Apparatus, initial?: unknown): Promi
     })
   return seed
 }
-export async function loadMethod(apparatus: Apparatus, revision: RevisionRef, provenance?: TaskTemplateRef,
+export async function loadMethod(
+  apparatus: Apparatus,
+  revision: RevisionRef,
+  provenance?: TaskTemplateRef,
 ): Promise<{ assets: MethodAssets; domain: Domain }> {
-  if (revision.environmentId !== methodEnvironment(apparatus)) refuse('unknown-revision', 'Revision belongs to another asset library')
-  const held = assertPinnedRevision(revision, apparatus.store.load().statesOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION), 'load Revision',
+  if (revision.environmentId !== methodEnvironment(apparatus))
+    refuse('unknown-revision', 'Revision belongs to another asset library')
+  const held = assertPinnedRevision(
+    revision,
+    apparatus.store.load().statesOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION),
+    'load Revision',
   )
-  const loaded = await parseMethod(apparatus.domain, held.manifest, join(apparatus.workspaceRoot, 'assets', revision.digest),
+  const loaded = await parseMethod(
+    apparatus.domain,
+    held.manifest,
+    join(apparatus.workspaceRoot, 'assets', revision.digest),
   )
   // Task provenance survives method edits. Resolve exact content from the same immutable library.
-  if (provenance !== undefined && loaded.domain.templates.get(provenance.id)?.digest !== provenance.digest &&
-    loaded.domain.contractTemplates?.get(provenance.id)?.digest !== provenance.digest) {
-    const library = apparatus.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, revision.environmentId)!
+  if (
+    provenance !== undefined &&
+    loaded.domain.templates.get(provenance.id)?.digest !== provenance.digest &&
+    loaded.domain.contractTemplates?.get(provenance.id)?.digest !== provenance.digest
+  ) {
+    const library = apparatus.store
+      .load()
+      .stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, revision.environmentId)!
     for (const source of Object.values(library.revisions)) {
       if (source.contentDigest === revision.digest) continue
       const parsed = await parseMethod(apparatus.domain, source.manifest)
       if (parsed.domain.templates.get(provenance.id)?.digest !== provenance.digest) continue
-      const frozen = (await loadMethod(apparatus, { environmentId: revision.environmentId,
-        revisionId: source.revisionId, digest: source.contentDigest })).domain.templates.get(provenance.id)!
+      const frozen = (
+        await loadMethod(apparatus, {
+          environmentId: revision.environmentId,
+          revisionId: source.revisionId,
+          digest: source.contentDigest,
+        })
+      ).domain.templates.get(provenance.id)!
       const templates = new Map(loaded.domain.contractTemplates)
       templates.set(frozen.id, frozen)
-      loaded.domain = { ...loaded.domain, contractTemplates: templates,
-        verifiers: [...loaded.domain.verifiers, ...frozen.checks.map(check => check.verifier)
-          .filter(verifier => !loaded.domain.verifiers.some(held => held.ref === verifier.ref && held.version === verifier.version))] }
+      loaded.domain = {
+        ...loaded.domain,
+        contractTemplates: templates,
+        verifiers: [
+          ...loaded.domain.verifiers,
+          ...frozen.checks
+            .map(check => check.verifier)
+            .filter(
+              verifier =>
+                !loaded.domain.verifiers.some(held => held.ref === verifier.ref && held.version === verifier.version),
+            ),
+        ],
+      }
       break
     }
     templateOf(loaded.domain, provenance)
   }
   for (const verifier of loaded.domain.verifiers) {
-    if (!apparatus.implementations.some(
-        (existing) => existing.ref === verifier.ref && existing.version === verifier.version,
-      )) {
+    if (
+      !apparatus.implementations.some(
+        existing => existing.ref === verifier.ref && existing.version === verifier.version,
+      )
+    ) {
       apparatus.implementations.push(verifier)
-      apparatus.store.declareSubject(`verifier:${verifier.ref}@${verifier.version}`, `${apparatus.controlId}:verifier:${verifier.ref}@${verifier.version}`,
+      apparatus.store.declareSubject(
+        `verifier:${verifier.ref}@${verifier.version}`,
+        `${apparatus.controlId}:verifier:${verifier.ref}@${verifier.version}`,
       )
     }
   }
   return loaded
 }
 export function publishedMethod(apparatus: Apparatus): RevisionRef | undefined {
-  const library = apparatus.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, methodEnvironment(apparatus))
-  return library?.pointer === undefined ? undefined : { environmentId: library.environmentId, revisionId: library.pointer, digest: library.revisions[library.pointer]!.contentDigest,
+  const library = apparatus.store
+    .load()
+    .stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, methodEnvironment(apparatus))
+  return library?.pointer === undefined
+    ? undefined
+    : {
+        environmentId: library.environmentId,
+        revisionId: library.pointer,
+        digest: library.revisions[library.pointer]!.contentDigest,
       }
 }
-export async function methodForRun(apparatus: Apparatus, run: RunState,
+export async function methodForRun(
+  apparatus: Apparatus,
+  run: RunState,
 ): Promise<{
   reference: RevisionRef
   assets: MethodAssets
@@ -310,7 +461,7 @@ export async function methodForRun(apparatus: Apparatus, run: RunState,
   bindings: MethodBindings
 }> {
   const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()].find(
-    (task) => task.runs[run.runId] !== undefined,
+    task => task.runs[run.runId] !== undefined,
   )!
   const { assets, domain } = await loadMethod(apparatus, run.revision, task.contract!.template)
   return {

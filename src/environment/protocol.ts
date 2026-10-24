@@ -176,9 +176,10 @@ export function declareEnvironmentProtocol(registry: ProtocolRegistry): void {
             // for an existing id digests differently from the one that created it.
             refuse(
               'revision-conflict',
-              `${where} re-creates revision "${payload.revisionId}" with content ${
-                contentDigest.slice(0, 12)
-              }… but that id was created with ${existing.contentDigest.slice(
+              `${where} re-creates revision "${payload.revisionId}" with content ${contentDigest.slice(
+                0,
+                12,
+              )}… but that id was created with ${existing.contentDigest.slice(
                 0,
                 12,
               )}…; a revision id names exactly one content`,

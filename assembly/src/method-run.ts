@@ -2,29 +2,48 @@ import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../../src/agent/protocol.ts'
-import type { SkillCandidate } from '@deepseek-ai/dsh-skill'
+import SkillRegistry, { type SkillCandidate } from '@deepseek-ai/dsh-skill'
+import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { TASK_PROTOCOL, TASK_VERSION, type RunState, type TaskState } from '../../src/task/protocol.ts'
 import { taskStateOf, type Apparatus, type Caller } from './apparatus.ts'
 import { workspaceOf } from './attempt.ts'
 import { methodForRun, methodToolReferences } from './method.ts'
-import { assertActive } from './coordination.ts'
+import { assertActive, waitingReason } from './coordination.ts'
 import type { RevisionRef } from '../../src/task/protocol.ts'
 import { templateOf } from './domain.ts'
 import { spawnProcess } from './process.ts'
 import { assertRunFile } from './workspace.ts'
 
-export async function consumeMethod(apparatus: Apparatus, taskId: string, run: RunState, asset: string, source: string, mode: import('../../src/task/run.ts').ConsumptionMode = 'read',
+export async function consumeMethod(
+  apparatus: Apparatus,
+  taskId: string,
+  run: RunState,
+  asset: string,
+  source: string,
+  mode: import('../../src/task/run.ts').ConsumptionMode = 'read',
 ): Promise<void> {
-  if (taskStateOf(apparatus, taskId).runs[run.runId]!.consumed.some((entry) => entry.method === asset && entry.mode === mode)) return
-  await apparatus.tasks.recordConsumption({ commandId: `consume:${taskId}/${run.runId}/${asset}/${mode}`, taskId,
-    runId: run.runId, revision: run.revision, method: asset, mode, source: `${run.revision.digest}/${source}`,
+  if (
+    taskStateOf(apparatus, taskId).runs[run.runId]!.consumed.some(
+      entry => entry.method === asset && entry.mode === mode,
+    )
+  )
+    return
+  await apparatus.tasks.recordConsumption({
+    commandId: `consume:${taskId}/${run.runId}/${asset}/${mode}`,
+    taskId,
+    runId: run.runId,
+    revision: run.revision,
+    method: asset,
+    mode,
+    source: `${run.revision.digest}/${source}`,
   })
 }
 function workingFor(apparatus: Apparatus, agentId: string) {
-  const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()]
-    .findLast((task) => task.responsibility?.agentId === agentId)
+  const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()].findLast(
+    task => task.responsibility?.agentId === agentId,
+  )
   const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
   return task !== undefined && run?.status === 'running' && run.stage === 'working' ? { task, run } : undefined
 }
@@ -32,9 +51,11 @@ async function skillsFor(apparatus: Apparatus, agentId: string) {
   const working = workingFor(apparatus, agentId)
   if (working === undefined) return []
   const { task, run } = working
+  if (waitingReason(apparatus, task.taskId) !== undefined) return []
   const { reference, assets, bindings } = await methodForRun(apparatus, run)
-  return assets.skills.filter((skill) => bindings.skills.some((binding) => binding.name === skill.name))
-    .map((skill) => ({ taskId: task.taskId, run, reference, skill }))
+  return assets.skills
+    .filter(skill => bindings.skills.some(binding => binding.name === skill.name))
+    .map(skill => ({ taskId: task.taskId, run, reference, skill }))
 }
 export interface MethodContext {
   readonly method: RevisionRef
@@ -49,6 +70,7 @@ export interface MethodContext {
   }[]
   readonly tools: readonly {
     readonly name: string
+    readonly description: string
     readonly digest: string
     readonly ref: string
     readonly call: {
@@ -64,35 +86,54 @@ export interface MethodContext {
     readonly baseline: number
     readonly unit: string
     readonly direction: 'higher' | 'lower'
-    readonly conditions: readonly string[] }
+    readonly conditions: readonly string[]
+  }
 }
 export async function methodContext(apparatus: Apparatus, taskId: string, run: RunState): Promise<MethodContext> {
   const { reference, assets, domain, bindings } = await methodForRun(apparatus, run)
   const contract = taskStateOf(apparatus, taskId).contract!
-  const template = contract.template === undefined ? undefined : domain.templates.get(contract.template.id) ?? templateOf(domain, contract.template)
-  return { method: reference, workflowGuidance: assets.workflowGuidance, template: template === undefined ? null : { id: template.id, digest: template.digest },
+  const template =
+    contract.template === undefined
+      ? undefined
+      : (domain.templates.get(contract.template.id) ?? templateOf(domain, contract.template))
+  return {
+    method: reference,
+    workflowGuidance: assets.workflowGuidance,
+    template: template === undefined ? null : { id: template.id, digest: template.digest },
     ...(template?.guidance === undefined ? {} : { guidance: template.guidance }),
-    skills: bindings.skills.map((binding) => {
-      const skill = assets.skills.find((skill) => skill.name === binding.name)!
-      return { ...binding, description: skill.description,
-        read: { tool: 'skill', arguments: { name: skill.name } },
-      }
+    skills: bindings.skills.map(binding => {
+      const skill = assets.skills.find(skill => skill.name === binding.name)!
+      return { ...binding, description: skill.description, read: { tool: 'skill', arguments: { name: skill.name } } }
     }),
-    tools: bindings.tools.map((binding) => {
-      const tool = assets.tools.find((tool) => tool.name === binding.name)!
-      return { ...binding, ref: join(apparatus.workspaceRoot, 'assets', reference.digest, `${tool.name}.mjs`),
-        call: { tool: 'singularity_run_method', arguments: { tool: tool.name,
-          ...(tool.verifier === undefined ? {} : { candidatePath: contract.artifact }),
-        } },
-        candidatePath: tool.verifier === undefined ? 'optional existing workspace file' : 'required existing workspace file',
+    tools: bindings.tools.map(binding => {
+      const tool = assets.tools.find(tool => tool.name === binding.name)!
+      return {
+        ...binding,
+        description:
+          tool.description ??
+          `Run ${tool.name} on frozen contract inputs${tool.verifier === undefined ? ' and an optional candidatePath' : ' and the required candidatePath'}; artifact returns stdout text.`,
+        ref: join(apparatus.workspaceRoot, 'assets', reference.digest, `${tool.name}.mjs`),
+        call: {
+          tool: 'singularity_run_method',
+          arguments: { tool: tool.name, ...(tool.verifier === undefined ? {} : { candidatePath: contract.artifact }) },
+        },
+        candidatePath:
+          tool.verifier === undefined ? 'optional existing workspace file' : 'required existing workspace file',
       }
     }),
     gaps: bindings.gaps,
     references: [...domain.references, ...methodToolReferences(apparatus, run)],
-    ...(domain.measurement === undefined ? {} : { measurement: { module: domain.measurement.module,
-      baseline: domain.measurement.baseline, unit: domain.measurement.unit, direction: domain.measurement.direction,
-      conditions: domain.measurement.conditions,
-    } }),
+    ...(domain.measurement === undefined
+      ? {}
+      : {
+          measurement: {
+            module: domain.measurement.module,
+            baseline: domain.measurement.baseline,
+            unit: domain.measurement.unit,
+            direction: domain.measurement.direction,
+            conditions: domain.measurement.conditions,
+          },
+        }),
   }
 }
 /** Delivery means the exact method packet exists in the durable native inbox or entered message. */
@@ -106,83 +147,191 @@ export async function confirmWorkflowDelivery(apparatus: Apparatus, taskId: stri
   const handle = await apparatus.persistence.open(SessionId(node.sessionId), 'read')
   try {
     for (const event of (await handle.read()).events) {
-      const messages = event.type === 'user/message' ? [event.data] : event.type === 'agent/inbox/spliced' ? event.data.inserted : []
+      const messages =
+        event.type === 'user/message' ? [event.data] : event.type === 'agent/inbox/spliced' ? event.data.inserted : []
       for (const message of messages) {
         const source = message.source
-        if (source.kind !== 'singularity' || source.controlId !== apparatus.controlId || source.taskId !== taskId || source.runId !== run.runId || source.purpose !== 'dispatch') continue
-        const packet = JSON.parse(message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')) as { method?: MethodContext }
-        if (digestOf(packet.method ?? null) !== digestOf(context)) refuse('command-conflict', 'native dispatch contains a different pinned method packet')
-        await consumeMethod(apparatus, taskId, run, 'workflowGuidance', `native-delivery:${node.sessionId}/${event.seq}`, 'delivered')
+        if (
+          source.kind !== 'singularity' ||
+          source.controlId !== apparatus.controlId ||
+          source.taskId !== taskId ||
+          source.runId !== run.runId ||
+          source.purpose !== 'dispatch'
+        )
+          continue
+        const packet = JSON.parse(
+          message.content
+            .filter(c => c.type === 'text')
+            .map(c => c.text)
+            .join('\n'),
+        ) as { method?: MethodContext }
+        if (digestOf(packet.method ?? null) !== digestOf(context))
+          refuse('command-conflict', 'native dispatch contains a different pinned method packet')
+        await consumeMethod(
+          apparatus,
+          taskId,
+          run,
+          'workflowGuidance',
+          `native-delivery:${node.sessionId}/${event.seq}`,
+          'delivered',
+        )
         return true
       }
     }
     return false
-  } finally { await handle.close() }
+  } finally {
+    await handle.close()
+  }
 }
 
 export async function readMethodContext(apparatus: Apparatus, taskId: string, run: RunState): Promise<MethodContext> {
   const context = await methodContext(apparatus, taskId, run)
   if (context.workflowGuidance !== '')
-    await consumeMethod(apparatus, taskId, run, 'workflowGuidance', `read:workflow:${digestOf(context.workflowGuidance)}`)
+    await consumeMethod(
+      apparatus,
+      taskId,
+      run,
+      'workflowGuidance',
+      `read:workflow:${digestOf(context.workflowGuidance)}`,
+    )
   if (context.guidance !== undefined) {
     const template = context.template!
-    await consumeMethod(apparatus, taskId, run, `guidance:${template.id}`, `read:guidance:${template.id}:${template.digest}`)
+    await consumeMethod(
+      apparatus,
+      taskId,
+      run,
+      `guidance:${template.id}`,
+      `read:guidance:${template.id}:${template.digest}`,
+    )
   }
   return context
 }
-export async function mountMethodSkills(apparatus: Apparatus, agent: Agent): Promise<void> {
-  const ctx = agent.ctx
+export async function mountMethodSkills(
+  apparatus: Apparatus,
+  agent: Agent,
+): Promise<import('@deepseek-ai/dsh-skill').SkillRegistry> {
+  // A separate native registry prevents deployment/global/filesystem providers
+  // from contributing either catalog entries or loaded content to this Run.
+  const ctx = agent.ctx.isolate('skills')
+  await ctx.plugin(SkillRegistry)
+  await ctx.plugin(ToolSkill)
   const skills = ctx.get('skills') as import('@deepseek-ai/dsh-skill').SkillRegistry
   const provider = `singularity-${agent.id}`
-  await ctx.plugin({ name: 'singularity-revision-skills', apply: (scope: typeof ctx) => {
-    scope.effect(() => skills.registerProvider(() => ({ name: provider,
-      list: async () => ({ complete: false,
-        candidates: (await skillsFor(apparatus, String(agent.id))).map(({ skill, taskId, run, reference }): SkillCandidate => ({
-          name: skill.name, description: skill.description, source: 'runtime', provider, rank: 0,
-          invocation: { modelInvocable: true, userInvocable: true },
-          locator: { taskId, runId: run.runId, methodDigest: reference.digest, name: skill.name, digest: digestOf(skill) },
+  await ctx.plugin({
+    name: 'singularity-revision-skills',
+    apply: (scope: typeof ctx) => {
+      scope.effect(() =>
+        skills.registerProvider(() => ({
+          name: provider,
+          list: async () => ({
+            complete: false,
+            candidates: (await skillsFor(apparatus, String(agent.id))).map(
+              ({ skill, taskId, run, reference }): SkillCandidate => ({
+                name: skill.name,
+                description: skill.description,
+                source: 'runtime',
+                provider,
+                rank: 0,
+                invocation: { modelInvocable: true, userInvocable: true },
+                locator: {
+                  taskId,
+                  runId: run.runId,
+                  methodDigest: reference.digest,
+                  name: skill.name,
+                  digest: digestOf(skill),
+                },
+              }),
+            ),
+          }),
+          get: async candidate => {
+            const locator = candidate.locator as {
+              taskId: string
+              runId: string
+              methodDigest: string
+              name: string
+              digest: string
+            }
+            const held = (await skillsFor(apparatus, String(agent.id))).find(
+              entry =>
+                entry.taskId === locator.taskId &&
+                entry.run.runId === locator.runId &&
+                entry.skill.name === locator.name,
+            )
+            if (
+              held === undefined ||
+              held.reference.digest !== locator.methodDigest ||
+              digestOf(held.skill) !== locator.digest
+            )
+              refuse('unknown-revision', 'Skill binding belongs to another Run')
+            await consumeMethod(
+              apparatus,
+              held.taskId,
+              held.run,
+              `skill:${held.skill.name}`,
+              `skill:${held.skill.name}:${locator.digest}`,
+            )
+            return { ...candidate, content: held.skill.content }
+          },
         })),
-      }),
-      get: async (candidate) => {
-        const locator = candidate.locator as { taskId: string; runId: string; methodDigest: string; name: string; digest: string }
-        const held = (await skillsFor(apparatus, String(agent.id))).find(
-          (entry) => entry.taskId === locator.taskId && entry.run.runId === locator.runId && entry.skill.name === locator.name)
-        if (held === undefined || held.reference.digest !== locator.methodDigest || digestOf(held.skill) !== locator.digest) refuse('unknown-revision', 'Skill binding belongs to another Run')
-        await consumeMethod(apparatus, held.taskId, held.run, `skill:${held.skill.name}`, `skill:${held.skill.name}:${locator.digest}`)
-        return { ...candidate, content: held.skill.content }
-      },
-    })))
-  } })
+      )
+    },
+  })
+  return skills
 }
-export async function runMethodTool(apparatus: Apparatus, caller: Caller, taskId: string, callId: string,
-  signal: AbortSignal, toolName: string, candidatePath?: string,
+export async function runMethodTool(
+  apparatus: Apparatus,
+  caller: Caller,
+  taskId: string,
+  callId: string,
+  signal: AbortSignal,
+  toolName: string,
+  candidatePath?: string,
 ): Promise<{ artifact: string }> {
   const task = taskStateOf(apparatus, taskId)
   if (task.responsibility?.agentId !== caller.agentId) refuse('not-responsible', 'caller does not own this Task')
-  const run = Object.values(task.runs).find((run) => run.status === 'running' && run.stage === 'working')
+  const run = Object.values(task.runs).find(run => run.status === 'running' && run.stage === 'working')
   if (run === undefined) refuse('illegal-transition', 'Task has no working Run')
   assertActive(apparatus, taskId)
   const method = await methodForRun(apparatus, run)
-  const tool = method.assets.tools.find((tool) => tool.name === toolName)
+  const tool = method.assets.tools.find(tool => tool.name === toolName)
   if (tool === undefined) refuse('malformed-declaration', `Tool ${toolName} is absent from the pinned Revision`)
-  if (!method.bindings.tools.some((binding) => binding.name === tool.name && binding.digest === digestOf(tool)))
+  if (!method.bindings.tools.some(binding => binding.name === tool.name && binding.digest === digestOf(tool)))
     refuse('not-responsible', `Tool ${toolName} is not bound to this Task`)
   const workspace = workspaceOf(apparatus, taskId, run.runId)
   const path = join(apparatus.workspaceRoot, 'assets', method.reference.digest, `${tool.name}.mjs`)
   if (tool.verifier !== undefined && candidatePath === undefined)
     refuse('malformed-declaration', 'a verifier Tool requires the artifact candidatePath')
   if (candidatePath !== undefined) await assertRunFile(workspace, candidatePath)
-  const inputArgs = task.contract!.inputs.map((input) => join(workspace, input.name))
+  const inputArgs = task.contract!.inputs.map(input => join(workspace, input.name))
   const candidateArgs = candidatePath === undefined ? [] : [join(workspace, candidatePath)]
-  const result = await spawnProcess({ shell: false, argv: [process.execPath, path,
+  const result = await spawnProcess(
+    {
+      shell: false,
+      argv: [
+        process.execPath,
+        path,
         ...(tool.verifier === undefined ? [...inputArgs, ...candidateArgs] : [...candidateArgs, ...inputArgs]),
       ],
-    }, signal, workspace,
-    { root: workspace, writable: true, protected: run.bubble!.inputs.map((input) => join(workspace, input.name)), references: [...method.domain.references, ...methodToolReferences(apparatus, run)],
+    },
+    signal,
+    workspace,
+    {
+      root: workspace,
+      writable: true,
+      protected: run.bubble!.inputs.map(input => join(workspace, input.name)),
+      references: [...method.domain.references, ...methodToolReferences(apparatus, run)],
     },
   )
   if (result.exitCode !== null)
-    await consumeMethod(apparatus, taskId, run, `tool:${tool.name}`, `tool:${tool.name}:${digestOf(tool)}:${caller.sessionId}/${callId}`, 'invoked')
-  if (result.failure !== undefined || result.exitCode !== 0) throw new Error(result.failure ?? `Tool exited ${result.exitCode}: ${result.stderr}`)
+    await consumeMethod(
+      apparatus,
+      taskId,
+      run,
+      `tool:${tool.name}`,
+      `tool:${tool.name}:${digestOf(tool)}:${caller.sessionId}/${callId}`,
+      'invoked',
+    )
+  if (result.failure !== undefined || result.exitCode !== 0)
+    throw new Error(result.failure ?? `Tool exited ${result.exitCode}: ${result.stderr}`)
   return { artifact: result.stdout }
 }

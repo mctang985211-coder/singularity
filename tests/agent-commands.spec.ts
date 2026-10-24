@@ -8,7 +8,14 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { AGENT_KINDS, AGENT_PROTOCOL, AGENT_VERSION, createAgentNodeCommands, type AgentNodeCommands, type AgentState } from '../src/index.ts'
+import {
+  AGENT_KINDS,
+  AGENT_PROTOCOL,
+  AGENT_VERSION,
+  createAgentNodeCommands,
+  type AgentNodeCommands,
+  type AgentState,
+} from '../src/index.ts'
 import { asyncRefusalOf } from './fixtures.ts'
 import { AGENT, deployment } from './command-fixtures.ts'
 

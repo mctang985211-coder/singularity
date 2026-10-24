@@ -1,6 +1,10 @@
 # context.md —— 当前接手状态
 
-本页替换当前状态；历史证据从 Git 查证，施工顺序只在 [终局计划](task-first-domain-rsi-plan.md) 维护。
+> 文档归档范围：混合历史。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
+当前架构和语义见[架构入口](architecture.md)，本页保留接手状态与裁定；阶段计划和实跑记录按其标注版本解释。
+
+2026-10-24 简化：Task v26 / Review v6 / snapshot v14，五项结果独立投影；unknown 区分审核无法判定与基础设施不可用，缺测不产生数值；三项提案标准、按用途分派审核规则、结构化事件引用和公开 core PR CI 已落地。没有重新运行模型或领域迁移实验，不改写以下历史结论。
 
 2026-10-23 简化：Task v25 新图，节点协议集中、共享步数送达、删除 RSI 资产配额及强制删除；env builder 只整理用户提供的任务、验收、评分与试分工具，空方法由宿主供给。无 suite 不发布；私有验证在报告提交持久化后开始，冷恢复继续同一验收入口。execution profile 从真实 mounted Loader 解析插件，报告引用冻结 round 免去数字重抄。见[审查与实测](prompt-simplification-20261023.md)和[芯片启动说明](rsi-startup-and-chip-workloads.md)。旧实验与批准包保留原样，不向新协议回放。
 

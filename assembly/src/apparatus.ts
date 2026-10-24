@@ -15,7 +15,13 @@ import { ProtocolRegistry } from '../../src/protocol/registry.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { createTaskCommands, type HeldAgent, type TaskCommands } from '../../src/task/commands.ts'
 import type { Bubble } from '../../src/task/bubble.ts'
-import { declareTaskProtocol, SCHEDULER_ROLE, TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type TaskState,
+import {
+  declareTaskProtocol,
+  SCHEDULER_ROLE,
+  TASK_PROTOCOL,
+  TASK_VERSION,
+  verifierRoleOf,
+  type TaskState,
 } from '../../src/task/protocol.ts'
 import type { Domain } from './domain.ts'
 import { declareReviewProtocol, REVIEW_ROLE, REVIEW_DIGEST } from '../../src/review/protocol.ts'
@@ -46,15 +52,21 @@ function subjectsOf(controlId: string, domain: Domain): Record<string, string> {
     [APPROVER_ROLE]: `${controlId}:approver`,
   }
   for (const verifier of domain.verifiers)
-    subjects[verifierRoleOf({ verifierRef: verifier.ref, verifierVersion: verifier.version })] = `${controlId}:verifier:${verifier.ref}@${verifier.version}`
+    subjects[verifierRoleOf({ verifierRef: verifier.ref, verifierVersion: verifier.version })] =
+      `${controlId}:verifier:${verifier.ref}@${verifier.version}`
   if (domain.measurement !== undefined) {
     const criterion = domain.measurement.criterion
     subjects[verifierRoleOf(criterion)] = `${controlId}:verifier:${criterion.verifierRef}@${criterion.verifierVersion}`
   }
   return subjects
 }
-export async function openApparatus(controlId: string, workspaceRoot: string, domain: Domain, persistence: SessionPersistence,
-  attachments: Apparatus['attachments'], projections: SessionProjectionRegistry,
+export async function openApparatus(
+  controlId: string,
+  workspaceRoot: string,
+  domain: Domain,
+  persistence: SessionPersistence,
+  attachments: Apparatus['attachments'],
+  projections: SessionProjectionRegistry,
 ): Promise<Apparatus> {
   const registry = new ProtocolRegistry()
   declareReviewProtocol(registry)
@@ -64,7 +76,12 @@ export async function openApparatus(controlId: string, workspaceRoot: string, do
   declareMeasureProtocol(registry)
   declareStrategyProtocol(registry)
   declareReleaseProtocol(registry)
-  const store = await ControlSessionStore.open({ persistence, controlId, registry, subjects: subjectsOf(controlId, domain), cwd: workspaceRoot,
+  const store = await ControlSessionStore.open({
+    persistence,
+    controlId,
+    registry,
+    subjects: subjectsOf(controlId, domain),
+    cwd: workspaceRoot,
   })
   const implementations = [
     ...domain.verifiers,
@@ -90,17 +107,24 @@ export async function openApparatus(controlId: string, workspaceRoot: string, do
 export interface Caller {
   readonly agentId: string
   readonly sessionId: string
-    readonly model: Bubble['model']
+  readonly model: Bubble['model']
 }
 export function callerOf(agent: Agent | undefined): Caller {
   if (agent === undefined)
-    refuse('unknown-emitter-role', 'this call arrived with no agent, and every fact this package produces is attributed to a caller; an anonymous call is refused rather than attributed to whoever the deployment happens to hold',
+    refuse(
+      'unknown-emitter-role',
+      'this call arrived with no agent, and every fact this package produces is attributed to a caller; an anonymous call is refused rather than attributed to whoever the deployment happens to hold',
     )
   const header = agent.session.requestHeader()
   if (header === undefined)
-    refuse('malformed-declaration', `agent "${agent.id}" has no request header, so the model that produced this program cannot be named; a bubble names what actually ran, never a guess`,
+    refuse(
+      'malformed-declaration',
+      `agent "${agent.id}" has no request header, so the model that produced this program cannot be named; a bubble names what actually ran, never a guess`,
     )
-  return { agentId: agent.id, sessionId: agent.session.id, model: { provider: header.config.provider, model: header.config.model },
+  return {
+    agentId: agent.id,
+    sessionId: agent.session.id,
+    model: { provider: header.config.provider, model: header.config.model },
   }
 }
 export function declareCaller(apparatus: Apparatus, agentId: string): string {
@@ -112,14 +136,20 @@ export function declareCaller(apparatus: Apparatus, agentId: string): string {
 export async function bindCaller(apparatus: Apparatus, caller: Caller): Promise<string> {
   const key = declareCaller(apparatus, caller.agentId)
   if (apparatus.store.load().stateOf(AGENT_PROTOCOL, AGENT_VERSION, caller.agentId) === undefined)
-    await apparatus.agents.open({ commandId: `agent:${caller.agentId}`, agentId: caller.agentId, sessionId: caller.sessionId, role: 'root',
+    await apparatus.agents.open({
+      commandId: `agent:${caller.agentId}`,
+      agentId: caller.agentId,
+      sessionId: caller.sessionId,
+      role: 'root',
     })
   return key
 }
 export function taskStateOf(apparatus: Apparatus, taskId: string): TaskState {
   const state = apparatus.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId)
   if (state === undefined || state.contract === undefined)
-    refuse('illegal-transition', `task "${taskId}" has no admitted contract in this control, so there is nothing to read or submit to`,
+    refuse(
+      'illegal-transition',
+      `task "${taskId}" has no admitted contract in this control, so there is nothing to read or submit to`,
     )
   return state
 }

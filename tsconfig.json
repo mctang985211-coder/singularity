@@ -1,15 +1,10 @@
 {
-  "extends": "./.singularity/tsconfig.host.json",
   "compilerOptions": {
     "target": "es2023",
-    "lib": [
-      "es2023"
-    ],
+    "lib": ["es2023"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "types": [
-      "node"
-    ],
+    "types": ["node"],
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -24,8 +19,5 @@
     "skipLibCheck": true,
     "baseUrl": "."
   },
-  "include": [
-    "src/**/*.ts",
-    "tests/**/*.ts"
-  ]
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
 }

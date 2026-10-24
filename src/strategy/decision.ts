@@ -9,11 +9,10 @@
  * cutoff; a decision computed from facts handed in can, and it produces the same selection no
  * matter which order the candidates finished in.
  *
- * Judgement order, frozen by `docs/phase-cd-design.md` §6.3: admissibility -> noise band -> cost
- * rule -> argmax with a deterministic tie-break. A high score never buys a violated hard
- * constraint: a non-null `inadmissible`, an absent measurement, `constraintsMet === false` or a
- * missing trial all remove the candidate *before* anything is compared, so no quality can
- * compensate for them. No admissible candidate means `winner: null`, which keeps the incumbent.
+ * Judgement order: structural admissibility -> measured improvement -> argmax
+ * with a deterministic tie-break. Hard constraints and complete quality observations
+ * remain mandatory. Missing or increased cost never vetoes a quality gain;
+ * recorded savings can still support an in-band improvement.
  *
  * Every deliberate difference from upstream is listed, with its counterexample vector, in
  * `docs/divergence-ledger.md`.
@@ -24,13 +23,7 @@
 /** One candidate's measurement, already projected by `src/measure/**`. */
 export interface Measurement {
   readonly quality: number
-  /**
-   * The candidate's own cost observation; `null` = unknown, which is not `0`.
-   *
-   * The cost rule does not read this field: it reads the round-relative change frozen in
-   * `History.deltas`, because a change recomputed from the incumbent of the day is exactly the R03
-   * defect, and the incumbent's own cost is deliberately not an input here.
-   */
+  /** Recorded cost for reporting; legacy callers may still supply null. Never used for admission. */
   readonly cost: number | null
   /** The planned trial count (`trials` of `measure@1`), not the number of observations. */
   readonly denominator: number
@@ -64,8 +57,8 @@ export interface History {
   readonly acceptedAssets: readonly string[]
   /**
    * Each slot's gain against **its own round's** incumbent, frozen when it was measured and never
-   * recomputed against today's head (R03). `deltaCost: null` means the change is unknown, which
-   * upstream's `relative_cost_change` silently turns into `0.0`.
+   * recomputed against today's head (R03). `deltaCost` can support a saving; null
+   * means the relative change is undefined (for example a zero baseline), and never blocks quality gains.
    */
   readonly deltas: readonly {
     readonly slot: number
@@ -95,17 +88,6 @@ export interface Selection {
   readonly winner: number | null
   readonly outcomes: readonly Outcome[]
 }
-
-/**
- * Upstream's cost-rule constants (`rrsi/config.py:70-74`), minus the novelty weight `w_n`.
- *
- * §11 gives `select` no policy parameter, so these live here as named constants instead of at call
- * sites. `beta0 = 0.10` is "10% more tokens for free"; `beta1 = 40` is "+1pp of S buys +40% cost";
- * `MAX_COST_INCREASE` is the deliberate +25% ceiling on what a gain may buy (ADR tightening #2).
- */
-const BASE_COST_ALLOWANCE = 0.10
-const GAIN_FUNDED_COST_INCREASE = 40
-const MAX_COST_INCREASE = 0.25
 
 type RoundDelta = History['deltas'][number]
 type Weights = { readonly quality: number; readonly cost: number }
@@ -148,22 +130,22 @@ export function noveltyOf(assets: readonly string[], history: History): number {
   return novelty
 }
 
-/** Steps 1-3 of the frozen order for one slot: admissibility, then the noise band, then cost. */
+/** Cost savings can support improvement; cost gaps or increases cannot veto it. */
 function judge(
   candidate: Candidate,
   delta: RoundDelta | undefined,
   calibration: Calibration,
   weights: Weights,
 ): Verdict {
-  if (candidate.inadmissible !== null)
-    return { admitted: false, reason: `inadmissible: ${candidate.inadmissible}` }
+  if (candidate.inadmissible !== null) return { admitted: false, reason: `inadmissible: ${candidate.inadmissible}` }
   const measurement = candidate.measurement
   if (measurement === null)
     return { admitted: false, reason: 'not measured: the slot has no measurement, so there is nothing to compare' }
   if (!candidate.constraintsMet)
     return {
       admitted: false,
-      reason: 'hard constraint violated: the judgement constraints are not all met, and no quality can compensate for one that is (non-compensating)',
+      reason:
+        'hard constraint violated: the judgement constraints are not all met, and no quality can compensate for one that is (non-compensating)',
     }
   if (measurement.missing > 0)
     return {
@@ -173,28 +155,20 @@ function judge(
   if (delta === undefined)
     return {
       admitted: false,
-      reason: `no frozen gain for slot ${candidate.slot}: the round's facts carry no measurement-time delta, so neither the noise band nor the cost rule has an input`,
+      reason: `no frozen gain for slot ${candidate.slot}: the round's facts carry no measurement-time delta, so the quality comparison has no input`,
     }
   const gain = delta.deltaQuality
-  const cost = delta.deltaCost
-  if (cost === null)
+  if (gain > calibration.floor)
     return {
-      admitted: false,
-      reason: `cost change unknown for slot ${candidate.slot}: refusing instead of reading it as 0.0 (upstream relative_cost_change, rrsi/evaluate.py:131), which would pass the cost rule silently; measure the cost side or drop the candidate`,
+      admitted: true,
+      reason: `admissible: gain ${signed(gain)} is outside the noise band ${bandOf(calibration)}; no cost gate`,
     }
-  if (gain > calibration.floor) {
-    const budget = Math.min(BASE_COST_ALLOWANCE + GAIN_FUNDED_COST_INCREASE * gain, MAX_COST_INCREASE)
-    const admitted = cost <= budget
-    return {
-      admitted,
-      reason: `${admitted ? 'admissible' : 'cost rule failed'}: gain ${signed(gain)} is outside the noise band ${bandOf(calibration)}; cost change ${signed(cost)} ${admitted ? '<=' : '>'} budget ${budget.toFixed(3)} (base ${BASE_COST_ALLOWANCE} + ${GAIN_FUNDED_COST_INCREASE}*dS, capped at ${MAX_COST_INCREASE})`,
-    }
-  }
-  const shaped = weights.quality * gain - weights.cost * cost
+  const saving = Math.max(0, -(delta.deltaCost ?? 0))
+  const shaped = weights.quality * gain + weights.cost * saving
   const admitted = shaped > 0
   return {
     admitted,
-    reason: `${admitted ? 'admissible' : 'in-band candidate'}: gain ${signed(gain)} is inside the noise band ${bandOf(calibration)}, so it is not a gain and funds no cost increase; the in-band rate ${weights.quality}*dS - ${weights.cost}*dC = ${signed(shaped)} ${admitted ? '>' : '<='} 0 (novelty never enters this rule)`,
+    reason: `${admitted ? 'admissible' : 'in-band candidate'}: gain ${signed(gain)} is inside the noise band ${bandOf(calibration)}; quality and recorded savings ${weights.quality}*dS + ${weights.cost}*saving = ${signed(shaped)} ${admitted ? '>' : '<='} 0; no cost gate; novelty never enters this rule`,
   }
 }
 

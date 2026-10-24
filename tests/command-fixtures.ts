@@ -40,7 +40,12 @@ import {
   type EnvironmentState,
 } from '../src/index.ts'
 import { ControlSessionStore } from '../src/control/session-store.ts'
-import { contract as parentContract, INTEGRATION_VERIFIER, SCHEDULER, UNIT_IMPLEMENTATION, UNIT_VERIFIER,
+import {
+  contract as parentContract,
+  INTEGRATION_VERIFIER,
+  SCHEDULER,
+  UNIT_IMPLEMENTATION,
+  UNIT_VERIFIER,
   BUBBLE_MODEL,
   fileAttachment,
 } from './task-fixtures.ts'
@@ -141,7 +146,9 @@ export function revisionDigest(live: Deployment): string {
   return digest
 }
 
-export const pin = (live: Deployment, overrides: Partial<{ environmentId: string; revisionId: string; digest: string }> = {},
+export const pin = (
+  live: Deployment,
+  overrides: Partial<{ environmentId: string; revisionId: string; digest: string }> = {},
 ) => ({
   environmentId: ENVIRONMENT,
   revisionId: REVISION,
@@ -192,7 +199,7 @@ export async function reviewedVerdict(
       inputDigests: run.bubble.inputs,
       files: {
         artifact: fileAttachment(input.verdict.artifactDigest, 'artifact.json'),
-        inputs: run.bubble.inputs.map((i) => ({ name: i.name, attachment: fileAttachment(i.digest, i.name) })),
+        inputs: run.bubble.inputs.map(i => ({ name: i.name, attachment: fileAttachment(i.digest, i.name) })),
       },
       source: { sessionId: 'fixture-source', eventCount: 0, digest: '2'.repeat(64) },
     }
@@ -236,7 +243,7 @@ export async function reviewedVerdict(
   await reviews.complete(
     'complete:' + reviewId,
     reviewId,
-    task.contract!.criteria.map((c) => ({
+    task.contract!.criteria.map(c => ({
       criterionId: c.criterionId,
       verdict: c.criterionId === input.verdict.criterionId ? input.verdict.verdict : 'pass',
       detail: input.verdict.detail ?? 'fixture judgment',

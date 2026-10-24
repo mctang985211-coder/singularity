@@ -16,13 +16,21 @@ import { schedulerMessage } from '../../src/runtime/task-message.ts'
 import { SUBJECT_INPUT } from './review.ts'
 import { sealedBytes } from './sealed.ts'
 import { DEFAULT_WORKFLOW_LIMITS } from '../../src/task/budget.ts'
-import { taskSessionsOf, taskTokenUsage, taskExecutionWindow, completeUsage, billedTokens, executionEvents } from './evaluation-cost.ts'
-export const improvementTools = new Set(['read', 'glob', 'grep', 'write', 'edit',
-  'singularity_read', 'singularity_memory', 'singularity_propose_method', 'singularity_submit'])
-export const improvementTaskId = (taskId: string, runId: string): string => `improve-${sha256(`${taskId}/${runId}`).slice(0, 24)}`
+import {
+  taskSessionsOf,
+  taskTokenUsage,
+  taskExecutionWindow,
+  completeUsage,
+  billedTokens,
+  executionEvents,
+} from './evaluation-cost.ts'
+export { improvementTools } from './tool-policy.ts'
+
+export const improvementTaskId = (taskId: string, runId: string): string =>
+  `improve-${sha256(`${taskId}/${runId}`).slice(0, 24)}`
 export function assertImprovementOwner(apparatus: Apparatus, agentId: string): void {
   const task = [...apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).values()].findLast(
-    (t) => t.responsibility?.agentId === agentId,
+    t => t.responsibility?.agentId === agentId,
   )
   const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
   if (run?.purpose !== 'improve' || run.status !== 'running' || run.stage !== 'working')
@@ -33,48 +41,94 @@ export function assertImprovementOwner(apparatus: Apparatus, agentId: string): v
 export async function explorationOf(apparatus: Apparatus, taskId: string, runId: string): Promise<Buffer> {
   const task = taskStateOf(apparatus, taskId)
   const history = await historyOf(apparatus, [], task.responsibility!.agentId)
-  const ownSession = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility!.agentId)!.sessionId
-  const sessions: { sessionId: string; from: number; complete: boolean; eventCount: number; digest: string; events: readonly SessionEvent[];
-    tokenUsage: ReturnType<typeof taskTokenUsage> }[] = []
+  const ownSession = apparatus.store
+    .load()
+    .stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility!.agentId)!.sessionId
+  const sessions: {
+    sessionId: string
+    from: number
+    complete: boolean
+    eventCount: number
+    digest: string
+    events: readonly SessionEvent[]
+    tokenUsage: ReturnType<typeof taskTokenUsage>
+  }[] = []
   for (const sessionId of taskSessionsOf(apparatus, taskId)) {
     const handle = await apparatus.persistence.open(SessionId(sessionId), 'read')
     try {
       const native = (await handle.read()).events
-      const { events, from, complete } = sessionId === ownSession
-        ? taskExecutionWindow(native, apparatus.controlId, taskId, task.runs[runId]!.submission?.source)
-        : { events: executionEvents(native), from: 0, complete: true }
+      const { events, from, complete } =
+        sessionId === ownSession
+          ? taskExecutionWindow(native, apparatus.controlId, taskId, task.runs[runId]!.submission?.source)
+          : { events: executionEvents(native), from: 0, complete: true }
       assertContiguous(handle.id, events, 0)
-      for (const task of history.tasks) for (const run of task.runs) {
-        const source = run.source
-        if (source?.sessionId !== sessionId) continue
-        if (events.length < source.eventCount || digestOf({ sessionId, eventCount: source.eventCount, events: events.slice(0, source.eventCount) }) !== source.digest)
-          refuse('digest-mismatch', 'sealed exploration transcript changed')
-      }
+      for (const task of history.tasks)
+        for (const run of task.runs) {
+          const source = run.source
+          if (source?.sessionId !== sessionId) continue
+          if (
+            events.length < source.eventCount ||
+            digestOf({ sessionId, eventCount: source.eventCount, events: events.slice(0, source.eventCount) }) !==
+              source.digest
+          )
+            refuse('digest-mismatch', 'sealed exploration transcript changed')
+        }
       const eventCount = events.length
       const tokenUsage = taskTokenUsage(apparatus, handle, events, from)
-      sessions.push({ sessionId, from, eventCount, digest: digestOf({ sessionId, eventCount, events }), events, tokenUsage,
-        complete: complete && Object.values(tokenUsage).every(value => value >= 0) && completeUsage(events.slice(from)) })
-    } finally { await handle.close() }
+      sessions.push({
+        sessionId,
+        from,
+        eventCount,
+        digest: digestOf({ sessionId, eventCount, events }),
+        events,
+        tokenUsage,
+        complete: complete && Object.values(tokenUsage).every(value => value >= 0) && completeUsage(events.slice(from)),
+      })
+    } finally {
+      await handle.close()
+    }
   }
   const states = apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   const usage = sessions.map(({ sessionId, from, complete, eventCount, digest, tokenUsage }) => ({
-    sessionId, from, complete, eventCount, digest, tokenUsage, tokens: billedTokens(tokenUsage), trajectoryRef: sessionId,
+    sessionId,
+    from,
+    complete,
+    eventCount,
+    digest,
+    tokenUsage,
+    tokens: billedTokens(tokenUsage),
+    trajectoryRef: sessionId,
   }))
   const summary = {
     root: { taskId, runId },
-    usage: { source: 'token-meter/tokenUsage', tokens: usage.reduce((total, session) => total + session.tokens, 0),
-      complete: sessions.every(session => session.complete) },
+    usage: {
+      source: 'token-meter/tokenUsage',
+      tokens: usage.reduce((total, session) => total + session.tokens, 0),
+      complete: sessions.every(session => session.complete),
+    },
     methods: history.methods.map(({ reference }) => reference),
-    tasks: history.tasks.map((task) => ({ taskId: task.taskId, contract: task.contract,
-      sessionId: task.sessionId, decomposition: task.decomposition,
-      parentId: task.parent?.id ?? null, questions: task.questions ?? [],
-      runs: task.runs.map((run) => {
+    tasks: history.tasks.map(task => ({
+      taskId: task.taskId,
+      contract: task.contract,
+      sessionId: task.sessionId,
+      decomposition: task.decomposition,
+      parentId: task.parent?.id ?? null,
+      questions: task.questions ?? [],
+      runs: task.runs.map(run => {
         const state = states.get(task.taskId)!.runs[run.runId]!
-        return { runId: run.runId, method: state.revision, status: run.status,
-          failureCause: run.failureCause, failureReason: run.failureReason,
+        return {
+          runId: run.runId,
+          method: state.revision,
+          status: run.status,
+          failureCause: run.failureCause,
+          failureReason: run.failureReason,
           verdicts: state.evidence.map(({ criterionId, verdict, reviewId }) => ({ criterionId, verdict, reviewId })),
-          artifact: state.submission === undefined ? null : { digest: state.submission.artifactDigest, ref: state.submission.files.artifact },
-          consumed: state.consumed, source: run.source,
+          artifact:
+            state.submission === undefined
+              ? null
+              : { digest: state.submission.artifactDigest, ref: state.submission.files.artifact },
+          consumed: state.consumed,
+          source: run.source,
         }
       }),
     })),
@@ -82,8 +136,13 @@ export async function explorationOf(apparatus: Apparatus, taskId: string, runId:
   }
   return Buffer.from(JSON.stringify({ root: { taskId, runId }, summary, sessions }))
 }
-export async function startImprovement(apparatus: Apparatus, seams: ChildSessionSeams, parent: Agent,
-  taskId: string, runId: string, signal: AbortSignal,
+export async function startImprovement(
+  apparatus: Apparatus,
+  seams: ChildSessionSeams,
+  parent: Agent,
+  taskId: string,
+  runId: string,
+  signal: AbortSignal,
 ): Promise<TaskState> {
   signal.throwIfAborted()
   const id = improvementTaskId(taskId, runId)
@@ -103,7 +162,10 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
   await apparatus.agents.open({ commandId: `agent:${agentId}`, agentId, sessionId: agentId, role: 'improve' })
   const commands = apparatus.tasks.forAgent(agentId)
   if (existing === undefined)
-    await commands.admit({ commandId: `admit:${id}`, taskId: id, contract: {
+    await commands.admit({
+      commandId: `admit:${id}`,
+      taskId: id,
+      contract: {
         goal: 'Improve reusable domain methods from frozen exploration evidence using RRSI analysis, an attributable hypothesis, independent screening and isolated evaluation. Use a bounded search; report measured improvement, no improvement or insufficient evidence truthfully.',
         artifact: 'report.json',
         inputs: [{ name: 'subject.json', source: { kind: 'protected', ref: SUBJECT_INPUT, digest: input.digest } }],
@@ -119,23 +181,57 @@ export async function startImprovement(apparatus: Apparatus, seams: ChildSession
   await commands.assign({ commandId: `assign:${id}`, taskId: id, agentId })
   signal.throwIfAborted()
   if (taskStateOf(apparatus, id).workflowLimits === undefined)
-    await apparatus.store.emit({ commandId: `workflow-limits:${id}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
-      subject: id, kind: 'workflow/limits-frozen', as: `agent:${agentId}`, payload: DEFAULT_WORKFLOW_LIMITS })
-  const run = await startAttempt(apparatus, { agentId, sessionId: agentId, model: callerOf(parent).model }, id, id, method, { domain, purpose: 'improve', relatedTo: { taskId, runId } },
+    await apparatus.store.emit({
+      commandId: `workflow-limits:${id}`,
+      protocol: TASK_PROTOCOL,
+      version: TASK_VERSION,
+      subject: id,
+      kind: 'workflow/limits-frozen',
+      as: `agent:${agentId}`,
+      payload: DEFAULT_WORKFLOW_LIMITS,
+    })
+  const run = await startAttempt(
+    apparatus,
+    { agentId, sessionId: agentId, model: callerOf(parent).model },
+    id,
+    id,
+    method,
+    { domain, purpose: 'improve', relatedTo: { taskId, runId } },
   )
   signal.throwIfAborted()
   if (taskStateOf(apparatus, id).search === undefined)
-    await apparatus.store.emit({ commandId: `search:${id}`, protocol: TASK_PROTOCOL, version: TASK_VERSION,
-      kind: 'rsi/search-opened', subject: id, as: `agent:${agentId}`, payload: { runId: run.runId, maxProposals: 6 } })
-  const session = await openChildSession(seams, { agentId: id, cwd: workspaceOf(apparatus, id, run.runId), parent,
+    await apparatus.store.emit({
+      commandId: `search:${id}`,
+      protocol: TASK_PROTOCOL,
+      version: TASK_VERSION,
+      kind: 'rsi/search-opened',
+      subject: id,
+      as: `agent:${agentId}`,
+      payload: { runId: run.runId, maxProposals: 6 },
+    })
+  const session = await openChildSession(seams, {
+    agentId: id,
+    cwd: workspaceOf(apparatus, id, run.runId),
+    parent,
     preset: 'singularity-improve',
-    model: run.bubble!.model, signal, message: schedulerMessage({ kind: 'singularity', purpose: 'dispatch', controlId: apparatus.controlId,
-      parentTaskId: taskId, taskId: id, runId: run.runId, factSeq: 0,
-      }, JSON.stringify({
-      taskId: id, runId: run.runId, contract: taskStateOf(apparatus, id).contract,
+    model: run.bubble!.model,
+    signal,
+    message: schedulerMessage(
+      {
+        kind: 'singularity',
+        purpose: 'dispatch',
+        controlId: apparatus.controlId,
+        parentTaskId: taskId,
+        taskId: id,
+        runId: run.runId,
+        factSeq: 0,
+      },
+      JSON.stringify({
+        taskId: id,
+        runId: run.runId,
+        contract: taskStateOf(apparatus, id).contract,
         method,
         trace: 'subject.json',
-
       }),
     ),
   })

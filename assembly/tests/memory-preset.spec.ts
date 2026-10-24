@@ -202,8 +202,14 @@ it('loads every shipped preset compaction group through native Loader with isola
     const script = join(root, 'host.mjs')
     await writeFile(script, smoke)
     const { stdout } = await run(process.execPath, [script, checkout, root], { timeout: 20_000 })
-    expect(JSON.parse(stdout.trim())).toEqual(['singularity-root', 'singularity-next', 'singularity-review', 'singularity-improve'].map(id => ({
-      id, registered: 'BasicCompactionEngine', durableSummaries: 1,
-    })))
-  } finally { await rm(root, { recursive: true, force: true }) }
+    expect(JSON.parse(stdout.trim())).toEqual(
+      ['singularity-root', 'singularity-next', 'singularity-review', 'singularity-improve'].map(id => ({
+        id,
+        registered: 'BasicCompactionEngine',
+        durableSummaries: 1,
+      })),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 }, 25_000)

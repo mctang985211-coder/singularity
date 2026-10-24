@@ -31,11 +31,10 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       emitter: 'scheduler',
       members: ['runId', 'reason'],
       nested: {},
-      parse: (raw) => {
+      parse: raw => {
         const row = record(raw, 'task closure'),
           reason = text(row, 'reason', 'task closure')
-        if (!['accepted', 'failed', 'cancelled'].includes(reason))
-          refuse('malformed-payload', 'unknown task closure')
+        if (!['accepted', 'failed', 'cancelled'].includes(reason)) refuse('malformed-payload', 'unknown task closure')
         return { runId: text(row, 'runId', 'task closure'), reason: reason as TaskClosure['reason'] }
       },
       reduce: (state, envelope, payload) => {
@@ -57,7 +56,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       emitter: 'scheduler',
       members: ['status', 'detail', 'trace'],
       nested: {},
-      parse: (raw) => {
+      parse: raw => {
         const row = record(raw, 'RSI status'),
           status = text(row, 'status', 'RSI status')
         if (!['pending', 'running', 'completed', 'failed', 'cancelled'].includes(status))
@@ -91,9 +90,12 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
               : state.rsi.status === 'running'
                 ? ['completed', 'failed', 'cancelled']
                 : state.rsi.status === 'failed'
-                  ? state.rsi.trace === undefined ? ['pending', 'cancelled']
-                    : isDeepStrictEqual(payload.trace, state.rsi.trace) ? ['running', 'cancelled'] : ['cancelled']
-                : []
+                  ? state.rsi.trace === undefined
+                    ? ['pending', 'cancelled']
+                    : isDeepStrictEqual(payload.trace, state.rsi.trace)
+                      ? ['running', 'cancelled']
+                      : ['cancelled']
+                  : []
         if (!allowed.includes(payload.status)) refuse('illegal-transition', 'invalid RSI transition')
         return { ...state, rsi: { ...state.rsi, ...payload } }
       },
@@ -103,13 +105,13 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       emitter: 'scheduler',
       members: ['runId', 'roundId', 'round', 'incumbent', 'candidates'],
       nested: {},
-      parse: (raw) => {
+      parse: raw => {
         const row = record(raw, 'round request')
         const round = row['round']
         if (!Number.isSafeInteger(round) || (round as number) < 1) refuse('malformed-payload', 'round must be positive')
         if (!Array.isArray(row['candidates']) || row['candidates'].length === 0)
           refuse('malformed-payload', 'round needs candidates')
-        const candidates = row['candidates'].map((ref) => revisionRef(ref, 'candidate', REVISION_MEMBERS))
+        const candidates = row['candidates'].map(ref => revisionRef(ref, 'candidate', REVISION_MEMBERS))
         if (new Set(candidates.map(ref => ref.digest)).size !== candidates.length)
           refuse('malformed-payload', 'round candidates must be unique revisions')
         return {
@@ -123,12 +125,13 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
       reduce: (state, envelope, payload) => {
         requireResponsible(state, envelope.actor, 'request evaluation')
         const run = requireRun(state, payload.runId, 'request evaluation')
-        if (state.transfer !== undefined) refuse('illegal-transition', 'champion is frozen; search evaluations are closed')
+        if (state.transfer !== undefined)
+          refuse('illegal-transition', 'champion is frozen; search evaluations are closed')
         if (
           run.purpose !== 'improve' ||
           run.status !== 'running' ||
           run.stage !== 'working' ||
-          state.rounds?.some((r) => r.roundId === payload.roundId || r.status === 'pending')
+          state.rounds?.some(r => r.roundId === payload.roundId || r.status === 'pending')
         )
           refuse('illegal-transition', 'evaluation requires a unique working RSI request')
         return { ...state, rounds: [...(state.rounds ?? []), { ...payload, status: 'pending' }] }
@@ -140,7 +143,7 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
         emitter: 'scheduler',
         members: ['roundId', 'status', 'error'],
         nested: {},
-        parse: (raw) => {
+        parse: raw => {
           const row = record(raw, 'round outcome')
           if (row['status'] !== 'completed' && row['status'] !== 'failed')
             refuse('malformed-payload', 'invalid round outcome')
@@ -151,11 +154,11 @@ export function lifecycleKinds(): Readonly<Record<string, KindRule<TaskState>>> 
           }
         },
         reduce: (state, _envelope, payload) => {
-          if (!state.rounds?.some((r) => r.roundId === payload.roundId && r.status === 'pending'))
+          if (!state.rounds?.some(r => r.roundId === payload.roundId && r.status === 'pending'))
             refuse('illegal-transition', 'round is not pending')
           return {
             ...state,
-            rounds: state.rounds.map((r) => (r.roundId === payload.roundId ? { ...r, ...payload } : r)),
+            rounds: state.rounds.map(r => (r.roundId === payload.roundId ? { ...r, ...payload } : r)),
           }
         },
       },

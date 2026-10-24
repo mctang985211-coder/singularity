@@ -38,49 +38,106 @@ const domainDir = fileURLToPath(new URL('../../domain/reference', import.meta.ur
 const roots: string[] = []
 const schedulers: Scheduler[] = []
 afterEach(async () => {
-  await Promise.all(schedulers.splice(0).map((scheduler) => scheduler.close()))
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  await Promise.all(schedulers.splice(0).map(scheduler => scheduler.close()))
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
-const contentOf = (message: UserMessage) => message.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n')
+const contentOf = (message: UserMessage) =>
+  message.content.map(block => (block.type === 'text' ? block.text : '')).join('\n')
 
-
-async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skillContent?: string, requirements: readonly ('required' | 'exploration')[] = ['required', 'required'], limits?: WorkflowLimits) {
+async function setup(
+  maxRuns = 1,
+  dependent: boolean | 'siblings' = false,
+  skillContent?: string,
+  requirements: readonly ('required' | 'exploration')[] = ['required', 'required'],
+  limits?: WorkflowLimits,
+) {
   const root = await mkdtemp(join(tmpdir(), 'assembly-scheduler-'))
   roots.push(root)
   const domain = await loadDomain(domainDir, spawnProcess)
   const medium = new FakePersistence()
-  const apparatus = await openApparatus('scheduler', root, domain, medium as unknown as SessionPersistence, attachmentsAt(root), testProjections,
+  const apparatus = await openApparatus(
+    'scheduler',
+    root,
+    domain,
+    medium as unknown as SessionPersistence,
+    attachmentsAt(root),
+    testProjections,
   )
   const runtime = nativeRuntime()
-  const method = skillContent === undefined ? await seedMethod(apparatus) : await createMethod(apparatus, {
-    workflowGuidance: '', templates: [...domain.templates.values()].map(templateDeclaration),
-    skills: [{ name: 'investigate', description: 'Investigate scoped evidence', capabilities: [], requiredTools: [], content: skillContent }], tools: [],
-  })
-  const addPlan = async (parentTaskId: string, holder: string, parentSession: string, childTaskId: string, model: string,
-    admitChildren = true, childContract?: TaskContract,
+  const method =
+    skillContent === undefined
+      ? await seedMethod(apparatus)
+      : await createMethod(apparatus, {
+          workflowGuidance: '',
+          templates: [...domain.templates.values()].map(templateDeclaration),
+          skills: [
+            {
+              name: 'investigate',
+              description: 'Investigate scoped evidence',
+              capabilities: [],
+              requiredTools: [],
+              content: skillContent,
+            },
+          ],
+          tools: [],
+        })
+  const addPlan = async (
+    parentTaskId: string,
+    holder: string,
+    parentSession: string,
+    childTaskId: string,
+    model: string,
+    admitChildren = true,
+    childContract?: TaskContract,
   ) => {
     const parent = runtime.agent(parentSession, model)
     await bindCaller(apparatus, { agentId: holder, sessionId: parentSession, model: { provider: 'test', model } })
     const template = domain.templates.get(domain.rootTemplate!)!
-    const contract = { ...contractFor(domain, template, 'count letters'), ...(skillContent === undefined ? {} : { skills: ['investigate'] }) }
+    const contract = {
+      ...contractFor(domain, template, 'count letters'),
+      ...(skillContent === undefined ? {} : { skills: ['investigate'] }),
+    }
     await apparatus.tasks.admit({ commandId: 'admit:' + parentTaskId, taskId: parentTaskId, contract })
     await apparatus.tasks.assign({ commandId: 'assign:' + parentTaskId, taskId: parentTaskId, agentId: holder })
-    if (limits !== undefined) await apparatus.store.emit({ commandId: 'limits:' + parentTaskId, protocol: TASK_PROTOCOL, version: TASK_VERSION,
-      kind: 'workflow/limits-frozen', subject: parentTaskId, payload: limits })
-    await startAttempt(apparatus, { agentId: holder, sessionId: parentSession, model: { provider: 'test', model } }, parentTaskId, 'parent-start:' + parentTaskId,
+    if (limits !== undefined)
+      await apparatus.store.emit({
+        commandId: 'limits:' + parentTaskId,
+        protocol: TASK_PROTOCOL,
+        version: TASK_VERSION,
+        kind: 'workflow/limits-frozen',
+        subject: parentTaskId,
+        payload: limits,
+      })
+    await startAttempt(
+      apparatus,
+      { agentId: holder, sessionId: parentSession, model: { provider: 'test', model } },
+      parentTaskId,
+      'parent-start:' + parentTaskId,
       method,
     )
-    const children: { taskId: string; dependsOn: string[]; supports: string[]; maxRuns: number; requirement: 'required' | 'exploration' }[] = [
-      { taskId: childTaskId, dependsOn: [], supports: ['letters'], maxRuns, requirement: requirements[0]! },
-    ]
-    if (dependent) children.push({ taskId: childTaskId + (dependent === 'siblings' ? '-sibling' : '-dependent'),
-      dependsOn: dependent === 'siblings' ? [] : [childTaskId], supports: ['letters'], maxRuns, requirement: requirements[1]!,
+    const children: {
+      taskId: string
+      dependsOn: string[]
+      supports: string[]
+      maxRuns: number
+      requirement: 'required' | 'exploration'
+    }[] = [{ taskId: childTaskId, dependsOn: [], supports: ['letters'], maxRuns, requirement: requirements[0]! }]
+    if (dependent)
+      children.push({
+        taskId: childTaskId + (dependent === 'siblings' ? '-sibling' : '-dependent'),
+        dependsOn: dependent === 'siblings' ? [] : [childTaskId],
+        supports: ['letters'],
+        maxRuns,
+        requirement: requirements[1]!,
       })
     for (const child of admitChildren ? children : []) {
       const childId = String(agentSessionIdOf(child.taskId))
       declareCaller(apparatus, childId)
       await apparatus.agents.open({ commandId: 'open:' + childId, agentId: childId, sessionId: childId, role: 'child' })
-      await apparatus.tasks.admit({ commandId: 'admit:' + child.taskId, taskId: child.taskId, contract: childContract ?? contract,
+      await apparatus.tasks.admit({
+        commandId: 'admit:' + child.taskId,
+        taskId: child.taskId,
+        contract: childContract ?? contract,
       })
       await apparatus.tasks.assign({ commandId: 'assign:' + child.taskId, taskId: child.taskId, agentId: childId })
     }
@@ -101,8 +158,12 @@ async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skill
       join(run.bubble!.workspace.ref, taskStateOf(apparatus, taskId).contract!.artifact),
       pass ? '35' : '0',
     )
-    return await submit(apparatus, fakeExecution(() => undefined), { agentId: id, sessionId: id, model: { provider: 'test', model: 'model-A' } },
-      execFor(child, 'submit:' + run.runId), { taskId, path: taskStateOf(apparatus, taskId).contract!.artifact },
+    return await submit(
+      apparatus,
+      fakeExecution(() => undefined),
+      { agentId: id, sessionId: id, model: { provider: 'test', model: 'model-A' } },
+      execFor(child, 'submit:' + run.runId),
+      { taskId, path: taskStateOf(apparatus, taskId).contract!.artifact },
       new AbortController().signal,
       fixtureReview(apparatus, verdict),
     )
@@ -111,61 +172,80 @@ async function setup(maxRuns = 1, dependent: boolean | 'siblings' = false, skill
 }
 
 describe('fact-driven child scheduling', () => {
-  it.each(['input', 'binding', 'method', 'route'] as const)('settles a parent after a child %s preparation failure, including cold recovery', async (kind) => {
-    const h = await setup(1, false, kind === 'method' ? 'Use reproducible evidence.' : undefined)
-    const contract: TaskContract = { goal: 'Inspect a narrow obligation', artifact: 'finding.txt',
-      inputs: kind === 'input' ? [{ name: 'source.txt', source: { kind: 'protected', ref: 'invented-ref', digest: '0'.repeat(64) } }] : [],
-      criteria: [{ criterionId: 'letters', statement: 'Produce a reproducible finding' }],
-      skills: kind === 'binding' ? ['missing-skill'] : [],
-    }
-    await h.addPlan('broken-parent', 'broken-holder', 'broken-session', 'broken-child', 'model-A', true, contract)
-    if (kind === 'method') {
-      const revision = Object.values(taskStateOf(h.apparatus, 'broken-parent').runs)[0]!.revision
-      const path = join(h.root, 'assets', revision.digest)
-      await rm(path, { recursive: true })
-      await writeFile(path, 'corrupt cached method asset')
-    }
-    if (kind === 'route') vi.spyOn(h.runtime.agents.get('broken-session')!.session, 'requestHeader').mockReturnValue({ config: {} } as never)
-    const scheduler = h.make()
-    await expect(scheduler.advance('broken-parent')).rejects.toMatchObject({ taskId: 'broken-child' })
-    expect(Object.values(taskStateOf(h.apparatus, 'broken-child').runs)).toMatchObject([
-      { status: 'failed', failureCause: 'runtime' },
-    ])
-    expect(Object.values(taskStateOf(h.apparatus, 'broken-child').runs)[0]!.bubble).toBeUndefined()
-    expect(Object.values(taskStateOf(h.apparatus, 'broken-parent').runs)).toMatchObject([{ status: 'failed' }])
-    expect(h.runtime.opened).toEqual([])
-    const count = factsOf(h.medium).length
-    expect(await h.make().advance('broken-parent')).toEqual([])
-    expect(factsOf(h.medium)).toHaveLength(count)
-  })
+  it.each(['input', 'binding', 'method', 'route'] as const)(
+    'settles a parent after a child %s preparation failure, including cold recovery',
+    async kind => {
+      const h = await setup(1, false, kind === 'method' ? 'Use reproducible evidence.' : undefined)
+      const contract: TaskContract = {
+        goal: 'Inspect a narrow obligation',
+        artifact: 'finding.txt',
+        inputs:
+          kind === 'input'
+            ? [{ name: 'source.txt', source: { kind: 'protected', ref: 'invented-ref', digest: '0'.repeat(64) } }]
+            : [],
+        criteria: [{ criterionId: 'letters', statement: 'Produce a reproducible finding' }],
+        skills: kind === 'binding' ? ['missing-skill'] : [],
+      }
+      await h.addPlan('broken-parent', 'broken-holder', 'broken-session', 'broken-child', 'model-A', true, contract)
+      if (kind === 'method') {
+        const revision = Object.values(taskStateOf(h.apparatus, 'broken-parent').runs)[0]!.revision
+        const path = join(h.root, 'assets', revision.digest)
+        await rm(path, { recursive: true })
+        await writeFile(path, 'corrupt cached method asset')
+      }
+      if (kind === 'route')
+        vi.spyOn(h.runtime.agents.get('broken-session')!.session, 'requestHeader').mockReturnValue({
+          config: {},
+        } as never)
+      const scheduler = h.make()
+      await expect(scheduler.advance('broken-parent')).rejects.toMatchObject({ taskId: 'broken-child' })
+      expect(Object.values(taskStateOf(h.apparatus, 'broken-child').runs)).toMatchObject([
+        { status: 'failed', failureCause: 'runtime' },
+      ])
+      expect(Object.values(taskStateOf(h.apparatus, 'broken-child').runs)[0]!.bubble).toBeUndefined()
+      expect(Object.values(taskStateOf(h.apparatus, 'broken-parent').runs)).toMatchObject([{ status: 'failed' }])
+      expect(h.runtime.opened).toEqual([])
+      const count = factsOf(h.medium).length
+      expect(await h.make().advance('broken-parent')).toEqual([])
+      expect(factsOf(h.medium)).toHaveLength(count)
+    },
+  )
 
-  it.each(['maxRuns', 'maxNoProgress'] as const)('settles the parent when %s refuses a child before run/started', async (limit) => {
-    const h = await setup(1, false, undefined, ['required', 'required'], { ...DEFAULT_WORKFLOW_LIMITS, [limit]: 1 })
-    await expect(h.make().advance('parent-task')).rejects.toMatchObject({ taskId: 'child-task', runId: null })
-    expect(Object.keys(taskStateOf(h.apparatus, 'child-task').runs)).toEqual([])
-    expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)).toMatchObject([
-      { status: 'failed', failureReason: expect.stringContaining('workflow budget exhausted') },
-    ])
-    const count = factsOf(h.medium).length
-    expect(await h.make().advance('parent-task')).toEqual([])
-    expect(factsOf(h.medium)).toHaveLength(count)
-    expect(h.runtime.opened).toEqual([])
-  })
+  it.each(['maxRuns', 'maxNoProgress'] as const)(
+    'settles the parent when %s refuses a child before run/started',
+    async limit => {
+      const h = await setup(1, false, undefined, ['required', 'required'], { ...DEFAULT_WORKFLOW_LIMITS, [limit]: 1 })
+      await expect(h.make().advance('parent-task')).rejects.toMatchObject({ taskId: 'child-task', runId: null })
+      expect(Object.keys(taskStateOf(h.apparatus, 'child-task').runs)).toEqual([])
+      expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)).toMatchObject([
+        { status: 'failed', failureReason: expect.stringContaining('workflow budget exhausted') },
+      ])
+      const count = factsOf(h.medium).length
+      expect(await h.make().advance('parent-task')).toEqual([])
+      expect(factsOf(h.medium)).toHaveLength(count)
+      expect(h.runtime.opened).toEqual([])
+    },
+  )
 
-  it.each(['maxRuns', 'maxNoProgress'] as const)('does not mistake a prior failed Run for a retry refused by %s', async (limit) => {
-    const h = await setup(2, false, undefined, ['required', 'required'], { ...DEFAULT_WORKFLOW_LIMITS, [limit]: 2 })
-    const scheduler = h.make()
-    await scheduler.advance('parent-task')
-    await h.answer('child-task', false)
-    await expect(scheduler.advance('parent-task')).rejects.toMatchObject({ taskId: 'child-task', runId: null })
-    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ status: 'failed', failureCause: 'acceptance' }])
-    expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)).toMatchObject([
-      { status: 'failed', failureReason: expect.stringContaining('workflow budget exhausted') },
-    ])
-    const count = factsOf(h.medium).length
-    expect(await h.make().advance('parent-task')).toEqual([])
-    expect(factsOf(h.medium)).toHaveLength(count)
-  })
+  it.each(['maxRuns', 'maxNoProgress'] as const)(
+    'does not mistake a prior failed Run for a retry refused by %s',
+    async limit => {
+      const h = await setup(2, false, undefined, ['required', 'required'], { ...DEFAULT_WORKFLOW_LIMITS, [limit]: 2 })
+      const scheduler = h.make()
+      await scheduler.advance('parent-task')
+      await h.answer('child-task', false)
+      await expect(scheduler.advance('parent-task')).rejects.toMatchObject({ taskId: 'child-task', runId: null })
+      expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([
+        { status: 'failed', failureCause: 'acceptance' },
+      ])
+      expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)).toMatchObject([
+        { status: 'failed', failureReason: expect.stringContaining('workflow budget exhausted') },
+      ])
+      const count = factsOf(h.medium).length
+      expect(await h.make().advance('parent-task')).toEqual([])
+      expect(factsOf(h.medium)).toHaveLength(count)
+    },
+  )
 
   it('resolves the exact parent session and model from its responsibility before dispatch', async () => {
     const h = await setup()
@@ -179,13 +259,27 @@ describe('fact-driven child scheduling', () => {
     expect(contentOf(message)).not.toContain('singularity_create_method')
     expect(contentOf(message)).not.toContain('Supported TaskTemplates:')
     const dispatch = JSON.parse(contentOf(message))
-    expect(Object.keys(dispatch.assigned).sort()).toEqual(['contract', 'method', 'phase', 'runId', 'taskId', 'workspace'])
+    expect(Object.keys(dispatch.assigned).sort()).toEqual([
+      'contract',
+      'method',
+      'phase',
+      'runId',
+      'taskId',
+      'workspace',
+    ])
     expect(Object.keys(dispatch.parent).sort()).toEqual(['dependsOn', 'id', 'requirement', 'runId', 'supports'])
     expect(dispatch).not.toHaveProperty('handoff')
     expect(dispatch.assigned.method).toEqual(run.revision)
     expect(message.source).toMatchObject({ kind: 'singularity', purpose: 'dispatch' })
-    expect(h.runtime.opened[0]!.message!.source).toMatchObject({ kind: 'singularity', controlId: 'scheduler', purpose: 'dispatch', parentTaskId: 'parent-task', taskId: 'child-task', runId: run.runId,
-      factSeq: factsOf(h.medium).find((fact) => fact.kind === TASK_KINDS.runStarted && fact.subject === 'child-task')!.seq,
+    expect(h.runtime.opened[0]!.message!.source).toMatchObject({
+      kind: 'singularity',
+      controlId: 'scheduler',
+      purpose: 'dispatch',
+      parentTaskId: 'parent-task',
+      taskId: 'child-task',
+      runId: run.runId,
+      factSeq: factsOf(h.medium).find(fact => fact.kind === TASK_KINDS.runStarted && fact.subject === 'child-task')!
+        .seq,
     })
   })
 
@@ -200,8 +294,13 @@ describe('fact-driven child scheduling', () => {
     const consumption = run.consumed
     expect(consumption.some(({ method }) => method.startsWith('skill:') || method.startsWith('guidance:'))).toBe(false)
     const directory = await readMethodContext(h.apparatus, 'child-task', run)
-    expect(directory.skills).toMatchObject([{ name: 'investigate', description: 'Investigate scoped evidence',
-      read: { tool: 'skill', arguments: { name: 'investigate' } } }])
+    expect(directory.skills).toMatchObject([
+      {
+        name: 'investigate',
+        description: 'Investigate scoped evidence',
+        read: { tool: 'skill', arguments: { name: 'investigate' } },
+      },
+    ])
     expect(directory.skills[0]).not.toHaveProperty('content')
     expect(JSON.stringify(directory)).not.toContain('Private procedural detail')
     expect(taskStateOf(h.apparatus, 'child-task').runs[run.runId]!.consumed).toEqual(consumption)
@@ -246,7 +345,8 @@ describe('fact-driven child scheduling', () => {
     expect(runs[1]).toMatchObject({ status: 'running', stage: 'working' })
     expect(h.runtime.opened).toHaveLength(1)
     expect(
-      JSON.parse(contentOf(h.runtime.delivered[1]!.message)).previous.findings.map((f: { detail: string }) => f.detail)
+      JSON.parse(contentOf(h.runtime.delivered[1]!.message))
+        .previous.findings.map((f: { detail: string }) => f.detail)
         .join('\n'),
     ).toBe(first.detail)
     expect(contentOf(h.runtime.delivered[1]!.message)).toContain(runs[1]!.bubble!.workspace.ref)
@@ -267,32 +367,48 @@ describe('fact-driven child scheduling', () => {
     expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)!.status).toBe('running')
   })
 
-  it.each(['exhausted', 'unknown', 'runtime'] as const)('stops %s work and notifies the accurate parent once with terminal provenance', async (cause) => {
-    const h = await setup(cause === 'exhausted' ? 1 : 3, true)
-    const scheduler = h.make()
-    await scheduler.advance('parent-task')
-    if (cause === 'exhausted') await h.answer('child-task', false)
-    else if (cause === 'unknown') await h.answer('child-task', true, 'unknown')
-    else {
-      const run = Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]!
-      await h.apparatus.tasks.forAgent(String(agentSessionIdOf('child-task'))).failRun({ commandId: 'runtime', taskId: 'child-task', runId: run.runId, reason: 'provider unavailable' })
-    }
-    expect(await scheduler.advance('parent-task')).toEqual([])
-    expect(await scheduler.advance('parent-task')).toEqual([])
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
-    const notice = h.runtime.delivered.find((entry) => entry.sessionId === 'parent-session')!.message
-    const terminal = factsOf(h.medium).findLast(
-        (fact) => fact.subject === 'child-task' && fact.kind === TASK_KINDS.runFailed,
+  it.each(['exhausted', 'unknown', 'runtime'] as const)(
+    'stops %s work and notifies the accurate parent once with terminal provenance',
+    async cause => {
+      const h = await setup(cause === 'exhausted' ? 1 : 3, true)
+      const scheduler = h.make()
+      await scheduler.advance('parent-task')
+      if (cause === 'exhausted') await h.answer('child-task', false)
+      else if (cause === 'unknown') await h.answer('child-task', true, 'unknown')
+      else {
+        const run = Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]!
+        await h.apparatus.tasks
+          .forAgent(String(agentSessionIdOf('child-task')))
+          .failRun({ commandId: 'runtime', taskId: 'child-task', runId: run.runId, reason: 'provider unavailable' })
+      }
+      expect(await scheduler.advance('parent-task')).toEqual([])
+      expect(await scheduler.advance('parent-task')).toEqual([])
+      expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
+      const notice = h.runtime.delivered.find(entry => entry.sessionId === 'parent-session')!.message
+      const terminal = factsOf(h.medium).findLast(
+        fact => fact.subject === 'child-task' && fact.kind === TASK_KINDS.runFailed,
       )!
-    expect(notice.source).toMatchObject({ kind: 'singularity', purpose: 'plan-outcome', parentTaskId: 'parent-task', taskId: 'child-task', factSeq: terminal.seq,
+      expect(notice.source).toMatchObject({
+        kind: 'singularity',
+        purpose: 'plan-outcome',
+        parentTaskId: 'parent-task',
+        taskId: 'child-task',
+        factSeq: terminal.seq,
       })
-    expect(JSON.parse(contentOf(notice))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
-      completed: 2, requiredFailures: 2 })
-    expect(contentOf(notice)).not.toContain('child-task-dependent')
-    expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)).toMatchObject({
-      status: 'failed', failureCause: cause === 'runtime' ? 'runtime' : 'business', failureReason: expect.stringContaining('required delegated responsibilities ended without verification') })
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId !== 'parent-session')).toHaveLength(1)
-  },
+      expect(JSON.parse(contentOf(notice))).toMatchObject({
+        parentTaskId: 'parent-task',
+        complete: true,
+        completed: 2,
+        requiredFailures: 2,
+      })
+      expect(contentOf(notice)).not.toContain('child-task-dependent')
+      expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)).toMatchObject({
+        status: 'failed',
+        failureCause: cause === 'runtime' ? 'runtime' : 'business',
+        failureReason: expect.stringContaining('required delegated responsibilities ended without verification'),
+      })
+      expect(h.runtime.delivered.filter(entry => entry.sessionId !== 'parent-session')).toHaveLength(1)
+    },
   )
 
   it('wakes the accurate parent after delegated work verifies without passing its own Run', async () => {
@@ -301,86 +417,146 @@ describe('fact-driven child scheduling', () => {
     await scheduler.advance('parent-task')
     await h.answer('child-task', true)
     await scheduler.advance('parent-task')
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
-    const notice = h.runtime.delivered.find((entry) => entry.sessionId === 'parent-session')!.message
-    expect(JSON.parse(contentOf(notice))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
-      completed: 1, requiredFailures: 0 })
-    expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)[0]).toMatchObject({ status: 'running', evidence: [],
+    expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
+    const notice = h.runtime.delivered.find(entry => entry.sessionId === 'parent-session')!.message
+    expect(JSON.parse(contentOf(notice))).toMatchObject({
+      parentTaskId: 'parent-task',
+      complete: true,
+      completed: 1,
+      requiredFailures: 0,
+    })
+    expect(Object.values(taskStateOf(h.apparatus, 'parent-task').runs)[0]).toMatchObject({
+      status: 'running',
+      evidence: [],
     })
     await scheduler.advance('parent-task')
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
+    expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
   })
 
   it('reports a branch outcome while siblings run and all outcomes after they settle', async () => {
-    const h = await setup(1, 'siblings'), scheduler = h.make()
+    const h = await setup(1, 'siblings'),
+      scheduler = h.make()
     await scheduler.advance('parent-task')
     const run = Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]!
-    await h.apparatus.tasks.forAgent(String(agentSessionIdOf('child-task'))).failRun({ commandId: 'runtime', taskId: 'child-task',
-      runId: run.runId, reason: 'provider unavailable' })
+    await h.apparatus.tasks
+      .forAgent(String(agentSessionIdOf('child-task')))
+      .failRun({ commandId: 'runtime', taskId: 'child-task', runId: run.runId, reason: 'provider unavailable' })
     await scheduler.advance('parent-task')
-    expect(h.runtime.delivered.filter((e) => e.sessionId === 'parent-session')).toMatchObject([{ message: { source: { purpose: 'branch-outcome', taskId: 'child-task' } } }])
-    const branch = JSON.parse(contentOf(h.runtime.delivered.find((entry) => entry.sessionId === 'parent-session')!.message))
+    expect(h.runtime.delivered.filter(e => e.sessionId === 'parent-session')).toMatchObject([
+      { message: { source: { purpose: 'branch-outcome', taskId: 'child-task' } } },
+    ])
+    const branch = JSON.parse(
+      contentOf(h.runtime.delivered.find(entry => entry.sessionId === 'parent-session')!.message),
+    )
     expect(branch).toMatchObject({ taskId: 'child-task', runId: run.runId, status: 'failed', verdicts: [] })
     expect(Object.keys(branch)).toEqual(['taskId', 'runId', 'status', 'verdicts'])
     await h.answer('child-task-sibling', true)
     await scheduler.advance('parent-task')
     await scheduler.advance('parent-task')
-    const notices = h.runtime.delivered.filter((e) => e.sessionId === 'parent-session' && e.message.source.kind === 'singularity' && e.message.source.purpose === 'plan-outcome')
+    const notices = h.runtime.delivered.filter(
+      e =>
+        e.sessionId === 'parent-session' &&
+        e.message.source.kind === 'singularity' &&
+        e.message.source.purpose === 'plan-outcome',
+    )
     expect(notices).toHaveLength(1)
     expect(notices[0]!.message.source).toMatchObject({ taskId: 'child-task-sibling' })
-    expect(JSON.parse(contentOf(notices[0]!.message))).toMatchObject({ parentTaskId: 'parent-task', complete: true,
-      completed: 2, requiredFailures: 1 })
+    expect(JSON.parse(contentOf(notices[0]!.message))).toMatchObject({
+      parentTaskId: 'parent-task',
+      complete: true,
+      completed: 2,
+      requiredFailures: 1,
+    })
     expect(contentOf(notices[0]!.message)).not.toContain('provider unavailable')
     expect(contentOf(notices[0]!.message)).not.toContain('artifactDigest')
   })
 
   it('keeps notifications independent of long child contracts and leaves evidence in explicit reads', async () => {
-    const h = await setup(), scheduler = h.make()
+    const h = await setup(),
+      scheduler = h.make()
     const goal = 'Detailed scoped design obligation. '.repeat(500)
-    await h.addPlan('large-parent', 'large-holder', 'large-session', 'large-child', 'model-A', true,
-      { goal, artifact: 'finding.txt', inputs: [], criteria: [{ criterionId: 'finding', statement: 'Return a verified finding' }] })
+    await h.addPlan('large-parent', 'large-holder', 'large-session', 'large-child', 'model-A', true, {
+      goal,
+      artifact: 'finding.txt',
+      inputs: [],
+      criteria: [{ criterionId: 'finding', statement: 'Return a verified finding' }],
+    })
     await scheduler.advance('large-parent')
     await h.answer('large-child', true)
     await scheduler.advance('large-parent')
-    const notice = h.runtime.delivered.find((entry) => entry.sessionId === 'large-session')!.message
-    expect(JSON.parse(contentOf(notice))).toMatchObject({ parentTaskId: 'large-parent', complete: true,
-      completed: 1, requiredFailures: 0 })
+    const notice = h.runtime.delivered.find(entry => entry.sessionId === 'large-session')!.message
+    expect(JSON.parse(contentOf(notice))).toMatchObject({
+      parentTaskId: 'large-parent',
+      complete: true,
+      completed: 1,
+      requiredFailures: 0,
+    })
     expect(contentOf(notice).length).toBeLessThan(600)
     expect(contentOf(notice)).not.toContain(goal)
     expect(contentOf(notice)).not.toContain('Independent fixture judgment')
     expect(taskStateOf(h.apparatus, 'large-child').contract!.goal).toBe(goal)
-    expect(Object.values(taskStateOf(h.apparatus, 'large-child').runs)[0]!.evidence[0]!.detail)
-      .toContain('Independent fixture judgment')
+    expect(Object.values(taskStateOf(h.apparatus, 'large-child').runs)[0]!.evidence[0]!.detail).toContain(
+      'Independent fixture judgment',
+    )
   })
 
-
   it('selects accepted work, cancels unselected exploration durably and does not resume it after recovery', async () => {
-    const h = await setup(2, 'siblings', undefined, ['required', 'exploration']), first = h.make()
+    const h = await setup(2, 'siblings', undefined, ['required', 'exploration']),
+      first = h.make()
     await first.advance('parent-task')
     await h.answer('child-task', true)
     await first.advance('parent-task')
     expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toMatchObject([
       { message: { source: { purpose: 'branch-outcome', taskId: 'child-task' } } },
     ])
-    const outcome = JSON.parse(contentOf(h.runtime.delivered.find(entry => entry.sessionId === 'parent-session')!.message))
-    expect(outcome).toMatchObject({ taskId: 'child-task', status: 'verified', artifactDigest: expect.any(String),
-      verdicts: [expect.objectContaining({ criterionId: 'letters', verdict: 'pass' })] })
+    const outcome = JSON.parse(
+      contentOf(h.runtime.delivered.find(entry => entry.sessionId === 'parent-session')!.message),
+    )
+    expect(outcome).toMatchObject({
+      taskId: 'child-task',
+      status: 'verified',
+      artifactDigest: expect.any(String),
+      verdicts: [expect.objectContaining({ criterionId: 'letters', verdict: 'pass' })],
+    })
     expect(outcome.verdicts.every((finding: Record<string, unknown>) => !Object.hasOwn(finding, 'detail'))).toBe(true)
     const tasks = () => h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
     expect(taskWaitingReason(tasks(), 'parent-task')).toContain('pending')
-    const stop = { commandId: 'select-winner', parentTaskId: 'parent-task', taskIds: ['child-task-sibling'], reason: 'accepted candidate is sufficient' }
+    const stop = {
+      commandId: 'select-winner',
+      parentTaskId: 'parent-task',
+      taskIds: ['child-task-sibling'],
+      reason: 'accepted candidate is sufficient',
+    }
     const fact = await h.apparatus.tasks.forAgent('holder').stopExplorations(stop)
     expect(await h.apparatus.tasks.forAgent('holder').stopExplorations(stop)).toEqual(fact)
     await first.advance('parent-task')
-    const branch = taskStateOf(h.apparatus, 'child-task-sibling'), run = Object.values(branch.runs).at(-1)!
-    expect(run).toMatchObject({ status: 'failed', failureCause: 'runtime', failureReason: expect.stringContaining('accepted candidate is sufficient') })
+    const branch = taskStateOf(h.apparatus, 'child-task-sibling'),
+      run = Object.values(branch.runs).at(-1)!
+    expect(run).toMatchObject({
+      status: 'failed',
+      failureCause: 'runtime',
+      failureReason: expect.stringContaining('accepted candidate is sufficient'),
+    })
     expect(h.runtime.stopped).toContain(String(agentSessionIdOf('child-task-sibling')))
-    expect(projectTree(tasks()).find(plan => plan.parentTaskId === 'parent-task')!.children)
-      .toMatchObject([{ status: 'verified', requirement: 'required' }, { status: 'cancelled', requirement: 'exploration' }])
+    expect(projectTree(tasks()).find(plan => plan.parentTaskId === 'parent-task')!.children).toMatchObject([
+      { status: 'verified', requirement: 'required' },
+      { status: 'cancelled', requirement: 'exploration' },
+    ])
     expect(taskWaitingReason(tasks(), 'parent-task')).toBeUndefined()
     expect(taskWaitingReason(tasks(), branch.taskId)).toContain('stopped')
-    await expect(startAttempt(h.apparatus, { agentId: branch.responsibility!.agentId, sessionId: String(agentSessionIdOf(branch.taskId)),
-      model: { provider: 'test', model: 'model-A' } }, branch.taskId, 'forbidden-retry', run.revision)).rejects.toThrow('stopped')
+    await expect(
+      startAttempt(
+        h.apparatus,
+        {
+          agentId: branch.responsibility!.agentId,
+          sessionId: String(agentSessionIdOf(branch.taskId)),
+          model: { provider: 'test', model: 'model-A' },
+        },
+        branch.taskId,
+        'forbidden-retry',
+        run.revision,
+      ),
+    ).rejects.toThrow('stopped')
     await first.close()
     const before = h.runtime.opened.length
     await h.make().advance('parent-task')
@@ -388,9 +564,15 @@ describe('fact-driven child scheduling', () => {
     expect(Object.values(taskStateOf(h.apparatus, branch.taskId).runs)).toHaveLength(1)
     const parentRun = Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)!
     await writeFile(join(parentRun.bubble!.workspace.ref, 'report.txt'), '35')
-    const result = await submit(h.apparatus, fakeExecution(() => undefined),
+    const result = await submit(
+      h.apparatus,
+      fakeExecution(() => undefined),
       { agentId: 'holder', sessionId: 'parent-session', model: { provider: 'test', model: 'model-A' } },
-      execFor(h.parent, 'parent-selected-submit'), { taskId: 'parent-task', path: 'report.txt' }, new AbortController().signal, fixtureReview(h.apparatus))
+      execFor(h.parent, 'parent-selected-submit'),
+      { taskId: 'parent-task', path: 'report.txt' },
+      new AbortController().signal,
+      fixtureReview(h.apparatus),
+    )
     expect(result.verdict).toBe('pass')
   })
 
@@ -401,51 +583,114 @@ describe('fact-driven child scheduling', () => {
     scheduler = h.make(async request => {
       const session = await h.runtime.open(request)
       if (request.agentId !== 'child-task-sibling') return session
-      return { ...session, close: async () => {
-        // Real submit.finally schedules its parent while dispose waits for its turn.
-        await scheduler.advance('parent-task')
-        await session.close()
-        closed = true
-      } }
+      return {
+        ...session,
+        close: async () => {
+          // Real submit.finally schedules its parent while dispose waits for its turn.
+          await scheduler.advance('parent-task')
+          await session.close()
+          closed = true
+        },
+      }
     })
     await scheduler.advance('parent-task')
     await h.answer('child-task', true)
-    await h.apparatus.tasks.forAgent('holder').stopExplorations({ commandId: 'stop-during-submit',
-      parentTaskId: 'parent-task', taskIds: ['child-task-sibling'], reason: 'required work passed' })
+    await h.apparatus.tasks.forAgent('holder').stopExplorations({
+      commandId: 'stop-during-submit',
+      parentTaskId: 'parent-task',
+      taskIds: ['child-task-sibling'],
+      reason: 'required work passed',
+    })
     await scheduler.advance('parent-task')
     await vi.waitFor(() => expect(closed).toBe(true))
-    expect(taskWaitingReason(h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), 'parent-task')).toBeUndefined()
+    expect(
+      taskWaitingReason(h.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), 'parent-task'),
+    ).toBeUndefined()
     await scheduler.close()
   })
 
   it('restores a persisted stop before attempting acceptance recovery or opening the cancelled session', async () => {
-    const h = await setup(1, 'siblings', undefined, ['required', 'exploration']), first = h.make()
+    const h = await setup(1, 'siblings', undefined, ['required', 'exploration']),
+      first = h.make()
     await first.advance('parent-task')
-    const taskId = 'child-task-sibling', task = taskStateOf(h.apparatus, taskId), run = Object.values(task.runs).at(-1)!
+    const taskId = 'child-task-sibling',
+      task = taskStateOf(h.apparatus, taskId),
+      run = Object.values(task.runs).at(-1)!
     const artifact = await h.apparatus.attachments.saveFile({ name: 'report.txt', data: Buffer.from('35') })
-    await h.apparatus.tasks.forAgent(task.responsibility!.agentId).submitRun({ commandId: 'sealed-before-stop', taskId, runId: run.runId,
-      submission: { requestId: 'sealed-before-stop', requestDigest: sha256('sealed-before-stop'), artifactDigest: sha256('35'),
-        inputDigests: run.bubble!.inputs, files: { artifact, inputs: run.bubble!.inputs.map(input => ({ name: input.name, attachment: input.attachment! })) },
-        source: { sessionId: String(agentSessionIdOf(taskId)), eventCount: 0, digest: sha256('source') } } })
-    const reviewId = 'pending-cancelled-review', reviewerId = 'pending-reviewer'
+    await h.apparatus.tasks.forAgent(task.responsibility!.agentId).submitRun({
+      commandId: 'sealed-before-stop',
+      taskId,
+      runId: run.runId,
+      submission: {
+        requestId: 'sealed-before-stop',
+        requestDigest: sha256('sealed-before-stop'),
+        artifactDigest: sha256('35'),
+        inputDigests: run.bubble!.inputs,
+        files: {
+          artifact,
+          inputs: run.bubble!.inputs.map(input => ({ name: input.name, attachment: input.attachment! })),
+        },
+        source: { sessionId: String(agentSessionIdOf(taskId)), eventCount: 0, digest: sha256('source') },
+      },
+    })
+    const reviewId = 'pending-cancelled-review',
+      reviewerId = 'pending-reviewer'
     declareCaller(h.apparatus, reviewerId)
-    await h.apparatus.agents.open({ commandId: 'pending-reviewer-agent', agentId: reviewerId, sessionId: reviewerId, role: 'review' })
+    await h.apparatus.agents.open({
+      commandId: 'pending-reviewer-agent',
+      agentId: reviewerId,
+      sessionId: reviewerId,
+      role: 'review',
+    })
     h.runtime.agent(reviewerId)
     await createReviewCommands(h.apparatus.store).start('pending-review', reviewId, {
-      target: { kind: 'acceptance', taskId, runId: run.runId, contractDigest: task.contractDigest!, artifactDigest: sha256('35') },
-      subject: await h.apparatus.attachments.saveFile({ name: 'subject.json', data: Buffer.from('{}') }), subjectDigest: sha256('{}'),
-      criteria: task.contract!.criteria, agentId: reviewerId, identity: h.apparatus.store.identityOf('agent:' + reviewerId)!, sessionId: reviewerId,
-      workspace: join(h.root, 'pending-review'), model: run.bubble!.model, method: run.revision,
+      target: {
+        kind: 'acceptance',
+        taskId,
+        runId: run.runId,
+        contractDigest: task.contractDigest!,
+        artifactDigest: sha256('35'),
+      },
+      subject: await h.apparatus.attachments.saveFile({ name: 'subject.json', data: Buffer.from('{}') }),
+      subjectDigest: sha256('{}'),
+      criteria: task.contract!.criteria,
+      agentId: reviewerId,
+      identity: h.apparatus.store.identityOf('agent:' + reviewerId)!,
+      sessionId: reviewerId,
+      workspace: join(h.root, 'pending-review'),
+      model: run.bubble!.model,
+      method: run.revision,
     })
-    await h.apparatus.tasks.forAgent('holder').stopExplorations({ commandId: 'durable-stop', parentTaskId: 'parent-task', taskIds: [taskId],
-      reason: 'use the other candidate' })
+    await h.apparatus.tasks.forAgent('holder').stopExplorations({
+      commandId: 'durable-stop',
+      parentTaskId: 'parent-task',
+      taskIds: [taskId],
+      reason: 'use the other candidate',
+    })
     await first.close()
     await h.apparatus.store.close()
-    const recovered = await openApparatus('scheduler', h.root, h.apparatus.domain, h.medium as never, attachmentsAt(h.root), testProjections)
+    const recovered = await openApparatus(
+      'scheduler',
+      h.root,
+      h.apparatus.domain,
+      h.medium as never,
+      attachmentsAt(h.root),
+      testProjections,
+    )
     let judgements = 0
-    await repair(recovered, async () => { judgements++; return true }, task.responsibility!.agentId)
+    await repair(
+      recovered,
+      async () => {
+        judgements++
+        return true
+      },
+      task.responsibility!.agentId,
+    )
     expect(judgements).toBe(0)
-    expect(taskStateOf(recovered, taskId).runs[run.runId]).toMatchObject({ status: 'failed', failureReason: expect.stringContaining('use the other candidate') })
+    expect(taskStateOf(recovered, taskId).runs[run.runId]).toMatchObject({
+      status: 'failed',
+      failureReason: expect.stringContaining('use the other candidate'),
+    })
     declareCaller(recovered, 'holder')
     const scheduler = createScheduler(recovered, h.runtime.seams, h.runtime.open)
     schedulers.push(scheduler)
@@ -456,36 +701,67 @@ describe('fact-driven child scheduling', () => {
     expect(recovered.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!.status).toBe('failed')
     expect(h.runtime.stopped).toContain(reviewerId)
     await scheduler.advance('parent-task')
-    expect(h.runtime.opened.slice(before).some(request => request.agentId === taskId || request.agentId === reviewerId)).toBe(false)
-    await scheduler.close(); schedulers.splice(schedulers.indexOf(scheduler), 1)
+    expect(
+      h.runtime.opened.slice(before).some(request => request.agentId === taskId || request.agentId === reviewerId),
+    ).toBe(false)
+    await scheduler.close()
+    schedulers.splice(schedulers.indexOf(scheduler), 1)
     await recovered.store.close()
   })
 
   it('cancels delegated descendants and closes their pending question path', async () => {
-    const h = await setup(1, 'siblings', undefined, ['required', 'exploration']), scheduler = h.make()
+    const h = await setup(1, 'siblings', undefined, ['required', 'exploration']),
+      scheduler = h.make()
     await scheduler.advance('parent-task')
-    const parentId = 'child-task-sibling', holder = String(agentSessionIdOf(parentId))
+    const parentId = 'child-task-sibling',
+      holder = String(agentSessionIdOf(parentId))
     const contract = taskStateOf(h.apparatus, parentId).contract!
-    const grandchild = 'nested-exploration', grandchildId = String(agentSessionIdOf(grandchild))
+    const grandchild = 'nested-exploration',
+      grandchildId = String(agentSessionIdOf(grandchild))
     declareCaller(h.apparatus, grandchildId)
-    await h.apparatus.agents.open({ commandId: 'nested-agent', agentId: grandchildId, sessionId: grandchildId, role: 'child' })
+    await h.apparatus.agents.open({
+      commandId: 'nested-agent',
+      agentId: grandchildId,
+      sessionId: grandchildId,
+      role: 'child',
+    })
     const commands = h.apparatus.tasks.forAgent(holder)
     await commands.admit({ commandId: 'nested-admit', taskId: grandchild, contract })
     await commands.assign({ commandId: 'nested-assign', taskId: grandchild, agentId: grandchildId })
-    await commands.decompose({ commandId: 'nested-plan', parentTaskId: parentId, children: [
-      { taskId: grandchild, dependsOn: [], supports: ['letters'], maxRuns: 2, requirement: 'required' },
-    ] })
+    await commands.decompose({
+      commandId: 'nested-plan',
+      parentTaskId: parentId,
+      children: [{ taskId: grandchild, dependsOn: [], supports: ['letters'], maxRuns: 2, requirement: 'required' }],
+    })
     await scheduler.advance(parentId)
-    const childCaller = { agentId: grandchildId, sessionId: grandchildId, model: { provider: 'test', model: 'model-A' } }
-    const question = await askParent(h.apparatus, childCaller, grandchild, { requestKey: 'clarify', question: 'Continue measuring?' })
-    await h.apparatus.tasks.forAgent('holder').stopExplorations({ commandId: 'stop-nested', parentTaskId: 'parent-task',
-      taskIds: [parentId], reason: 'no additional exploration is needed' })
+    const childCaller = {
+      agentId: grandchildId,
+      sessionId: grandchildId,
+      model: { provider: 'test', model: 'model-A' },
+    }
+    const question = await askParent(h.apparatus, childCaller, grandchild, {
+      requestKey: 'clarify',
+      question: 'Continue measuring?',
+    })
+    await h.apparatus.tasks.forAgent('holder').stopExplorations({
+      commandId: 'stop-nested',
+      parentTaskId: 'parent-task',
+      taskIds: [parentId],
+      reason: 'no additional exploration is needed',
+    })
     await scheduler.advance('parent-task')
     expect(Object.values(taskStateOf(h.apparatus, grandchild).runs).at(-1)!.status).toBe('failed')
     expect(h.runtime.stopped).toContain(grandchildId)
-    await expect(askParent(h.apparatus, childCaller, grandchild, { requestKey: 'again', question: 'Can I resume?' })).rejects.toThrow('stopped')
-    await expect(answerChild(h.apparatus, { ...childCaller, agentId: holder, sessionId: holder },
-      { questionId: question.questionId, requestKey: 'late', answer: 'Continue', resolves: true })).rejects.toThrow('stopped')
+    await expect(
+      askParent(h.apparatus, childCaller, grandchild, { requestKey: 'again', question: 'Can I resume?' }),
+    ).rejects.toThrow('stopped')
+    await expect(
+      answerChild(
+        h.apparatus,
+        { ...childCaller, agentId: holder, sessionId: holder },
+        { questionId: question.questionId, requestKey: 'late', answer: 'Continue', resolves: true },
+      ),
+    ).rejects.toThrow('stopped')
     const before = h.runtime.delivered.length
     await deliverQuestions(h.apparatus, h.runtime.seams)
     await scheduler.advance(parentId)
@@ -495,41 +771,77 @@ describe('fact-driven child scheduling', () => {
 
   it('stops pending exploration without starting it and refuses to cancel a required dependency', async () => {
     const h = await setup(1, true, undefined, ['exploration', 'required'])
-    await expect(h.apparatus.tasks.forAgent('holder').stopExplorations({ commandId: 'invalid-stop', parentTaskId: 'parent-task',
-      taskIds: ['child-task'], reason: 'cannot skip required acceptance dependency' })).rejects.toThrow('still depends')
-    await expect(h.apparatus.tasks.forAgent('holder').stopExplorations({ commandId: 'required-stop', parentTaskId: 'parent-task',
-      taskIds: ['child-task-dependent'], reason: 'cannot cancel required work' })).rejects.toThrow('not a stoppable exploration')
+    await expect(
+      h.apparatus.tasks.forAgent('holder').stopExplorations({
+        commandId: 'invalid-stop',
+        parentTaskId: 'parent-task',
+        taskIds: ['child-task'],
+        reason: 'cannot skip required acceptance dependency',
+      }),
+    ).rejects.toThrow('still depends')
+    await expect(
+      h.apparatus.tasks.forAgent('holder').stopExplorations({
+        commandId: 'required-stop',
+        parentTaskId: 'parent-task',
+        taskIds: ['child-task-dependent'],
+        reason: 'cannot cancel required work',
+      }),
+    ).rejects.toThrow('not a stoppable exploration')
     const independent = await setup(1, 'siblings', undefined, ['required', 'exploration'])
-    await independent.apparatus.tasks.forAgent('holder').stopExplorations({ commandId: 'pending-stop', parentTaskId: 'parent-task',
-      taskIds: ['child-task-sibling'], reason: 'one candidate route is sufficient' })
+    await independent.apparatus.tasks.forAgent('holder').stopExplorations({
+      commandId: 'pending-stop',
+      parentTaskId: 'parent-task',
+      taskIds: ['child-task-sibling'],
+      reason: 'one candidate route is sufficient',
+    })
     expect(await independent.make().advance('parent-task')).toEqual(['child-task'])
     expect(Object.values(taskStateOf(independent.apparatus, 'child-task-sibling').runs)).toHaveLength(0)
-    expect(taskSessionsOf(independent.apparatus, 'parent-task')).not.toContain(String(agentSessionIdOf('child-task-sibling')))
-    expect(taskWaitingReason(independent.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), 'parent-task')).toContain('pending')
+    expect(taskSessionsOf(independent.apparatus, 'parent-task')).not.toContain(
+      String(agentSessionIdOf('child-task-sibling')),
+    )
+    expect(
+      taskWaitingReason(
+        independent.apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION),
+        'parent-task',
+      ),
+    ).toContain('pending')
   })
 
   it('refuses a plan outcome without a causal terminal instead of inventing notification provenance', async () => {
     const h = await setup()
     await h.addPlan('missing-parent', 'missing-holder', 'missing-session', 'absent-child', 'model-C', false)
-    expect(await asyncRefusalOf(() => h.make().advance('missing-parent'))).toMatchObject({ code: 'illegal-transition',
+    expect(await asyncRefusalOf(() => h.make().advance('missing-parent'))).toMatchObject({
+      code: 'illegal-transition',
       detail: expect.stringContaining('no admitted contract'),
     })
     expect(h.runtime.delivered).toEqual([])
     expect(h.runtime.opened).toEqual([])
   })
 
-  it.each(['create', 'post'] as const)('records %s failure as runtime, notifies the parent, and returns the dispatch error', async (phase) => {
-    const h = await setup(3)
-    if (phase === 'post') h.runtime.beforePost((id) => { if (id !== 'parent-session') throw new Error('post failed') })
-    const scheduler = h.make(phase === 'create' ? async () => { throw new Error('create failed') } : h.runtime.open,
+  it.each(['create', 'post'] as const)(
+    'records %s failure as runtime, notifies the parent, and returns the dispatch error',
+    async phase => {
+      const h = await setup(3)
+      if (phase === 'post')
+        h.runtime.beforePost(id => {
+          if (id !== 'parent-session') throw new Error('post failed')
+        })
+      const scheduler = h.make(
+        phase === 'create'
+          ? async () => {
+              throw new Error('create failed')
+            }
+          : h.runtime.open,
       )
-    await expect(scheduler.advance('parent-task')).rejects.toThrow(phase + ' failed')
-    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]).toMatchObject({ status: 'failed', failureCause: 'runtime',
+      await expect(scheduler.advance('parent-task')).rejects.toThrow(phase + ' failed')
+      expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]).toMatchObject({
+        status: 'failed',
+        failureCause: 'runtime',
       })
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
-    expect(await scheduler.advance('parent-task')).toEqual([])
-    expect(h.runtime.opened).toHaveLength(phase === 'create' ? 0 : 1)
-  },
+      expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
+      expect(await scheduler.advance('parent-task')).toEqual([])
+      expect(h.runtime.opened).toHaveLength(phase === 'create' ? 0 : 1)
+    },
   )
 
   it('notifies the parent when preparation fails after starting the child Run', async () => {
@@ -539,10 +851,11 @@ describe('fact-driven child scheduling', () => {
     await mkdir(dirname(input), { recursive: true })
     await writeFile(input, 'already exists')
     await expect(h.make().advance('parent-task')).rejects.toMatchObject({ taskId: 'child-task', runId })
-    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ runId, status: 'failed', failureCause: 'runtime' },
+    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([
+      { runId, status: 'failed', failureCause: 'runtime' },
     ])
     expect(h.runtime.opened).toEqual([])
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
+    expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
   })
 
   it('stops and notifies once when a child input loses its authoritative sealed object', async () => {
@@ -550,7 +863,10 @@ describe('fact-driven child scheduling', () => {
     const caller = { agentId: 'holder', sessionId: 'parent-session', model: { provider: 'test', model: 'model-A' } }
     const commands = h.apparatus.tasks.forAgent(caller.agentId)
     const template = h.apparatus.domain.templates.get('extract-letters')!
-    await commands.admit({ commandId: 'producer-admit', taskId: 'producer', contract: contractFor(h.apparatus.domain, template, template.goal),
+    await commands.admit({
+      commandId: 'producer-admit',
+      taskId: 'producer',
+      contract: contractFor(h.apparatus.domain, template, template.goal),
     })
     await commands.assign({ commandId: 'producer-assign', taskId: 'producer', agentId: caller.agentId })
     await startAttempt(h.apparatus, caller, 'producer', 'producer-run', await seedMethod(h.apparatus))
@@ -562,7 +878,12 @@ describe('fact-driven child scheduling', () => {
         .match(/[A-Za-z]/g)!
         .join(''),
     )
-    const result = await submit(h.apparatus, fakeExecution(() => undefined), caller, execFor(h.parent, 'producer-submit'), { taskId: 'producer', path: 'letters.txt' },
+    const result = await submit(
+      h.apparatus,
+      fakeExecution(() => undefined),
+      caller,
+      execFor(h.parent, 'producer-submit'),
+      { taskId: 'producer', path: 'letters.txt' },
       new AbortController().signal,
       fixtureReview(h.apparatus),
     )
@@ -570,16 +891,23 @@ describe('fact-driven child scheduling', () => {
     const producer = taskStateOf(h.apparatus, 'producer').runs[result.runId]!
     await rm(attachmentsAt(h.root).fileHostPath(producer.submission!.files.artifact))
     const consumer = h.apparatus.domain.templates.get('count-letters')!
-    await h.addPlan('artifact-parent', 'artifact-holder', 'artifact-session', 'consumer-task', 'model-A', true,
+    await h.addPlan(
+      'artifact-parent',
+      'artifact-holder',
+      'artifact-session',
+      'consumer-task',
+      'model-A',
+      true,
       contractFor(h.apparatus.domain, consumer, consumer.goal, new Map([['extract-letters', 'producer']])),
     )
     const scheduler = h.make()
     await expect(scheduler.advance('artifact-parent')).rejects.toMatchObject({ taskId: 'consumer-task' })
     expect(await scheduler.advance('artifact-parent')).toEqual([])
-    expect(Object.values(taskStateOf(h.apparatus, 'consumer-task').runs)).toMatchObject([{ status: 'failed', failureCause: 'runtime' },
+    expect(Object.values(taskStateOf(h.apparatus, 'consumer-task').runs)).toMatchObject([
+      { status: 'failed', failureCause: 'runtime' },
     ])
     expect(h.runtime.opened).toEqual([])
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'artifact-session')).toHaveLength(1)
+    expect(h.runtime.delivered.filter(entry => entry.sessionId === 'artifact-session')).toHaveLength(1)
   })
 
   it('rejects a missing recorded parent session before creating a child or starting its Run', async () => {
@@ -603,33 +931,49 @@ describe('fact-driven child scheduling', () => {
   })
 
   it('restores a sealed child for acceptance without waking the executor or creating another Run', async () => {
-    const h = await setup(1, true), first = h.make()
+    const h = await setup(1, true),
+      first = h.make()
     await first.advance('parent-task')
     const run = Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]!
     const artifact = await h.apparatus.attachments.saveFile({ name: 'report.txt', data: Buffer.from('35') })
     await h.apparatus.tasks.forAgent(taskStateOf(h.apparatus, 'child-task').responsibility!.agentId).submitRun({
-      commandId: 'seal-child', taskId: 'child-task', runId: run.runId, submission: {
-        requestId: 'seal-child', requestDigest: sha256('seal-child'), artifactDigest: sha256('35'),
+      commandId: 'seal-child',
+      taskId: 'child-task',
+      runId: run.runId,
+      submission: {
+        requestId: 'seal-child',
+        requestDigest: sha256('seal-child'),
+        artifactDigest: sha256('35'),
         inputDigests: run.bubble!.inputs,
-        files: { artifact, inputs: run.bubble!.inputs.map((input) => ({ name: input.name, attachment: input.attachment! })) },
+        files: {
+          artifact,
+          inputs: run.bubble!.inputs.map(input => ({ name: input.name, attachment: input.attachment! })),
+        },
         source: { sessionId: String(agentSessionIdOf('child-task')), eventCount: 0, digest: sha256('source') },
-      } })
+      },
+    })
     await first.close()
-    const recovered = h.make(async (request) => {
+    const recovered = h.make(async request => {
       const session = await h.runtime.open(request)
       if (request.message === undefined) {
         const held = taskStateOf(h.apparatus, 'child-task').runs[run.runId]!
         await judgeAndRecord(h.apparatus, 'child-task', held, new AbortController().signal, fixtureReview(h.apparatus))
-        await h.apparatus.tasks.settle({ commandId: 'recover-settle', taskId: 'child-task', runId: run.runId },
-          'agent:' + taskStateOf(h.apparatus, 'child-task').responsibility!.agentId)
+        await h.apparatus.tasks.settle(
+          { commandId: 'recover-settle', taskId: 'child-task', runId: run.runId },
+          'agent:' + taskStateOf(h.apparatus, 'child-task').responsibility!.agentId,
+        )
       }
       return session
     })
     expect(await recovered.advance('parent-task')).toEqual(['child-task', 'child-task-dependent'])
     expect(h.runtime.opened[1]).not.toHaveProperty('message')
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === String(agentSessionIdOf('child-task')))).toHaveLength(1)
+    expect(
+      h.runtime.delivered.filter(entry => entry.sessionId === String(agentSessionIdOf('child-task'))),
+    ).toHaveLength(1)
     expect(h.runtime.woken).toEqual([])
-    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ runId: run.runId, status: 'verified' }])
+    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([
+      { runId: run.runId, status: 'verified' },
+    ])
   })
 
   it('resumes a pending working Run with its frozen route after its parent changes model', async () => {
@@ -665,62 +1009,77 @@ describe('fact-driven child scheduling', () => {
     const childId = String(agentSessionIdOf('child-task'))
     h.runtime.routes.set(childId, { provider: 'test', model: 'model-B' })
     await expect(h.make().advance('parent-task')).rejects.toThrow('model route')
-    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ status: 'failed', failureCause: 'runtime' },
+    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([
+      { status: 'failed', failureCause: 'runtime' },
     ])
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === childId)).toHaveLength(1)
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
+    expect(h.runtime.delivered.filter(entry => entry.sessionId === childId)).toHaveLength(1)
+    expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
   })
 
   it('fails an interrupted unprepared Run as runtime without opening a child or starting another Run', async () => {
     const h = await setup(3)
     const revision = Object.values(taskStateOf(h.apparatus, 'parent-task').runs)[0]!.revision
-    await h.apparatus.tasks.forAgent(String(agentSessionIdOf('child-task'))).startRun({ purpose: 'solve', commandId: 'interrupted',
-      taskId: 'child-task', runId: 'unprepared', revision })
+    await h.apparatus.tasks
+      .forAgent(String(agentSessionIdOf('child-task')))
+      .startRun({ purpose: 'solve', commandId: 'interrupted', taskId: 'child-task', runId: 'unprepared', revision })
     await expect(h.make().advance('parent-task')).rejects.toThrow('no prepared execution bubble')
-    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ runId: 'unprepared', status: 'failed', failureCause: 'runtime' },
+    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([
+      { runId: 'unprepared', status: 'failed', failureCause: 'runtime' },
     ])
     expect(h.runtime.opened).toEqual([])
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
+    expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
   })
 
-  it.each(['entered', 'claimed'] as const)('recovers entered work and refuses unconfirmed claimed delivery (%s)', async (state) => {
-    const h = await setup(3)
-    const first = h.make()
-    await first.advance('parent-task')
-    const id = String(agentSessionIdOf('child-task'))
-    const instruction = h.runtime.delivered[0]!.message
-    h.runtime.append(id, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
-    if (state === 'entered') h.runtime.append(id, 'user/message', instruction)
-    await first.close()
-    if (state === 'entered') {
-      await expect(h.make().advance('parent-task')).resolves.toEqual(['child-task'])
-      expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ status: 'running' }])
-      return
-    }
-    await expect(h.make().advance('parent-task')).rejects.toThrow('unconfirmed')
-    expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ status: 'failed', failureCause: 'runtime' },
+  it.each(['entered', 'claimed'] as const)(
+    'recovers entered work and refuses unconfirmed claimed delivery (%s)',
+    async state => {
+      const h = await setup(3)
+      const first = h.make()
+      await first.advance('parent-task')
+      const id = String(agentSessionIdOf('child-task'))
+      const instruction = h.runtime.delivered[0]!.message
+      h.runtime.append(id, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+      if (state === 'entered') h.runtime.append(id, 'user/message', instruction)
+      await first.close()
+      if (state === 'entered') {
+        await expect(h.make().advance('parent-task')).resolves.toEqual(['child-task'])
+        expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([{ status: 'running' }])
+        return
+      }
+      await expect(h.make().advance('parent-task')).rejects.toThrow('unconfirmed')
+      expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toMatchObject([
+        { status: 'failed', failureCause: 'runtime' },
       ])
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === id)).toHaveLength(1)
-    expect(h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')).toHaveLength(1)
-  },
+      expect(h.runtime.delivered.filter(entry => entry.sessionId === id)).toHaveLength(1)
+      expect(h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')).toHaveLength(1)
+    },
   )
 
   it('binds settled evidence to the new parent Run after a retry, without duplicating either notice', async () => {
-    const h = await setup(), scheduler = h.make()
+    const h = await setup(),
+      scheduler = h.make()
     await scheduler.advance('parent-task')
     await h.answer('child-task', true)
     await scheduler.advance('parent-task')
     const first = Object.values(taskStateOf(h.apparatus, 'parent-task').runs).at(-1)!
-    await h.apparatus.tasks.forAgent('holder').failRun({ commandId: 'parent-failed', taskId: 'parent-task',
-      runId: first.runId, reason: 'integration interrupted' })
-    const next = await startAttempt(h.apparatus, { agentId: 'holder', sessionId: 'parent-session',
-      model: { provider: 'test', model: 'model-A' } }, 'parent-task', 'parent-retry', first.revision)
+    await h.apparatus.tasks.forAgent('holder').failRun({
+      commandId: 'parent-failed',
+      taskId: 'parent-task',
+      runId: first.runId,
+      reason: 'integration interrupted',
+    })
+    const next = await startAttempt(
+      h.apparatus,
+      { agentId: 'holder', sessionId: 'parent-session', model: { provider: 'test', model: 'model-A' } },
+      'parent-task',
+      'parent-retry',
+      first.revision,
+    )
     await scheduler.advance('parent-task')
     await scheduler.advance('parent-task')
-    const notices = h.runtime.delivered.filter((entry) => entry.sessionId === 'parent-session')
+    const notices = h.runtime.delivered.filter(entry => entry.sessionId === 'parent-session')
     expect(notices).toHaveLength(2)
-    expect(notices.map((entry) => entry.message.source)).toMatchObject([
-      { runId: first.runId }, { runId: next.runId }])
+    expect(notices.map(entry => entry.message.source)).toMatchObject([{ runId: first.runId }, { runId: next.runId }])
     expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)).toHaveLength(1)
   })
 
@@ -729,8 +1088,13 @@ describe('fact-driven child scheduling', () => {
     const scheduler = h.make()
     await scheduler.advance('parent-task')
     await h.answer('child-task', true)
-    h.runtime.beforePost((id) => { if (id === 'parent-session') throw new Error('parent delivery failed') })
-    await expect(scheduler.advance('parent-task')).rejects.toMatchObject({ parentTaskId: 'parent-task', taskId: 'parent-task', runId: null,
+    h.runtime.beforePost(id => {
+      if (id === 'parent-session') throw new Error('parent delivery failed')
+    })
+    await expect(scheduler.advance('parent-task')).rejects.toMatchObject({
+      parentTaskId: 'parent-task',
+      taskId: 'parent-task',
+      runId: null,
       cause: expect.objectContaining({ message: 'parent delivery failed' }),
     })
     expect(Object.values(taskStateOf(h.apparatus, 'child-task').runs)[0]).toMatchObject({ status: 'verified' })
@@ -738,8 +1102,11 @@ describe('fact-driven child scheduling', () => {
 
   it('surfaces owned child close failure and stops the handle during unload', async () => {
     const h = await setup()
-    const scheduler = h.make(async (request) => ({
-      ...(await h.runtime.open(request)), stop: () => { throw new Error('close failed') },
+    const scheduler = h.make(async request => ({
+      ...(await h.runtime.open(request)),
+      stop: () => {
+        throw new Error('close failed')
+      },
     }))
     await scheduler.advance('parent-task')
     await expect(scheduler.close()).rejects.toThrow('child unload failed')
@@ -748,7 +1115,14 @@ describe('fact-driven child scheduling', () => {
 })
 
 describe('scheduler messages retain native inbox provenance', () => {
-  const source = { kind: 'singularity' as const, purpose: 'dispatch' as const, controlId: 'scheduler', parentTaskId: 'parent-task', taskId: 'child-task', runId: 'r1', factSeq: 10,
+  const source = {
+    kind: 'singularity' as const,
+    purpose: 'dispatch' as const,
+    controlId: 'scheduler',
+    parentTaskId: 'parent-task',
+    taskId: 'child-task',
+    runId: 'r1',
+    factSeq: 10,
   }
   it('posts a new source once and wakes its pending native message without another insertion', async () => {
     const runtime = nativeRuntime()
@@ -763,7 +1137,11 @@ describe('scheduler messages retain native inbox provenance', () => {
     const agent = runtime.agent('child-session')
     const message = schedulerMessage(source, 'solve')
     await postIdentifiedMessage(runtime.seams, agent, message)
-    runtime.append('child-session', 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [],
+    runtime.append('child-session', 'agent/inbox/spliced', {
+      target: 'next-turn',
+      start: 0,
+      removedCount: 1,
+      inserted: [],
     })
     runtime.append('child-session', 'user/message', message)
     expect(await postIdentifiedMessage(runtime.seams, agent, schedulerMessage(source, 'solve'))).toBe('entered')
@@ -774,21 +1152,26 @@ describe('scheduler messages retain native inbox provenance', () => {
     const runtime = nativeRuntime()
     const agent = runtime.agent('child-session')
     await postIdentifiedMessage(runtime.seams, agent, schedulerMessage(source, 'solve'))
-    runtime.append('child-session', 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [],
+    runtime.append('child-session', 'agent/inbox/spliced', {
+      target: 'next-turn',
+      start: 0,
+      removedCount: 1,
+      inserted: [],
     })
-    expect(await asyncRefusalOf(() => postIdentifiedMessage(runtime.seams, agent, schedulerMessage(source, 'solve'))),
-    )
-      .toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('unconfirmed') })
+    expect(
+      await asyncRefusalOf(() => postIdentifiedMessage(runtime.seams, agent, schedulerMessage(source, 'solve'))),
+    ).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('unconfirmed') })
     expect(runtime.delivered).toHaveLength(1)
   })
   it('rejects different content under the same native source without a second insertion', async () => {
     const runtime = nativeRuntime()
     const agent = runtime.agent('child-session')
     await postIdentifiedMessage(runtime.seams, agent, schedulerMessage(source, 'solve'))
-    expect(await asyncRefusalOf(() => postIdentifiedMessage(runtime.seams, agent, schedulerMessage(source, 'different task')),
+    expect(
+      await asyncRefusalOf(() =>
+        postIdentifiedMessage(runtime.seams, agent, schedulerMessage(source, 'different task')),
       ),
-    )
-      .toMatchObject({ code: 'command-conflict' })
+    ).toMatchObject({ code: 'command-conflict' })
     expect(runtime.delivered).toHaveLength(1)
   })
 })

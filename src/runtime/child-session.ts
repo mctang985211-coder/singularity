@@ -15,9 +15,10 @@ export interface ChildSessionSeams {
   readonly agentLoop?: unknown
   readonly agentPresets?:
     | {
-    composeFrom(ctx: unknown, source: unknown): string | undefined
-    mount(ctx: unknown, id: string): Promise<unknown>
-  } | undefined
+        composeFrom(ctx: unknown, source: unknown): string | undefined
+        mount(ctx: unknown, id: string): Promise<unknown>
+      }
+    | undefined
   get?(name: string): unknown
 }
 export interface ChildSessionRequest {
@@ -54,10 +55,13 @@ export async function openChildSession(seams: ChildSessionSeams, request: ChildS
   const persisted = await persistence.stat(agentSessionIdOf(request.agentId))
   const reasoningEffort = (request.parent.session.requestHeader()?.config ?? request.parent.options).reasoningEffort
   const opened = await openAgentSession(seams, {
-    agentId: request.agentId, resume: persisted !== undefined, cwd: request.cwd, parent: request.parent,
+    agentId: request.agentId,
+    resume: persisted !== undefined,
+    cwd: request.cwd,
+    parent: request.parent,
     preset: request.preset ?? 'singularity-next',
     agentOptions: { ...request.model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) },
-    setup: async (ctx) => {
+    setup: async ctx => {
       await presets.mount(ctx, request.preset ?? 'singularity-next')
     },
   })
@@ -67,19 +71,29 @@ export async function openChildSession(seams: ChildSessionSeams, request: ChildS
     request.signal.throwIfAborted()
     let delivery: ChildSession['delivery'] = request.message === undefined ? 'none' : await post(request.message)
     if (opened.resumed && request.message !== undefined && delivery === 'entered') {
-      if (request.message.source.kind !== 'singularity') refuse('malformed-declaration', 'task continuation requires an identified Task source')
-      delivery = await post(schedulerMessage({ ...request.message.source, purpose: 'resume', factSeq: Number(opened.agent.session.seq) },
-        'Continue this exact Task/Run from its durable session and frozen workspace.\n' +
-        request.message.content.filter((block) => block.type === 'text')
-              .map((block) => block.text)
+      if (request.message.source.kind !== 'singularity')
+        refuse('malformed-declaration', 'task continuation requires an identified Task source')
+      delivery = await post(
+        schedulerMessage(
+          { ...request.message.source, purpose: 'resume', factSeq: Number(opened.agent.session.seq) },
+          'Continue this exact Task/Run from its durable session and frozen workspace.\n' +
+            request.message.content
+              .filter(block => block.type === 'text')
+              .map(block => block.text)
               .join('\n'),
         ),
       )
     }
-    return { ...opened, agentId: String(opened.agent.id), delivery, post, stop,
+    return {
+      ...opened,
+      agentId: String(opened.agent.id),
+      delivery,
+      post,
+      stop,
       wait: async () => {
         await opened.agent.whenIdle()
-        if (!(await sessions.flush(opened.agent.session))) refuse('write-not-durable', `session ${opened.sessionId} has no durability listener`)
+        if (!(await sessions.flush(opened.agent.session)))
+          refuse('write-not-durable', `session ${opened.sessionId} has no durability listener`)
       },
       close: () => closeAgentSession(request.agentId),
     }

@@ -13,7 +13,7 @@ import { count, openedKind, requirePlan, type RoundPlan } from './plan.ts'
 export type { RoundPlan } from './plan.ts'
 
 export const STRATEGY_PROTOCOL = 'strategy'
-export const STRATEGY_VERSION = 9
+export const STRATEGY_VERSION = 10
 
 /** The trusted role that freezes a round, receives its candidates and closes it. */
 export const STRATEGY_ROLE = 'strategy'
@@ -101,7 +101,11 @@ export function readCalibration(raw: unknown, where: string, members: MemberSet)
  * could not tell "one change named twice" from "two changes".
  */
 function editList(raw: unknown, where: string, members: MemberSet): readonly StructuralEdit[] {
-  if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of {asset, target}, got ${raw === null ? 'null' : typeof raw}`)
+  if (!Array.isArray(raw))
+    refuse(
+      'malformed-payload',
+      `${where} must be an array of {asset, target}, got ${raw === null ? 'null' : typeof raw}`,
+    )
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const at = `${where}[${index}]`
@@ -109,10 +113,17 @@ function editList(raw: unknown, where: string, members: MemberSet): readonly Str
     assertClosedKeys(source, members, at)
     const asset = source['asset']
     if (typeof asset !== 'string' || !EDIT_ASSETS.includes(asset))
-      refuse('malformed-payload', `${at}.asset must be one of ${EDIT_ASSETS.join(', ')}, got ${JSON.stringify(asset ?? null)}`)
+      refuse(
+        'malformed-payload',
+        `${at}.asset must be one of ${EDIT_ASSETS.join(', ')}, got ${JSON.stringify(asset ?? null)}`,
+      )
     const target = text(source, 'target', at)
     const identity = `${asset}\u0000${target}`
-    if (seen.has(identity)) refuse('malformed-payload', `${where} names the ${asset} edit of ${JSON.stringify(target)} twice; one submission names one structural change per target`)
+    if (seen.has(identity))
+      refuse(
+        'malformed-payload',
+        `${where} names the ${asset} edit of ${JSON.stringify(target)} twice; one submission names one structural change per target`,
+      )
     seen.add(identity)
     return { asset: asset as EditAsset, target }
   })
@@ -121,7 +132,11 @@ function editList(raw: unknown, where: string, members: MemberSet): readonly Str
 /** The submission payload, before the log stamps who submitted it. */
 type Submission = Omit<CandidateSubmission, 'actor' | 'at'>
 
-function submissionPayload(raw: unknown, where: string, nested: { readonly edits: MemberSet; readonly revision: MemberSet }): Submission {
+function submissionPayload(
+  raw: unknown,
+  where: string,
+  nested: { readonly edits: MemberSet; readonly revision: MemberSet },
+): Submission {
   const source = record(raw, where)
   return {
     slot: count(source, 'slot', where),
@@ -135,28 +150,45 @@ function submissionPayload(raw: unknown, where: string, nested: { readonly edits
 
 type Decided = { winner: number | null; outcomes: readonly Outcome[]; calibration: Calibration }
 
-function decidedPayload(raw: unknown, where: string, nested: { readonly outcomes: MemberSet; readonly calibration: MemberSet }): Decided {
+function decidedPayload(
+  raw: unknown,
+  where: string,
+  nested: { readonly outcomes: MemberSet; readonly calibration: MemberSet },
+): Decided {
   const source = record(raw, where)
   const winner = source['winner']
   if (winner !== null && (typeof winner !== 'number' || !Number.isInteger(winner) || winner < 0))
-    refuse('malformed-payload', `${where}.winner must be a slot number or null, got ${winner === undefined ? 'nothing' : JSON.stringify(winner)}`)
+    refuse(
+      'malformed-payload',
+      `${where}.winner must be a slot number or null, got ${winner === undefined ? 'nothing' : JSON.stringify(winner)}`,
+    )
   const rawOutcomes = source['outcomes']
   if (!Array.isArray(rawOutcomes))
-    refuse('malformed-payload', `${where}.outcomes must be an array of {slot, admitted, reason}, got ${rawOutcomes === null ? 'null' : typeof rawOutcomes}`)
+    refuse(
+      'malformed-payload',
+      `${where}.outcomes must be an array of {slot, admitted, reason}, got ${rawOutcomes === null ? 'null' : typeof rawOutcomes}`,
+    )
   const outcomes = rawOutcomes.map((entry, index): Outcome => {
     const at = `${where}.outcomes[${index}]`
     const outcome = record(entry, at)
     assertClosedKeys(outcome, nested.outcomes, at)
     const admitted = outcome['admitted']
     if (typeof admitted !== 'boolean')
-      refuse('malformed-payload', `${at}.admitted must be true or false, got ${admitted === undefined ? 'nothing' : JSON.stringify(admitted)}`)
+      refuse(
+        'malformed-payload',
+        `${at}.admitted must be true or false, got ${admitted === undefined ? 'nothing' : JSON.stringify(admitted)}`,
+      )
     // A reason is required for every slot, admitted or not: "no reason recorded" is how a slot went
     // unaccounted for in the previous system.
     return { slot: count(outcome, 'slot', at), admitted, reason: text(outcome, 'reason', at) }
   })
   // The band is required, not optional: a decision whose basis has to be inferred from the reasons
   // is the sentence-instead-of-a-guarantee this member exists to remove.
-  return { winner, outcomes, calibration: readCalibration(source['calibration'], `${where}.calibration`, nested.calibration) }
+  return {
+    winner,
+    outcomes,
+    calibration: readCalibration(source['calibration'], `${where}.calibration`, nested.calibration),
+  }
 }
 
 /**
@@ -169,7 +201,11 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
     kinds: {
       [STRATEGY_KINDS.roundOpened]: openedKind(STRATEGY_KINDS.roundOpened, STRATEGY_ROLE),
 
-      [STRATEGY_KINDS.candidateSubmitted]: defineKind<RoundState, Submission, { edits: MemberSet; revision: MemberSet }>({
+      [STRATEGY_KINDS.candidateSubmitted]: defineKind<
+        RoundState,
+        Submission,
+        { edits: MemberSet; revision: MemberSet }
+      >({
         guarantees: APPENDED,
         members: SUBMISSION_MEMBERS,
         // `edits[]` and `revision` are closed by their own readers, each handed the set named here:
@@ -236,7 +272,10 @@ export function declareStrategyProtocol(registry: ProtocolRegistry): void {
           const named = payload.outcomes.map(outcome => outcome.slot)
           const repeated = named.filter((slot, index) => named.indexOf(slot) !== index)
           if (repeated.length > 0)
-            refuse('illegal-transition', `${where} closes slot ${repeated[0]} out twice; each declared slot has one disposition`)
+            refuse(
+              'illegal-transition',
+              `${where} closes slot ${repeated[0]} out twice; each declared slot has one disposition`,
+            )
           const missing = declared.filter(slot => !named.includes(slot))
           if (missing.length > 0)
             refuse(

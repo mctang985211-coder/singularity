@@ -90,12 +90,22 @@ const GUARANTEE_KEYS = ['appended', 'atomicFact', 'conditional', 'derived'] as c
 function assertMemberSet(set: unknown, where: string): void {
   // An empty set is a shape, not an omission: a payload that accepts nothing but is still an object.
   if (!Array.isArray(set))
-    refuse('malformed-declaration', `${where} must be an array of member names, got ${set === null ? 'null' : typeof set}`)
+    refuse(
+      'malformed-declaration',
+      `${where} must be an array of member names, got ${set === null ? 'null' : typeof set}`,
+    )
   const seen = new Set<string>()
   for (const name of set as readonly unknown[]) {
     if (typeof name !== 'string' || name.length === 0)
-      refuse('malformed-declaration', `${where} names ${JSON.stringify(name ?? null)}, which is not a member name; a closed set is a list of non-empty strings`)
-    if (seen.has(name as string)) refuse('malformed-declaration', `${where} names ${JSON.stringify(name)} twice; a closed set names each member once`)
+      refuse(
+        'malformed-declaration',
+        `${where} names ${JSON.stringify(name ?? null)}, which is not a member name; a closed set is a list of non-empty strings`,
+      )
+    if (seen.has(name as string))
+      refuse(
+        'malformed-declaration',
+        `${where} names ${JSON.stringify(name)} twice; a closed set names each member once`,
+      )
     seen.add(name as string)
   }
 }
@@ -131,7 +141,10 @@ function assertDeclaredShape(rule: KindRule<unknown>, where: string): void {
   assertMemberSet(rule.members, `${where} declares its payload members`)
   const nested = rule.nested as unknown
   if (nested === undefined)
-    refuse('malformed-declaration', `${where} declares payload members and no nested shape set; state it as {}, so a kind that closes no inner shape says so`)
+    refuse(
+      'malformed-declaration',
+      `${where} declares payload members and no nested shape set; state it as {}, so a kind that closes no inner shape says so`,
+    )
   if (nested === null || typeof nested !== 'object' || Array.isArray(nested))
     refuse('malformed-declaration', `${where} declares a nested shape set that is not a record of member sets`)
   for (const [member, set] of Object.entries(nested as Record<string, unknown>)) {
@@ -165,7 +178,10 @@ function assertGuarantees(guarantees: Guarantees, where: string): void {
       `${where} is derived and appended at once; derived state is folded from persisted facts and is never written`,
     )
   if (record['conditional'] === true && record['appended'] !== true)
-    refuse('unknown-guarantee', `${where} is conditional without being appended; there is no committed state to compare against`)
+    refuse(
+      'unknown-guarantee',
+      `${where} is conditional without being appended; there is no committed state to compare against`,
+    )
 }
 
 /** What the framework needs from one kind, with the payload type erased. */
@@ -287,19 +303,27 @@ export class ProtocolRegistry {
 
     let conditionalClaimant: string | undefined
     for (const kind of kinds) {
-      if (kind.length === 0) refuse('malformed-declaration', `protocol ${protocol}@${version} declares an empty kind name`)
+      if (kind.length === 0)
+        refuse('malformed-declaration', `protocol ${protocol}@${version} declares an empty kind name`)
       if (!Object.hasOwn(spec.kinds, kind))
         refuse('malformed-declaration', `protocol ${protocol}@${version} kind ${kind} is inherited, not declared`)
       const rule = spec.kinds[kind] as KindRule<State>
       const where = `protocol ${protocol}@${version} kind ${kind}`
       assertGuarantees(rule.guarantees, where)
       if (typeof rule.emitter !== 'function' || typeof rule.parse !== 'function' || typeof rule.reduce !== 'function')
-        refuse('malformed-declaration', `${where} must declare an emitter, a payload parser and a reducer (use defineKind)`)
+        refuse(
+          'malformed-declaration',
+          `${where} must declare an emitter, a payload parser and a reducer (use defineKind)`,
+        )
       assertDeclaredShape(rule as KindRule<unknown>, where)
       if (rule.guarantees.conditional === true) conditionalClaimant = protocol
     }
 
-    if (conditionalClaimant !== undefined && this.#conditionalOwner !== undefined && this.#conditionalOwner !== conditionalClaimant)
+    if (
+      conditionalClaimant !== undefined &&
+      this.#conditionalOwner !== undefined &&
+      this.#conditionalOwner !== conditionalClaimant
+    )
       refuse(
         'second-conditional-owner',
         `protocol ${conditionalClaimant} claims conditional updates while ${this.#conditionalOwner} already owns them; one environment has one authoritative switch path`,

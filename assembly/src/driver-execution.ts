@@ -17,18 +17,25 @@ import { answerChild, askParent, assertActive, directionForRun, parentPlan, wait
 import { workflowSteps } from './evaluation-cost.ts'
 import type { Admission } from './execution.ts'
 import { sha256, taskIdOf } from './ids.ts'
-import { improvementTaskId, improvementTools } from './improvement.ts'
+import { improvementTaskId } from './improvement.ts'
 import { parentMemorySessionsOf, readMemoryForAgent } from './memory-view.ts'
 import { memoryContextOf } from './memory.ts'
 import { confirmWorkflowDelivery, methodContext, mountMethodSkills, runMethodTool } from './method-run.ts'
 import { methodToolReferences } from './method.ts'
-import { ParentMemoryUnavailable, parentMemoryRefOf, prepareParentMemory, readParentMemory, type ParentMemoryRef } from './parent-memory.ts'
+import {
+  ParentMemoryUnavailable,
+  parentMemoryRefOf,
+  prepareParentMemory,
+  readParentMemory,
+  type ParentMemoryRef,
+} from './parent-memory.ts'
 import { readForAgent } from './read.ts'
 import { repair } from './repair.ts'
-import { methodReviewTools, reviewOf, submitReview } from './review.ts'
+import { reviewOf, submitReview } from './review.ts'
 import { linkRsiMemory, rsiMemorySourceOf } from './rsi-memory.ts'
 import { proposeRsiMethod } from './rsi-proposal.ts'
 import { rsiState, rsiToolReason } from './rsi-state.ts'
+import { toolsFor } from './tool-policy.ts'
 import { snapshotOf } from './snapshot.ts'
 import { submit } from './submission.ts'
 import { decompose, propose, retry } from './surfaces.ts'
@@ -38,10 +45,21 @@ import type { RsiLifecycle } from './driver-rsi.ts'
 import type { DriverRuntime } from './driver-runtime.ts'
 import type { TaskDriver } from './task-service.ts'
 
-export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: ReviewLifecycle,
-  rsi: RsiLifecycle) {
-  const { apparatus, options, controller, backgroundErrors, tasks, registry, owner, parentOf,
-    nativeEvents, work, scheduler, evaluation } = runtime
+export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: ReviewLifecycle, rsi: RsiLifecycle) {
+  const {
+    apparatus,
+    options,
+    controller,
+    backgroundErrors,
+    tasks,
+    registry,
+    owner,
+    parentOf,
+    nativeEvents,
+    work,
+    scheduler,
+    evaluation,
+  } = runtime
   const { acceptanceFor, restoreJudgement } = reviewLifecycle
   const { taskSignal, rsiStatus, closeRoot, stopRsiWork, rsiRootOf, schedule } = rsi
   // A live projection, never a persisted counter. Follow acceptance evidence
@@ -56,10 +74,12 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
       if (target !== undefined && target.kind !== 'acceptance') return undefined
       id = target?.kind === 'acceptance' ? target.taskId : parent
     }
-    const root = tasks().get(id), maxSteps = root?.workflowLimits?.maxSteps
+    const root = tasks().get(id),
+      maxSteps = root?.workflowLimits?.maxSteps
     if (maxSteps === undefined || root?.closure !== undefined) return undefined
     const steps = await workflowSteps(apparatus, id, sessionId =>
-      (session?.id === sessionId ? session : registry().get(SessionId(sessionId))?.session)?.snapshotEvents())
+      (session?.id === sessionId ? session : registry().get(SessionId(sessionId))?.session)?.snapshotEvents(),
+    )
     return { rootId: id, steps, maxSteps, remainingSteps: Math.max(0, maxSteps - steps) }
   }
   const memoryRef = async (agentId: string): Promise<ParentMemoryRef | undefined> => {
@@ -67,160 +87,245 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
     if (task === undefined) return undefined
     const parent = parentPlan(apparatus, task.taskId)
     if (parent === undefined) return undefined
-    const cut = apparatus.store.load(), scope = (await memoryContextOf(apparatus, agentId)).scope
+    const cut = apparatus.store.load(),
+      scope = (await memoryContextOf(apparatus, agentId)).scope
     const found: ParentMemoryRef[] = []
-    for (const sessionId of parentMemorySessionsOf(cut, { ...parent, kind: cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).has(parent.id) ? 'task' : 'review' })) {
+    for (const sessionId of parentMemorySessionsOf(cut, {
+      ...parent,
+      kind: cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION).has(parent.id) ? 'task' : 'review',
+    })) {
       const ref = parentMemoryRefOf(sessionId, await nativeEvents(sessionId), scope)
       if (ref !== undefined) found.push(ref)
     }
-    if (found.length > 1) refuse('evidence-input-mismatch', 'assigned scope has checkpoints in multiple parent sessions')
+    if (found.length > 1)
+      refuse('evidence-input-mismatch', 'assigned scope has checkpoints in multiple parent sessions')
     return found[0]
   }
-  const admission: Admission = (exec) => {
+  const admission: Admission = exec => {
     if (exec.agent === undefined) return undefined
     const review = reviewOf(apparatus, String(exec.agent.id))
-    if (review !== undefined && review.target.kind !== 'acceptance' && !methodReviewTools.has(exec.name))
-      return 'Method review only reads frozen evidence and submits findings; it cannot mutate files, execute, delegate or browse'
     const task = owner(String(exec.agent.id))
     const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
-    if (run?.purpose === 'improve' && !improvementTools.has(exec.name))
-      return 'RSI only reads evidence, edits candidate/report files, proposes and submits; execution belongs to the runtime'
-    if (run?.purpose === 'improve') {
-      const reason = rsiToolReason(task!, exec.name)
-      if (reason !== undefined) return reason
-    }
-    if (exec.name.startsWith('singularity_')) return undefined
-    if (review !== undefined) return review.status === 'running' ? ['read', 'read_image', 'glob', 'grep'].includes(exec.name) ? undefined : waitingReason(apparatus, review.reviewId) : 'review Run has settled'
-    if (['read', 'read_image', 'glob', 'grep'].includes(exec.name)) return undefined
-    return run !== undefined && (run.status !== 'running' || run.stage !== 'working')
-      ? 'Run has closed write admission'
-      : task === undefined ? undefined : waitingReason(apparatus, task.taskId)
-  }
-  const execution = options.execution(admission, (failure) =>
-    controller.signal.aborted ? Promise.resolve() : work(async () => {
-      if (controller.signal.aborted) return
-      const review = reviewOf(apparatus, failure.sessionId)
-      if (review?.status === 'running')
-        await createReviewCommands(apparatus.store).fail(
-          `turn-failed:${review.reviewId}/${failure.seq}`,
-          review.reviewId,
-          JSON.stringify(failure),
-        )
-      const task = owner(failure.sessionId)
-      if (review !== undefined) await scheduler.advance(review.reviewId)
-      if (task === undefined || taskSignal(task.taskId).aborted) return
-      const run = Object.values(task.runs).at(-1)
-      if (run?.status !== 'running') return
-      declareCaller(apparatus, task.responsibility!.agentId)
-      await apparatus.tasks
-        .forAgent(task.responsibility!.agentId)
-        .failRun({
-          commandId: `turn-failed:${failure.sessionId}/${failure.seq}`,
-          taskId: task.taskId,
-          runId: run.runId,
-          reason: JSON.stringify(failure),
-          ...(failure.reason.kind === 'aborted' && failure.reason.reason.kind === 'user' ? { cause: 'cancelled' as const } : {}),
-        })
-      const terminal = taskStateOf(apparatus, task.taskId)
-      await closeRoot(
-        terminal,
-        terminal.runs[run.runId]!,
-        'failed',
+    if (task === undefined && review === undefined) return undefined
+    const id = review?.reviewId ?? task!.taskId
+    const role =
+      review !== undefined
+        ? review.target.kind === 'acceptance'
+          ? 'review'
+          : 'method-review'
+        : run?.purpose === 'improve'
+          ? 'improve'
+          : apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, String(exec.agent.id))?.role ===
+              'root'
+            ? 'root'
+            : 'task'
+    const allowed = toolsFor({
+      role,
+      waiting: waitingReason(apparatus, id) !== undefined,
+      canPlan: waitingReason(apparatus, id, apparatus.store.load(), 'plan') === undefined,
+      closed: review === undefined ? run?.status !== 'running' || run.stage !== 'working' : review.status !== 'running',
+      search: run?.purpose === 'improve' ? rsiState(task!) : undefined,
+    })
+    if (allowed.has(exec.name)) return undefined
+    if (role === 'method-review') return 'Method review only reads frozen evidence and submits findings.'
+    if (role === 'improve')
+      return (
+        rsiToolReason(task!, exec.name) ??
+        'RSI only reads evidence, edits candidate/report files, proposes and submits; execution belongs to the runtime.'
       )
-      await scheduler.advance(task.taskId)
-      const parent = parentOf(task.taskId)
-      if (parent !== undefined) await scheduler.advance(parent)
-      schedule()
-    }).catch((error) => {
-      if (!controller.signal.aborted) backgroundErrors.push(error)
-      throw error
-    }),
+    return waitingReason(apparatus, id) ?? 'Tool is outside the current Singularity role/state admission'
+  }
+  const execution = options.execution(admission, failure =>
+    controller.signal.aborted
+      ? Promise.resolve()
+      : work(async () => {
+          if (controller.signal.aborted) return
+          const review = reviewOf(apparatus, failure.sessionId)
+          if (review?.status === 'running')
+            await createReviewCommands(apparatus.store).fail(
+              `turn-failed:${review.reviewId}/${failure.seq}`,
+              review.reviewId,
+              JSON.stringify(failure),
+            )
+          const task = owner(failure.sessionId)
+          if (review !== undefined) await scheduler.advance(review.reviewId)
+          if (task === undefined || taskSignal(task.taskId).aborted) return
+          const run = Object.values(task.runs).at(-1)
+          if (run?.status !== 'running') return
+          declareCaller(apparatus, task.responsibility!.agentId)
+          await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
+            commandId: `turn-failed:${failure.sessionId}/${failure.seq}`,
+            taskId: task.taskId,
+            runId: run.runId,
+            reason: JSON.stringify(failure),
+            ...(failure.reason.kind === 'aborted' && failure.reason.reason.kind === 'user'
+              ? { cause: 'cancelled' as const }
+              : {}),
+          })
+          const terminal = taskStateOf(apparatus, task.taskId)
+          await closeRoot(terminal, terminal.runs[run.runId]!, 'failed')
+          await scheduler.advance(task.taskId)
+          const parent = parentOf(task.taskId)
+          if (parent !== undefined) await scheduler.advance(parent)
+          schedule()
+        }).catch(error => {
+          if (!controller.signal.aborted) backgroundErrors.push(error)
+          throw error
+        }),
   )
   const service: Omit<TaskDriver, 'close'> = {
     stepBudget,
-    cancel: ({ sessionId, taskId }) => work(async () => {
-      const task = taskId === undefined ? owner(sessionId) : tasks().get(taskId)
-      const holder = task?.responsibility === undefined ? undefined : apparatus.store.load()
-        .stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility.agentId)
-      if (task === undefined || holder?.sessionId !== sessionId || parentOf(task.taskId) !== undefined ||
-        Object.values(task.runs).at(-1)?.purpose !== 'solve') refuse('not-responsible', 'cancel requires a business root session')
-      const run = Object.values(task.runs).at(-1)!
-      if (run.status === 'running') {
-        declareCaller(apparatus, task.responsibility!.agentId)
-        await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({ commandId: `cancel:${task.taskId}:${run.runId}`,
-          taskId: task.taskId, runId: run.runId, cause: 'cancelled', reason: 'cancelled by user' })
-        registry().get(SessionId(sessionId))?.cancel({ kind: 'user' })
-        await scheduler.advance(task.taskId)
-        await closeRoot(taskStateOf(apparatus, task.taskId), taskStateOf(apparatus, task.taskId).runs[run.runId]!, 'cancelled')
-      } else if ((run.purpose === 'solve' && run.failureCause !== 'cancelled' && task.learning !== false && task.rsi === undefined) ||
-        task.rsi?.status === 'pending' || task.rsi?.status === 'running' || task.rsi?.status === 'failed' || task.rsi?.status === 'cancelled') {
-        if (task.closure === undefined) await closeRoot(task, run, run.status === 'verified' ? 'accepted' : 'failed')
-        if (taskStateOf(apparatus, task.taskId).rsi === undefined)
-          await rsiStatus(task.taskId, { status: 'pending', detail: 'business root closed; trajectory is available for asynchronous RSI' })
-        if (taskStateOf(apparatus, task.taskId).rsi!.status !== 'cancelled')
-          await rsiStatus(task.taskId, { status: 'cancelled', detail: 'RSI cancelled by user' })
-        rsi.abort(task.taskId)
-        await stopRsiWork(task.taskId)
-      } else if (run.failureCause !== 'cancelled') refuse('illegal-transition', 'Task already ended')
-      return { status: 'cancelled' as const, taskId: task.taskId }
-    }),
-    inheritRsi: input => work(() => linkRsiMemory(apparatus,
-      (options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')) as NonNullable<ChildSessionSeams['sessions']>, input)),
-    prepareMemory: (agent) => work(async () => {
-      const task = owner(String(agent.id))
-      // Acceptance reviewers remain independent from the subject's working narrative.
-      if (task === undefined || reviewOf(apparatus, String(agent.id)) !== undefined) return
-      const signal = taskSignal(task.taskId)
-      signal.throwIfAborted()
-      const source = await rsiMemorySourceOf(apparatus, String(agent.id))
-      if (source !== undefined) {
-        const context = await memoryContextOf(apparatus, String(agent.id))
-        const sourceContext = await memoryContextOf(apparatus, source.task.responsibility!.agentId)
-        const ownEvents = await nativeEvents(String(agent.session.id))
-        const ownRef = parentMemoryRefOf(String(agent.session.id), ownEvents, context.scope)
-        if (ownRef !== undefined) { await readParentMemory(apparatus.persistence, ownRef); return }
-        const handle = await apparatus.persistence.open(SessionId(source.sessionId), 'read')
-        try {
-          const stored = await handle.read()
-          const origin = Session.create(handle.id, stored.events, handle.header, handle.inheritedEventCount)
-          const inheritedRef = parentMemoryRefOf(source.sessionId, stored.events, sourceContext.scope)
-          const inherited = inheritedRef === undefined ? undefined : await readParentMemory(apparatus.persistence, inheritedRef)
-          signal.throwIfAborted()
-          await prepareParentMemory({
-            sessions: (options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')) as NonNullable<ChildSessionSeams['sessions']>,
-            sessionPersistence: apparatus.persistence, llm: options.seams.get?.('llm') as LlmRuntime,
-          }, agent, {
-            memoryId: 'memory-' + sha256(`rsi:${source.task.taskId}/${source.run.runId}/${task.taskId}/${Object.values(task.runs).at(-1)!.runId}`),
-            context: { ...context, evidenceRefs: [...context.evidenceRefs, ...sourceContext.evidenceRefs],
-              excludedTexts: [...context.excludedTexts, ...sourceContext.excludedTexts] },
-            focus: 'Carry forward the previous RSI decisions and their reasons, tested and rejected mechanisms, no-winner or review rejection causes, round/method/measurement/publication references, successful habits and regression risks, and unresolved hypotheses. All RSI usage is excluded from every comparison.',
-            maxTokens: 32768, signal,
-            ...(inherited === undefined ? {} : { inherited }),
-          }, origin)
-        } finally { await handle.close() }
-        return
-      }
-      const parent = parentPlan(apparatus, task.taskId)
-      if (parent === undefined) return
-      const prior = await memoryRef(String(agent.id))
-      if (prior !== undefined) { await readParentMemory(apparatus.persistence, prior); return }
-      const parentNode = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, parent.agentId)!
-      const parentAgent = registry().get(SessionId(parentNode.sessionId))
-      if (parentAgent === undefined) refuse('not-responsible', 'parent memory requires the exact live parent session')
-      const inheritedRef = await memoryRef(parent.agentId)
-      const inherited = inheritedRef === undefined ? undefined : await readParentMemory(apparatus.persistence, inheritedRef)
-      const sessions = (options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')) as NonNullable<ChildSessionSeams['sessions']>
-      const llm = options.seams.get?.('llm') as LlmRuntime
-      const run = Object.values(task.runs).at(-1)!
-      signal.throwIfAborted()
-      await prepareParentMemory({ sessions, sessionPersistence: apparatus.persistence, llm }, parentAgent, {
+    cancel: ({ sessionId, taskId }) =>
+      work(async () => {
+        const task = taskId === undefined ? owner(sessionId) : tasks().get(taskId)
+        const holder =
+          task?.responsibility === undefined
+            ? undefined
+            : apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, task.responsibility.agentId)
+        if (
+          task === undefined ||
+          holder?.sessionId !== sessionId ||
+          parentOf(task.taskId) !== undefined ||
+          Object.values(task.runs).at(-1)?.purpose !== 'solve'
+        )
+          refuse('not-responsible', 'cancel requires a business root session')
+        const run = Object.values(task.runs).at(-1)!
+        if (run.status === 'running') {
+          declareCaller(apparatus, task.responsibility!.agentId)
+          await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
+            commandId: `cancel:${task.taskId}:${run.runId}`,
+            taskId: task.taskId,
+            runId: run.runId,
+            cause: 'cancelled',
+            reason: 'cancelled by user',
+          })
+          registry().get(SessionId(sessionId))?.cancel({ kind: 'user' })
+          await scheduler.advance(task.taskId)
+          await closeRoot(
+            taskStateOf(apparatus, task.taskId),
+            taskStateOf(apparatus, task.taskId).runs[run.runId]!,
+            'cancelled',
+          )
+        } else if (
+          (run.purpose === 'solve' &&
+            run.failureCause !== 'cancelled' &&
+            task.learning !== false &&
+            task.rsi === undefined) ||
+          task.rsi?.status === 'pending' ||
+          task.rsi?.status === 'running' ||
+          task.rsi?.status === 'failed' ||
+          task.rsi?.status === 'cancelled'
+        ) {
+          if (task.closure === undefined) await closeRoot(task, run, run.status === 'verified' ? 'accepted' : 'failed')
+          if (taskStateOf(apparatus, task.taskId).rsi === undefined)
+            await rsiStatus(task.taskId, {
+              status: 'pending',
+              detail: 'business root closed; trajectory is available for asynchronous RSI',
+            })
+          if (taskStateOf(apparatus, task.taskId).rsi!.status !== 'cancelled')
+            await rsiStatus(task.taskId, { status: 'cancelled', detail: 'RSI cancelled by user' })
+          rsi.abort(task.taskId)
+          await stopRsiWork(task.taskId)
+        } else if (run.failureCause !== 'cancelled') refuse('illegal-transition', 'Task already ended')
+        return { status: 'cancelled' as const, taskId: task.taskId }
+      }),
+    inheritRsi: input =>
+      work(() =>
+        linkRsiMemory(
+          apparatus,
+          (options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')) as NonNullable<
+            ChildSessionSeams['sessions']
+          >,
+          input,
+        ),
+      ),
+    prepareMemory: agent =>
+      work(async () => {
+        const task = owner(String(agent.id))
+        // Acceptance reviewers remain independent from the subject's working narrative.
+        if (task === undefined || reviewOf(apparatus, String(agent.id)) !== undefined) return
+        const signal = taskSignal(task.taskId)
+        signal.throwIfAborted()
+        const source = await rsiMemorySourceOf(apparatus, String(agent.id))
+        if (source !== undefined) {
+          const context = await memoryContextOf(apparatus, String(agent.id))
+          const sourceContext = await memoryContextOf(apparatus, source.task.responsibility!.agentId)
+          const ownEvents = await nativeEvents(String(agent.session.id))
+          const ownRef = parentMemoryRefOf(String(agent.session.id), ownEvents, context.scope)
+          if (ownRef !== undefined) {
+            await readParentMemory(apparatus.persistence, ownRef)
+            return
+          }
+          const handle = await apparatus.persistence.open(SessionId(source.sessionId), 'read')
+          try {
+            const stored = await handle.read()
+            const origin = Session.create(handle.id, stored.events, handle.header, handle.inheritedEventCount)
+            const inheritedRef = parentMemoryRefOf(source.sessionId, stored.events, sourceContext.scope)
+            const inherited =
+              inheritedRef === undefined ? undefined : await readParentMemory(apparatus.persistence, inheritedRef)
+            signal.throwIfAborted()
+            await prepareParentMemory(
+              {
+                sessions: (options.seams.get === undefined
+                  ? options.seams.sessions
+                  : options.seams.get('sessions')) as NonNullable<ChildSessionSeams['sessions']>,
+                sessionPersistence: apparatus.persistence,
+                llm: options.seams.get?.('llm') as LlmRuntime,
+              },
+              agent,
+              {
+                memoryId:
+                  'memory-' +
+                  sha256(
+                    `rsi:${source.task.taskId}/${source.run.runId}/${task.taskId}/${Object.values(task.runs).at(-1)!.runId}`,
+                  ),
+                context: {
+                  ...context,
+                  evidenceRefs: [...context.evidenceRefs, ...sourceContext.evidenceRefs],
+                  excludedTexts: [...context.excludedTexts, ...sourceContext.excludedTexts],
+                },
+                focus:
+                  'Carry forward the previous RSI decisions and their reasons, tested and rejected mechanisms, no-winner or review rejection causes, round/method/measurement/publication references, successful habits and regression risks, and unresolved hypotheses. All RSI usage is excluded from every comparison.',
+                maxTokens: 32768,
+                signal,
+                ...(inherited === undefined ? {} : { inherited }),
+              },
+              origin,
+            )
+          } finally {
+            await handle.close()
+          }
+          return
+        }
+        const parent = parentPlan(apparatus, task.taskId)
+        if (parent === undefined) return
+        const prior = await memoryRef(String(agent.id))
+        if (prior !== undefined) {
+          await readParentMemory(apparatus.persistence, prior)
+          return
+        }
+        const parentNode = apparatus.store.load().stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, parent.agentId)!
+        const parentAgent = registry().get(SessionId(parentNode.sessionId))
+        if (parentAgent === undefined) refuse('not-responsible', 'parent memory requires the exact live parent session')
+        const inheritedRef = await memoryRef(parent.agentId)
+        const inherited =
+          inheritedRef === undefined ? undefined : await readParentMemory(apparatus.persistence, inheritedRef)
+        const sessions = (
+          options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')
+        ) as NonNullable<ChildSessionSeams['sessions']>
+        const llm = options.seams.get?.('llm') as LlmRuntime
+        const run = Object.values(task.runs).at(-1)!
+        signal.throwIfAborted()
+        await prepareParentMemory({ sessions, sessionPersistence: apparatus.persistence, llm }, parentAgent, {
           memoryId: 'memory-' + sha256(`${parent.id}/${parent.runId}/${task.taskId}/${run.runId}`),
-          context: await memoryContextOf(apparatus, String(agent.id)), focus: task.contract!.goal,
-          maxTokens: 32768, signal,
+          context: await memoryContextOf(apparatus, String(agent.id)),
+          focus: task.contract!.goal,
+          maxTokens: 32768,
+          signal,
           ...(inherited === undefined ? {} : { inherited }),
-      })
-    }),
-    failed: (agentId) => {
+        })
+      }),
+    failed: agentId => {
       const review = reviewOf(apparatus, agentId)
       if (review !== undefined) return review.status === 'failed'
       const task = owner(agentId)
@@ -228,14 +333,19 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
       return run?.status === 'failed'
     },
     reviewTarget: agentId => reviewOf(apparatus, agentId)?.target,
-    responsibility: (agentId) => {
-      const task = owner(agentId), review = reviewOf(apparatus, agentId)
+    responsibility: agentId => {
+      const task = owner(agentId),
+        review = reviewOf(apparatus, agentId)
       if (task === undefined && review === undefined) return undefined
       const id = review?.reviewId ?? task!.taskId
       const run = task === undefined ? undefined : Object.values(task.runs).at(-1)
-      const working = review === undefined ? run?.status === 'running' && run.stage === 'working' : review.status === 'running'
-      return { waiting: waitingReason(apparatus, id) ?? null,
-        canPlan: working && waitingReason(apparatus, id, apparatus.store.load(), 'plan') === undefined }
+      const working =
+        review === undefined ? run?.status === 'running' && run.stage === 'working' : review.status === 'running'
+      return {
+        waiting: waitingReason(apparatus, id) ?? null,
+        closed: !working,
+        canPlan: working && waitingReason(apparatus, id, apparatus.store.load(), 'plan') === undefined,
+      }
     },
     enter: (agent, messages, model) =>
       work(async () => {
@@ -245,41 +355,61 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
           const subject = review.target.kind === 'acceptance' ? tasks().get(review.target.taskId) : undefined
           const limit = subject?.workflowLimits?.maxSteps ?? DEFAULT_WORKFLOW_LIMITS.maxSteps
           if ((await nativeEvents(review.sessionId)).filter(event => event.type === 'step/start').length >= limit) {
-            await createReviewCommands(apparatus.store).fail(`step-limit:${review.reviewId}`, review.reviewId, `review step limit ${limit} exhausted`)
+            await createReviewCommands(apparatus.store).fail(
+              `step-limit:${review.reviewId}`,
+              review.reviewId,
+              `review step limit ${limit} exhausted`,
+            )
             await scheduler.advance(review.reviewId)
             agent.cancel({ kind: 'parent' }, { keepInbox: true })
             return undefined
           }
         }
-        const assignedTask = owner(agentId), assignedRun = assignedTask === undefined ? undefined : Object.values(assignedTask.runs).at(-1)
+        const assignedTask = owner(agentId),
+          assignedRun = assignedTask === undefined ? undefined : Object.values(assignedTask.runs).at(-1)
         const budget = await stepBudget(agentId, agent.session)
         if (budget !== undefined && budget.steps >= budget.maxSteps) {
-          const root = tasks().get(budget.rootId)!, run = Object.values(root.runs).at(-1)!
+          const root = tasks().get(budget.rootId)!,
+            run = Object.values(root.runs).at(-1)!
           if (run.status === 'running') {
             declareCaller(apparatus, root.responsibility!.agentId)
-            await apparatus.tasks.forAgent(root.responsibility!.agentId).failRun({ commandId: `step-limit:${root.taskId}:${run.runId}`,
-              taskId: root.taskId, runId: run.runId, cause: 'business', reason: `workflow step limit ${budget.maxSteps} exhausted` })
+            await apparatus.tasks.forAgent(root.responsibility!.agentId).failRun({
+              commandId: `step-limit:${root.taskId}:${run.runId}`,
+              taskId: root.taskId,
+              runId: run.runId,
+              cause: 'business',
+              reason: `workflow step limit ${budget.maxSteps} exhausted`,
+            })
             await scheduler.advance(root.taskId)
-            await closeRoot(taskStateOf(apparatus, root.taskId), taskStateOf(apparatus, root.taskId).runs[run.runId]!, 'failed')
+            await closeRoot(
+              taskStateOf(apparatus, root.taskId),
+              taskStateOf(apparatus, root.taskId).runs[run.runId]!,
+              'failed',
+            )
             registry().get(SessionId(root.responsibility!.agentId))?.cancel({ kind: 'parent' }, { keepInbox: true })
             schedule()
           }
           agent.cancel({ kind: 'parent' }, { keepInbox: true })
           return undefined
         }
-        if (assignedTask !== undefined && assignedRun?.status === 'running' && assignedRun.stage === 'working' && assignedRun.purpose !== 'improve')
+        if (
+          assignedTask !== undefined &&
+          assignedRun?.status === 'running' &&
+          assignedRun.stage === 'working' &&
+          assignedRun.purpose !== 'improve'
+        )
           await confirmWorkflowDelivery(apparatus, assignedTask.taskId, assignedRun)
         if (
           reviewOf(apparatus, agentId) !== undefined ||
           (owner(agentId) !== undefined && owner(agentId)!.closure === undefined)
         )
           return undefined
-        let human = messages.findLast((m) => m.source.kind === 'user')
+        let human = messages.findLast(m => m.source.kind === 'user')
         if (human === undefined) {
           const handle = await apparatus.persistence.open(agent.session.id, 'read')
           try {
             human = (await handle.read()).events
-              .filter((e) => e.type === 'user/message' && e.data.source.kind === 'user')
+              .filter(e => e.type === 'user/message' && e.data.source.kind === 'user')
               .at(-1)?.data as UserMessage | undefined
           } finally {
             await handle.close()
@@ -287,8 +417,8 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
         }
         if (human === undefined) return undefined
         const goal = human.content
-          .filter((b) => b.type === 'text')
-          .map((b) => b.text)
+          .filter(b => b.type === 'text')
+          .map(b => b.text)
           .join('\n')
         if (!goal) refuse('malformed-declaration', 'root request requires a goal')
         if (owner(agentId)?.taskId === taskIdOf(apparatus.controlId, agentId, `human:${human.id}`)) return undefined
@@ -297,7 +427,8 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
           const raw = JSON.parse(goal) as Record<string, unknown>
           if ('contract' in raw) {
             assertClosedKeys(raw, ['contract', 'learning'], 'Task request', 'malformed-declaration')
-            if (typeof raw['learning'] !== 'boolean') refuse('malformed-declaration', 'Task request learning must be boolean')
+            if (typeof raw['learning'] !== 'boolean')
+              refuse('malformed-declaration', 'Task request learning must be boolean')
             request = { contract: raw['contract'] as TaskContract, learning: raw['learning'] }
           } else request = { contract: raw as unknown as TaskContract }
         }
@@ -312,11 +443,23 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
             runId: proposal.runId,
             factSeq: apparatus.store.committedOf(`start:${proposal.runId}`)!.seq,
           },
-          JSON.stringify({ assigned: proposal, budget: await stepBudget(agentId, agent.session), method: await methodContext(apparatus, proposal.taskId, taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!),
-            direction: directionForRun(apparatus, proposal.taskId, taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!) }),
+          JSON.stringify({
+            assigned: proposal,
+            budget: await stepBudget(agentId, agent.session),
+            method: await methodContext(
+              apparatus,
+              proposal.taskId,
+              taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!,
+            ),
+            direction: directionForRun(
+              apparatus,
+              proposal.taskId,
+              taskStateOf(apparatus, proposal.taskId).runs[proposal.runId]!,
+            ),
+          }),
         )
       }),
-    activate: (sessionId) =>
+    activate: sessionId =>
       work(async () => {
         await mkdir(join(apparatus.workspaceRoot, 'agents', sha256(sessionId)), { recursive: true })
         for (const node of apparatus.store.load().statesOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION).values())
@@ -333,14 +476,21 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
               const analysis = tasks().get(improvementTaskId(task.taskId, task.closure!.runId))
               const run = analysis === undefined ? undefined : Object.values(analysis.runs).at(-1)
               if (analysis?.closure === undefined && (run === undefined || run.status === 'running'))
-                await rsiStatus(task.taskId, task.rsi.trace === undefined
-                  ? { status: 'pending', detail: 'retrying startup before its first sealed trajectory' }
-                  : { status: 'running', trace: task.rsi.trace, detail: 'resuming the same unfinished RSI from its sealed trajectory' })
+                await rsiStatus(
+                  task.taskId,
+                  task.rsi.trace === undefined
+                    ? { status: 'pending', detail: 'retrying startup before its first sealed trajectory' }
+                    : {
+                        status: 'running',
+                        trace: task.rsi.trace,
+                        detail: 'resuming the same unfinished RSI from its sealed trajectory',
+                      },
+                )
             }
           }
         schedule()
       }),
-    forCall: (exec) => {
+    forCall: exec => {
       const agent = execution.assertCaller(exec),
         caller = callerOf(agent)
       const task = owner(caller.agentId),
@@ -350,65 +500,128 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
         review?.reviewId ?? task?.taskId ?? refuse('not-responsible', 'caller has no assigned responsibility')
       return {
         current,
-        memory: (input) => work(async () => {
-          if (input?.ref === undefined) {
-            try { await service.prepareMemory(agent) }
-            catch (error) { if (!(error instanceof ParentMemoryUnavailable)) throw error }
-          }
-          return readMemoryForAgent(apparatus, caller.agentId, input)
-        }),
-        stopExplorations: (input) => work(async () => {
-          if (!input.requestKey) refuse('malformed-declaration', 'stop exploration requires a stable requestKey')
-          if (review !== undefined) refuse('not-responsible', 'independent reviews delegate only required evidence Tasks')
-          const result = await apparatus.tasks.forAgent(caller.agentId).stopExplorations({
-            commandId: 'stop-exploration-' + sha256(`${current()}/${input.requestKey}`),
-            parentTaskId: current(), taskIds: input.taskIds, reason: input.reason,
-          })
-          await scheduler.advance(current())
-          return result
-        }),
-        askParent: (input) => work(async () => {
-          if (review !== undefined) refuse('not-responsible', 'a review has no parent responsibility')
-          const release = await execution.drain(exec)
-          try {
-            const result = await askParent(apparatus, caller, current(), input)
-            await scheduler.advance(result.parentId)
+        memory: input =>
+          work(async () => {
+            assertClosedKeys({ ...input }, ['prepare', 'ref', 'from', 'count'], 'memory', 'malformed-declaration')
+            if (input?.prepare !== undefined && typeof input.prepare !== 'boolean')
+              refuse('malformed-declaration', 'prepare must be boolean')
+            if (input?.prepare === true) {
+              if (input.ref !== undefined || input.from !== undefined || input.count !== undefined)
+                refuse('malformed-declaration', 'prepare is exclusive with ref and pagination')
+              const before = await readMemoryForAgent(apparatus, caller.agentId)
+              if (!('canPrepare' in before) || !before.canPrepare)
+                refuse('not-responsible', 'this role has no inherited notes to prepare; use {} to list existing notes')
+              try {
+                await service.prepareMemory(agent)
+              } catch (error) {
+                if (!(error instanceof ParentMemoryUnavailable)) throw error
+              }
+              const directory = await readMemoryForAgent(apparatus, caller.agentId)
+              if ('inherited' in directory && directory.inherited !== null)
+                return {
+                  ...(await readMemoryForAgent(apparatus, caller.agentId, { ref: directory.inherited })),
+                  next: 'Use notes as optional leads. Read original sealed evidence through evidenceRefs; a failed preparation is final, so continue without notes.',
+                }
+              return {
+                status: 'unavailable',
+                checkpoint: null,
+                next: 'No inherited notes were produced. Continue from the contract and declared evidence without repeating preparation.',
+              }
+            }
+            return readMemoryForAgent(apparatus, caller.agentId, input)
+          }),
+        stopExplorations: input =>
+          work(async () => {
+            if (!input.requestKey) refuse('malformed-declaration', 'stop exploration requires a stable requestKey')
+            if (review !== undefined)
+              refuse('not-responsible', 'independent reviews delegate only required evidence Tasks')
+            const result = await apparatus.tasks.forAgent(caller.agentId).stopExplorations({
+              commandId: 'stop-exploration-' + sha256(`${current()}/${input.requestKey}`),
+              parentTaskId: current(),
+              taskIds: input.taskIds,
+              reason: input.reason,
+            })
+            await scheduler.advance(current())
             return result
-          } finally { release() }
-        }),
-        answer: (input) => work(async () => {
-          const result = await answerChild(apparatus, caller, input)
-          await scheduler.advance(current())
-          return result
-        }),
-        retry: (input) => work(async () => {
-          const result = await retry(apparatus, caller, String(exec.callId), input)
-          await scheduler.advance(input.taskId)
-          return result
-        }),
-        runMethod: (input) =>
+          }),
+        askParent: input =>
+          work(async () => {
+            if (review !== undefined) refuse('not-responsible', 'a review has no parent responsibility')
+            const release = await execution.drain(exec)
+            try {
+              const result = await askParent(apparatus, caller, current(), input)
+              await scheduler.advance(result.parentId)
+              if (result.blocking && !result.answers.some(answer => answer.resolves)) exec.concludeTurn?.()
+              return {
+                ...result,
+                status: result.answers.some(answer => answer.resolves) ? 'resolved' : 'pending',
+                next:
+                  result.blocking && !result.answers.some(answer => answer.resolves)
+                    ? 'End this turn; the host will resume you with the answer. Answers cannot change your frozen contract or permissions.'
+                    : 'Continue bounded work if unblocked; the host delivers new answers. The original contract and permissions remain fixed.',
+              }
+            } finally {
+              release()
+            }
+          }),
+        answer: input =>
+          work(async () => {
+            const result = await answerChild(apparatus, caller, input)
+            await scheduler.advance(current())
+            return {
+              ...result,
+              status: result.answers.some(answer => answer.resolves) ? 'resolved' : 'pending',
+              next: input.resolves
+                ? 'The child may resume under its original contract. Coordinate other pending responsibilities or end this turn.'
+                : 'This question remains open; provide a final answer with resolves:true and a new requestKey when available.',
+            }
+          }),
+        retry: input =>
+          work(async () => {
+            const result = await retry(apparatus, caller, String(exec.callId), input)
+            await scheduler.advance(input.taskId)
+            return result
+          }),
+        runMethod: input =>
           work(async () => {
             assertActive(apparatus, current())
-            return runMethodTool(apparatus, caller, input.taskId, String(exec.callId), signal, input.tool, input.candidatePath)
+            return runMethodTool(
+              apparatus,
+              caller,
+              input.taskId,
+              String(exec.callId),
+              signal,
+              input.tool,
+              input.candidatePath,
+            )
           }),
-        proposeMethod: (input) => work(async () => {
-          try {
-            const result = await proposeRsiMethod(apparatus, caller.agentId, input, signal)
-            schedule()
-            return result
-          } finally {
-            const root = task === undefined ? undefined : rsiRootOf(task.taskId)
-            if (root !== undefined) await stopRsiWork(root.taskId)
-          }
-        }),
-        history: (input) => work(() => readForAgent(apparatus, caller.agentId, input, evaluation)),
-        decompose: (input) => work(async () => {
-          if (review !== undefined && review.target.kind !== 'acceptance') refuse('not-responsible', 'method reviews do not delegate or execute evidence Tasks')
-          const release = await execution.drain(exec)
-          try { return await decompose(apparatus, scheduler, caller, { ...input, taskId: current() }) }
-          finally { release(); schedule() }
-        }),
-        submit: (input) =>
+        proposeMethod: input =>
+          work(async () => {
+            try {
+              const result = await proposeRsiMethod(apparatus, caller.agentId, input, signal)
+              schedule()
+              return result
+            } finally {
+              const root = task === undefined ? undefined : rsiRootOf(task.taskId)
+              if (root !== undefined) await stopRsiWork(root.taskId)
+            }
+          }),
+        history: input => work(() => readForAgent(apparatus, caller.agentId, input, evaluation)),
+        decompose: input =>
+          work(async () => {
+            if (review !== undefined && review.target.kind !== 'acceptance')
+              refuse('not-responsible', 'method reviews do not delegate or execute evidence Tasks')
+            const release = await execution.drain(exec)
+            try {
+              const result = await decompose(apparatus, scheduler, caller, { ...input, taskId: current() })
+              if (waitingReason(apparatus, current()) !== undefined) exec.concludeTurn?.()
+              return result
+            } finally {
+              release()
+              schedule()
+            }
+          }),
+        submit: input =>
           work(async () => {
             signal.throwIfAborted()
             assertActive(apparatus, current())
@@ -416,8 +629,11 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
               assertClosedKeys(input, ['findings'], 'review submission', 'malformed-declaration')
               if (!('findings' in input)) refuse('malformed-declaration', 'reviewers submit only findings')
               const release = await execution.drain(exec)
-              try { return await submitReview(apparatus, review, input.findings) }
-              finally { release() }
+              try {
+                return await submitReview(apparatus, review, input.findings)
+              } finally {
+                release()
+              }
             }
             if ('findings' in input) refuse('not-responsible', 'only reviewers submit findings')
             const task = owner(caller.agentId)!
@@ -451,13 +667,15 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
       if (backgroundErrors.length) throw new AggregateError(backgroundErrors, 'background RSI delivery failed')
       return snapshotOf(apparatus)
     },
-    rsiState: (agentId) => {
+    rsiState: agentId => {
       const task = owner(agentId)
       return task === undefined ? undefined : rsiState(task)
     },
-    mountSkills: (agent) => mountMethodSkills(apparatus, agent),
-    memoryContext: (agentId) => memoryContextOf(apparatus, agentId),
-    world: (agentId) => {
+    mountSkills: async agent => {
+      await mountMethodSkills(apparatus, agent)
+    },
+    memoryContext: agentId => memoryContextOf(apparatus, agentId),
+    world: agentId => {
       const review = reviewOf(apparatus, agentId),
         task = owner(agentId),
         run = task === undefined ? undefined : Object.values(task.runs).at(-1)
@@ -467,19 +685,28 @@ export function createTaskLifecycle(runtime: DriverRuntime, reviewLifecycle: Rev
         root,
         writable:
           review === undefined
-            ? run === undefined || (run.status === 'running' && run.stage === 'working' && waitingReason(apparatus, task!.taskId) === undefined)
-            : review.target.kind === 'acceptance' && review.status === 'running' && waitingReason(apparatus, review.reviewId) === undefined,
+            ? run === undefined ||
+              (run.status === 'running' &&
+                run.stage === 'working' &&
+                waitingReason(apparatus, task!.taskId) === undefined)
+            : review.target.kind === 'acceptance' &&
+              review.status === 'running' &&
+              waitingReason(apparatus, review.reviewId) === undefined,
         protected:
           review === undefined
-            ? (run?.bubble?.inputs.map((i) => join(root, i.name)) ?? [])
+            ? (run?.bubble?.inputs.map(i => join(root, i.name)) ?? [])
             : [
                 join(root, 'subject.json'),
                 join(root, 'submitted-artifact'),
                 ...(review.target.kind === 'acceptance'
-                  ? taskStateOf(apparatus, review.target.taskId).contract!.inputs.map((i) => join(root, 'inputs', i.name))
+                  ? taskStateOf(apparatus, review.target.taskId).contract!.inputs.map(i => join(root, 'inputs', i.name))
                   : []),
               ],
-        references: [...((review !== undefined || run?.purpose === 'improve') && apparatus.domain.suite === undefined ? [apparatus.domain.dir] : []), ...apparatus.domain.references,
+        references: [
+          ...((review !== undefined || run?.purpose === 'improve') && apparatus.domain.suite === undefined
+            ? [apparatus.domain.dir]
+            : []),
+          ...apparatus.domain.references,
           ...(run === undefined ? [] : methodToolReferences(apparatus, run)),
         ],
       }

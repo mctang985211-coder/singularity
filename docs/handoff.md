@@ -1,5 +1,7 @@
 # 接手入口
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 更新：2026-10-23。当前 Task v25 / Strategy v9 / Measure v5 / Review v5 / snapshot v13，仅新图。[简化审查与实跑](prompt-simplification-20261023.md)记录单一节点 policy、共享预算、RSI 减量和 env setup 的验证边界。下文实验属于 2026-10-20 的 Task v23，整体审查基线 `4314487`、修复起点 `7bd91bb`。
 
 1. [Task / Workflow RSI 终局计划](task-first-domain-rsi-plan.md)：架构、T00–T16 与未完成出口，唯一施工顺序在第 9.1 节。

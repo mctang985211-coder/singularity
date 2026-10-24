@@ -85,7 +85,10 @@ export interface SelftestReport {
 /** A declaration that is empty where it must name something cannot be bound at all. */
 function requireText(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.length === 0)
-    refuse('malformed-declaration', `${field} must be a non-empty string, got ${value === null ? 'null' : typeof value}`)
+    refuse(
+      'malformed-declaration',
+      `${field} must be a non-empty string, got ${value === null ? 'null' : typeof value}`,
+    )
   return value
 }
 
@@ -139,8 +142,12 @@ export async function runVerifierSelftest(implementation: VerifierImplementation
   for (const sample of samples) {
     const verdict = await implementation.judge(sample.input)
     if (verdict.verdict !== sample.expected)
-      failures.push({ name: sample.name, expected: sample.expected, actual: verdict.verdict,
-        ...(verdict.detail === undefined ? {} : { detail: verdict.detail }) })
+      failures.push({
+        name: sample.name,
+        expected: sample.expected,
+        actual: verdict.verdict,
+        ...(verdict.detail === undefined ? {} : { detail: verdict.detail }),
+      })
   }
   return {
     ref: implementation.ref,

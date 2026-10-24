@@ -1,0 +1,31 @@
+# Ordinary DSH Web session; no Singularity roles, method assets or delegation.
+- id: workspace-changes
+  disabled: true
+- insert:
+    - id: preset-env-setup
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: env-setup
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: You prepare finite, reviewable RSI environments.
+              suffix: Your working directory is {{cwd}}.
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: false
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+            config:
+              mode: timed
+              timeout: 120

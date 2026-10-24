@@ -14,7 +14,13 @@ import { describe, expect, it } from 'vitest'
 
 import { MemoryLog } from '../src/protocol/memory-log.ts'
 import { ProtocolRegistry } from '../src/protocol/registry.ts'
-import { declareStrategyProtocol, STRATEGY_KINDS, STRATEGY_PROTOCOL, STRATEGY_ROLE, STRATEGY_VERSION } from '../src/strategy/protocol.ts'
+import {
+  declareStrategyProtocol,
+  STRATEGY_KINDS,
+  STRATEGY_PROTOCOL,
+  STRATEGY_ROLE,
+  STRATEGY_VERSION,
+} from '../src/strategy/protocol.ts'
 import { asyncRefusalOf } from './fixtures.ts'
 
 const SUBJECTS: Readonly<Record<string, string>> = { [STRATEGY_ROLE]: 'strategy-service' }
@@ -26,8 +32,18 @@ describe('a fact of the previous strategy version is refused by name', async () 
     const log = new MemoryLog(registry, { subjects: SUBJECTS, now: () => '2026-10-09T00:00:00.000Z' })
     const previous = STRATEGY_VERSION - 1
     const refusal = await asyncRefusalOf(() =>
-      log.emit({ commandId: 'old-version', protocol: STRATEGY_PROTOCOL, version: previous, kind: STRATEGY_KINDS.roundDecided, subject: 'round-1', payload: {} }),
+      log.emit({
+        commandId: 'old-version',
+        protocol: STRATEGY_PROTOCOL,
+        version: previous,
+        kind: STRATEGY_KINDS.roundDecided,
+        subject: 'round-1',
+        payload: {},
+      }),
     )
-    expect([refusal.code, refusal.detail.includes(`declared at ${STRATEGY_VERSION}`)]).toEqual(['version-mismatch', true])
+    expect([refusal.code, refusal.detail.includes(`declared at ${STRATEGY_VERSION}`)]).toEqual([
+      'version-mismatch',
+      true,
+    ])
   })
 })

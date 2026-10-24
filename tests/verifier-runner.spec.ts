@@ -29,7 +29,9 @@ import { asyncRefusalOf } from './fixtures.ts'
 
 const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 /** A process that ran and exited with this code. */
-const exited = (exitCode: number, stderr = ''): VerifierProcess => async () => ({ exitCode, stderr })
+const exited =
+  (exitCode: number, stderr = ''): VerifierProcess =>
+  async () => ({ exitCode, stderr })
 
 let directory: string
 let artifact: string
@@ -52,7 +54,10 @@ describe('the verifier command runner', () => {
       return { exitCode: 0, stderr: '' }
     }
 
-    const result: VerifierCommandResult = await runVerifierCommand({ command: 'write it', artifactPath: artifact, inputs: [] }, port)
+    const result: VerifierCommandResult = await runVerifierCommand(
+      { command: 'write it', artifactPath: artifact, inputs: [] },
+      port,
+    )
 
     expect([result.verdict, result.artifactDigest]).toEqual(['pass', sha256('after')])
   })
@@ -97,7 +102,9 @@ describe('the verifier command runner', () => {
     const absent = join(directory, 'not-there.txt')
 
     // The process exited 0 and the judgement still cannot be formed, because no digest exists.
-    const refusal = await asyncRefusalOf(() => runVerifierCommand({ command: 'true', artifactPath: absent, inputs: [] }, exited(0)))
+    const refusal = await asyncRefusalOf(() =>
+      runVerifierCommand({ command: 'true', artifactPath: absent, inputs: [] }, exited(0)),
+    )
 
     expect([refusal.code, refusal.detail.includes(absent)]).toEqual(['evidence-input-mismatch', true])
   })
@@ -107,7 +114,11 @@ describe('the verifier command runner', () => {
 
     const refusal = await asyncRefusalOf(() =>
       runVerifierCommand(
-        { command: 'true', artifactPath: artifact, inputs: [{ name: 'words.txt', digest: sha256('x'), path: join(directory, 'missing.txt') }] },
+        {
+          command: 'true',
+          artifactPath: artifact,
+          inputs: [{ name: 'words.txt', digest: sha256('x'), path: join(directory, 'missing.txt') }],
+        },
         exited(0),
       ),
     )
@@ -119,13 +130,19 @@ describe('the verifier command runner', () => {
     await writeFile(artifact, 'artifact', 'utf8')
     const port: VerifierProcess = async () => ({ exitCode: null, stderr: '', failure: 'spawn nope ENOENT' })
 
-    await expect(runVerifierCommand({ command: 'nope', artifactPath: artifact, inputs: [] }, port)).rejects.toThrow('spawn nope ENOENT')
+    await expect(runVerifierCommand({ command: 'nope', artifactPath: artifact, inputs: [] }, port)).rejects.toThrow(
+      'spawn nope ENOENT',
+    )
   })
 
   it('rejects runtime failure even when an invocation reports exit zero', async () => {
     await writeFile(artifact, 'artifact', 'utf8')
-    await expect(runVerifierCommand({ command: 'true', artifactPath: artifact }, async () => ({
-      exitCode: 0, stderr: '', failure: 'process output limit',
-    }))).rejects.toThrow('process output limit')
+    await expect(
+      runVerifierCommand({ command: 'true', artifactPath: artifact }, async () => ({
+        exitCode: 0,
+        stderr: '',
+        failure: 'process output limit',
+      })),
+    ).rejects.toThrow('process output limit')
   })
 })

@@ -1,5 +1,9 @@
 # 装配层蓝图与交付计划
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
+> 历史设计与施工记录：协议版本和证据范围以各节日期为准；当前行为合同见[架构入口](architecture.md)。
+
 日期：2026-10-14。实施基线：`f892376`。本文保留该阶段的装配设计与工作包；2026-10-17 起，剩余施工顺序及新验收条件由 [Task 优先的领域 RSI 计划](task-first-domain-rsi-plan.md) 接替。下文旧状态不能视为新架构已实现。
 总目标见 [blueprint.md](blueprint.md)，本轮反例见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)，G2 合同见 [phase-g2-design.md](phase-g2-design.md)。
 

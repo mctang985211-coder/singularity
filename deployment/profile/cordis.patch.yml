@@ -21,36 +21,36 @@
   disabled: true
 
 # The deployment's model route, because the base layer mounts `llm-pi-ai` with no providers and
-# defaults every agent to `deepseek-official`, for which this machine holds no credential: a profile
-# that names no route composes a session in which no model call can happen. The route names an
-# environment variable, never a key — `DEEPSEEK_API_KEY` resolves per request through
+# defaults every agent to `deepseek-official`. The route names an environment variable, never a key —
+# `MYAPI_API_KEY` resolves per request through
 # `$DSH_HOME/.credentials.yaml`. `agent-default-model` is restated whole because an id-targeted patch
 # replaces the matched config, so every key it owns has to be here.
 #
-# The route is DeepSeek's own Responses endpoint: `api: openai-responses` posts to `<baseURL>/responses`,
-# which `https://api.deepseek.com/` serves directly. Model id, capacities and effort levels are the
-# provider's own `/models` answer (context 1048576, max output 393216, effort low/high/max), so no
-# gateway alias or capacity is restated here.
+# Use the configured OpenAI Chat Completions compatible gateway. Keep the `cn:` model prefix because
+# the gateway uses it to route this model.
 - id: llm-pi-ai
   config:
     providers:
-      deepseek:
-        displayName: DeepSeek
-        apiKeyEnv: DEEPSEEK_API_KEY
-        api: openai-responses
-        baseURL: https://api.deepseek.com/
+      myapi:
+        displayName: Custom API (ccapi)
+        apiKeyEnv: MYAPI_API_KEY
+        api: openai-completions
+        baseURL: https://ccapi.cgdoem.cn/v1
         retryPolicy:
           mode: normal
           maxRetries: 20
-          backoff:
-            initialDelayMs: 500
-            maxDelayMs: 180000
-            jitterRatio: 0.1
+          retryableCodes:
+            - EMPTY_RESPONSE
+            - RATE_LIMIT
+            - SERVER
+            - TIMEOUT
+            - TRANSPORT
+            - PI_AI_ERROR
         models:
-          - id: deepseek-flash
-            name: DeepSeek-V4.1-Flash
-            contextWindow: 1048576
-            maxTokens: 393216
+          - id: 'cn:deepseek-v4.1-flash'
+            name: DeepSeek V4.1 Flash（ccapi）
+            contextWindow: 1000000
+            maxTokens: 196608
             reasoningEfforts:
               low: low
               high: high
@@ -59,8 +59,8 @@
 - id: agent-default-model
   name: '@deepseek-ai/dsh-agent-default-model'
   config:
-    provider: deepseek
-    model: deepseek-flash
+    provider: myapi
+    model: 'cn:deepseek-v4.1-flash'
     reasoningEffort: max
 
 - id: agent-preset-registry

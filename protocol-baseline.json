@@ -8,11 +8,7 @@
       "kinds": [
         {
           "name": "agent/opened",
-          "members": [
-            "agentId",
-            "role",
-            "sessionId"
-          ]
+          "members": ["agentId", "role", "sessionId"]
         }
       ],
       "producedBy": "scripts/*.mjs deployments (a deployment opens the node before recording it)",
@@ -25,17 +21,11 @@
       "kinds": [
         {
           "name": "pointer/switched",
-          "members": [
-            "expected",
-            "to"
-          ]
+          "members": ["expected", "to"]
         },
         {
           "name": "revision/created",
-          "members": [
-            "revisionId",
-            "manifest"
-          ]
+          "members": ["revisionId", "manifest"]
         }
       ],
       "producedBy": "src/environment/protocol.ts revision/created (a deployment mints revisions) and src/release/commands.ts publish (the one conditional update)",
@@ -43,7 +33,7 @@
     },
     {
       "protocol": "measure",
-      "version": 5,
+      "version": 6,
       "subject": "the evaluation id",
       "kinds": [
         {
@@ -61,17 +51,7 @@
         },
         {
           "name": "evaluation/opened",
-          "members": [
-            "baseline",
-            "candidate",
-            "run",
-            "context",
-            "metric",
-            "weights",
-            "trials",
-            "judgement",
-            "matrix"
-          ]
+          "members": ["baseline", "candidate", "run", "context", "metric", "weights", "trials", "judgement", "matrix"]
         },
         {
           "name": "trial/failed",
@@ -91,12 +71,7 @@
         },
         {
           "name": "trial/missed",
-          "members": [
-            "slot",
-            "reason",
-            "verifierRef",
-            "verifierVersion"
-          ]
+          "members": ["slot", "reason", "cost", "verifierRef", "verifierVersion"]
         },
         {
           "name": "trial/recorded",
@@ -125,22 +100,11 @@
       "kinds": [
         {
           "name": "release/approved",
-          "members": [
-            "revisionId",
-            "draftDigest",
-            "approvedBy",
-            "approvalId",
-            "review"
-          ]
+          "members": ["revisionId", "draftDigest", "approvedBy", "approvalId", "review"]
         },
         {
           "name": "release/drafted",
-          "members": [
-            "revisionId",
-            "contentDigest",
-            "draftDigest",
-            "basis"
-          ]
+          "members": ["revisionId", "contentDigest", "draftDigest", "basis"]
         }
       ],
       "producedBy": "src/release/commands.ts createReleaseCommands (bootstrap draft or committed-winner draftFromDecision, and approveReview with exact independent review evidence)",
@@ -148,27 +112,20 @@
     },
     {
       "protocol": "review",
-      "version": 5,
+      "version": 8,
       "subject": "the independent review id",
       "kinds": [
         {
           "name": "review/completed",
-          "members": [
-            "findings",
-            "result"
-          ]
+          "members": ["findings", "result"]
         },
         {
           "name": "review/decomposed",
-          "members": [
-            "children"
-          ]
+          "members": ["children"]
         },
         {
           "name": "review/failed",
-          "members": [
-            "reason"
-          ]
+          "members": ["reason"]
         },
         {
           "name": "review/started",
@@ -191,25 +148,16 @@
     },
     {
       "protocol": "strategy",
-      "version": 9,
+      "version": 10,
       "subject": "the round id",
       "kinds": [
         {
           "name": "candidate/submitted",
-          "members": [
-            "slot",
-            "revision",
-            "evaluationId",
-            "edits"
-          ]
+          "members": ["slot", "revision", "evaluationId", "edits"]
         },
         {
           "name": "round/decided",
-          "members": [
-            "winner",
-            "outcomes",
-            "calibration"
-          ]
+          "members": ["winner", "outcomes", "calibration"]
         },
         {
           "name": "round/opened",
@@ -230,19 +178,12 @@
     },
     {
       "protocol": "task",
-      "version": 25,
+      "version": 27,
       "subject": "the task id",
       "kinds": [
         {
           "name": "bubble/opened",
-          "members": [
-            "runId",
-            "inputs",
-            "workspace",
-            "model",
-            "tools",
-            "conditions"
-          ]
+          "members": ["runId", "inputs", "workspace", "model", "tools", "conditions"]
         },
         {
           "name": "evidence/produced",
@@ -261,174 +202,91 @@
         },
         {
           "name": "learning/configured",
-          "members": [
-            "enabled"
-          ]
+          "members": ["enabled"]
         },
         {
           "name": "method/consumed",
-          "members": [
-            "runId",
-            "revision",
-            "method",
-            "source",
-            "mode"
-          ]
+          "members": ["runId", "revision", "method", "source", "mode"]
         },
         {
           "name": "rsi/batch-ended",
-          "members": [
-            "batchId"
-          ]
+          "members": ["batchId"]
         },
         {
           "name": "rsi/batch-opened",
-          "members": [
-            "batchId",
-            "incumbent",
-            "historyCutoff",
-            "slots"
-          ]
+          "members": ["batchId", "incumbent", "historyCutoff", "slots"]
         },
         {
           "name": "rsi/batch-slot-settled",
-          "members": [
-            "batchId",
-            "slot",
-            "status",
-            "detail",
-            "revision"
-          ]
+          "members": ["batchId", "slot", "status", "detail", "revision"]
         },
         {
           "name": "rsi/round-requested",
-          "members": [
-            "runId",
-            "roundId",
-            "round",
-            "incumbent",
-            "candidates"
-          ]
+          "members": ["runId", "roundId", "round", "incumbent", "candidates"]
         },
         {
           "name": "rsi/round-settled",
-          "members": [
-            "roundId",
-            "status",
-            "error"
-          ]
+          "members": ["roundId", "status", "error"]
         },
         {
           "name": "rsi/search-opened",
-          "members": [
-            "runId",
-            "maxProposals"
-          ]
+          "members": ["runId", "maxProposals"]
         },
         {
           "name": "rsi/status",
-          "members": [
-            "status",
-            "detail",
-            "trace"
-          ]
+          "members": ["status", "detail", "trace"]
         },
         {
           "name": "rsi/transfer-frozen",
-          "members": [
-            "baseline",
-            "champion",
-            "suiteDigest",
-            "executionProfileDigest",
-            "roundId"
-          ]
+          "members": ["baseline", "champion", "suiteDigest", "executionProfileDigest", "roundId"]
         },
         {
           "name": "rsi/transfer-settled",
-          "members": [
-            "outcome",
-            "report"
-          ]
+          "members": ["outcome", "report"]
         },
         {
           "name": "rsi/transfer-started",
-          "members": [
-            "suiteDigest"
-          ]
+          "members": ["suiteDigest"]
         },
         {
           "name": "run/failed",
-          "members": [
-            "runId",
-            "cause",
-            "reason"
-          ]
+          "members": ["runId", "cause", "reason"]
         },
         {
           "name": "run/started",
-          "members": [
-            "runId",
-            "revision",
-            "purpose",
-            "relatedTo",
-            "case"
-          ]
+          "members": ["runId", "revision", "purpose", "relatedTo", "case"]
         },
         {
           "name": "run/submitted",
-          "members": [
-            "runId",
-            "submission"
-          ]
+          "members": ["runId", "submission"]
         },
         {
           "name": "run/verified",
-          "members": [
-            "runId"
-          ]
+          "members": ["runId"]
         },
         {
           "name": "task/admitted",
-          "members": [
-            "contract"
-          ]
+          "members": ["contract"]
         },
         {
           "name": "task/assigned",
-          "members": [
-            "agentId",
-            "agentIdentity"
-          ]
+          "members": ["agentId", "agentIdentity"]
         },
         {
           "name": "task/closed",
-          "members": [
-            "runId",
-            "reason"
-          ]
+          "members": ["runId", "reason"]
         },
         {
           "name": "task/decomposed",
-          "members": [
-            "children"
-          ]
+          "members": ["children"]
         },
         {
           "name": "task/explorations-stopped",
-          "members": [
-            "taskIds",
-            "reason"
-          ]
+          "members": ["taskIds", "reason"]
         },
         {
           "name": "task/question-answered",
-          "members": [
-            "questionId",
-            "answerId",
-            "answer",
-            "resolves",
-            "evidence"
-          ]
+          "members": ["questionId", "answerId", "answer", "resolves", "evidence"]
         },
         {
           "name": "task/question-asked",
@@ -445,21 +303,11 @@
         },
         {
           "name": "task/reassigned",
-          "members": [
-            "from",
-            "agentId",
-            "agentIdentity"
-          ]
+          "members": ["from", "agentId", "agentIdentity"]
         },
         {
           "name": "workflow/limits-frozen",
-          "members": [
-            "maxSteps",
-            "maxNodes",
-            "maxPlans",
-            "maxRuns",
-            "maxNoProgress"
-          ]
+          "members": ["maxSteps", "maxNodes", "maxPlans", "maxRuns", "maxNoProgress"]
         }
       ],
       "producedBy": "src/task/commands.ts createTaskCommands; assembly/src/{improvement,rsi-proposal}.ts emits host-owned search facts governed by src/task/search.ts",

@@ -54,7 +54,10 @@ export function assignedKind(kind: string, emitter: string): KindRule<TaskState>
           'illegal-transition',
           `${where} assigns task "${envelope.subject}" again; it is already the responsibility of agent "${current.agentId}". A change of hands is a transfer, which must name who it is taken from`,
         )
-      return { ...state, responsibility: { agentId: payload.agentId, agentIdentity: payload.agentIdentity, assignedAt: envelope.at } }
+      return {
+        ...state,
+        responsibility: { agentId: payload.agentId, agentIdentity: payload.agentIdentity, assignedAt: envelope.at },
+      }
     },
   })
 }
@@ -84,15 +87,24 @@ export function reassignedKind(kind: string, emitter: string): KindRule<TaskStat
       requireResponsible(state, envelope.actor, where)
       const current = state.responsibility
       if (current === undefined)
-        refuse('illegal-transition', `${where} transfers task "${envelope.subject}", which nobody is responsible for yet; there is nothing to transfer`)
+        refuse(
+          'illegal-transition',
+          `${where} transfers task "${envelope.subject}", which nobody is responsible for yet; there is nothing to transfer`,
+        )
       if (current.agentId !== payload.from)
         refuse(
           'illegal-transition',
           `${where} transfers task "${envelope.subject}" from agent "${payload.from}", but it is held by agent "${current.agentId}"; a transfer must name the current holder`,
         )
       if (payload.agentId === current.agentId)
-        refuse('illegal-transition', `${where} transfers task "${envelope.subject}" to agent "${payload.agentId}", which already holds it`)
-      return { ...state, responsibility: { agentId: payload.agentId, agentIdentity: payload.agentIdentity, assignedAt: envelope.at } }
+        refuse(
+          'illegal-transition',
+          `${where} transfers task "${envelope.subject}" to agent "${payload.agentId}", which already holds it`,
+        )
+      return {
+        ...state,
+        responsibility: { agentId: payload.agentId, agentIdentity: payload.agentIdentity, assignedAt: envelope.at },
+      }
     },
   })
 }

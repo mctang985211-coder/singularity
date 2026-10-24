@@ -49,7 +49,9 @@ describe('the verifier boundary', () => {
   it('refuses a deployment that binds one identity to both the executor and a verifier', async () => {
     // The executor and the verifier are different roles, but one identity holds both. Role
     // separation alone would pass this, so the identity is checked too.
-    const shared = { scheduler: 'shared-identity', [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'shared-identity',
+    const shared = {
+      scheduler: 'shared-identity',
+      [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'shared-identity',
     }
     const log = new MemoryLog(taskRegistry(), { subjects: shared })
     await log.emit(admitted())
@@ -59,14 +61,17 @@ describe('the verifier boundary', () => {
     await log.emit(started())
     await log.emit(bubbleOpened())
 
-    expect(await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))).toMatchObject({ code: 'self-reported-evidence', detail: expect.stringContaining('cannot also judge'),
+    expect(await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))).toMatchObject({
+      code: 'self-reported-evidence',
+      detail: expect.stringContaining('cannot also judge'),
     })
   })
 
   it('refuses a second verdict on one criterion', async () => {
     const log = await running()
     await log.emit(judged('correctness', UNIT_VERIFIER, 'fail'))
-    expect((await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER, 'pass')))).code).toBe<RefusalCode>('evidence-conflict',
+    expect((await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER, 'pass')))).code).toBe<RefusalCode>(
+      'evidence-conflict',
     )
   })
 })
@@ -76,7 +81,9 @@ describe('settlement', () => {
     const log = await running()
     await log.emit(judged('correctness', UNIT_VERIFIER))
 
-    expect(await asyncRefusalOf(() => log.emit(verified()))).toMatchObject({ code: 'unadjudicated-criterion', detail: expect.stringContaining('"limits" has no passing verdict from independent review'),
+    expect(await asyncRefusalOf(() => log.emit(verified()))).toMatchObject({
+      code: 'unadjudicated-criterion',
+      detail: expect.stringContaining('"limits" has no passing verdict from independent review'),
     })
   })
 
@@ -90,10 +97,18 @@ describe('settlement', () => {
 
   it('refuses any further fact once a run has settled', async () => {
     const log = await running()
-    await log.emit({ commandId: 'f1', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/failed', subject: TASK_ID, payload: { runId: RUN_ID, cause: 'runtime', reason: 'no golden file' },
+    await log.emit({
+      commandId: 'f1',
+      protocol: TASK_PROTOCOL,
+      version: TASK_VERSION,
+      kind: 'run/failed',
+      subject: TASK_ID,
+      payload: { runId: RUN_ID, cause: 'runtime', reason: 'no golden file' },
     })
 
-    expect([(await asyncRefusalOf(() => log.emit(verified()))).code, (await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))).code,
+    expect([
+      (await asyncRefusalOf(() => log.emit(verified()))).code,
+      (await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))).code,
     ]).toEqual(['illegal-transition', 'illegal-transition'])
   })
 })
@@ -102,42 +117,68 @@ describe('payloads are closed', () => {
   it('refuses RSI overhead in a round request and duplicate candidate revisions', async () => {
     const log = await running()
     for (const extra of [{ proposal: { tokens: 7 } }, { candidates: [REVISION, REVISION] }])
-      expect((await asyncRefusalOf(() => log.emit({
-        commandId: 'bad-round', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'rsi/round-requested', subject: TASK_ID,
-        payload: { runId: RUN_ID, roundId: 'round', round: 1, incumbent: REVISION, candidates: [REVISION], ...extra },
-      }))).code).toBe('malformed-payload')
+      expect(
+        (
+          await asyncRefusalOf(() =>
+            log.emit({
+              commandId: 'bad-round',
+              protocol: TASK_PROTOCOL,
+              version: TASK_VERSION,
+              kind: 'rsi/round-requested',
+              subject: TASK_ID,
+              payload: {
+                runId: RUN_ID,
+                roundId: 'round',
+                round: 1,
+                incumbent: REVISION,
+                candidates: [REVISION],
+                ...extra,
+              },
+            }),
+          )
+        ).code,
+      ).toBe('malformed-payload')
   })
   it('refuses an unknown contract member and a missing explicit member', () => {
     const widened = { ...contract(), extra: 'typo' }
     const withoutInputs = { artifact: 'artifact.json', goal: 'g', criteria: contract().criteria }
     const criterionWidened = { ...contract(), criteria: [{ ...contract().criteria[0], note: 'extra' }] }
-    expect([widened, withoutInputs, criterionWidened].map(
-        (payload) => refusalOf(() => assertContract(payload, 'contract')).code,
+    expect(
+      [widened, withoutInputs, criterionWidened].map(
+        payload => refusalOf(() => assertContract(payload, 'contract')).code,
       ),
     ).toEqual(['malformed-contract', 'malformed-contract', 'malformed-contract'])
   })
 
   it('validates task asset selections independently from template provenance', () => {
     const { template: _template, ...oneOff } = contract()
-    expect(assertContract({ ...oneOff, skills: ['count'], capabilities: ['probe'] }, 'contract'))
-      .toMatchObject({ skills: ['count'], capabilities: ['probe'] })
-    expect(assertContract({ ...contract(), skills: ['count'], capabilities: ['probe'] }, 'contract'))
-      .toMatchObject({ template: contract().template, skills: ['count'], capabilities: ['probe'] })
-    for (const selection of [
-      { skills: ['count', 'count'] }, { capabilities: [''] }, { skills: 'count' },
-    ]) expect(refusalOf(() => assertContract({ ...oneOff, ...selection }, 'contract')).code).toBe('malformed-contract')
+    expect(assertContract({ ...oneOff, skills: ['count'], capabilities: ['probe'] }, 'contract')).toMatchObject({
+      skills: ['count'],
+      capabilities: ['probe'],
+    })
+    expect(assertContract({ ...contract(), skills: ['count'], capabilities: ['probe'] }, 'contract')).toMatchObject({
+      template: contract().template,
+      skills: ['count'],
+      capabilities: ['probe'],
+    })
+    for (const selection of [{ skills: ['count', 'count'] }, { capabilities: [''] }, { skills: 'count' }])
+      expect(refusalOf(() => assertContract({ ...oneOff, ...selection }, 'contract')).code).toBe('malformed-contract')
   })
 
   it('refuses an unknown payload member instead of accepting it', async () => {
     const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
-    expect(await asyncRefusalOf(() => log.emit({ ...admitted(), payload: { contract: contract(), approvedBy: 'me' } })),
+    expect(
+      await asyncRefusalOf(() => log.emit({ ...admitted(), payload: { contract: contract(), approvedBy: 'me' } })),
     ).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('approvedBy') })
   })
 
   it('refuses a wrong-typed optional member instead of normalizing it away', async () => {
     const log = await running()
     // The reviewer's counterexample: `detail: 123` silently became the empty string.
-    const refusal = await asyncRefusalOf(() => log.emit({ ...judged('correctness', UNIT_VERIFIER), payload: { ...(judged('correctness', UNIT_VERIFIER).payload as object), detail: 123 },
+    const refusal = await asyncRefusalOf(() =>
+      log.emit({
+        ...judged('correctness', UNIT_VERIFIER),
+        payload: { ...(judged('correctness', UNIT_VERIFIER).payload as object), detail: 123 },
       }),
     )
     expect(refusal).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('detail') })
@@ -146,7 +187,11 @@ describe('payloads are closed', () => {
   it('refuses a revision reference whose digest is not a content digest', async () => {
     const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
     await log.emit(admitted())
-    expect(await asyncRefusalOf(() => log.emit({ ...started(), payload: { purpose: 'solve', runId: RUN_ID, revision: { ...REVISION, digest: 'not-a-digest' } },
+    expect(
+      await asyncRefusalOf(() =>
+        log.emit({
+          ...started(),
+          payload: { purpose: 'solve', runId: RUN_ID, revision: { ...REVISION, digest: 'not-a-digest' } },
         }),
       ),
     ).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('sha256') })
@@ -169,9 +214,11 @@ describe('replay never consults what this deployment can run today', () => {
 describe('what the protocol does not know', () => {
   it('refuses an unknown run and an unknown criterion', async () => {
     const log = await running()
-    expect((await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER, 'pass', { runId: 'run-ghost' })))).code,
+    expect(
+      (await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER, 'pass', { runId: 'run-ghost' })))).code,
     ).toBe<RefusalCode>('unknown-run')
-    expect((await asyncRefusalOf(() => log.emit(judged('ghost-criterion', UNIT_VERIFIER)))).code).toBe<RefusalCode>('unknown-criterion',
+    expect((await asyncRefusalOf(() => log.emit(judged('ghost-criterion', UNIT_VERIFIER)))).code).toBe<RefusalCode>(
+      'unknown-criterion',
     )
     expect((await asyncRefusalOf(() => log.emit(verified('run-ghost')))).code).toBe<RefusalCode>('unknown-run')
   })
@@ -182,7 +229,9 @@ describe('what the protocol does not know', () => {
     const registry = taskRegistry()
     // The facts handed in are the whole input: a prefix that stops before the settlement yields no
     // receipt, and a run the facts never mention has none either.
-    expect(refusalOf(() => projectReceipt(registry, held, TASK_ID, RUN_ID))).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('still running'),
+    expect(refusalOf(() => projectReceipt(registry, held, TASK_ID, RUN_ID))).toMatchObject({
+      code: 'illegal-transition',
+      detail: expect.stringContaining('still running'),
     })
     expect(refusalOf(() => projectReceipt(registry, held, TASK_ID, 'run-ghost')).code).toBe<RefusalCode>('unknown-run')
   })

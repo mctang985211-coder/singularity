@@ -23,8 +23,12 @@ export async function repair(
       if (run.status !== 'running') continue
       const stopped = stoppedExplorationOf(cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), task.taskId)
       if (stopped !== undefined) {
-        await apparatus.tasks.forAgent(agentId).failRun({ commandId: `branch-stopped:${task.taskId}/${run.runId}`,
-          taskId: task.taskId, runId: run.runId, reason: `exploration stopped by ${stopped.parentTaskId}: ${stopped.reason}` })
+        await apparatus.tasks.forAgent(agentId).failRun({
+          commandId: `branch-stopped:${task.taskId}/${run.runId}`,
+          taskId: task.taskId,
+          runId: run.runId,
+          reason: `exploration stopped by ${stopped.parentTaskId}: ${stopped.reason}`,
+        })
         continue
       }
       assertPinnedRevision(
@@ -33,14 +37,12 @@ export async function repair(
         'resume Run',
       )
       if (run.bubble === undefined) {
-        await apparatus.tasks
-          .forAgent(agentId)
-          .failRun({
-            commandId: `recover-unprepared:${task.taskId}/${run.runId}`,
-            taskId: task.taskId,
-            runId: run.runId,
-            reason: 'execution preparation did not commit a snapshot',
-          })
+        await apparatus.tasks.forAgent(agentId).failRun({
+          commandId: `recover-unprepared:${task.taskId}/${run.runId}`,
+          taskId: task.taskId,
+          runId: run.runId,
+          reason: 'execution preparation did not commit a snapshot',
+        })
         continue
       }
       for (const input of run.bubble.inputs) {

@@ -6,7 +6,17 @@ import { defineKind, type KindRule, type MemberSet } from '../protocol/registry.
 import { assertInputsBound, BUBBLE_INPUT_MEMBERS, inputList, type Bubble, type BubbleInput } from './bubble.ts'
 import type { AcceptanceCriterion, TaskContract } from './contract.ts'
 import { requireResponsible } from './responsibility.ts'
-import { digest, maybeText, record, requireContractOf, requireRun, revisionRef, REVISION_MEMBERS, sameRevision, settled, text,
+import {
+  digest,
+  maybeText,
+  record,
+  requireContractOf,
+  requireRun,
+  revisionRef,
+  REVISION_MEMBERS,
+  sameRevision,
+  settled,
+  text,
 } from './shape.ts'
 import type { RevisionRef, TaskState } from './protocol.ts'
 
@@ -60,7 +70,11 @@ export interface RunState {
   readonly revision: RevisionRef
   readonly purpose: 'solve' | 'evaluation' | 'improve'
   readonly relatedTo?: { readonly taskId: string; readonly runId: string }
-  readonly case?: { readonly caseId: string; readonly familyId: string; readonly split: 'evolve' | 'validation' | 'heldout' }
+  readonly case?: {
+    readonly caseId: string
+    readonly familyId: string
+    readonly split: 'evolve' | 'validation' | 'heldout'
+  }
   readonly startedAt: string
   readonly status: RunStatus
   readonly stage: RunStage
@@ -88,9 +102,17 @@ const INPUT_ATTACHMENT_MEMBERS = ['name', 'attachment'] as const
 const SOURCE_MEMBERS = ['sessionId', 'eventCount', 'digest'] as const
 const RUN_VERIFIED_MEMBERS = ['runId'] as const
 const RUN_FAILED_MEMBERS = ['runId', 'cause', 'reason'] as const
-const EVIDENCE_PRODUCED_MEMBERS = ['runId', 'criterionId',
+const EVIDENCE_PRODUCED_MEMBERS = [
+  'runId',
+  'criterionId',
   'reviewId',
-  'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'inputDigests', 'detail',
+  'verdict',
+  'verifierRef',
+  'verifierVersion',
+  'implementationDigest',
+  'artifactDigest',
+  'inputDigests',
+  'detail',
 ] as const
 
 export function fileAttachmentRef(raw: unknown, expectedDigest: string | undefined, where: string): FileAttachmentRef {
@@ -108,8 +130,11 @@ export function fileAttachmentRef(raw: unknown, expectedDigest: string | undefin
   return { attachmentId: attachmentId as FileAttachmentRef['attachmentId'], name: text(source, 'name', where), bytes }
 }
 
-function submissionFiles(raw: unknown,
-  artifactDigest: string, inputs: readonly BubbleInput[], where: string,
+function submissionFiles(
+  raw: unknown,
+  artifactDigest: string,
+  inputs: readonly BubbleInput[],
+  where: string,
 ): RunSubmission['files'] {
   const source = record(raw, where)
   assertClosedKeys(source, SUBMISSION_FILES_MEMBERS, where)
@@ -132,22 +157,32 @@ function submissionFiles(raw: unknown,
 }
 
 export function verdictFor(run: RunState, criterion: AcceptanceCriterion): EvidenceRecord | undefined {
-  return run.evidence.find((entry) => entry.criterionId === criterion.criterionId)
+  return run.evidence.find(entry => entry.criterionId === criterion.criterionId)
 }
 
 /** The criteria this run holds **no verdict at all** for, from each criterion's own verifier. */
 export function unadjudicatedCriteria(contract: TaskContract, run: RunState): readonly AcceptanceCriterion[] {
-  return contract.criteria.filter((criterion) => verdictFor(run, criterion) === undefined)
+  return contract.criteria.filter(criterion => verdictFor(run, criterion) === undefined)
 }
 
 /** The criteria this run holds **no passing** verdict for: a missing verdict and a failing one alike. */
 export function unmetCriteria(contract: TaskContract, run: RunState): readonly AcceptanceCriterion[] {
-  return contract.criteria.filter((criterion) => verdictFor(run, criterion)?.verdict !== 'pass')
+  return contract.criteria.filter(criterion => verdictFor(run, criterion)?.verdict !== 'pass')
 }
 
 /** `run/started`: one attempt at a task, pinned to the revision it will be judged against. */
 export function runStartedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { runId: string; revision: RevisionRef; purpose: RunState['purpose']; relatedTo?: RunState['relatedTo']; case?: RunState['case'] }, { revision: MemberSet }>({
+  return defineKind<
+    TaskState,
+    {
+      runId: string
+      revision: RevisionRef
+      purpose: RunState['purpose']
+      relatedTo?: RunState['relatedTo']
+      case?: RunState['case']
+    },
+    { revision: MemberSet }
+  >({
     guarantees: APPENDED,
     members: RUN_STARTED_MEMBERS,
     nested: { revision: REVISION_MEMBERS },
@@ -161,11 +196,22 @@ export function runStartedKind(kind: string, emitter: string): KindRule<TaskStat
       const taskCase = source['case'] === undefined ? undefined : record(source['case'], 'trial case')
       if (taskCase) {
         assertClosedKeys(taskCase, ['caseId', 'familyId', 'split'], 'trial case')
-        if (purpose !== 'evaluation' || !['evolve', 'validation', 'heldout'].includes(String(taskCase['split']))) refuse('malformed-payload', 'only evaluation Runs may name a case split')
+        if (purpose !== 'evaluation' || !['evolve', 'validation', 'heldout'].includes(String(taskCase['split'])))
+          refuse('malformed-payload', 'only evaluation Runs may name a case split')
       }
-      return { runId: text(source, 'runId', where), revision: revisionRef(source['revision'], `${where}.revision`, nested.revision),
+      return {
+        runId: text(source, 'runId', where),
+        revision: revisionRef(source['revision'], `${where}.revision`, nested.revision),
         purpose: purpose as RunState['purpose'],
-        ...(taskCase === undefined ? {} : { case: { caseId: text(taskCase, 'caseId', where), familyId: text(taskCase, 'familyId', where), split: taskCase['split'] as NonNullable<RunState['case']>['split'] } }),
+        ...(taskCase === undefined
+          ? {}
+          : {
+              case: {
+                caseId: text(taskCase, 'caseId', where),
+                familyId: text(taskCase, 'familyId', where),
+                split: taskCase['split'] as NonNullable<RunState['case']>['split'],
+              },
+            }),
         ...(related === undefined
           ? {}
           : { relatedTo: { taskId: text(related, 'taskId', where), runId: text(related, 'runId', where) } }),
@@ -180,9 +226,11 @@ export function runStartedKind(kind: string, emitter: string): KindRule<TaskStat
       if (state.runs[payload.runId] !== undefined)
         refuse('illegal-transition', `${where} starts run "${payload.runId}" again; one run id is one attempt`)
       if (state.closure !== undefined) refuse('illegal-transition', 'a closed Task cannot start another Run')
-      const running = Object.values(state.runs).find((run) => run.status === 'running')
+      const running = Object.values(state.runs).find(run => run.status === 'running')
       if (running !== undefined)
-        refuse('illegal-transition', `${where} cannot start run "${payload.runId}" while run "${running.runId}" is running; one task has one unsettled attempt`,
+        refuse(
+          'illegal-transition',
+          `${where} cannot start run "${payload.runId}" while run "${running.runId}" is running; one task has one unsettled attempt`,
         )
       return {
         ...state,
@@ -235,7 +283,10 @@ export function runSubmittedKind(kind: string, emitter: string): KindRule<TaskSt
           artifactDigest,
           inputDigests,
           files: submissionFiles(submission['files'], artifactDigest, inputDigests, `${at}.files`),
-          source: { sessionId: text(source, 'sessionId', sourceAt), eventCount, digest: digest(source, 'digest', sourceAt),
+          source: {
+            sessionId: text(source, 'sessionId', sourceAt),
+            eventCount,
+            digest: digest(source, 'digest', sourceAt),
           },
         },
       }
@@ -256,7 +307,11 @@ export function runSubmittedKind(kind: string, emitter: string): KindRule<TaskSt
       assertInputsBound(run.bubble, payload.submission.inputDigests, where)
       return {
         ...state,
-        runs: { ...state.runs, [payload.runId]: { ...run, stage: 'submitted',
+        runs: {
+          ...state.runs,
+          [payload.runId]: {
+            ...run,
+            stage: 'submitted',
             request: { id: payload.submission.requestId, digest: payload.submission.requestDigest },
             submission: payload.submission,
             submittedAt: envelope.at,
@@ -300,7 +355,9 @@ export function evidenceProducedKind(
       const source = record(raw, where)
       const verdict = source['verdict']
       if (verdict !== 'pass' && verdict !== 'fail' && verdict !== 'partial' && verdict !== 'unknown')
-        refuse('malformed-payload', `${where}.verdict must be pass, fail, partial or unknown, got ${JSON.stringify(verdict ?? null)}`,
+        refuse(
+          'malformed-payload',
+          `${where}.verdict must be pass, fail, partial or unknown, got ${JSON.stringify(verdict ?? null)}`,
         )
       const detail = maybeText(source, 'detail', where)
       return {
@@ -323,9 +380,11 @@ export function evidenceProducedKind(
       if (run.status !== 'running')
         refuse('illegal-transition', `${where} judges run "${payload.runId}", which already settled ${run.status}`)
 
-      const criterion = contract.criteria.find((candidate) => candidate.criterionId === payload.criterionId)
+      const criterion = contract.criteria.find(candidate => candidate.criterionId === payload.criterionId)
       if (criterion === undefined)
-        refuse('unknown-criterion', `${where} names criterion "${payload.criterionId}", which task "${envelope.subject}" does not declare`,
+        refuse(
+          'unknown-criterion',
+          `${where} names criterion "${payload.criterionId}", which task "${envelope.subject}" does not declare`,
         )
 
       // Invariant 1: the executor never judges its own run — by role, and by identity, so a
@@ -340,13 +399,15 @@ export function evidenceProducedKind(
       // swapping an input after the fact would leave the old pass standing.
       assertInputsBound(run.bubble, payload.inputDigests, where)
       if (run.submission !== undefined && run.submission.artifactDigest !== payload.artifactDigest)
-        refuse('evidence-input-mismatch', `${where} judges artifact ${payload.artifactDigest}, but run "${payload.runId}" submitted ${run.submission.artifactDigest}`,
+        refuse(
+          'evidence-input-mismatch',
+          `${where} judges artifact ${payload.artifactDigest}, but run "${payload.runId}" submitted ${run.submission.artifactDigest}`,
         )
 
-      if (run.evidence.some((entry) => entry.criterionId === payload.criterionId))
+      if (run.evidence.some(entry => entry.criterionId === payload.criterionId))
         refuse(
           'evidence-conflict',
-          `${where}: criterion "${payload.criterionId}" of run "${payload.runId}" already carries a verdict from ${run.evidence.find((entry) => entry.criterionId === payload.criterionId)?.actor ?? 'a verifier'}; one criterion has one verdict`,
+          `${where}: criterion "${payload.criterionId}" of run "${payload.runId}" already carries a verdict from ${run.evidence.find(entry => entry.criterionId === payload.criterionId)?.actor ?? 'a verifier'}; one criterion has one verdict`,
         )
 
       return {
@@ -386,7 +447,7 @@ export function runVerifiedKind(kind: string, emitter: string): KindRule<TaskSta
     members: RUN_VERIFIED_MEMBERS,
     nested: {},
     emitter,
-    parse: (raw) => {
+    parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
       return { runId: text(source, 'runId', where) }
@@ -405,7 +466,7 @@ export function runVerifiedKind(kind: string, emitter: string): KindRule<TaskSta
         refuse(
           'unadjudicated-criterion',
           `${where} cannot settle run "${payload.runId}" verified: ${unanswered
-            .map((criterion) => `"${criterion.criterionId}" has no passing verdict from independent review`)
+            .map(criterion => `"${criterion.criterionId}" has no passing verdict from independent review`)
             .join('; ')}`,
         )
 
@@ -421,7 +482,7 @@ export function runFailedKind(kind: string, emitter: string): KindRule<TaskState
     members: RUN_FAILED_MEMBERS,
     nested: {},
     emitter,
-    parse: (raw) => {
+    parse: raw => {
       const where = `${kind} payload`
       const source = record(raw, where)
       const cause = source['cause']
@@ -441,9 +502,14 @@ export function runFailedKind(kind: string, emitter: string): KindRule<TaskState
         if (unadjudicatedCriteria(contract, run).length > 0 || unmetCriteria(contract, run).length === 0)
           refuse('unadjudicated-criterion', `${where} requires complete verdicts with at least one failing criterion`)
       }
-      return { ...state, runs: { ...state.runs, [payload.runId]: {
-        ...settled(run, 'failed', envelope.at, payload.reason), failureCause: payload.cause,
-      },
+      return {
+        ...state,
+        runs: {
+          ...state.runs,
+          [payload.runId]: {
+            ...settled(run, 'failed', envelope.at, payload.reason),
+            failureCause: payload.cause,
+          },
         },
       }
     },
@@ -457,7 +523,11 @@ function consumptionMode(value: unknown): ConsumptionMode {
 }
 
 export function methodConsumedKind(kind: string, emitter: string): KindRule<TaskState> {
-  return defineKind<TaskState, { runId: string; revision: RevisionRef; method: string; source: string; mode: ConsumptionMode }, { revision: MemberSet }>({
+  return defineKind<
+    TaskState,
+    { runId: string; revision: RevisionRef; method: string; source: string; mode: ConsumptionMode },
+    { revision: MemberSet }
+  >({
     guarantees: APPENDED,
     members: METHOD_CONSUMED_MEMBERS,
     nested: { revision: REVISION_MEMBERS },
@@ -476,23 +546,28 @@ export function methodConsumedKind(kind: string, emitter: string): KindRule<Task
       const where = `${kind} #${envelope.seq}`
       const run = requireRun(state, payload.runId, where)
       if (run.status !== 'running' || run.stage !== 'working')
-        refuse('illegal-transition', `${where} cannot record method consumption for run "${payload.runId}" in ${run.status}/${run.stage}`,
+        refuse(
+          'illegal-transition',
+          `${where} cannot record method consumption for run "${payload.runId}" in ${run.status}/${run.stage}`,
         )
       if (!sameRevision(run.revision, payload.revision))
         refuse(
           'evidence-input-mismatch',
           `${where} records run "${payload.runId}" consuming method "${payload.method}" at ${payload.revision.environmentId} revision ${payload.revision.revisionId} (${payload.revision.digest.slice(0, 12)}…), but that run is pinned to revision ${run.revision.revisionId} (${run.revision.digest.slice(0, 12)}…); a method version the run was not pinned to is not one it consumed`,
         )
-      if (run.consumed.some((entry) => entry.method === payload.method && entry.mode === payload.mode))
+      if (run.consumed.some(entry => entry.method === payload.method && entry.mode === payload.mode))
         refuse(
           'evidence-conflict',
-          `${where}: run "${payload.runId}" already consumed method "${payload.method}" (recorded as ${JSON.stringify(run.consumed.find((entry) => entry.method === payload.method && entry.mode === payload.mode)?.source ?? '')}); one (run, method, mode) tuple is recorded once`,
+          `${where}: run "${payload.runId}" already consumed method "${payload.method}" (recorded as ${JSON.stringify(run.consumed.find(entry => entry.method === payload.method && entry.mode === payload.mode)?.source ?? '')}); one (run, method, mode) tuple is recorded once`,
         )
       return {
         ...state,
         runs: {
           ...state.runs,
-          [payload.runId]: { ...run, consumed: [...run.consumed, { method: payload.method, source: payload.source, mode: payload.mode }] },
+          [payload.runId]: {
+            ...run,
+            consumed: [...run.consumed, { method: payload.method, source: payload.source, mode: payload.mode }],
+          },
         },
       }
     },

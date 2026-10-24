@@ -15,7 +15,9 @@ import { sealedBytes } from '../src/sealed.ts'
 import { fixtureReview } from './review-fixture.ts'
 import { attachmentsAt, FakePersistence, agentFor, execFor, fakeExecution } from './seam.ts'
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))) })
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true })))
+})
 
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'sealed-submission-'))
@@ -26,7 +28,8 @@ async function setup() {
       root,
       await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess),
       medium as never,
-      attachmentsAt(root), testProjections,
+      attachmentsAt(root),
+      testProjections,
     )
   const agent = agentFor('worker', 'worker'),
     caller = callerOf(agent),
@@ -48,18 +51,36 @@ describe('sealed file submission', () => {
     const h = await setup()
     await writeFile(join(h.proposal.workspace, h.proposal.contract.artifact), '35')
     let reviewing!: () => void, finish!: () => void
-    const started = new Promise<void>((resolve) => { reviewing = resolve })
-    const release = new Promise<void>((resolve) => { finish = resolve })
+    const started = new Promise<void>(resolve => {
+      reviewing = resolve
+    })
+    const release = new Promise<void>(resolve => {
+      finish = resolve
+    })
     const judge = fixtureReview(h.apparatus)
-    const pending = submit(h.apparatus, fakeExecution(() => undefined), h.caller, execFor(h.agent, 'first'),
-      { taskId: h.proposal.taskId, path: h.proposal.contract.artifact }, new AbortController().signal,
-      async (...args) => { reviewing(); await release; return judge(...args) })
+    const pending = submit(
+      h.apparatus,
+      fakeExecution(() => undefined),
+      h.caller,
+      execFor(h.agent, 'first'),
+      { taskId: h.proposal.taskId, path: h.proposal.contract.artifact },
+      new AbortController().signal,
+      async (...args) => {
+        reviewing()
+        await release
+        return judge(...args)
+      },
+    )
     await started
     try {
       await expect(h.send('second')).rejects.toThrow('no working Run')
-      expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId])
-        .toMatchObject({ status: 'running', stage: 'submitted' })
-    } finally { finish() }
+      expect(taskStateOf(h.apparatus, h.proposal.taskId).runs[h.proposal.runId]).toMatchObject({
+        status: 'running',
+        stage: 'submitted',
+      })
+    } finally {
+      finish()
+    }
     expect((await pending).verdict).toBe('pass')
     await h.apparatus.store.close()
   })
@@ -75,9 +96,10 @@ describe('sealed file submission', () => {
     await rm(h.proposal.workspace, { recursive: true })
     expect(await h.send()).toEqual(answer)
     expect(h.medium.events).toHaveLength(count)
-    expect((await readTask(h.apparatus, taskStateOf(h.apparatus, h.proposal.taskId))).runs.at(-1)!.receipt?.source?.sessionId).toBe(
-      'worker',
-    )
+    expect(
+      (await readTask(h.apparatus, taskStateOf(h.apparatus, h.proposal.taskId))).runs.at(-1)!.receipt?.source
+        ?.sessionId,
+    ).toBe('worker')
     await h.apparatus.store.close()
   })
   it('finishes a negative review and a failed acceptance without failing the reviewer Run', async () => {
@@ -87,13 +109,13 @@ describe('sealed file submission', () => {
     const reviews = h.apparatus.store
       .load()
       .entries()
-      .filter((e) => e.kind === 'review/completed')
+      .filter(e => e.kind === 'review/completed')
     expect(reviews).toHaveLength(1)
     expect(
       h.apparatus.store
         .load()
         .entries()
-        .some((e) => e.kind === 'review/failed'),
+        .some(e => e.kind === 'review/failed'),
     ).toBe(false)
     await h.apparatus.store.close()
   })
@@ -106,7 +128,7 @@ describe('sealed file submission', () => {
       h.apparatus.store
         .load()
         .entries()
-        .some((e) => e.kind === 'review/started'),
+        .some(e => e.kind === 'review/started'),
     ).toBe(false)
     await h.apparatus.store.close()
     const s = await setup()

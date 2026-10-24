@@ -37,7 +37,6 @@ export interface SubmitCandidateInput {
   readonly revision: RevisionRef
   readonly evaluationId: string
   readonly edits: readonly StructuralEdit[]
-
 }
 
 export interface DecideRoundInput {
@@ -81,7 +80,9 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
           weights: input.weights,
         },
         () => {
-          for (const [subject, state] of options.store.load().statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION)) {
+          for (const [subject, state] of options.store
+            .load()
+            .statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION)) {
             if (subject === input.roundId || state.plan === undefined) continue
             if (state.plan.campaignId !== input.campaignId || state.plan.round !== input.round) continue
             refuse(
@@ -89,15 +90,22 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
               `cannot open round ${input.round} as "${input.roundId}": round "${subject}" already carries that number (opened at ${state.openedAt ?? 'an unrecorded time'}, history cutoff ${state.plan.historyCutoff}); two rounds with one number would freeze two different histories under one identity`,
             )
           }
-          const rounds = [...options.store.load().statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION).values()]
-            .filter(state => state.plan?.campaignId === input.campaignId && state.roundId !== input.roundId)
+          const rounds = [
+            ...options.store.load().statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION).values(),
+          ].filter(state => state.plan?.campaignId === input.campaignId && state.roundId !== input.roundId)
           const previous = rounds.sort((a, b) => b.plan!.round - a.plan!.round)[0]
           if (previous !== undefined) {
-            if (previous.decision === undefined) refuse('illegal-transition', 'settle the current search round before advancing its head')
-            if (previous.plan!.caliber !== input.caliber) refuse('caliber-mismatch', 'a campaign cannot change its frozen suite or execution caliber')
-            const selected = previous.submissions.find(candidate => candidate.slot === previous.decision!.winner)?.revision ?? previous.plan!.incumbent
-            if (!sameRevision(selected, input.incumbent)) refuse('evidence-input-mismatch', 'round incumbent must be the preceding accepted search head')
-            if (input.round !== previous.plan!.round + 1) refuse('illegal-transition', 'campaign round numbers must advance by one')
+            if (previous.decision === undefined)
+              refuse('illegal-transition', 'settle the current search round before advancing its head')
+            if (previous.plan!.caliber !== input.caliber)
+              refuse('caliber-mismatch', 'a campaign cannot change its frozen suite or execution caliber')
+            const selected =
+              previous.submissions.find(candidate => candidate.slot === previous.decision!.winner)?.revision ??
+              previous.plan!.incumbent
+            if (!sameRevision(selected, input.incumbent))
+              refuse('evidence-input-mismatch', 'round incumbent must be the preceding accepted search head')
+            if (input.round !== previous.plan!.round + 1)
+              refuse('illegal-transition', 'campaign round numbers must advance by one')
           }
         },
       ),
@@ -113,7 +121,7 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
           revision: input.revision,
           evaluationId: input.evaluationId,
           edits: input.edits,
-          },
+        },
         () => {
           const cut = options.store.load()
           // The reducer names a submission to a round that was never opened; the anchor below is
@@ -138,7 +146,10 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
       const at = options.store.load()
       const state = at.stateOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, input.roundId)
       if (state === undefined)
-        refuse('illegal-transition', `round "${input.roundId}" was never opened in this log, so there is nothing to decide`)
+        refuse(
+          'illegal-transition',
+          `round "${input.roundId}" was never opened in this log, so there is nothing to decide`,
+        )
       const payload = decisionPayload(projectRound(state, options.measuresAt(at), options.calibration))
       return emitRaw(options, input.commandId, STRATEGY_KINDS.roundDecided, input.roundId, payload, () => {
         const now = options.store.load()
@@ -151,9 +162,13 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
             'illegal-transition',
             `round "${input.roundId}" changed between composing this decision and committing it: the decision closes out slots [${payload.outcomes
               .map(outcome => outcome.slot)
-              .join(', ')}] with winner ${describeWinner(payload.winner)}, while the facts now imply slots [${recomputed.outcomes
+              .join(
+                ', ',
+              )}] with winner ${describeWinner(payload.winner)}, while the facts now imply slots [${recomputed.outcomes
               .map(outcome => outcome.slot)
-              .join(', ')}] with winner ${describeWinner(recomputed.winner)}; recompute the decision against the current cut and submit it under a new command id`,
+              .join(
+                ', ',
+              )}] with winner ${describeWinner(recomputed.winner)}; recompute the decision against the current cut and submit it under a new command id`,
           )
       })
     },
@@ -164,7 +179,11 @@ export function createStrategyCommands(options: StrategyCommandOptions): Strateg
  * The frozen member set of `round/decided`: a slot number and a reason per candidate, plus the noise
  * basis the selection was made against — the band that was actually used, not one looked up again.
  */
-function decisionPayload(decision: RoundDecision): { winner: number | null; outcomes: RoundDecision['outcomes']; calibration: RoundDecision['calibration'] } {
+function decisionPayload(decision: RoundDecision): {
+  winner: number | null
+  outcomes: RoundDecision['outcomes']
+  calibration: RoundDecision['calibration']
+} {
   return { winner: decision.winner, outcomes: decision.outcomes, calibration: decision.calibration }
 }
 
@@ -187,5 +206,8 @@ async function emitRaw(
   payload: unknown,
   require?: () => void,
 ): Promise<Envelope> {
-  return options.store.emit({ commandId, protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind, subject, payload }, require) as Promise<Envelope>
+  return options.store.emit(
+    { commandId, protocol: STRATEGY_PROTOCOL, version: STRATEGY_VERSION, kind, subject, payload },
+    require,
+  ) as Promise<Envelope>
 }

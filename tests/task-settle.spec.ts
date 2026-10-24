@@ -11,7 +11,13 @@ import { reviewedVerdict } from './command-fixtures.ts'
 
 import { describe, expect, it } from 'vitest'
 
-import { AGENT_ROLE, createTaskCommands, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type TaskState,
+import {
+  AGENT_ROLE,
+  createTaskCommands,
+  TASK_KINDS,
+  TASK_PROTOCOL,
+  TASK_VERSION,
+  type TaskState,
 } from '../src/index.ts'
 import { asyncRefusalOf } from './fixtures.ts'
 import { AGENT, createRevision, deployment, openAgent, PARENT, pin, RUN, type Deployment } from './command-fixtures.ts'
@@ -62,7 +68,10 @@ async function running(live: Deployment): Promise<Commands> {
 /** One verdict for one criterion, from the implementation that criterion names. */
 async function judge(
   live: Deployment,
-  commands: Commands, criterionId: string, verdict: 'pass' | 'fail', detail?: string,
+  commands: Commands,
+  criterionId: string,
+  verdict: 'pass' | 'fail',
+  detail?: string,
 ): Promise<void> {
   await reviewedVerdict(live, commands, {
     commandId: `verdict-${criterionId}-${verdict}`,
@@ -126,14 +135,18 @@ describe('the settle command decides the run from its evidence', () => {
 
     const refusal = await asyncRefusalOf(() => commands.settle({ commandId: 'settle-1', taskId: PARENT, runId: RUN }))
 
-    expect([refusal.code, runOf(live)?.status, live.store.load().entries().length]).toEqual(['unadjudicated-criterion', 'running', recorded,
+    expect([refusal.code, runOf(live)?.status, live.store.load().entries().length]).toEqual([
+      'unadjudicated-criterion',
+      'running',
+      recorded,
     ])
   })
 
   it('refuses a run the task never started', async () => {
     const { commands } = await ready()
 
-    const refusal = await asyncRefusalOf(() => commands.settle({ commandId: 'settle-ghost', taskId: PARENT, runId: 'run-ghost' }),
+    const refusal = await asyncRefusalOf(() =>
+      commands.settle({ commandId: 'settle-ghost', taskId: PARENT, runId: 'run-ghost' }),
     )
 
     expect(refusal.code).toBe('unknown-run')
@@ -186,8 +199,10 @@ describe('the settle command decides the run from its evidence', () => {
     const first = await commands.settle(request)
     const before = live.store.load().entries().length
     const again = await commands.settle(request)
-    expect([again.digest, again.payload, live.store.load().entries().length])
-      .toEqual([first.digest, { runId: RUN, cause: 'acceptance' }, before,
+    expect([again.digest, again.payload, live.store.load().entries().length]).toEqual([
+      first.digest,
+      { runId: RUN, cause: 'acceptance' },
+      before,
     ])
   })
 
@@ -199,7 +214,8 @@ describe('the settle command decides the run from its evidence', () => {
 
     // The binding is a held identity that is not the task's holder. Nothing here compares it: the
     // reducer's own responsibility rule refuses the fact, and nothing is recorded.
-    const refusal = await asyncRefusalOf(() => commands.settle({ commandId: 'settle-1', taskId: PARENT, runId: RUN }, AGENT_ROLE),
+    const refusal = await asyncRefusalOf(() =>
+      commands.settle({ commandId: 'settle-1', taskId: PARENT, runId: RUN }, AGENT_ROLE),
     )
 
     expect([refusal.code, live.store.load().entries().length]).toEqual(['not-responsible', recorded])

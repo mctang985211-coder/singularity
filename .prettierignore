@@ -1,0 +1,10 @@
+node_modules/
+.singularity/
+assembly/lib/
+third_party/
+coverage/
+artifacts/
+pnpm-lock.yaml
+# Historical bytes are evidence, not current style targets.
+tests/fixtures/legacy/
+docs/

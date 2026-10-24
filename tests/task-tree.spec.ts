@@ -57,7 +57,16 @@ describe('a plan is presented with its gates, not its hopes', () => {
     const view = tree(registry, log)
 
     // A is ready because nothing gates it; B depends on A, which has not verified, so B waits, naming it.
-    expect(view).toMatchObject({ parentTaskId: PARENT, children: [{ taskId: CHILD_A, status: 'ready' }, { taskId: CHILD_B, status: 'waiting' }], ready: [CHILD_A], blocked: [{ taskId: CHILD_B, reason: expect.stringContaining(CHILD_A) }], complete: false, })
+    expect(view).toMatchObject({
+      parentTaskId: PARENT,
+      children: [
+        { taskId: CHILD_A, status: 'ready' },
+        { taskId: CHILD_B, status: 'waiting' },
+      ],
+      ready: [CHILD_A],
+      blocked: [{ taskId: CHILD_B, reason: expect.stringContaining(CHILD_A) }],
+      complete: false,
+    })
   })
 
   it('names a declared sub-task that was never admitted, and never offers it as ready', async () => {
@@ -68,7 +77,14 @@ describe('a plan is presented with its gates, not its hopes', () => {
     await log.emit(decompose(PARENT, plan()))
     const view = tree(registry, log)
 
-    expect(view).toMatchObject({ children: [{ taskId: CHILD_A, status: 'missing' }, { taskId: CHILD_B, status: 'missing' }], ready: [], complete: false, })
+    expect(view).toMatchObject({
+      children: [
+        { taskId: CHILD_A, status: 'missing' },
+        { taskId: CHILD_B, status: 'missing' },
+      ],
+      ready: [],
+      complete: false,
+    })
     // A declared sub-task nobody admitted is never offered as ready; the blocked list names it.
     expect(view.blocked[0]?.reason).toContain('no admitted contract')
   })
@@ -82,7 +98,14 @@ describe('a plan is presented with its gates, not its hopes', () => {
 
     const view = tree(registry, log)
     // The dependency verified, so the dependent proceeds: nothing is waiting and nothing is blocked.
-    expect(view).toMatchObject({ children: [{ taskId: CHILD_A, status: 'verified' }, { taskId: CHILD_B, status: 'ready' }], ready: [CHILD_B], blocked: [], })
+    expect(view).toMatchObject({
+      children: [
+        { taskId: CHILD_A, status: 'verified' },
+        { taskId: CHILD_B, status: 'ready' },
+      ],
+      ready: [CHILD_B],
+      blocked: [],
+    })
   })
 
   it('blocks a dependent on a dependency that ended without verifying, naming it', async () => {
@@ -95,10 +118,17 @@ describe('a plan is presented with its gates, not its hopes', () => {
     }
 
     const view = tree(registry, log)
-    expect(statusOf(view, CHILD_A)).toMatchObject({ status: 'stopped', lastOutcome: 'failed', reason: expect.stringContaining('budget exhausted'), })
+    expect(statusOf(view, CHILD_A)).toMatchObject({
+      status: 'stopped',
+      lastOutcome: 'failed',
+      reason: expect.stringContaining('budget exhausted'),
+    })
     // B is blocked by A being stopped, not merely having failed: the reason names that link and the
     // rule behind it, that only a verified dependency satisfies a dependent.
-    expect(statusOf(view, CHILD_B)).toMatchObject({ status: 'blocked', reason: expect.stringMatching(new RegExp(`"${CHILD_A}" is stopped.*only a verified dependency`)), })
+    expect(statusOf(view, CHILD_B)).toMatchObject({
+      status: 'blocked',
+      reason: expect.stringMatching(new RegExp(`"${CHILD_A}" is stopped.*only a verified dependency`)),
+    })
   })
 
   it('propagates a stopped dependency through a chain, naming each link', async () => {
@@ -118,7 +148,15 @@ describe('a plan is presented with its gates, not its hopes', () => {
 
     const view = tree(registry, log)
     // The second link is blocked by the first link's blocked-ness, not by A directly.
-    expect(view).toMatchObject({ children: [ { taskId: CHILD_A, status: 'stopped' }, { taskId: CHILD_B, status: 'blocked', reason: expect.stringContaining(`"${CHILD_A}" is stopped`) }, { taskId: CHILD_C, status: 'blocked', reason: expect.stringContaining(`"${CHILD_B}" is blocked`) }, ], ready: [], complete: false, })
+    expect(view).toMatchObject({
+      children: [
+        { taskId: CHILD_A, status: 'stopped' },
+        { taskId: CHILD_B, status: 'blocked', reason: expect.stringContaining(`"${CHILD_A}" is stopped`) },
+        { taskId: CHILD_C, status: 'blocked', reason: expect.stringContaining(`"${CHILD_B}" is blocked`) },
+      ],
+      ready: [],
+      complete: false,
+    })
   })
 
   it('reports a failing sub-task as retryable while its budget remains, without calling it verified', async () => {
@@ -129,14 +167,19 @@ describe('a plan is presented with its gates, not its hopes', () => {
     await log.emit(failed(CHILD_A, 'a1', 'first attempt failed', 'acceptance'))
 
     const view = tree(registry, log)
-    expect(statusOf(view, CHILD_A)).toMatchObject({ status: 'ready', lastOutcome: 'failed', runsUsed: 1, reason: expect.stringContaining('1 of 2 runs remain'), })
+    expect(statusOf(view, CHILD_A)).toMatchObject({
+      status: 'ready',
+      lastOutcome: 'failed',
+      runsUsed: 1,
+      reason: expect.stringContaining('1 of 2 runs remain'),
+    })
     // A failing attempt must not be mistaken for a verified dependency.
     expect(statusOf(view, CHILD_B)?.status).toBe('waiting')
   })
 })
 
 describe('a parent is accepted by verification, never by its children ending', () => {
-  it('keeps verified child support separate from the parent\'s own acceptance', async () => {
+  it("keeps verified child support separate from the parent's own acceptance", async () => {
     const registry = taskRegistry()
     const log = await planned(registry)
     for (const [taskId, contractCriterion, runId] of [
@@ -165,7 +208,10 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(failed(CHILD_B, 'b1', 'the limit check never ran'))
 
     const view = tree(registry, log)
-    expect(view.criteria.map(entry => `${entry.criterionId}:${entry.satisfiedBy}`)).toEqual(['counts:null', 'limits:null'])
+    expect(view.criteria.map(entry => `${entry.criterionId}:${entry.satisfiedBy}`)).toEqual([
+      'counts:null',
+      'limits:null',
+    ])
     expect(statusOf(view, CHILD_B)?.status).toBe('stopped')
     expect(view.complete).toBe(false)
   })
@@ -176,7 +222,11 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(admit(PARENT, parentContract()))
     await log.emit(assigned(PARENT))
     // The child supports `counts`; the parent independently judges both criteria.
-    await log.emit(decompose(PARENT, [{ taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1, requirement: 'required' as const }]))
+    await log.emit(
+      decompose(PARENT, [
+        { taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1, requirement: 'required' as const },
+      ]),
+    )
     await log.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
     await log.emit(assigned(CHILD_A))
     await openRun(log, CHILD_A, 'a1')
@@ -228,7 +278,10 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(judge(PARENT, 'p1', 'counts', UNIT_VERIFIER))
     await log.emit(judge(PARENT, 'p1', 'limits', INTEGRATION_VERIFIER))
     await log.emit(verified(PARENT, 'p1'))
-    expect(tree(registry, log)).toMatchObject({ complete: false, children: [{ status: 'stopped' }, { status: 'blocked' }] })
+    expect(tree(registry, log)).toMatchObject({
+      complete: false,
+      children: [{ status: 'stopped' }, { status: 'blocked' }],
+    })
   })
 })
 

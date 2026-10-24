@@ -58,7 +58,6 @@ window.__ModuleLoader__.load({
       return rows
     }
 
-
     const { createElement } = require('react')
 
     const PANEL_PATH = '/singularity/panel/'
@@ -67,7 +66,8 @@ window.__ModuleLoader__.load({
     let attachFrame = () => undefined
     function TasksPage() {
       return createElement('iframe', {
-        src: PANEL_PATH, ref: element => attachFrame(element),
+        src: PANEL_PATH,
+        ref: element => attachFrame(element),
         title: 'Singularity map',
         'data-panel-frame': PANEL_ID,
         style: { border: 0, width: '100%', height: '100%', display: 'block' },
@@ -95,10 +95,21 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'sessions']
 
     function apply(ctx) {
-      let frame, current, dispose, generation = 0
+      let frame,
+        current,
+        dispose,
+        generation = 0
       const post = data => frame?.contentWindow?.postMessage(data, location.origin)
-      const clear = () => { generation++; dispose?.(); dispose = undefined; current = undefined }
-      attachFrame = element => { frame = element; if (element === null) clear() }
+      const clear = () => {
+        generation++
+        dispose?.()
+        dispose = undefined
+        current = undefined
+      }
+      attachFrame = element => {
+        frame = element
+        if (element === null) clear()
+      }
       const bind = async id => {
         clear()
         if (id === null) return
@@ -106,8 +117,9 @@ window.__ModuleLoader__.load({
         const reference = ctx.sessions.retain(id, { source: 'singularity' })
         dispose = () => reference.release()
         let binding
-        try { binding = await reference.ready }
-        catch (error) {
+        try {
+          binding = await reference.ready
+        } catch (error) {
           if (version !== generation) return
           clear()
           throw error
@@ -118,31 +130,62 @@ window.__ModuleLoader__.load({
         const paint = () => {
           if (version !== generation) return
           const snapshot = binding.session.getSnapshot()
-          if (snapshot.openState === 'error') { post({ type: 'singularity:session-error', sessionId: id, message: snapshot.openError.message }); return }
-          post({ type: 'singularity:transcript', sessionId: id, rows: module.exports.transcriptRows(binding.eventSource.getSnapshot().entries, snapshot, inbox.getSnapshot()) })
+          if (snapshot.openState === 'error') {
+            post({ type: 'singularity:session-error', sessionId: id, message: snapshot.openError.message })
+            return
+          }
+          post({
+            type: 'singularity:transcript',
+            sessionId: id,
+            rows: module.exports.transcriptRows(
+              binding.eventSource.getSnapshot().entries,
+              snapshot,
+              inbox.getSnapshot(),
+            ),
+          })
         }
         paint()
         const stops = [binding.eventSource.subscribe(paint), binding.session.subscribe(paint), inbox.subscribe(paint)]
-        dispose = () => { stops.forEach(stop => stop()); reference.release() }
+        dispose = () => {
+          stops.forEach(stop => stop())
+          reference.release()
+        }
       }
       const receive = event => {
         if (event.source !== frame?.contentWindow || event.origin !== location.origin) return
         const data = event.data
-        if (data.type === 'singularity:open') void bind(data.sessionId).catch(error => post({ type: 'singularity:session-error', sessionId: data.sessionId, message: String(error) }))
+        if (data.type === 'singularity:open')
+          void bind(data.sessionId).catch(error =>
+            post({ type: 'singularity:session-error', sessionId: data.sessionId, message: String(error) }),
+          )
         if (data.type === 'singularity:prompt') {
           const submit = async () => {
-            if (current === undefined || ctx.sessions.binding(data.sessionId) !== current) throw new Error('Session binding changed')
+            if (current === undefined || ctx.sessions.binding(data.sessionId) !== current)
+              throw new Error('Session binding changed')
             const handle = current.session.beginSubmission({ mode: 'queue', text: data.text, attachments: [] })
             try {
-              const result = await current.session.prompt([{ type: 'text', text: data.text }], 'queue', undefined, handle.requestId)
+              const result = await current.session.prompt(
+                [{ type: 'text', text: data.text }],
+                'queue',
+                undefined,
+                handle.requestId,
+              )
               if (!result.ok) throw new Error(JSON.stringify(result.error))
-            } catch (error) { handle.abandon(); throw error }
+            } catch (error) {
+              handle.abandon()
+              throw error
+            }
           }
-          void submit().catch(error => post({ type: 'singularity:session-error', sessionId: data.sessionId, message: String(error) }))
+          void submit().catch(error =>
+            post({ type: 'singularity:session-error', sessionId: data.sessionId, message: String(error) }),
+          )
         }
       }
       window.addEventListener('message', receive)
-      ctx.effect(() => () => { clear(); window.removeEventListener('message', receive) })
+      ctx.effect(() => () => {
+        clear()
+        window.removeEventListener('message', receive)
+      })
       ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, TasksPage))
       ctx.slots.inject('sidebar.panellist', () =>
         ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 60, label: 'Singularity' }, TasksIcon),

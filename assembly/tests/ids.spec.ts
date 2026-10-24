@@ -16,11 +16,15 @@ const sha256 = (bytes: string): string => createHash('sha256').update(bytes).dig
 
 describe('the stable ids', () => {
   it('derives the task id from the control, the caller and the goal', () => {
-    expect(taskIdOf('lib-1', 'agent-7', 'count the letters')).toBe(`task-${sha256('lib-1\u0000agent-7\u0000count the letters').slice(0, 16)}`)
+    expect(taskIdOf('lib-1', 'agent-7', 'count the letters')).toBe(
+      `task-${sha256('lib-1\u0000agent-7\u0000count the letters').slice(0, 16)}`,
+    )
   })
 
   it('derives the run id from the control, the session and the call', () => {
-    expect(runIdOf('lib-1', 'session-9', 'call-4')).toBe(`run-${sha256('lib-1\u0000session-9\u0000call-4').slice(0, 16)}`)
+    expect(runIdOf('lib-1', 'session-9', 'call-4')).toBe(
+      `run-${sha256('lib-1\u0000session-9\u0000call-4').slice(0, 16)}`,
+    )
   })
 
   it('gives two goals of one caller two task ids', () => {

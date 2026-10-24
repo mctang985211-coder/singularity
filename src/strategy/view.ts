@@ -15,7 +15,16 @@ import {
   type Outcome,
 } from './decision.ts'
 import { requirePlan, type RoundPlan } from './plan.ts'
-import { CALIBRATION_MEMBERS, readCalibration, declareStrategyProtocol, STRATEGY_PROTOCOL, STRATEGY_VERSION, type CandidateSubmission, type RoundState, type StructuralEdit } from './protocol.ts'
+import {
+  CALIBRATION_MEMBERS,
+  readCalibration,
+  declareStrategyProtocol,
+  STRATEGY_PROTOCOL,
+  STRATEGY_VERSION,
+  type CandidateSubmission,
+  type RoundState,
+  type StructuralEdit,
+} from './protocol.ts'
 import { publishedAssetsBelow } from './published-assets.ts'
 
 const ROUND_FOLD = new ProtocolRegistry()
@@ -68,8 +77,8 @@ export interface SlotView {
   readonly missingTrials: EvaluationView['missing']
   /**
    * The frozen gain: how much **better** this candidate measured than the incumbent, or `null` when
-   * either side is not measurable. One convention — positive is an improvement — because the cost
-   * rule *reads* it. `quality` above is the metric's own raw number; this one is not.
+   * either side is not measurable. One convention — positive is an improvement — for the quality
+   * comparison. `quality` above is the metric's own raw number; this one is not.
    */
   readonly gain: number | null
   /** Relative cost change against the frozen incumbent; `null` when it cannot be calculated. */
@@ -168,18 +177,23 @@ function inadmissibleReason(
   if (violated.length > 0)
     return `violates hard constraint${violated.length === 1 ? '' : 's'} ${violated
       .map(constraint => `"${constraint.criterionId}"`)
-      .join(', ')}; no aggregate buys a violated constraint, so this candidate does not enter the comparison — change the candidate, not the weights`
+      .join(
+        ', ',
+      )}; no aggregate buys a violated constraint, so this candidate does not enter the comparison — change the candidate, not the weights`
   const unchecked = evaluation.constraints.filter(constraint => constraint.met === null)
   if (unchecked.length > 0)
     return `hard constraint${unchecked.length === 1 ? '' : 's'} ${unchecked
       .map(constraint => `"${constraint.criterionId}"`)
-      .join(', ')} ${unchecked.length === 1 ? 'has' : 'have'} not been checked yet; an unchecked constraint is not a met one, so this candidate is not admissible before its judgement is recorded`
+      .join(
+        ', ',
+      )} ${unchecked.length === 1 ? 'has' : 'have'} not been checked yet; an unchecked constraint is not a met one, so this candidate is not admissible before its judgement is recorded`
   if (evaluation.missing.length > 0 || evaluation.observed !== evaluation.denominator)
     return `the measurement is incomplete: ${evaluation.observed} of ${evaluation.denominator} planned trials observed, ${
       evaluation.missing.length === 0
         ? `${evaluation.denominator - evaluation.observed} unreported`
         : `missing ${evaluation.missing.map(entry => `slot ${entry.slot} (${entry.reason})`).join(', ')}`
     }; the denominator keeps the plan's trials (R06), so this aggregate is not this candidate's score — finish the trials or record them as missed`
+  if (evaluation.quality === null) return 'the measurement has no complete quality aggregate'
   if (incumbentAggregate === null)
     return `the incumbent ${describeRevision(plan.incumbent)} has no aggregate below the round's frozen history cutoff, so this candidate has no frozen gain to place against the noise floor; measure the incumbent first, or this round can only retain it`
   const sign = directionSign(direction)
@@ -206,9 +220,20 @@ function plannedOf(
 ): PlannedSlot {
   const evaluation = slice.evaluationOf(submission.evaluationId)
   if (evaluation === undefined)
-    return { submission, evaluation, reason: null, gain: null, costGain: null, constraintsMet: false, measurement: null }
+    return {
+      submission,
+      evaluation,
+      reason: null,
+      gain: null,
+      costGain: null,
+      constraintsMet: false,
+      measurement: null,
+    }
   const frozenCostGain =
-    incumbentAggregate === null || evaluation.cost === null || incumbentAggregate.cost === null || incumbentAggregate.cost === 0
+    incumbentAggregate === null ||
+    evaluation.cost === null ||
+    incumbentAggregate.cost === null ||
+    incumbentAggregate.cost === 0
       ? null
       : (evaluation.cost - incumbentAggregate.cost) / incumbentAggregate.cost
   const direction = directionOf(evaluation)
@@ -216,15 +241,23 @@ function plannedOf(
     submission,
     evaluation,
     reason: inadmissibleReason(evaluation, submission, plan, incumbentAggregate, calibration, bestQuality),
-    // The one normalisation: the frozen gain the cost rule reads is a gain in the measurement's
+    // The one normalisation: the frozen gain is a gain in the measurement's
     // direction. A view that states none was given its reason above and gets no signed number.
-    gain: direction === null || incumbentAggregate === null ? null : better(evaluation.quality, direction) - better(incumbentAggregate.quality, direction),
+    gain:
+      direction === null || evaluation.quality === null || incumbentAggregate === null
+        ? null
+        : better(evaluation.quality, direction) - better(incumbentAggregate.quality, direction),
     costGain: frozenCostGain,
     constraintsMet: evaluation.constraints.every(constraint => constraint.met === true),
     measurement:
-      direction === null
+      direction === null || evaluation.quality === null
         ? null
-        : { quality: better(evaluation.quality, direction), cost: evaluation.cost, denominator: evaluation.denominator, missing: evaluation.missing.length },
+        : {
+            quality: better(evaluation.quality, direction),
+            cost: evaluation.cost,
+            denominator: evaluation.denominator,
+            missing: evaluation.missing.length,
+          },
   }
 }
 
@@ -245,7 +278,9 @@ function slotViewOf(planned: PlannedSlot, history: History): SlotView {
       novelty,
       constraintsMet: false,
       admissible: false,
-      reason: reason ?? `no evaluation "${submission.evaluationId}" is in this log, so slot ${submission.slot} has no aggregate to compare; measure the candidate and record its evaluation first`,
+      reason:
+        reason ??
+        `no evaluation "${submission.evaluationId}" is in this log, so slot ${submission.slot} has no aggregate to compare; measure the candidate and record its evaluation first`,
     }
   return {
     slot: submission.slot,
@@ -273,20 +308,38 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
   const acceptedAssets = publishedAssetsBelow(slice.entries, plan.incumbent.environmentId, plan.historyCutoff)
   const submissions = [...state.submissions].sort((left, right) => left.slot - right.slot)
 
-  const direction = submissions.map(submission => slice.evaluationOf(submission.evaluationId))
+  const direction = submissions
+    .map(submission => slice.evaluationOf(submission.evaluationId))
     .find(evaluation => evaluation?.caliberDigest === plan.caliber)?.direction
   const sign = direction === 'lower' ? -1 : 1
   let bestQuality = incumbentAggregate?.quality ?? 0
-  const prior = foldSubjects<RoundState>(ROUND_FOLD, slice.entries.filter(entry => entry.seq < plan.historyCutoff), STRATEGY_PROTOCOL, STRATEGY_VERSION)
+  const prior = foldSubjects<RoundState>(
+    ROUND_FOLD,
+    slice.entries.filter(entry => entry.seq < plan.historyCutoff),
+    STRATEGY_PROTOCOL,
+    STRATEGY_VERSION,
+  )
   for (const state of prior.values()) {
-    if (state.plan?.campaignId !== plan.campaignId || state.plan.caliber !== plan.caliber || state.decision === undefined) continue
+    if (
+      state.plan?.campaignId !== plan.campaignId ||
+      state.plan.caliber !== plan.caliber ||
+      state.decision === undefined
+    )
+      continue
     const baseline = slice.incumbentBelow(state.plan.incumbent, state.plan.historyCutoff, plan.caliber)
     if (baseline !== null && sign * baseline.quality > sign * bestQuality) bestQuality = baseline.quality
     const winner = state.submissions.find(submission => submission.slot === state.decision!.winner)
     const accepted = winner === undefined ? undefined : slice.evaluationOf(winner.evaluationId)
-    if (accepted?.caliberDigest === plan.caliber && sign * accepted.quality > sign * bestQuality) bestQuality = accepted.quality
+    if (
+      accepted?.caliberDigest === plan.caliber &&
+      accepted.quality !== null &&
+      sign * accepted.quality > sign * bestQuality
+    )
+      bestQuality = accepted.quality
   }
-  const planned = submissions.map(submission => plannedOf(submission, slice, plan, incumbentAggregate, calibration, bestQuality))
+  const planned = submissions.map(submission =>
+    plannedOf(submission, slice, plan, incumbentAggregate, calibration, bestQuality),
+  )
 
   // The gains the decision layer sees are the frozen ones — one entry per slot whose two sides were
   // both measurable. A gain that cannot be computed is absent rather than invented as 0.
@@ -305,7 +358,13 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
   const candidates: Candidate[] = Array.from({ length: plan.candidates }, (_, slot): Candidate => {
     const entry = planned.find(item => item.submission.slot === slot)
     if (entry === undefined)
-      return { slot, assets: [], measurement: null, constraintsMet: false, inadmissible: 'no candidate was submitted to this slot' }
+      return {
+        slot,
+        assets: [],
+        measurement: null,
+        constraintsMet: false,
+        inadmissible: 'no candidate was submitted to this slot',
+      }
     return {
       slot,
       assets: assetsOf(entry.submission.edits),

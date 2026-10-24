@@ -12,7 +12,8 @@ export async function assertRunFile(workspace: string, name: string): Promise<vo
   for (const part of relative(workspace, join(workspace, name)).split(sep)) {
     path = join(path, part)
     try {
-      if ((await lstat(path)).isSymbolicLink()) refuse('evidence-input-mismatch', 'Run submission path contains a symbolic link: ' + path)
+      if ((await lstat(path)).isSymbolicLink())
+        refuse('evidence-input-mismatch', 'Run submission path contains a symbolic link: ' + path)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
       throw error
@@ -20,7 +21,8 @@ export async function assertRunFile(workspace: string, name: string): Promise<vo
   }
 }
 
-export async function prepareWorkspace(template: Pick<TaskTemplate, 'artifact' | 'initial'>,
+export async function prepareWorkspace(
+  template: Pick<TaskTemplate, 'artifact' | 'initial'>,
   inputs: readonly PreparedInput[],
   workspace: string,
 ): Promise<void> {

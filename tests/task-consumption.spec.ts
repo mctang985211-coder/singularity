@@ -23,10 +23,28 @@ import {
   type RevisionRef,
 } from '../src/index.ts'
 import { unconsumedMethods } from '../src/task/consumption.ts'
-import { CHILD, createRevision, deployment, ENVIRONMENT, openAgent, pin, planned, REVISION, RUN,
+import {
+  CHILD,
+  createRevision,
+  deployment,
+  ENVIRONMENT,
+  openAgent,
+  pin,
+  planned,
+  REVISION,
+  RUN,
 } from './command-fixtures.ts'
 import { refusalOf } from './fixtures.ts'
-import { admitted, assigned, failed, REVISION as PIN, RUN_ID, SCHEDULER, started, TASK_ID, taskRegistry,
+import {
+  admitted,
+  assigned,
+  failed,
+  REVISION as PIN,
+  RUN_ID,
+  SCHEDULER,
+  started,
+  TASK_ID,
+  taskRegistry,
 } from './task-fixtures.ts'
 
 /** The method names this revision declares, as a deployment read them out of its own manifest. */
@@ -54,7 +72,8 @@ const consumed = (options: {
     runId: options.runId ?? RUN_ID,
     revision: options.revision ?? PIN,
     method: options.method,
-    source: options.source ?? SOURCE, mode: options.mode ?? 'read',
+    source: options.source ?? SOURCE,
+    mode: options.mode ?? 'read',
   },
 })
 
@@ -82,13 +101,15 @@ describe('a consumption fact is bound to the run it names', () => {
 
   it('refuses a fact whose source is empty', async () => {
     const log = await running()
-    expect(refusalOf(() => log.emit(consumed({ method: 'word-count', source: '' }))).code).toBe<RefusalCode>('malformed-payload',
+    expect(refusalOf(() => log.emit(consumed({ method: 'word-count', source: '' }))).code).toBe<RefusalCode>(
+      'malformed-payload',
     )
   })
 
   it('refuses a run this task never started', async () => {
     const log = await running()
-    expect(refusalOf(() => log.emit(consumed({ method: 'word-count', runId: 'run-nope' }))).code).toBe<RefusalCode>('unknown-run',
+    expect(refusalOf(() => log.emit(consumed({ method: 'word-count', runId: 'run-nope' }))).code).toBe<RefusalCode>(
+      'unknown-run',
     )
   })
 })
@@ -98,17 +119,24 @@ describe('the declared methods nothing consumed, below a cutoff', () => {
     const log = await running()
     await log.emit(consumed({ method: 'word-count', mode: 'bound' }))
     await log.emit(consumed({ method: 'word-count', mode: 'delivered' }))
-    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count))
-      .toEqual(['word-count', 'limit-check', 'normalize'])
+    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count)).toEqual([
+      'word-count',
+      'limit-check',
+      'normalize',
+    ])
     await log.emit(consumed({ method: 'word-count' }))
-    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count))
-      .toEqual(['limit-check', 'normalize'])
+    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count)).toEqual([
+      'limit-check',
+      'normalize',
+    ])
   })
 
   it('names the declared methods with no consumption fact', async () => {
     const log = await running()
     await log.emit(consumed({ method: 'limit-check' }))
-    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count)).toEqual(['word-count', 'normalize',
+    expect(unconsumedMethods(log.entries(), PIN.environmentId, PIN.revisionId, DECLARED, log.count)).toEqual([
+      'word-count',
+      'normalize',
     ])
   })
 
@@ -151,14 +179,25 @@ describe('the trusted command surface', () => {
     const commands = await planned(live)
     await commands.startRun({
       purpose: 'solve',
-      commandId: 'start-child', taskId: CHILD, runId: RUN, revision: pin(live),
+      commandId: 'start-child',
+      taskId: CHILD,
+      runId: RUN,
+      revision: pin(live),
     })
-    const recorded = await commands.recordConsumption({ commandId: 'consumed-1', taskId: CHILD, runId: RUN, revision: pin(live), method: 'word-count', source: SOURCE, mode: 'read',
+    const recorded = await commands.recordConsumption({
+      commandId: 'consumed-1',
+      taskId: CHILD,
+      runId: RUN,
+      revision: pin(live),
+      method: 'word-count',
+      source: SOURCE,
+      mode: 'read',
     })
     const entries = live.store.load().entries()
     // The log stamps the role, not the caller: the apparatus's own role, never the scheduler's.
     expect(recorded.emitter).toBe('runtime')
-    expect(unconsumedMethods(entries, ENVIRONMENT, REVISION, ['word-count', 'limit-check'], entries.length)).toEqual(['limit-check',
+    expect(unconsumedMethods(entries, ENVIRONMENT, REVISION, ['word-count', 'limit-check'], entries.length)).toEqual([
+      'limit-check',
     ])
   })
 })

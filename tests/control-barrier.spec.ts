@@ -23,7 +23,9 @@ import { REVISION, RUN_ID, SUBJECTS, TASK_ID, contract, taskRegistry } from './t
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void
-  const promise = new Promise<void>((done) => { resolve = done })
+  const promise = new Promise<void>(done => {
+    resolve = done
+  })
   return { promise, resolve }
 }
 
@@ -36,7 +38,8 @@ class BarrierPersistence extends SessionPersistence {
   closeCalls = 0
   #header: SessionHeader | undefined
   #pause:
-    | { operation: 'append' | 'flush'; entered: ReturnType<typeof deferred>; released: ReturnType<typeof deferred> } | undefined
+    | { operation: 'append' | 'flush'; entered: ReturnType<typeof deferred>; released: ReturnType<typeof deferred> }
+    | undefined
 
   pauseNext(operation: 'append' | 'flush'): { entered: Promise<void>; release: () => void } {
     const entered = deferred()
@@ -90,7 +93,10 @@ class BarrierPersistence extends SessionPersistence {
   }
 
   #snapshot(header: SessionHeader): SessionPersistenceSnapshot {
-    return { header, revision: SessionPersistenceRevision(`fake:${header.id}:${this.events.length}`), eventCount: this.events.length,
+    return {
+      header,
+      revision: SessionPersistenceRevision(`fake:${header.id}:${this.events.length}`),
+      eventCount: this.events.length,
     }
   }
 }
@@ -108,12 +114,16 @@ class FakeHandle implements SessionHandle {
     this.access = access
   }
 
-  get id(): SessionId { return this.header.id }
+  get id(): SessionId {
+    return this.header.id
+  }
 
   async read(offset = 0, length?: number): Promise<SessionHandleReadResult> {
     this.#assertOpen('read')
     const { events } = this.#medium
-    return { eventState: 'detached', events: structuredClone(events.slice(offset, length === undefined ? events.length : offset + length)),
+    return {
+      eventState: 'detached',
+      events: structuredClone(events.slice(offset, length === undefined ? events.length : offset + length)),
     }
   }
 
@@ -139,7 +149,9 @@ class FakeHandle implements SessionHandle {
     }
   }
 
-  async [Symbol.asyncDispose](): Promise<void> { await this.close() }
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close()
+  }
 
   #assertOpen(operation: string): void {
     if (this.#closed) throw new SessionHandleClosedError(this.id, operation)
@@ -147,12 +159,24 @@ class FakeHandle implements SessionHandle {
 }
 
 function admission(commandId: string): EmitInput {
-  return { commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.admitted, subject: TASK_ID, payload: { contract: contract() },
+  return {
+    commandId,
+    protocol: TASK_PROTOCOL,
+    version: TASK_VERSION,
+    kind: TASK_KINDS.admitted,
+    subject: TASK_ID,
+    payload: { contract: contract() },
   }
 }
 
 function started(commandId: string): EmitInput {
-  return { commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runStarted, subject: TASK_ID, payload: { purpose: 'solve', runId: RUN_ID, revision: REVISION },
+  return {
+    commandId,
+    protocol: TASK_PROTOCOL,
+    version: TASK_VERSION,
+    kind: TASK_KINDS.runStarted,
+    subject: TASK_ID,
+    payload: { purpose: 'solve', runId: RUN_ID, revision: REVISION },
   }
 }
 
@@ -160,7 +184,13 @@ function started(commandId: string): EmitInput {
  * A fact the task protocol accepts with no prior fact. This spec is about the storage boundary, so
  */
 function assignment(commandId: string): EmitInput {
-  return { commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: TASK_ID, payload: { agentId: 'agent-1', agentIdentity: 'runtime-1' },
+  return {
+    commandId,
+    protocol: TASK_PROTOCOL,
+    version: TASK_VERSION,
+    kind: TASK_KINDS.assigned,
+    subject: TASK_ID,
+    payload: { agentId: 'agent-1', agentIdentity: 'runtime-1' },
   }
 }
 
@@ -169,7 +199,7 @@ function optionsFor(medium: BarrierPersistence, controlId: string): ControlStore
 }
 
 describe('the control submission boundary', () => {
-  it.each(['append', 'flush'] as const)('keeps the committed cut while %s is pending', async (operation) => {
+  it.each(['append', 'flush'] as const)('keeps the committed cut while %s is pending', async operation => {
     const medium = new BarrierPersistence(new Context())
     const store = await ControlSessionStore.open(optionsFor(medium, `pending-${operation}`))
     const admitted = await store.emit(admission('cmd-admit'))
@@ -179,7 +209,11 @@ describe('the control submission boundary', () => {
     try {
       // One read of the cut and one of the prefix that survives a crash: the submission in flight
       // is in neither, whatever the operation it is waiting on.
-      expect(store.load().entries().map((entry) => entry.digest),
+      expect(
+        store
+          .load()
+          .entries()
+          .map(entry => entry.digest),
       ).toEqual([admitted.digest])
       expect(medium.durable).toHaveLength(1)
     } finally {
@@ -205,7 +239,8 @@ describe('the control submission boundary', () => {
     expect((await asyncRefusalOf(() => store.emit(request))).code).toBe('write-not-durable')
     await expect(store.close()).rejects.toThrow('durability barrier failed')
     // ... and neither is asking a successor process to adopt the log.
-    expect((await asyncRefusalOf(() => ControlSessionStore.open(optionsFor(medium, 'never-durable')))).code).toBe('write-not-durable',
+    expect((await asyncRefusalOf(() => ControlSessionStore.open(optionsFor(medium, 'never-durable')))).code).toBe(
+      'write-not-durable',
     )
   })
 
@@ -275,7 +310,8 @@ describe('the control submission boundary', () => {
     await store.emit(assignment('cmd-start'))
     // The later read is a *new* snapshot of the new committed cut, not a view that the values
     // forged above leaked into.
-    expect(store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.responsibility?.agentId).toBe('agent-1',
+    expect(store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.responsibility?.agentId).toBe(
+      'agent-1',
     )
     await store.close()
   })

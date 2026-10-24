@@ -26,7 +26,7 @@ import {
 export type { EvidenceRecord, RunState, RunStatus, RunSubmission } from './run.ts'
 
 export const TASK_PROTOCOL = 'task'
-export const TASK_VERSION = 25
+export const TASK_VERSION = 27
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'
@@ -39,13 +39,17 @@ export function verifierRoleOf(payload: { verifierRef: string; verifierVersion: 
 export function recordedVerdictDigest(
   state: TaskState,
   where: string,
-  { runId, criterionId, artifactDigest,
+  {
+    runId,
+    criterionId,
+    artifactDigest,
   }: { readonly runId: string; readonly criterionId: string; readonly artifactDigest: string },
 ): string {
   const run = state.runs[runId]
-  if (run === undefined) refuse('unknown-run', `${where} cites a verdict of run "${runId}", which task "${state.taskId}" never started`)
+  if (run === undefined)
+    refuse('unknown-run', `${where} cites a verdict of run "${runId}", which task "${state.taskId}" never started`)
   const evidence = run.evidence.find(
-    (entry) => entry.criterionId === criterionId && entry.artifactDigest === artifactDigest,
+    entry => entry.criterionId === criterionId && entry.artifactDigest === artifactDigest,
   )
   if (evidence === undefined)
     refuse(
@@ -135,7 +139,10 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
       ...transferKinds(),
       'workflow/limits-frozen': workflowLimitsKind(),
       'learning/configured': defineKind<TaskState, { enabled: boolean }, {}>({
-        guarantees: { appended: true }, emitter: SCHEDULER_ROLE, members: ['enabled'], nested: {},
+        guarantees: { appended: true },
+        emitter: SCHEDULER_ROLE,
+        members: ['enabled'],
+        nested: {},
         parse: raw => {
           const row = record(raw, 'learning policy')
           if (typeof row['enabled'] !== 'boolean') refuse('malformed-payload', 'learning.enabled must be boolean')
@@ -167,7 +174,9 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
             )
           for (const input of payload.contract.inputs)
             if (input.source.kind === 'artifact' && input.source.taskId === envelope.subject)
-              refuse('malformed-contract', `task "${envelope.subject}" declares its own artifact as input "${input.name}"`,
+              refuse(
+                'malformed-contract',
+                `task "${envelope.subject}" declares its own artifact as input "${input.name}"`,
               )
           return {
             taskId: envelope.subject,

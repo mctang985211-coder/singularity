@@ -11,7 +11,9 @@ export interface SchedulerMessageSource {
   readonly factSeq: number
 }
 declare module '@deepseek-ai/dsh-llm' {
-  interface MessageSourceMap { singularity: SchedulerMessageSource }
+  interface MessageSourceMap {
+    singularity: SchedulerMessageSource
+  }
 }
 
 export function schedulerMessage(source: SchedulerMessageSource, text: string): UserMessage {

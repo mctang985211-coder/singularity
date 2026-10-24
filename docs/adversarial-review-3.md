@@ -1,5 +1,7 @@
 # adversarial-review-3.md —— 第三轮：攻击上一轮的修复
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 **审的是 `9eb755c` 的干净副本。审查只读；测量全在 `/tmp` 副本上做。**
 基线：`tsc` 干净、308 测试 / 28 文件、`node scripts/gates.mjs` **18/18**。
 

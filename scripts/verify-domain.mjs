@@ -8,8 +8,9 @@ const args = process.argv.slice(2).filter(arg => arg !== '--')
 if (args.length !== 1) throw new Error('Usage: pnpm verify:domain -- <environment-directory>')
 const root = await realpath(resolve(args[0]))
 const entry = join(root, 'verify.mjs')
-try { await access(entry) }
-catch (error) {
+try {
+  await access(entry)
+} catch (error) {
   if (error.code !== 'ENOENT') throw error
   console.log(`SKIP domain verification: ${entry} is not provided`)
   process.exit(0)

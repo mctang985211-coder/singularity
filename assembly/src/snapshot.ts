@@ -18,10 +18,11 @@ import { coordinationOf } from './coordination.ts'
 import { digestOf } from '../../src/protocol/envelope.ts'
 import { sealedBytes } from './sealed.ts'
 import { pairedReport } from '../../src/measure/paired.ts'
+import { rsiSummary } from './rsi-state.ts'
 import { searchView } from './rsi-history.ts'
 
 export interface ControlSnapshot {
-  readonly formatVersion: 13
+  readonly formatVersion: 15
   readonly geometry: Readonly<Record<string, { x: number; y: number; width: number; height: number }>>
   readonly controlId: string
   readonly suiteDigest: string | null
@@ -36,6 +37,7 @@ export interface ControlSnapshot {
     readonly purpose: string
     readonly closure: TaskState['closure'] | null
     readonly rsi: TaskState['rsi'] | null
+    readonly semantics: ReturnType<typeof rsiSummary>
     readonly learning: boolean | null
     readonly search: ReturnType<typeof searchView>
     readonly transfer: TaskState['transfer'] | null
@@ -77,22 +79,28 @@ export interface ControlSnapshot {
     readonly plan: RoundState['plan']
     readonly submissions: RoundState['submissions']
     readonly decision: RoundState['decision'] | null
-    readonly evaluations: readonly { readonly evaluationId: string
+    readonly evaluations: readonly {
+      readonly evaluationId: string
       readonly report: ReturnType<typeof projectEvaluation>
       readonly state: EvaluationState
-      readonly paired: ReturnType<typeof pairedReport> | null }[]
+      readonly paired: ReturnType<typeof pairedReport> | null
+    }[]
   }[]
-  readonly releases: readonly { readonly seq: number
+  readonly releases: readonly {
+    readonly seq: number
     readonly kind: string
     readonly environmentId: string
-    readonly payload: unknown }[]
-  readonly consumption: readonly { readonly seq: number
+    readonly payload: unknown
+  }[]
+  readonly consumption: readonly {
+    readonly seq: number
     readonly taskId: string
     readonly runId: string
     readonly method: string
     readonly mode: import('../../src/task/run.ts').ConsumptionMode
     readonly source: string
-    readonly revision: RevisionRef }[]
+    readonly revision: RevisionRef
+  }[]
   readonly budget: { readonly rootSolves: number; readonly childRuns: number; readonly terminalRuns: number }
 }
 
@@ -104,7 +112,10 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
   for (const [taskId, state] of committed.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)) {
     if (state.contract === undefined) continue
     const view = projectTask(state)
-    const agent = state.responsibility === undefined ? undefined : committed.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, state.responsibility.agentId)
+    const agent =
+      state.responsibility === undefined
+        ? undefined
+        : committed.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, state.responsibility.agentId)
     const run = Object.values(state.runs).at(-1)
     let bindings: MethodBindings | null = null
     if (run !== undefined) {
@@ -118,27 +129,45 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
     tasks.push({
       closure: state.closure ?? null,
       rsi: state.rsi ?? null,
+      semantics: rsiSummary(apparatus, state, committed),
       learning: state.learning ?? null,
       search: searchView(apparatus, state, committed),
       transfer: state.transfer ?? null,
-      ...(state.transfer?.report === undefined ? {} : { transferReport: JSON.parse((await sealedBytes(apparatus, state.transfer.report)).toString('utf8')) as unknown }),
+      ...(state.transfer?.report === undefined
+        ? {}
+        : {
+            transferReport: JSON.parse(
+              (await sealedBytes(apparatus, state.transfer.report)).toString('utf8'),
+            ) as unknown,
+          }),
       requests: state.rounds ?? [],
-      taskId, goal: state.contract.goal, phase: view.phase,
+      taskId,
+      goal: state.contract.goal,
+      phase: view.phase,
       coordination: coordinationOf(apparatus, taskId, committed),
-      sessionId: agent?.sessionId ?? null, template: state.contract.template ?? null,
-      relatedTo: run?.relatedTo ?? null, purpose: run?.purpose ?? 'solve',
+      sessionId: agent?.sessionId ?? null,
+      template: state.contract.template ?? null,
+      relatedTo: run?.relatedTo ?? null,
+      purpose: run?.purpose ?? 'solve',
       bindings,
-      runs: view.runs.map((run) => {
+      runs: view.runs.map(run => {
         const execution = state.runs[run.runId]!
         const inputSources =
-          execution.bubble?.inputs.map((input) => ({
+          execution.bubble?.inputs.map(input => ({
             name: input.name,
             digest: input.digest,
-            source: state.contract!.inputs.find((declared) => declared.name === input.name)!.source,
+            source: state.contract!.inputs.find(declared => declared.name === input.name)!.source,
             ...(input.producerRunId === undefined ? {} : { producerRunId: input.producerRunId }),
           })) ?? []
-        return { runId: run.runId, status: run.status, model: execution.bubble?.model ?? null, inputSources,
-          detail: run.failureReason ?? run.verdicts.find((entry) => entry.criterionId === state.contract!.criteria[0]!.criterionId)?.detail ?? null,
+        return {
+          runId: run.runId,
+          status: run.status,
+          model: execution.bubble?.model ?? null,
+          inputSources,
+          detail:
+            run.failureReason ??
+            run.verdicts.find(entry => entry.criterionId === state.contract!.criteria[0]!.criterionId)?.detail ??
+            null,
           receipt: run.status === 'running' ? null : projectReceipt(apparatus.registry, entries, taskId, run.runId),
         }
       }),
@@ -148,63 +177,107 @@ export async function snapshotOf(apparatus: Apparatus): Promise<ControlSnapshot>
   const states = committed.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   const plans = [
     ...projectTree(states),
-    ...reviews.filter((r) => r.children.length > 0).map((r) => projectPlan(r.reviewId, r.criteria, r.children, states)),
-  ].map((view) => ({
+    ...reviews.filter(r => r.children.length > 0).map(r => projectPlan(r.reviewId, r.criteria, r.children, states)),
+  ].map(view => ({
     parentTaskId: view.parentTaskId,
     complete: view.complete,
     children: view.children.map(({ lastOutcome: _, ...child }) => child),
     criteria: view.criteria.map(({ supportedBy: _, ...criterion }) => criterion),
   }))
   const ordered = tasks.sort((left, right) => left.taskId.localeCompare(right.taskId))
-  const library = committed.stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, methodEnvironment(apparatus),
+  const library = committed.stateOf<EnvironmentState>(
+    ENVIRONMENT_PROTOCOL,
+    ENVIRONMENT_VERSION,
+    methodEnvironment(apparatus),
   )
-  const methods = Object.values(library?.revisions ?? {}).map((revision) => {
+  const methods = Object.values(library?.revisions ?? {}).map(revision => {
     const assets = revision.manifest as MethodAssets
-    return { reference: { environmentId: library!.environmentId, revisionId: revision.revisionId, digest: revision.contentDigest,
+    return {
+      reference: {
+        environmentId: library!.environmentId,
+        revisionId: revision.revisionId,
+        digest: revision.contentDigest,
       },
       published: library!.pointer === revision.revisionId,
-      templates: assets.templates.map((template) => (template as { id: string }).id),
-      skillBytes: Buffer.byteLength(JSON.stringify(assets.skills)), toolBytes: Buffer.byteLength(JSON.stringify(assets.tools)), toolCount: assets.tools.length,
+      templates: assets.templates.map(template => (template as { id: string }).id),
+      skillBytes: Buffer.byteLength(JSON.stringify(assets.skills)),
+      toolBytes: Buffer.byteLength(JSON.stringify(assets.tools)),
+      toolCount: assets.tools.length,
     }
   })
   const evaluations = committed.statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION)
-  const rounds = [...committed.statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION).values()].map((round) => ({
-    roundId: round.roundId, plan: round.plan, submissions: round.submissions, decision: round.decision ?? null,
-    evaluations: [`${round.roundId}:bootstrap:evaluation`, ...round.submissions.map(s => s.evaluationId)].flatMap(evaluationId => {
-      const state = evaluations.get(evaluationId), baseline = evaluations.get(`${round.roundId}:bootstrap:evaluation`)
-      return state === undefined ? [] : [{ evaluationId, state, report: projectEvaluation(state),
-        paired: baseline?.matrix && state.matrix && state !== baseline ? pairedReport(baseline, state) : null }]
-    }),
+  const rounds = [...committed.statesOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION).values()].map(round => ({
+    roundId: round.roundId,
+    plan: round.plan,
+    submissions: round.submissions,
+    decision: round.decision ?? null,
+    evaluations: [`${round.roundId}:bootstrap:evaluation`, ...round.submissions.map(s => s.evaluationId)].flatMap(
+      evaluationId => {
+        const state = evaluations.get(evaluationId),
+          baseline = evaluations.get(`${round.roundId}:bootstrap:evaluation`)
+        return state === undefined
+          ? []
+          : [
+              {
+                evaluationId,
+                state,
+                report: projectEvaluation(state),
+                paired: baseline?.matrix && state.matrix && state !== baseline ? pairedReport(baseline, state) : null,
+              },
+            ]
+      },
+    ),
   }))
-  const releases = entries.filter((entry) => entry.protocol === RELEASE_PROTOCOL || entry.kind === 'pointer/switched')
-    .map((entry) => ({ seq: entry.seq, kind: entry.kind, environmentId: entry.subject, payload: entry.payload }))
-  const consumption = entries.filter((entry) => entry.kind === 'method/consumed')
-    .map((entry) => {
-    const use = entry.payload as { runId: string; method: string; source: string; mode: import('../../src/task/run.ts').ConsumptionMode }
-    const execution = committed.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, entry.subject)!.runs[use.runId]!
+  const releases = entries
+    .filter(entry => entry.protocol === RELEASE_PROTOCOL || entry.kind === 'pointer/switched')
+    .map(entry => ({ seq: entry.seq, kind: entry.kind, environmentId: entry.subject, payload: entry.payload }))
+  const consumption = entries
+    .filter(entry => entry.kind === 'method/consumed')
+    .map(entry => {
+      const use = entry.payload as {
+        runId: string
+        method: string
+        source: string
+        mode: import('../../src/task/run.ts').ConsumptionMode
+      }
+      const execution = committed.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, entry.subject)!.runs[use.runId]!
       return { seq: entry.seq, taskId: entry.subject, ...use, revision: execution.revision }
-  })
-  const childIds = new Set(plans.flatMap((plan) => plan.children.map((child) => child.taskId)))
-  const starts = entries.filter((entry) => entry.kind === 'run/started')
-  const budget = { rootSolves: starts.filter((entry) => !childIds.has(entry.subject)).length,
-    childRuns: starts.filter((entry) => childIds.has(entry.subject)).length,
-    terminalRuns: entries.filter((entry) => ['run/verified', 'run/failed'].includes(entry.kind)).length,
+    })
+  const childIds = new Set(plans.flatMap(plan => plan.children.map(child => child.taskId)))
+  const starts = entries.filter(entry => entry.kind === 'run/started')
+  const budget = {
+    rootSolves: starts.filter(entry => !childIds.has(entry.subject)).length,
+    childRuns: starts.filter(entry => childIds.has(entry.subject)).length,
+    terminalRuns: entries.filter(entry => ['run/verified', 'run/failed'].includes(entry.kind)).length,
   }
   const geometry: Record<string, { x: number; y: number; width: number; height: number }> = {}
-  const parentOf = new Map([...plans.flatMap((plan) => plan.children.map((child) => [child.taskId, plan.parentTaskId] as const)),
-    ...tasks.flatMap((task) => (task.relatedTo === null ? [] : [[task.taskId, task.relatedTo.taskId] as const])),
+  const parentOf = new Map([
+    ...plans.flatMap(plan => plan.children.map(child => [child.taskId, plan.parentTaskId] as const)),
+    ...tasks.flatMap(task => (task.relatedTo === null ? [] : [[task.taskId, task.relatedTo.taskId] as const])),
   ])
   const depth = (id: string): number => (parentOf.has(id) ? 1 + depth(parentOf.get(id)!) : 0)
   const rows = new Map<number, number>()
   for (const review of reviews)
     if (review.target.kind === 'acceptance') parentOf.set(review.reviewId, review.target.taskId)
-  for (const task of [...ordered.map((t) => t.taskId), ...reviews.map((r) => r.reviewId)]) {
-    const column = depth(task), row = rows.get(column) ?? 0
+  for (const task of [...ordered.map(t => t.taskId), ...reviews.map(r => r.reviewId)]) {
+    const column = depth(task),
+      row = rows.get(column) ?? 0
     rows.set(column, row + 1)
     geometry[task] = { x: column * 330, y: row * 145, width: 260, height: 105 }
   }
-  return { formatVersion: 13,
+  return {
+    formatVersion: 15,
     suiteDigest: apparatus.domain.suite === undefined ? null : digestOf(apparatus.domain.suite),
-    reviews, geometry, controlId: apparatus.controlId, cutoff: entries.length, tasks: ordered, plans, methods, rounds, releases, consumption, budget,
+    reviews,
+    geometry,
+    controlId: apparatus.controlId,
+    cutoff: entries.length,
+    tasks: ordered,
+    plans,
+    methods,
+    rounds,
+    releases,
+    consumption,
+    budget,
   }
 }

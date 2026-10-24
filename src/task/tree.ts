@@ -1,4 +1,3 @@
-
 import { refuse } from '../protocol/refusal.ts'
 import type { AcceptanceCriterion } from './contract.ts'
 import type { DecompositionChild } from './decomposition.ts'
@@ -6,12 +5,18 @@ import type { RunState, TaskState } from './protocol.ts'
 import { openQuestions } from './questions.ts'
 
 /** Direct responsibility edges have one parent and cannot point back to an ancestor. */
-export function assertParentage(parentId: string, children: readonly DecompositionChild[], tasks: ReadonlyMap<string, TaskState>,
+export function assertParentage(
+  parentId: string,
+  children: readonly DecompositionChild[],
+  tasks: ReadonlyMap<string, TaskState>,
   otherPlans: readonly { readonly parentId: string; readonly children: readonly DecompositionChild[] }[] = [],
 ): void {
-  const plans = [...tasks.values()].filter((task) => task.decomposition !== undefined)
-    .map((task) => ({ parentId: task.taskId, children: task.decomposition!.children }))
-  const parents = new Map([...plans, ...otherPlans].flatMap((plan) => plan.children.map((child) => [child.taskId, plan.parentId] as const)))
+  const plans = [...tasks.values()]
+    .filter(task => task.decomposition !== undefined)
+    .map(task => ({ parentId: task.taskId, children: task.decomposition!.children }))
+  const parents = new Map(
+    [...plans, ...otherPlans].flatMap(plan => plan.children.map(child => [child.taskId, plan.parentId] as const)),
+  )
   for (const child of children) {
     const owner = parents.get(child.taskId)
     if (owner !== undefined && owner !== parentId)
@@ -65,25 +70,34 @@ export interface TreeView {
 }
 
 export const childSettled = (child: TreeChildView): boolean =>
-  child.status === 'verified' || child.status === 'stopped' || child.status === 'blocked' || child.status === 'cancelled'
+  child.status === 'verified' ||
+  child.status === 'stopped' ||
+  child.status === 'blocked' ||
+  child.status === 'cancelled'
 
 /** One hold, shared by the command boundary and native execution admission. */
-export function taskWaitingReason(tasks: ReadonlyMap<string, TaskState>, taskId: string, action: 'plan' | 'execute' = 'execute'): string | undefined {
+export function taskWaitingReason(
+  tasks: ReadonlyMap<string, TaskState>,
+  taskId: string,
+  action: 'plan' | 'execute' = 'execute',
+): string | undefined {
   const task = tasks.get(taskId)!
   const stopped = stoppedExplorationOf(tasks, taskId)
-  if (stopped !== undefined) return `exploration ${stopped.taskId} was stopped by parent ${stopped.parentTaskId}: ${stopped.reason}`
+  if (stopped !== undefined)
+    return `exploration ${stopped.taskId} was stopped by parent ${stopped.parentTaskId}: ${stopped.reason}`
   const run = Object.values(task.runs).at(-1)
-  const questions = run === undefined ? [] : openQuestions(task, run.runId).filter((q) => q.blocking)
+  const questions = run === undefined ? [] : openQuestions(task, run.runId).filter(q => q.blocking)
   if (questions.length)
-    return `waiting for parent answers: ${questions.map((q) => q.questionId).join(', ')}; read or coordinate, then end the turn`
+    return `waiting for parent answers: ${questions.map(q => q.questionId).join(', ')}; read or coordinate, then end the turn`
   if (action === 'execute' && task.decomposition !== undefined) {
     const children = projectOne(task, tasks).children
     if (!children.every(childSettled))
       return 'delegated responsibilities are pending; read evidence, answer children, or stop unselected exploration, then end the turn'
     const unmet = children.filter(child => child.requirement === 'required' && child.status !== 'verified')
-    if (unmet.length) return `required delegated responsibilities have not verified: ${unmet.map(child => child.taskId).join(', ')}`
+    if (unmet.length)
+      return `required delegated responsibilities have not verified: ${unmet.map(child => child.taskId).join(', ')}`
   }
-  if (task.rounds?.some((request) => request.status === 'pending'))
+  if (task.rounds?.some(request => request.status === 'pending'))
     return 'waiting for the committed evaluation outcome; read or coordinate, then end the turn'
   return undefined
 }
@@ -93,9 +107,9 @@ function runsOf(state: TaskState | undefined): readonly RunState[] {
 }
 
 function outcomeOf(runs: readonly RunState[]): ChildOutcome {
-  if (runs.some((run) => run.status === 'running')) return 'running'
-  if (runs.some((run) => run.status === 'verified')) return 'verified'
-  if (runs.some((run) => run.status === 'failed')) return 'failed'
+  if (runs.some(run => run.status === 'running')) return 'running'
+  if (runs.some(run => run.status === 'verified')) return 'verified'
+  if (runs.some(run => run.status === 'failed')) return 'failed'
   return null
 }
 
@@ -107,9 +121,9 @@ function outcomeOf(runs: readonly RunState[]): ChildOutcome {
  */
 export function projectTree(tasks: ReadonlyMap<string, TaskState>): readonly TreeView[] {
   return [...tasks.values()]
-    .filter((state) => state.decomposition !== undefined)
+    .filter(state => state.decomposition !== undefined)
     .sort((left, right) => (left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0))
-    .map((parent) => projectOne(parent, tasks))
+    .map(parent => projectOne(parent, tasks))
 }
 
 function projectOne(parent: TaskState, tasks: ReadonlyMap<string, TaskState>): TreeView {
@@ -131,7 +145,7 @@ export function projectPlan(
   tasks: ReadonlyMap<string, TaskState>,
   parentRuns: readonly RunState[] = [],
 ): TreeView {
-  const childOf = new Map(entries.map((entry) => [entry.taskId, entry]))
+  const childOf = new Map(entries.map(entry => [entry.taskId, entry]))
   const computed = new Map<string, TreeChildView>()
 
   /** Decide one sub-task. Recursion terminates because the reducer refuses a cyclic plan. */
@@ -140,10 +154,14 @@ export function projectPlan(
     if (settled !== undefined) return settled
     const entry = childOf.get(taskId)
     if (entry === undefined)
-      refuse('unknown-criterion', `"${taskId}" is not a sub-task this decomposition declares, so it has no state to decide`,
+      refuse(
+        'unknown-criterion',
+        `"${taskId}" is not a sub-task this decomposition declares, so it has no state to decide`,
       )
     if (stack.includes(taskId))
-      refuse('cyclic-dependency', `the decomposition of "${parentId}" reaches "${taskId}" twice: ${[...stack, taskId].join(' -> ')}`,
+      refuse(
+        'cyclic-dependency',
+        `the decomposition of "${parentId}" reaches "${taskId}" twice: ${[...stack, taskId].join(' -> ')}`,
       )
 
     const childState = tasks.get(taskId)
@@ -177,12 +195,22 @@ export function projectPlan(
 
     // An unadmitted child cannot run.
     if (childState === undefined || childState.contract === undefined)
-      return { ...shape, status: 'missing', reason: `sub-task "${entry.taskId}" is declared but has no admitted contract, so it cannot be started`,
+      return {
+        ...shape,
+        status: 'missing',
+        reason: `sub-task "${entry.taskId}" is declared but has no admitted contract, so it cannot be started`,
       }
 
-    const dependencies = entry.dependsOn.map((dependency) => ({ dependency, view: statusOf(dependency, [...stack, entry.taskId]),
+    const dependencies = entry.dependsOn.map(dependency => ({
+      dependency,
+      view: statusOf(dependency, [...stack, entry.taskId]),
     }))
-    const dead = dependencies.filter(({ view }) => view.status === 'missing' || view.status === 'blocked' || view.status === 'stopped' || view.status === 'cancelled',
+    const dead = dependencies.filter(
+      ({ view }) =>
+        view.status === 'missing' ||
+        view.status === 'blocked' ||
+        view.status === 'stopped' ||
+        view.status === 'cancelled',
     )
     if (dead.length > 0)
       return {
@@ -196,16 +224,22 @@ export function projectPlan(
       return { ...shape, status: 'stopped', reason: 'parent Run settled before this responsibility started' }
     const pending = dependencies.filter(({ view }) => view.status !== 'verified')
     if (pending.length > 0)
-      return { ...shape, status: 'waiting', reason: `waiting for ${pending.map(({ dependency, view }) => `"${dependency}" (${view.status})`).join(', ')} to verify`,
+      return {
+        ...shape,
+        status: 'waiting',
+        reason: `waiting for ${pending.map(({ dependency, view }) => `"${dependency}" (${view.status})`).join(', ')} to verify`,
       }
 
-    if (runs.some((run) => run.status === 'verified')) return { ...shape, status: 'verified', reason: null }
-    if (runs.some((run) => run.status === 'running')) return { ...shape, status: 'running', reason: null }
-    const uncertain = runs.find((run) => run.evidence.some((entry) => entry.verdict === 'unknown'))
+    if (runs.some(run => run.status === 'verified')) return { ...shape, status: 'verified', reason: null }
+    if (runs.some(run => run.status === 'running')) return { ...shape, status: 'running', reason: null }
+    const uncertain = runs.find(run => run.evidence.some(entry => entry.verdict === 'unknown'))
     if (uncertain !== undefined) return { ...shape, status: 'blocked', reason: 'verification evidence is insufficient' }
-    const interrupted = runs.find((run) => run.failureCause === 'runtime')
+    const interrupted = runs.find(run => run.failureCause === 'runtime')
     if (interrupted !== undefined)
-      return { ...shape, status: 'stopped', reason: `runtime failure in Run "${interrupted.runId}"${interrupted.failureReason === undefined ? '' : ': ' + interrupted.failureReason}`,
+      return {
+        ...shape,
+        status: 'stopped',
+        reason: `runtime failure in Run "${interrupted.runId}"${interrupted.failureReason === undefined ? '' : ': ' + interrupted.failureReason}`,
       }
     if (runsUsed >= entry.maxRuns)
       return {
@@ -213,21 +247,27 @@ export function projectPlan(
         status: 'stopped',
         reason:
           `budget exhausted: ${runsUsed} of ${entry.maxRuns} declared runs used without a verified run` +
-          (runs.some((run) => run.status === 'failed') ? ', and the last attempt failed' : ''),
+          (runs.some(run => run.status === 'failed') ? ', and the last attempt failed' : ''),
       }
     if (runsUsed > 0)
-      return { ...shape, status: 'ready', reason: `the previous attempt ${shape.lastOutcome ?? 'ended'} and ${entry.maxRuns - runsUsed} of ${entry.maxRuns} runs remain`,
+      return {
+        ...shape,
+        status: 'ready',
+        reason: `the previous attempt ${shape.lastOutcome ?? 'ended'} and ${entry.maxRuns - runsUsed} of ${entry.maxRuns} runs remain`,
       }
     return { ...shape, status: 'ready', reason: null }
   }
 
-  const children = entries.map((entry) => statusOf(entry.taskId, []))
+  const children = entries.map(entry => statusOf(entry.taskId, []))
 
-  const criteria: TreeCriterionView[] = standards.map((criterion) => {
+  const criteria: TreeCriterionView[] = standards.map(criterion => {
     const supportedBy = children
-      .filter((child) => child.supports.includes(criterion.criterionId)).map((child) => child.taskId)
+      .filter(child => child.supports.includes(criterion.criterionId))
+      .map(child => child.taskId)
     const byOwnRun = parentRuns.find(
-      (run) => run.status === 'verified' && run.evidence.some((entry) => entry.criterionId === criterion.criterionId && entry.verdict === 'pass'),
+      run =>
+        run.status === 'verified' &&
+        run.evidence.some(entry => entry.criterionId === criterion.criterionId && entry.verdict === 'pass'),
     )
     return {
       criterionId: criterion.criterionId,
@@ -240,21 +280,29 @@ export function projectPlan(
     parentTaskId: parentId,
     children,
     criteria,
-    ready: children.filter((child) => child.status === 'ready').map((child) => child.taskId),
+    ready: children.filter(child => child.status === 'ready').map(child => child.taskId),
     blocked: children
-      .filter((child) => child.reason !== null)
-      .map((child) => ({ taskId: child.taskId, reason: child.reason as string })),
-    complete: criteria.every((criterion) => criterion.satisfiedBy !== null) && children.every(childSettled) &&
+      .filter(child => child.reason !== null)
+      .map(child => ({ taskId: child.taskId, reason: child.reason as string })),
+    complete:
+      criteria.every(criterion => criterion.satisfiedBy !== null) &&
+      children.every(childSettled) &&
       children.every(child => child.requirement !== 'required' || child.status === 'verified'),
   }
 }
 
 /** A persisted stop covers the selected branch and every delegated descendant. */
-export function stoppedExplorationOf(tasks: ReadonlyMap<string, TaskState>, taskId: string):
-  { readonly parentTaskId: string; readonly taskId: string; readonly reason: string; readonly seq: number } | undefined {
+export function stoppedExplorationOf(
+  tasks: ReadonlyMap<string, TaskState>,
+  taskId: string,
+):
+  | { readonly parentTaskId: string; readonly taskId: string; readonly reason: string; readonly seq: number }
+  | undefined {
   let current = taskId
   for (;;) {
-    const parent = [...tasks.values()].find(task => task.decomposition?.children.some(child => child.taskId === current))
+    const parent = [...tasks.values()].find(task =>
+      task.decomposition?.children.some(child => child.taskId === current),
+    )
     if (parent === undefined) return undefined
     const stopped = parent.decomposition!.stopped?.find(entry => entry.taskId === current)
     if (stopped !== undefined) return { parentTaskId: parent.taskId, ...stopped }
@@ -268,11 +316,12 @@ export function taskRelations(tasks: ReadonlyMap<string, TaskState>) {
   const consumers = new Map<string, string[]>()
   for (const task of tasks.values()) {
     for (const child of task.decomposition?.children ?? []) parents.set(child.taskId, task.taskId)
-    for (const input of task.contract?.inputs ?? []) if (input.source.kind === 'artifact') {
-      const ids = consumers.get(input.source.taskId) ?? []
-      if (!ids.includes(task.taskId)) ids.push(task.taskId)
-      consumers.set(input.source.taskId, ids)
-    }
+    for (const input of task.contract?.inputs ?? [])
+      if (input.source.kind === 'artifact') {
+        const ids = consumers.get(input.source.taskId) ?? []
+        if (!ids.includes(task.taskId)) ids.push(task.taskId)
+        consumers.set(input.source.taskId, ids)
+      }
   }
   const ancestors = (id: string): string[] => {
     const path: string[] = []

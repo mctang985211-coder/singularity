@@ -67,7 +67,8 @@ export const DEMO_V1: ProtocolSpec<Gate> = {
       emitter: 'writer',
       parse: (raw, where) => emptyPayload(raw, where),
       reduce: (state, envelope) => {
-        if (!state.open) refuse('illegal-transition', `demo/bumped #${envelope.seq} arrived while the subject is closed`)
+        if (!state.open)
+          refuse('illegal-transition', `demo/bumped #${envelope.seq} arrived while the subject is closed`)
         return { open: true, bumps: state.bumps + 1 }
       },
     }),
@@ -93,7 +94,8 @@ export const AUDIT_V1: ProtocolSpec<Journal> = {
       parse: (raw, where) => {
         const source = raw as Record<string, unknown>
         const text = source['text']
-        if (typeof text !== 'string' || text.length === 0) refuse('malformed-payload', `${where}.text must be a non-empty string`)
+        if (typeof text !== 'string' || text.length === 0)
+          refuse('malformed-payload', `${where}.text must be a non-empty string`)
         return { text }
       },
       reduce: (state, _envelope, payload) => ({ notes: [...state.notes, payload.text] }),
@@ -122,8 +124,10 @@ export const POINTER_V1: ProtocolSpec<{ revision: string; generation: number }> 
         const source = raw as Record<string, unknown>
         const expected = source['expected']
         const to = source['to']
-        if (typeof expected !== 'string' || expected.length === 0) refuse('malformed-payload', `${where}.expected must be a non-empty string`)
-        if (typeof to !== 'string' || to.length === 0) refuse('malformed-payload', `${where}.to must be a non-empty string`)
+        if (typeof expected !== 'string' || expected.length === 0)
+          refuse('malformed-payload', `${where}.expected must be a non-empty string`)
+        if (typeof to !== 'string' || to.length === 0)
+          refuse('malformed-payload', `${where}.to must be a non-empty string`)
         return { expected, to }
       },
       reduce: (state, envelope, payload) => {

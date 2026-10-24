@@ -26,7 +26,10 @@ function refuse(reason) {
 
 /** Substitute explicit deployment paths, refusing a template that would keep a token. */
 function materialise(text, file) {
-  const out = text.replaceAll(CHECKOUT_TOKEN, root).replaceAll(DSH_HOME_TOKEN, homeDir).replaceAll('@@DOMAIN_DIR@@', domainDir)
+  const out = text
+    .replaceAll(CHECKOUT_TOKEN, root)
+    .replaceAll(DSH_HOME_TOKEN, homeDir)
+    .replaceAll('@@DOMAIN_DIR@@', domainDir)
   if (out.includes('@@')) refuse(`${file} still contains a materialisation token after substitution`)
   return out
 }
@@ -55,13 +58,20 @@ for (const file of patchFiles)
     refuse(`assembly/package.json declares the bundle patch ${JSON.stringify(file)}, which does not exist`)
 
 const profileDir = join(homeDir, 'profiles', PROFILE_NAME)
-const profileManifest = JSON.parse(materialise(await readFile(join(templateDir, 'package.json'), 'utf8'), 'deployment/profile/package.json'))
+const profileManifest = JSON.parse(
+  materialise(await readFile(join(templateDir, 'package.json'), 'utf8'), 'deployment/profile/package.json'),
+)
 if (profileManifest.name !== PROFILE_NAME)
-  refuse(`deployment/profile/package.json is named ${JSON.stringify(profileManifest.name)}, not ${JSON.stringify(PROFILE_NAME)}`)
+  refuse(
+    `deployment/profile/package.json is named ${JSON.stringify(profileManifest.name)}, not ${JSON.stringify(PROFILE_NAME)}`,
+  )
 const bundles = profileManifest.dsh?.profile?.bundles
 if (!Array.isArray(bundles) || !bundles.includes(assemblyManifest.name))
   refuse(`deployment/profile/package.json does not mount ${assemblyManifest.name} in dsh.profile.bundles`)
-const profilePatch = materialise(await readFile(join(templateDir, 'cordis.patch.yml'), 'utf8'), 'deployment/profile/cordis.patch.yml')
+const profilePatch = materialise(
+  await readFile(join(templateDir, 'cordis.patch.yml'), 'utf8'),
+  'deployment/profile/cordis.patch.yml',
+)
 
 await rm(profileDir, { recursive: true, force: true })
 const linkDir = join(profileDir, 'node_modules', '@dangosys')
@@ -79,8 +89,7 @@ JSON.parse(await readFile(join(profileDir, 'package.json'), 'utf8'))
 if ((await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8')).includes('@@'))
   refuse(`${join(profileDir, 'cordis.patch.yml')} contains a materialisation token`)
 const linked = await realpath(linkPath)
-if (linked !== assemblyDir)
-  refuse(`${linkPath} resolves to ${linked}, not ${assemblyDir}`)
+if (linked !== assemblyDir) refuse(`${linkPath} resolves to ${linked}, not ${assemblyDir}`)
 
 process.stdout.write(
   [

@@ -7,7 +7,13 @@ import { afterAll } from 'vitest'
 import { LocalAttachmentStore } from '@deepseek-ai/dsh-attachment-local'
 import { join } from 'node:path'
 import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
-import { SessionId, SessionSeq, SessionLogOffset, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import {
+  SessionId,
+  SessionSeq,
+  SessionLogOffset,
+  type SessionEvent,
+  type SessionHeader,
+} from '@deepseek-ai/dsh-session'
 import {
   assertContiguous,
   SessionPersistenceNotFoundError,
@@ -88,13 +94,22 @@ export class FakePersistence {
   async stat(id: SessionId): Promise<SessionPersistenceSnapshot | undefined> {
     const header = this.#header
     if (header === undefined || header.id !== id) return undefined
-    return { header, revision: SessionPersistenceRevision(`fake:${header.id}:${this.events.length}`), eventCount: this.events.length,
+    return {
+      header,
+      revision: SessionPersistenceRevision(`fake:${header.id}:${this.events.length}`),
+      eventCount: this.events.length,
     }
   }
 
   async list(): Promise<readonly SessionPersistenceSnapshot[]> {
     const header = this.#header
-    return header === undefined ? [] : [{ header, revision: SessionPersistenceRevision(`fake:${header.id}:${this.events.length}`), eventCount: this.events.length,
+    return header === undefined
+      ? []
+      : [
+          {
+            header,
+            revision: SessionPersistenceRevision(`fake:${header.id}:${this.events.length}`),
+            eventCount: this.events.length,
           },
         ]
   }
@@ -118,7 +133,9 @@ class FakeHandle implements SessionHandle {
 
   async read(offset = 0, length?: number): Promise<SessionHandleReadResult> {
     const { events } = this.#medium
-    return { eventState: 'detached', events: structuredClone(events.slice(offset, length === undefined ? events.length : offset + length)),
+    return {
+      eventState: 'detached',
+      events: structuredClone(events.slice(offset, length === undefined ? events.length : offset + length)),
     }
   }
 
@@ -144,17 +161,19 @@ class FakeHandle implements SessionHandle {
 
 /** Every committed fact, as the log carries it. */
 export function factsOf(medium: FakePersistence): readonly Envelope[] {
-  return medium.events.map((event) => (event.data as ControlEventData).payload)
+  return medium.events.map(event => (event.data as ControlEventData).payload)
 }
 
 /** The kinds of every committed fact, in order. */
 export function kindsOf(medium: FakePersistence): readonly string[] {
-  return factsOf(medium).map((fact) => fact.kind)
+  return factsOf(medium).map(fact => fact.kind)
 }
 
 /** An agent-shaped caller: an id, a session with its own id, and the request header in force. */
 export function agentFor(agentId: string, sessionId: string, model = 'model-under-test'): Agent {
-  return { id: agentId, session: { id: sessionId, requestHeader: () => ({ config: { provider: 'test', model } }) },
+  return {
+    id: agentId,
+    session: { id: sessionId, requestHeader: () => ({ config: { provider: 'test', model } }) },
   } as unknown as Agent
 }
 
@@ -165,12 +184,12 @@ export function execFor(agent: Agent, callId: string): ToolRunContext {
 
 /** This fixed execution double does not claim real DSH transcript provenance. */
 export const fakeExecution = (_admission: Admission): Execution => ({
-  assertCaller: (exec) => {
+  assertCaller: exec => {
     if (exec.agent === undefined) refuse('unknown-emitter-role', 'the execution double received an agentless call')
     return exec.agent
   },
   drain: async () => () => undefined,
-  sealTranscript: async (exec) => {
+  sealTranscript: async exec => {
     if (exec.agent === undefined) refuse('unknown-emitter-role', 'the execution double received an agentless call')
     const sessionId = String(exec.agent.session.id)
     return { sessionId, eventCount: 0, digest: digestOf({ testDouble: true, sessionId, eventCount: 0, events: [] }) }
@@ -182,23 +201,32 @@ export const attachmentsAt = (root: string): LocalAttachmentStore =>
   new LocalAttachmentStore(new Context(), { dshHome: join(root, 'dsh-home') })
 
 /** Exercise admission and submission primitives without imitating a model or review session. */
-export async function mount(config: Config, medium = new FakePersistence(),
+export async function mount(
+  config: Config,
+  medium = new FakePersistence(),
 ): Promise<{ ctx: Context; medium: FakePersistence; apparatus: Apparatus }> {
   const ctx = new Context()
-  const apparatus = await openApparatus(config.controlId, config.workspaceRoot, await loadDomain(config.domainDir, spawnProcess),
-    medium as unknown as SessionPersistence, attachmentsAt(config.workspaceRoot), testProjections,
+  const apparatus = await openApparatus(
+    config.controlId,
+    config.workspaceRoot,
+    await loadDomain(config.domainDir, spawnProcess),
+    medium as unknown as SessionPersistence,
+    attachmentsAt(config.workspaceRoot),
+    testProjections,
   )
   const execution = fakeExecution(() => undefined)
-  const surface = { forCall: (exec: ToolRunContext) => {
-    const caller = callerOf(exec.agent)
-    return {
-      retry: (input: Parameters<AgentTaskSurface['retry']>[0]) => retry(apparatus, caller, String(exec.callId), input),
-      submit: (input: Parameters<AgentTaskSurface['submit']>[0]) => {
-        if ('findings' in input) refuse('not-responsible', 'this fixture only mounts task submission')
-        return submit(apparatus, execution, caller, exec, input, exec.signal, fixtureReview(apparatus))
-      },
-    } as AgentTaskSurface
-  },
+  const surface = {
+    forCall: (exec: ToolRunContext) => {
+      const caller = callerOf(exec.agent)
+      return {
+        retry: (input: Parameters<AgentTaskSurface['retry']>[0]) =>
+          retry(apparatus, caller, String(exec.callId), input),
+        submit: (input: Parameters<AgentTaskSurface['submit']>[0]) => {
+          if ('findings' in input) refuse('not-responsible', 'this fixture only mounts task submission')
+          return submit(apparatus, execution, caller, exec, input, exec.signal, fixtureReview(apparatus))
+        },
+      } as AgentTaskSurface
+    },
   }
   ctx.provide('singularity', surface as never)
   ctx.effect(() => () => apparatus.store.close())
@@ -229,8 +257,15 @@ export function nativeRuntime() {
     routes.set(id, { provider: 'test', model })
     const created = {
       id: SessionId(id),
-      get options() { return routes.get(id)! },
-      session: { id: SessionId(id), header: { id: SessionId(id) }, get seq() { return events.get(id)!.length },
+      get options() {
+        return routes.get(id)!
+      },
+      session: {
+        id: SessionId(id),
+        header: { id: SessionId(id) },
+        get seq() {
+          return events.get(id)!.length
+        },
         requestHeader: () => (headersAbsent.has(id) ? undefined : { config: routes.get(id)! }),
       },
       followup: (message: UserMessage) => {
@@ -238,9 +273,15 @@ export function nativeRuntime() {
         delivered.push({ sessionId: id, message })
         append(id, 'agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [message] })
       },
-      wake: () => { woken.push(id) },
-      whenIdle: async () => { throw new Error('dispatch must not await child idle') },
-      cancel: () => { stopped.push(id) },
+      wake: () => {
+        woken.push(id)
+      },
+      whenIdle: async () => {
+        throw new Error('dispatch must not await child idle')
+      },
+      cancel: () => {
+        stopped.push(id)
+      },
     } as unknown as Agent
     agents.set(id, created)
     return created
@@ -248,18 +289,22 @@ export function nativeRuntime() {
   const services: Record<string, unknown> = {
     agents: { get: (id: string) => agents.get(id) } as unknown as AgentRegistry,
     sessions: { flush: async () => true },
-    sessionPersistence: { open: async (id: string) => ({ id: SessionId(id),
-      read: async () => ({ events: structuredClone(events.get(id)!), eventState: 'detached' }), close: async () => undefined,
+    sessionPersistence: {
+      open: async (id: string) => ({
+        id: SessionId(id),
+        read: async () => ({ events: structuredClone(events.get(id)!), eventState: 'detached' }),
+        close: async () => undefined,
       }),
     } as unknown as SessionPersistence,
   }
-  const seams: ChildSessionSeams = { get: (name) => services[name] }
+  const seams: ChildSessionSeams = { get: name => services[name] }
   const open = async (request: ChildSessionRequest): Promise<ChildSession> => {
     opened.push(request)
     const id = String(agentSessionIdOf(request.agentId))
     const live = agents.get(id) ?? agent(id, request.model.model)
     const resumed = events.get(id)!.length > 0
-    const post = (message: UserMessage) => postIdentifiedMessage(seams, live, message, (message) => live.followup(message))
+    const post = (message: UserMessage) =>
+      postIdentifiedMessage(seams, live, message, message => live.followup(message))
     let delivery: ChildSession['delivery']
     if (request.message === undefined) delivery = 'none'
     else if (resumed) delivery = await post(request.message)
@@ -267,11 +312,33 @@ export function nativeRuntime() {
       live.followup(request.message)
       delivery = 'posted'
     }
-    return { agentId: id, sessionId: id, resumed, agent: live, delivery,
-      post, wait: () => live.whenIdle(), stop: () => live.cancel({ kind: 'parent' }), close: async () => undefined,
+    return {
+      agentId: id,
+      sessionId: id,
+      resumed,
+      agent: live,
+      delivery,
+      post,
+      wait: () => live.whenIdle(),
+      stop: () => live.cancel({ kind: 'parent' }),
+      close: async () => undefined,
     }
   }
-  return { agents, routes, headersAbsent, events, delivered, woken, stopped, opened, seams, open, agent, append,
-    beforePost: (listener: typeof beforePost) => { beforePost = listener },
+  return {
+    agents,
+    routes,
+    headersAbsent,
+    events,
+    delivered,
+    woken,
+    stopped,
+    opened,
+    seams,
+    open,
+    agent,
+    append,
+    beforePost: (listener: typeof beforePost) => {
+      beforePost = listener
+    },
   }
 }

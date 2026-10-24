@@ -22,26 +22,50 @@ import { advanceRsiBatch } from './rsi-proposal.ts'
 import type { DriverRuntime } from './driver-runtime.ts'
 
 export function createRsiLifecycle(runtime: DriverRuntime) {
-  const { apparatus, options, tasks, parentOf, registry, controller, taskFact, scheduler,
-    startJob, idle, evaluation, measurement, parallelism } = runtime
+  const {
+    apparatus,
+    options,
+    tasks,
+    parentOf,
+    registry,
+    controller,
+    taskFact,
+    scheduler,
+    startJob,
+    idle,
+    evaluation,
+    measurement,
+    parallelism,
+  } = runtime
   const rsiControllers = new Map<string, AbortController>()
   let scheduled = false
   const rsiRootOf = (taskId: string): TaskState | undefined => {
-    const states = tasks(), seen = new Set<string>()
+    const states = tasks(),
+      seen = new Set<string>()
     let id: string | undefined = taskId
     while (id !== undefined && !seen.has(id)) {
       seen.add(id)
       const task = states.get(id)
       if (task === undefined) {
-        const review: ReviewRun | undefined = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, id)
+        const review: ReviewRun | undefined = apparatus.store
+          .load()
+          .stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, id)
         if (review === undefined) return undefined
-        if (review.target.kind === 'acceptance') { id = review.target.taskId; continue }
+        if (review.target.kind === 'acceptance') {
+          id = review.target.taskId
+          continue
+        }
         const reviewId = (operation: string) => `review-${sha256(`${apparatus.controlId}/${operation}`).slice(0, 24)}`
         const target: Exclude<ReviewRun['target'], { kind: 'acceptance' }> = review.target
-        id = [...states.values()].find((t): boolean => Object.values(t.runs).some(run => run.purpose === 'improve') &&
-          (target.kind === 'proposal' ? review.reviewId === reviewId(`proposal:${t.taskId}:${target.assetsDigest}`)
-            : review.reviewId === reviewId(`transfer:${t.taskId}:release:review`) ||
-              t.rounds?.some(round => review.reviewId === reviewId(`round:${round.roundId}:release:review`)) === true))?.taskId
+        id = [...states.values()].find(
+          (t): boolean =>
+            Object.values(t.runs).some(run => run.purpose === 'improve') &&
+            (target.kind === 'proposal'
+              ? review.reviewId === reviewId(`proposal:${t.taskId}:${target.assetsDigest}`)
+              : review.reviewId === reviewId(`transfer:${t.taskId}:release:review`) ||
+                t.rounds?.some(round => review.reviewId === reviewId(`round:${round.roundId}:release:review`)) ===
+                  true),
+        )?.taskId
         continue
       }
       const run = Object.values(task.runs).at(-1)
@@ -75,7 +99,10 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
     return root === undefined ? controller.signal : rsiSignal(root.taskId)
   }
   const rsiStatus = (taskId: string, value: RSIStatus) => {
-    const prior = apparatus.store.load().entriesOf(TASK_PROTOCOL, TASK_VERSION).findLast(fact => fact.subject === taskId && fact.kind === 'rsi/status')
+    const prior = apparatus.store
+      .load()
+      .entriesOf(TASK_PROTOCOL, TASK_VERSION)
+      .findLast(fact => fact.subject === taskId && fact.kind === 'rsi/status')
     return taskFact(`rsi:${taskId}:${value.status}:${prior?.seq ?? 0}`, 'rsi/status', taskId, value)
   }
   const closeRoot = async (
@@ -127,71 +154,154 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
             if (batch.settled) continue
             for (const [slot] of batch.slots.entries())
               if (!batch.outcomes.some(outcome => outcome.slot === slot))
-                await taskFact(`cancel:${task.taskId}:${batch.batchId}:${slot}`, 'rsi/batch-slot-settled', task.taskId,
-                  { batchId: batch.batchId, slot, status: 'cancelled', detail: reason }, as)
-            await taskFact(`cancel:${task.taskId}:${batch.batchId}`, 'rsi/batch-ended', task.taskId, { batchId: batch.batchId }, as)
+                await taskFact(
+                  `cancel:${task.taskId}:${batch.batchId}:${slot}`,
+                  'rsi/batch-slot-settled',
+                  task.taskId,
+                  { batchId: batch.batchId, slot, status: 'cancelled', detail: reason },
+                  as,
+                )
+            await taskFact(
+              `cancel:${task.taskId}:${batch.batchId}`,
+              'rsi/batch-ended',
+              task.taskId,
+              { batchId: batch.batchId },
+              as,
+            )
           }
         }
         for (const round of task.rounds ?? [])
           if (round.status === 'pending')
-            await taskFact(`round-settled:${round.roundId}`, 'rsi/round-settled', task.taskId, { roundId: round.roundId, status: 'failed', error: reason })
+            await taskFact(`round-settled:${round.roundId}`, 'rsi/round-settled', task.taskId, {
+              roundId: round.roundId,
+              status: 'failed',
+              error: reason,
+            })
         if (task.transfer?.consumed && task.transfer.outcome === undefined) {
-          const report = await apparatus.attachments.saveFile({ name: 'transfer-report.json', data: Buffer.from(JSON.stringify({ status: 'insufficient-evidence', reason })) })
-          await taskFact(`transfer:${task.taskId}:settled`, 'rsi/transfer-settled', task.taskId, { outcome: 'insufficient-evidence', report }, as)
+          const report = await apparatus.attachments.saveFile({
+            name: 'transfer-report.json',
+            data: Buffer.from(JSON.stringify({ status: 'insufficient-evidence', reason })),
+          })
+          await taskFact(
+            `transfer:${task.taskId}:settled`,
+            'rsi/transfer-settled',
+            task.taskId,
+            { outcome: 'insufficient-evidence', report },
+            as,
+          )
         }
         if (run.status === 'running')
-          await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({ commandId: `cancel:${task.taskId}:${run.runId}`,
-            taskId: task.taskId, runId: run.runId, cause, reason })
+          await apparatus.tasks.forAgent(task.responsibility!.agentId).failRun({
+            commandId: `cancel:${task.taskId}:${run.runId}`,
+            taskId: task.taskId,
+            runId: run.runId,
+            cause,
+            reason,
+          })
       }
-      registry().get(SessionId(task.responsibility!.agentId))?.cancel({ kind: cause === 'cancelled' ? 'user' : 'parent' })
+      registry()
+        .get(SessionId(task.responsibility!.agentId))
+        ?.cancel({ kind: cause === 'cancelled' ? 'user' : 'parent' })
     }
     for (const review of apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()) {
       if (controller.signal.aborted) return
       if (review.status !== 'running' || rsiRootOf(review.reviewId)?.taskId !== rootId) continue
       await createReviewCommands(apparatus.store).fail(`cancel:${review.reviewId}`, review.reviewId, reason)
-      registry().get(SessionId(review.sessionId))?.cancel({ kind: cause === 'cancelled' ? 'user' : 'parent' })
+      registry()
+        .get(SessionId(review.sessionId))
+        ?.cancel({ kind: cause === 'cancelled' ? 'user' : 'parent' })
       await scheduler.advance(review.reviewId)
     }
     for (const task of affected) {
       if (controller.signal.aborted) return
       await scheduler.advance(task.taskId)
-      const current = taskStateOf(apparatus, task.taskId), last = Object.values(current.runs).at(-1)
-      if (last !== undefined && last.status !== 'running') await closeRoot(current, last, last.status === 'verified' ? 'accepted' : 'failed')
+      const current = taskStateOf(apparatus, task.taskId),
+        last = Object.values(current.runs).at(-1)
+      if (last !== undefined && last.status !== 'running')
+        await closeRoot(current, last, last.status === 'verified' ? 'accepted' : 'failed')
     }
   }
-  const advanceRound = async (task: TaskState, request: RoundRequest, parent: Agent, signal: AbortSignal): Promise<void> => {
+  const advanceRound = async (
+    task: TaskState,
+    request: RoundRequest,
+    parent: Agent,
+    signal: AbortSignal,
+  ): Promise<void> => {
     const { runId: _runId, status: _status, error: _error, ...round } = request
     try {
       signal.throwIfAborted()
-      const native = createNativeSolve(apparatus, options.seams, parent, signal, measurement === undefined ? undefined
-        : { digest: measurement.criterion.implementationDigest, measure: (source, signal, context) => measurement.measure(source, signal, context) })
+      const native = createNativeSolve(
+        apparatus,
+        options.seams,
+        parent,
+        signal,
+        measurement === undefined
+          ? undefined
+          : {
+              digest: measurement.criterion.implementationDigest,
+              measure: (source, signal, context) => measurement.measure(source, signal, context),
+            },
+      )
       const suite = apparatus.domain.suite
-      const profile = suite === undefined ? undefined : await executionProfile(parent, options.seams, apparatus.domain, parallelism)
-      const evolution = createEvolution({ store: apparatus.store, registry: apparatus.registry, ...evaluation, parallelism,
+      const profile =
+        suite === undefined ? undefined : await executionProfile(parent, options.seams, apparatus.domain, parallelism)
+      const evolution = createEvolution({
+        store: apparatus.store,
+        registry: apparatus.registry,
+        ...evaluation,
+        parallelism,
         productionHead: publishedMethod(apparatus)!.revisionId,
         ...(suite === undefined ? {} : { suite, executionProfileDigest: profile!.digest }),
-        loadMethod: async (revision) => (await loadMethod(apparatus, revision)).assets,
-        baseline: suite === undefined ? async (trialRequest) => {
-          const { revision, started } = trialRequest
-          const ownerRun = task.runs[request.runId]!
-          const source = ownerRun.relatedTo!
-          const incumbent = taskStateOf(apparatus, source.taskId).runs[source.runId]!
-          if (incumbent.revision.digest !== revision.digest || evaluation.trials !== 1) {
-            const measured = [...apparatus.store.load().statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION).values()].findLast(e =>
-              e.candidate?.digest === revision.digest && e.trials === 1 && e.observed.length === 1 &&
-              digestOf(e.metric) === digestOf(evaluation.metric) && e.observed[0]!.detail !== undefined)
-            if (measured !== undefined) {
-              const observation = JSON.parse(measured.observed[0]!.detail!) as import('./evolution.ts').SolveResult
-              if (digestOf(taskStateOf(apparatus, observation.taskId).contract) === digestOf(taskStateOf(apparatus, source.taskId).contract)) {
-                await started({ taskId: observation.taskId, runId: observation.runId })
-                return observation
+        loadMethod: async revision => (await loadMethod(apparatus, revision)).assets,
+        baseline:
+          suite === undefined
+            ? async trialRequest => {
+                const { revision, started } = trialRequest
+                const ownerRun = task.runs[request.runId]!
+                const source = ownerRun.relatedTo!
+                const incumbent = taskStateOf(apparatus, source.taskId).runs[source.runId]!
+                if (incumbent.revision.digest !== revision.digest || evaluation.trials !== 1) {
+                  const measured = [
+                    ...apparatus.store.load().statesOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION).values(),
+                  ].findLast(
+                    e =>
+                      e.candidate?.digest === revision.digest &&
+                      e.trials === 1 &&
+                      e.observed.length === 1 &&
+                      digestOf(e.metric) === digestOf(evaluation.metric) &&
+                      e.observed[0]!.detail !== undefined,
+                  )
+                  if (measured !== undefined) {
+                    const observation = JSON.parse(
+                      measured.observed[0]!.detail!,
+                    ) as import('./evolution.ts').SolveResult
+                    if (
+                      digestOf(taskStateOf(apparatus, observation.taskId).contract) ===
+                      digestOf(taskStateOf(apparatus, source.taskId).contract)
+                    ) {
+                      await started({ taskId: observation.taskId, runId: observation.runId })
+                      return observation
+                    }
+                  }
+                  return native(trialRequest)
+                }
+                await started(source)
+                return observeSolve(
+                  apparatus,
+                  source.taskId,
+                  source.runId,
+                  signal,
+                  measurement === undefined
+                    ? undefined
+                    : {
+                        digest: measurement.criterion.implementationDigest,
+                        measure: (source, signal, context) => measurement.measure(source, signal, context),
+                      },
+                )
               }
-            }
-            return native(trialRequest)
-          }
-          await started(source)
-          return observeSolve(apparatus, source.taskId, source.runId, signal, measurement === undefined ? undefined : { digest: measurement.criterion.implementationDigest, measure: (source, signal, context) => measurement.measure(source, signal, context) })
-        } : native, solve: native, })
+            : native,
+        solve: native,
+      })
       await evolution.runRound({ ...round, campaignId: task.taskId })
       signal.throwIfAborted()
       const currentRun = taskStateOf(apparatus, task.taskId).runs[request.runId]!
@@ -199,11 +309,16 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
         refuse('illegal-transition', 'evaluation requires its working RSI Run')
       signal.throwIfAborted()
       await taskFact(`round-settled:${round.roundId}`, 'rsi/round-settled', task.taskId, {
-        roundId: round.roundId, status: 'completed', })
+        roundId: round.roundId,
+        status: 'completed',
+      })
     } catch (error) {
       if (signal.aborted) return
       await taskFact(`round-settled:${round.roundId}`, 'rsi/round-settled', task.taskId, {
-        roundId: round.roundId, status: 'failed', error: String(error), })
+        roundId: round.roundId,
+        status: 'failed',
+        error: String(error),
+      })
     }
     if (!signal.aborted && taskStateOf(apparatus, task.taskId).runs[request.runId]!.status === 'running')
       await notifyRound(task, request, parent)
@@ -211,9 +326,21 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
   const notifyRound = async (task: TaskState, request: RoundRequest, parent: Agent): Promise<void> => {
     const fact = apparatus.store.committedOf(`round-settled:${request.roundId}`)!
     await postIdentifiedMessage(
-      options.seams, parent, schedulerMessage(
+      options.seams,
+      parent,
+      schedulerMessage(
         {
-          kind: 'singularity', purpose: 'plan-outcome', controlId: apparatus.controlId, parentTaskId: task.taskId, taskId: task.taskId, runId: request.runId, factSeq: fact.seq, }, JSON.stringify({ roundId: request.roundId, outcome: fact.payload }), ), )
+          kind: 'singularity',
+          purpose: 'plan-outcome',
+          controlId: apparatus.controlId,
+          parentTaskId: task.taskId,
+          taskId: task.taskId,
+          runId: request.runId,
+          factSeq: fact.seq,
+        },
+        JSON.stringify({ roundId: request.roundId, outcome: fact.payload }),
+      ),
+    )
   }
   const advance = (): void => {
     if (controller.signal.aborted) return
@@ -224,37 +351,57 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
       const last = Object.values(task.runs).at(-1)
       if (task.rsi !== undefined && rsiStop(task.taskId) !== undefined)
         startJob(`stop-rsi:${task.taskId}`, () => stopRsiWork(task.taskId))
-      if (task.closure === undefined && last !== undefined && last.status !== 'running' && parentOf(task.taskId) === undefined)
+      if (
+        task.closure === undefined &&
+        last !== undefined &&
+        last.status !== 'running' &&
+        parentOf(task.taskId) === undefined
+      )
         startJob(`close:${task.taskId}`, async () => {
           try {
             await idle([parent])
-            const state = taskStateOf(apparatus, task.taskId), run = Object.values(state.runs).at(-1)!
+            const state = taskStateOf(apparatus, task.taskId),
+              run = Object.values(state.runs).at(-1)!
             if (state.closure === undefined && run.status !== 'running') {
-              await closeRoot(state, run, run.status === 'verified' ? 'accepted'
-                : 'failed')
+              await closeRoot(state, run, run.status === 'verified' ? 'accepted' : 'failed')
               schedule()
             }
-          } catch (error) { if (!controller.signal.aborted) throw error }
+          } catch (error) {
+            if (!controller.signal.aborted) throw error
+          }
         })
-      if ((task.closure !== undefined && last?.purpose === 'solve' && last.failureCause !== 'cancelled' &&
-        task.learning !== false && task.rsi === undefined && parentOf(task.taskId) === undefined) ||
-        task.rsi?.status === 'pending' || task.rsi?.status === 'running')
+      if (
+        (task.closure !== undefined &&
+          last?.purpose === 'solve' &&
+          last.failureCause !== 'cancelled' &&
+          task.learning !== false &&
+          task.rsi === undefined &&
+          parentOf(task.taskId) === undefined) ||
+        task.rsi?.status === 'pending' ||
+        task.rsi?.status === 'running'
+      )
         startJob(`rsi:${task.taskId}`, async () => {
           const signal = rsiSignal(task.taskId)
           try {
             signal.throwIfAborted()
             if (taskStateOf(apparatus, task.taskId).rsi === undefined)
-              await rsiStatus(task.taskId, { status: 'pending', detail: 'business root closed; trajectory is available for asynchronous RSI' })
+              await rsiStatus(task.taskId, {
+                status: 'pending',
+                detail: 'business root closed; trajectory is available for asynchronous RSI',
+              })
             if (taskStateOf(apparatus, task.taskId).rsi!.status === 'pending') {
               const sessions = [...taskSessionsOf(apparatus, task.taskId)]
-                .map((id) => registry().get(SessionId(id)))
+                .map(id => registry().get(SessionId(id)))
                 .filter((agent): agent is Agent => agent !== undefined)
               await idle(sessions, signal)
               const trace = await apparatus.attachments.saveFile({
-                name: 'trajectory.json', data: await explorationOf(apparatus, task.taskId, task.closure!.runId), })
+                name: 'trajectory.json',
+                data: await explorationOf(apparatus, task.taskId, task.closure!.runId),
+              })
               signal.throwIfAborted()
               await rsiStatus(task.taskId, {
-                status: 'running', detail: 'starting independent method analysis from the sealed root trajectory',
+                status: 'running',
+                detail: 'starting independent method analysis from the sealed root trajectory',
                 trace,
               })
             }
@@ -268,32 +415,53 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
             )
             signal.throwIfAborted()
             const last = Object.values(analysis.runs).at(-1)!
-            await closeRoot(analysis, last, last.status === 'verified' ? 'accepted'
-              : 'failed')
+            await closeRoot(analysis, last, last.status === 'verified' ? 'accepted' : 'failed')
           } catch (error) {
             if (signal.aborted) return
             const state = taskStateOf(apparatus, task.taskId).rsi
             if (state?.status !== 'pending' && state?.status !== 'running') throw error
             await rsiStatus(task.taskId, { status: 'failed', detail: String(error) })
-          } finally { await stopRsiWork(task.taskId) }
+          } finally {
+            await stopRsiWork(task.taskId)
+          }
         })
       if (last?.purpose === 'improve' && last.status === 'running' && last.stage === 'working') {
         for (const batch of task.search?.batches ?? []) {
-          if (!batch.settled) startJob(`batch:${task.taskId}:${batch.batchId}`, async () => {
-            const signal = taskSignal(task.taskId)
-            try { await advanceRsiBatch(apparatus, options.seams, parent, task.taskId, signal) }
-            catch (error) { if (signal.aborted) return; throw error }
-            schedule()
-          })
+          if (!batch.settled)
+            startJob(`batch:${task.taskId}:${batch.batchId}`, async () => {
+              const signal = taskSignal(task.taskId)
+              try {
+                await advanceRsiBatch(apparatus, options.seams, parent, task.taskId, signal)
+              } catch (error) {
+                if (signal.aborted) return
+                throw error
+              }
+              schedule()
+            })
           else if (!batch.outcomes.some(outcome => outcome.status === 'evaluation-requested'))
             startJob(`batch-notify:${task.taskId}:${batch.batchId}`, async () => {
               const fact = apparatus.store.committedOf(`rsi/batch-ended:${task.taskId}:${batch.batchId}`)!
-              await postIdentifiedMessage(options.seams, parent, schedulerMessage({
-                kind: 'singularity', purpose: 'plan-outcome', controlId: apparatus.controlId,
-                parentTaskId: task.taskId, taskId: task.taskId, runId: last.runId, factSeq: fact.seq,
-              }, JSON.stringify({ batchId: batch.batchId, status: 'screened',
-                outcomes: batch.outcomes.map(({ slot, status, revision }) => ({ slot, status, revision })),
-                next: 'Read singularity_read({kind:"search"}) for the current state and feedback.' })))
+              await postIdentifiedMessage(
+                options.seams,
+                parent,
+                schedulerMessage(
+                  {
+                    kind: 'singularity',
+                    purpose: 'plan-outcome',
+                    controlId: apparatus.controlId,
+                    parentTaskId: task.taskId,
+                    taskId: task.taskId,
+                    runId: last.runId,
+                    factSeq: fact.seq,
+                  },
+                  JSON.stringify({
+                    batchId: batch.batchId,
+                    status: 'screened',
+                    outcomes: batch.outcomes.map(({ slot, status, revision }) => ({ slot, status, revision })),
+                    next: 'Read singularity_read({kind:"search"}) for the current state and feedback.',
+                  }),
+                ),
+              )
             })
         }
       }
@@ -304,7 +472,9 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
             const signal = taskSignal(task.taskId)
             try {
               if (!signal.aborted)
-                await (request.status === 'pending' ? advanceRound(task, request, parent, signal) : notifyRound(task, request, parent))
+                await (request.status === 'pending'
+                  ? advanceRound(task, request, parent, signal)
+                  : notifyRound(task, request, parent))
             } finally {
               const root = rsiRootOf(task.taskId)
               if (root !== undefined) await stopRsiWork(root.taskId)
@@ -321,8 +491,15 @@ export function createRsiLifecycle(runtime: DriverRuntime) {
       }, 0)
     }
   }
-  return { taskSignal, rsiStatus, closeRoot, stopRsiWork, rsiRootOf, schedule,
+  return {
+    taskSignal,
+    rsiStatus,
+    closeRoot,
+    stopRsiWork,
+    rsiRootOf,
+    schedule,
     abort: (rootId: string) => rsiControllers.get(rootId)?.abort(new Error('RSI cancelled by user')),
-    cancellationReasons: () => [...rsiControllers.values()].filter(c => c.signal.aborted).map(c => c.signal.reason) }
+    cancellationReasons: () => [...rsiControllers.values()].filter(c => c.signal.aborted).map(c => c.signal.reason),
+  }
 }
 export type RsiLifecycle = ReturnType<typeof createRsiLifecycle>

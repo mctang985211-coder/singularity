@@ -1,5 +1,7 @@
 # adversarial-review-4.md —— 第四轮：A–F 全齐之后
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 **审的是 `8b07482` 的干净副本。只读；测量全在 `/tmp` 副本上做。**
 基线复核：`tsc` 干净、323 测试 / 29 文件、**19/19 门禁**、`--probe` OK、`domain-probe` 51/51。
 

@@ -25,7 +25,9 @@ async function readRequest() {
 
 function asRecord(value, field) {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
-    throw new Error(`${field} must be an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`)
+    throw new Error(
+      `${field} must be an object, got ${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}`,
+    )
   return value
 }
 
@@ -38,7 +40,8 @@ function text(source, key, field) {
 
 /** A number a report may carry: not `NaN`, not `Infinity`, and not a numeric string. */
 function finiteNumber(value, field) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${field} must be a finite number, got ${String(value)}`)
+  if (typeof value !== 'number' || !Number.isFinite(value))
+    throw new Error(`${field} must be a finite number, got ${String(value)}`)
   return value
 }
 
@@ -52,9 +55,13 @@ function readInputs(raw) {
     const where = `request.inputs[${index}]`
     const input = asRecord(entry, where)
     for (const key of Object.keys(input))
-      if (key !== 'name' && key !== 'digest' && key !== 'path') throw new Error(`${where} carries undeclared member "${key}"`)
+      if (key !== 'name' && key !== 'digest' && key !== 'path')
+        throw new Error(`${where} carries undeclared member "${key}"`)
     const path = text(input, 'path', `${where}.path`)
-    if (!isAbsolute(path)) throw new Error(`${where}.path must be an absolute path, got ${JSON.stringify(path)}; the adapter reads bytes, not names`)
+    if (!isAbsolute(path))
+      throw new Error(
+        `${where}.path must be an absolute path, got ${JSON.stringify(path)}; the adapter reads bytes, not names`,
+      )
     return { name: text(input, 'name', `${where}.name`), digest: text(input, 'digest', `${where}.digest`), path }
   })
 }
@@ -87,7 +94,9 @@ function execute(command) {
 
 /** The real content digest of the artifact's bytes, taken after the program has run. */
 async function digestOfFile(path) {
-  return createHash('sha256').update(await readFile(path)).digest('hex')
+  return createHash('sha256')
+    .update(await readFile(path))
+    .digest('hex')
 }
 
 /** The real content digest of every input's bytes, in the order the inputs were declared. */
@@ -111,16 +120,21 @@ function readNumber(stdout, command) {
     .filter(line => line !== '')
   const last = lines.at(-1)
   if (last === undefined)
-    throw new Error(`"${command}" exited 0 without printing a number; a measurement is one JSON line {quality, cost?} as the last line of stdout`)
+    throw new Error(
+      `"${command}" exited 0 without printing a number; a measurement is one JSON line {quality, cost?} as the last line of stdout`,
+    )
   let parsed
   try {
     parsed = JSON.parse(last)
   } catch (error) {
-    throw new Error(`the last stdout line of "${command}" is not JSON (${error instanceof Error ? error.message : String(error)}): ${clip(last)}`)
+    throw new Error(
+      `the last stdout line of "${command}" is not JSON (${error instanceof Error ? error.message : String(error)}): ${clip(last)}`,
+    )
   }
   const report = asRecord(parsed, 'the measurement line')
   for (const key of Object.keys(report))
-    if (!NUMBER_MEMBERS.includes(key)) throw new Error(`the measurement line carries undeclared member "${key}"; it is {quality, cost?}`)
+    if (!NUMBER_MEMBERS.includes(key))
+      throw new Error(`the measurement line carries undeclared member "${key}"; it is {quality, cost?}`)
   const quality = finiteNumber(report['quality'], 'the measurement line.quality')
   const cost = report['cost'] === undefined ? undefined : finiteNumber(report['cost'], 'the measurement line.cost')
   return { quality, cost }
@@ -128,7 +142,10 @@ function readNumber(stdout, command) {
 
 /** What the reader needs to see why this is the number it is. */
 function describe(command, outcome, inputs, measured) {
-  const declared = inputs.length === 0 ? 'no declared inputs' : `declared inputs ${inputs.map(input => `${input.name}=${input.digest.slice(0, 12)}…`).join(', ')}`
+  const declared =
+    inputs.length === 0
+      ? 'no declared inputs'
+      : `declared inputs ${inputs.map(input => `${input.name}=${input.digest.slice(0, 12)}…`).join(', ')}`
   const where =
     outcome.exitCode === null
       ? `did not run${outcome.spawnError === null ? '' : ` (${outcome.spawnError.message})`}`

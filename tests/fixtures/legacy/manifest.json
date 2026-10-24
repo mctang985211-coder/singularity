@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "kind": "historical-engineering-evidence",
+  "sourceCommit": "401ef9ee4387ed1924df5d527cf8656f34cc57f7",
+  "scope": "Historical F engineering fixture and report; not a model generalization result. Original bytes; no protocol migration or recalculation. Protocol versions are recorded verbatim in protocol-baseline.json; F report describes its own older Measure v3. No raw session logs are claimed to be archived here.",
+  "files": {
+    "f-evidence.md": {
+      "sourcePath": "docs/f-evidence.md",
+      "sha256": "5a5722668129b4001d62a3f7c697176b7f23845f7517fd622fd6fea2e8892b13"
+    },
+    "f-domain.json": {
+      "sourcePath": "tests/fixtures/f-domain.json",
+      "sha256": "265c6ee2a337750606883c7788a6befe475d8693d1aafdf39a5dbaef6f3b1e6a"
+    },
+    "protocol-baseline.json": {
+      "sourcePath": "protocol-baseline.json",
+      "sha256": "20d03f6ca5b9d0f83d94ace782d3ac75495a3ebccb88257f8dac630b99c45eb4"
+    }
+  }
+}

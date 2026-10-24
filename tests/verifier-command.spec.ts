@@ -113,8 +113,12 @@ describe('the verifier command adapter', () => {
   it('produces the two verdicts from the exit code alone, on identical artifact bytes', async () => {
     await writeFile(artifact, 'unchanged', 'utf8')
 
-    const passed = readJudgement((await invoke({ command: 'true', artifactPath: artifact, inputs: [] })).stdout).judgement
-    const failed = readJudgement((await invoke({ command: 'false', artifactPath: artifact, inputs: [] })).stdout).judgement
+    const passed = readJudgement(
+      (await invoke({ command: 'true', artifactPath: artifact, inputs: [] })).stdout,
+    ).judgement
+    const failed = readJudgement(
+      (await invoke({ command: 'false', artifactPath: artifact, inputs: [] })).stdout,
+    ).judgement
 
     expect([passed.verdict, failed.verdict]).toEqual(['pass', 'fail'])
     // Same bytes, same digest, different verdict: the exit code is the whole difference.

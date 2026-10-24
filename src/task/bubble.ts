@@ -46,7 +46,8 @@ const BUBBLE_TOOL_MEMBERS = ['name', 'implementationDigest', 'version'] as const
 const DIGEST = /^[0-9a-f]{64}$/
 
 export function inputList(raw: unknown, where: string, members: MemberSet): readonly BubbleInput[] {
-  if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of named inputs, got ${raw === null ? 'null' : typeof raw}`)
+  if (!Array.isArray(raw))
+    refuse('malformed-payload', `${where} must be an array of named inputs, got ${raw === null ? 'null' : typeof raw}`)
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const at = `${where}[${index}]`
@@ -54,8 +55,10 @@ export function inputList(raw: unknown, where: string, members: MemberSet): read
     assertClosedKeys(source, members, at)
     const name = text(source, 'name', at)
     const digest = text(source, 'digest', at)
-    if (!DIGEST.test(digest)) refuse('malformed-payload', `${at}.digest must be a sha256 hex content digest, got ${JSON.stringify(digest)}`)
-    if (seen.has(name)) refuse('malformed-payload', `${where} names input ${JSON.stringify(name)} twice; one input has one digest`)
+    if (!DIGEST.test(digest))
+      refuse('malformed-payload', `${at}.digest must be a sha256 hex content digest, got ${JSON.stringify(digest)}`)
+    if (seen.has(name))
+      refuse('malformed-payload', `${where} names input ${JSON.stringify(name)} twice; one input has one digest`)
     seen.add(name)
     const attachment = source['attachment'] === undefined ? undefined : record(source['attachment'], `${at}.attachment`)
     if (attachment !== undefined) {
@@ -90,8 +93,12 @@ export function assertInputsBound(bubble: Bubble | undefined, declared: readonly
     )
   for (const [index, expected] of bubble.inputs.entries()) {
     const actual = declared[index]
-    if (actual === undefined || actual.name !== expected.name || actual.digest !== expected.digest ||
-      (actual.producerRunId !== undefined && actual.producerRunId !== expected.producerRunId))
+    if (
+      actual === undefined ||
+      actual.name !== expected.name ||
+      actual.digest !== expected.digest ||
+      (actual.producerRunId !== undefined && actual.producerRunId !== expected.producerRunId)
+    )
       refuse(
         'evidence-input-mismatch',
         `${where} declares input ${index} as ${JSON.stringify(actual?.name ?? null)}=${actual?.digest.slice(0, 12) ?? 'null'}…, but the run's bubble declares ${JSON.stringify(expected.name)}=${expected.digest.slice(0, 12)}…`,
@@ -101,7 +108,9 @@ export function assertInputsBound(bubble: Bubble | undefined, declared: readonly
 
 function toolList(raw: unknown, where: string, members: MemberSet): readonly BubbleTool[] {
   if (!Array.isArray(raw))
-    refuse('malformed-payload', `${where} must be an array of the tools the execution could reach, got ${raw === null ? 'null' : typeof raw}`,
+    refuse(
+      'malformed-payload',
+      `${where} must be an array of the tools the execution could reach, got ${raw === null ? 'null' : typeof raw}`,
     )
   const seen = new Set<string>()
   return raw.map((entry, index) => {
@@ -109,11 +118,14 @@ function toolList(raw: unknown, where: string, members: MemberSet): readonly Bub
     const source = record(entry, at)
     assertClosedKeys(source, members, at)
     const name = text(source, 'name', at)
-    if (seen.has(name)) refuse('malformed-payload', `${where} names tool ${JSON.stringify(name)} twice; one name was one implementation`)
+    if (seen.has(name))
+      refuse('malformed-payload', `${where} names tool ${JSON.stringify(name)} twice; one name was one implementation`)
     seen.add(name)
     const implementationDigest = text(source, 'implementationDigest', at)
     if (!DIGEST.test(implementationDigest))
-      refuse('malformed-payload', `${at}.implementationDigest must be a sha256 hex content digest, got ${JSON.stringify(implementationDigest)}`,
+      refuse(
+        'malformed-payload',
+        `${at}.implementationDigest must be a sha256 hex content digest, got ${JSON.stringify(implementationDigest)}`,
       )
     return { name, implementationDigest, version: text(source, 'version', at) }
   })
@@ -121,14 +133,18 @@ function toolList(raw: unknown, where: string, members: MemberSet): readonly Bub
 
 /** The observable external conditions, each named once. An empty list is a claim, not an omission. */
 function conditionList(raw: unknown, where: string): readonly string[] {
-  if (!Array.isArray(raw)) refuse('malformed-payload', `${where} must be an array of named conditions, got ${raw === null ? 'null' : typeof raw}`,
+  if (!Array.isArray(raw))
+    refuse(
+      'malformed-payload',
+      `${where} must be an array of named conditions, got ${raw === null ? 'null' : typeof raw}`,
     )
   const seen = new Set<string>()
   return raw.map((entry, index) => {
     const at = `${where}[${index}]`
     if (typeof entry !== 'string' || entry.length === 0)
       refuse('malformed-payload', `${at} must be a non-empty string, got ${entry === null ? 'null' : typeof entry}`)
-    if (seen.has(entry)) refuse('malformed-payload', `${where} names condition ${JSON.stringify(entry)} twice; a condition is stated once`)
+    if (seen.has(entry))
+      refuse('malformed-payload', `${where} names condition ${JSON.stringify(entry)} twice; a condition is stated once`)
     seen.add(entry)
     return entry
   })
@@ -138,17 +154,23 @@ function conditionList(raw: unknown, where: string): readonly string[] {
 export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskState> {
   return defineKind<
     TaskState,
-    { runId: string
+    {
+      runId: string
       inputs: readonly BubbleInput[]
       workspace: { kind: string; ref: string }
       model: Bubble['model']
       tools: readonly BubbleTool[]
-      conditions: readonly string[] },
+      conditions: readonly string[]
+    },
     { workspace: MemberSet; inputs: MemberSet; tools: MemberSet; model: MemberSet }
   >({
     guarantees: { appended: true },
     members: BUBBLE_MEMBERS,
-    nested: { workspace: WORKSPACE_MEMBERS, inputs: BUBBLE_INPUT_MEMBERS, tools: BUBBLE_TOOL_MEMBERS, model: MODEL_MEMBERS,
+    nested: {
+      workspace: WORKSPACE_MEMBERS,
+      inputs: BUBBLE_INPUT_MEMBERS,
+      tools: BUBBLE_TOOL_MEMBERS,
+      model: MODEL_MEMBERS,
     },
     emitter,
     parse: (raw, where, nested) => {
@@ -160,7 +182,9 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
       return {
         runId: text(source, 'runId', where),
         inputs: inputList(source['inputs'], `${where}.inputs`, nested.inputs),
-        workspace: { kind: text(workspace, 'kind', `${where}.workspace`), ref: text(workspace, 'ref', `${where}.workspace`),
+        workspace: {
+          kind: text(workspace, 'kind', `${where}.workspace`),
+          ref: text(workspace, 'ref', `${where}.workspace`),
         },
         model: { provider: text(model, 'provider', `${where}.model`), model: text(model, 'model', `${where}.model`) },
         tools: toolList(source['tools'], `${where}.tools`, nested.tools),
@@ -175,7 +199,9 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
       // it: nobody else declares what this run executed against.
       requireResponsible(state, envelope.actor, where)
       if (run.status !== 'running')
-        refuse('illegal-transition', `${where} opens an execution context for run "${payload.runId}", which already settled ${run.status}`,
+        refuse(
+          'illegal-transition',
+          `${where} opens an execution context for run "${payload.runId}", which already settled ${run.status}`,
         )
       if (run.stage !== 'working')
         refuse('illegal-transition', `${where} cannot open a bubble for run "${payload.runId}" in ${run.stage}`)
@@ -185,7 +211,9 @@ export function bubbleOpenedKind(kind: string, emitter: string): KindRule<TaskSt
           `${where} opens a second execution context for run "${payload.runId}" (the first was opened at ${run.bubble.at}); an execution happened in one context`,
         )
       if (payload.inputs.length !== contract.inputs.length)
-        refuse('evidence-input-mismatch', `${where} declares ${payload.inputs.length} inputs, but the Task declares ${contract.inputs.length}`,
+        refuse(
+          'evidence-input-mismatch',
+          `${where} declares ${payload.inputs.length} inputs, but the Task declares ${contract.inputs.length}`,
         )
       for (const [index, input] of contract.inputs.entries()) {
         const bound = payload.inputs[index]!

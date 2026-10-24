@@ -1,5 +1,7 @@
 # Singularity 重构：第一轮审核与构建交接
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 - 日期：2026-10-09。
 - 审核对象：[blueprint.md](blueprint.md)、`singularity-core` 的 S1/S2、旧 Singularity、DSH 及 RRSI 上游。
 - 定位：记录第一轮结论、补充关键遗漏、规定后续构建检查点。本文中的建议尚未作为产品代码实现。

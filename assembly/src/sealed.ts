@@ -15,18 +15,22 @@ export async function sealedBytes(apparatus: Apparatus, ref: FileAttachmentRef):
   return bytes
 }
 
-export async function sealFiles(apparatus: Apparatus, run: RunState,
+export async function sealFiles(
+  apparatus: Apparatus,
+  run: RunState,
   artifact: string,
   workspace: string,
 ): Promise<RunSubmission['files']> {
   await assertRunFile(workspace, artifact)
   return {
     artifact: await apparatus.attachments.saveFile({ name: artifact, data: await readFile(join(workspace, artifact)) }),
-    inputs: run.bubble!.inputs.map((input) => ({ name: input.name, attachment: input.attachment! })),
+    inputs: run.bubble!.inputs.map(input => ({ name: input.name, attachment: input.attachment! })),
   }
 }
 
-export async function withSealedWorkspace<T>(apparatus: Apparatus, run: RunState,
+export async function withSealedWorkspace<T>(
+  apparatus: Apparatus,
+  run: RunState,
   artifact: string,
   judge: (workspace: string) => Promise<T>,
 ): Promise<T> {
@@ -35,7 +39,7 @@ export async function withSealedWorkspace<T>(apparatus: Apparatus, run: RunState
     const files = run.submission!.files
     const copies: readonly (readonly [string, FileAttachmentRef])[] = [
       [artifact, files.artifact],
-      ...files.inputs.map((input) => [input.name, input.attachment] as const),
+      ...files.inputs.map(input => [input.name, input.attachment] as const),
     ]
     for (const [name, ref] of copies) {
       const path = join(workspace, name)

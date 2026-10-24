@@ -22,7 +22,16 @@ import {
 } from '../src/index.ts'
 import { asyncRefusalOf } from './fixtures.ts'
 import { contract } from './task-fixtures.ts'
-import { createRevision, deployment, ENVIRONMENT, openAgent, PARENT, pin, commandsFor, AGENT } from './command-fixtures.ts'
+import {
+  createRevision,
+  deployment,
+  ENVIRONMENT,
+  openAgent,
+  PARENT,
+  pin,
+  commandsFor,
+  AGENT,
+} from './command-fixtures.ts'
 
 describe('a revision is chosen when a run starts, and never moved afterwards', () => {
   it('keeps the in-flight run on its own revision and lets a later run choose the newer one', async () => {
@@ -36,7 +45,10 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
     const firstPin = pin(live)
     await commands.startRun({
       purpose: 'solve',
-      commandId: 'r-old', taskId: PARENT, runId: 'run-old', revision: firstPin,
+      commandId: 'r-old',
+      taskId: PARENT,
+      runId: 'run-old',
+      revision: firstPin,
     })
 
     // A second revision, created through the environment's own protocol.
@@ -48,12 +60,17 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
       subject: ENVIRONMENT,
       payload: { revisionId: 'r0002', manifest: { skills: ['count-words', 'bound-size'] } },
     })
-    const secondDigest = live.store.load().stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT)?.revisions['r0002']?.contentDigest
+    const secondDigest = live.store
+      .load()
+      .stateOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT)?.revisions[
+      'r0002'
+    ]?.contentDigest
     if (secondDigest === undefined) throw new Error('the second revision was not created')
     expect(secondDigest).not.toBe(firstPin.digest)
 
     // The run that was already pinned is untouched: its pin records when it started.
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-old']?.revision,
+    expect(
+      live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-old']?.revision,
     ).toEqual(firstPin)
 
     // A later run may choose the newer revision, explicitly, and is recorded with that choice.
@@ -65,7 +82,8 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
       runId: 'run-new',
       revision: { environmentId: ENVIRONMENT, revisionId: 'r0002', digest: secondDigest },
     })
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-new']?.revision,
+    expect(
+      live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-new']?.revision,
     ).toEqual({ environmentId: ENVIRONMENT, revisionId: 'r0002', digest: secondDigest })
 
     // And the same revision id cannot be re-pointed at different content, so "the newer revision"

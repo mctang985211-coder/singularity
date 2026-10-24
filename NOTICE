@@ -14,3 +14,9 @@ scripts/build-private-dsh.mjs rebuilds the pinned external host with these sourc
 See third_party/dsh/LICENSE and dsh-baseline.json for source and artifact digests.
 
 These third-party terms do not license unrelated original project code.
+
+The browser bundle includes React, React DOM, @xyflow/react, Zustand and their
+runtime dependency closure. The build copies their original license and notice
+files into lib/licenses/npm/ and records names, versions, license identifiers and
+SHA256 values in lib/licenses/npm/index.json. The closure may include type-only
+or tree-shaken members. It does not grant rights to original Singularity code.

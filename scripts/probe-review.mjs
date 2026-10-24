@@ -7,7 +7,7 @@ import { createAgentNodeCommands } from '../src/agent/commands.ts'
 import { createReviewCommands } from '../src/review/commands.ts'
 import { REVIEW_ROLE } from '../src/review/protocol.ts'
 import { createHash } from 'node:crypto'
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 export async function reviewed(store, registry, commands, taskId, verdict) {
   const task = store.load().stateOf(TASK_PROTOCOL, TASK_VERSION, taskId),
     run = task.runs[verdict.runId]
@@ -38,7 +38,7 @@ export async function reviewed(store, registry, commands, taskId, verdict) {
             await readFile(join(run.bubble.workspace.ref, task.contract.artifact)),
           ),
           inputs: await Promise.all(
-            run.bubble.inputs.map(async (input) => ({
+            run.bubble.inputs.map(async input => ({
               name: input.name,
               attachment: await save(input.name, await readFile(join(run.bubble.workspace.ref, input.name))),
             })),
@@ -90,7 +90,7 @@ export async function reviewed(store, registry, commands, taskId, verdict) {
     method: run.revision,
     model: run.bubble.model,
   })
-  const findings = task.contract.criteria.map((c) => ({
+  const findings = task.contract.criteria.map(c => ({
     criterionId: c.criterionId,
     verdict: verdict.verdict,
     detail: verdict.detail ?? 'Real protected checker result',

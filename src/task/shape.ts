@@ -6,14 +6,20 @@ import type { RevisionRef, RunState, RunStatus, TaskState } from './protocol.ts'
 const DIGEST = /^[0-9a-f]{64}$/
 export function record(raw: unknown, where: string): Record<string, unknown> {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
-    refuse('malformed-payload', `${where} must be an object, got ${raw === null ? 'null' : Array.isArray(raw) ? 'an array' : typeof raw}`)
+    refuse(
+      'malformed-payload',
+      `${where} must be an object, got ${raw === null ? 'null' : Array.isArray(raw) ? 'an array' : typeof raw}`,
+    )
   return raw as Record<string, unknown>
 }
 
 export function text(source: Record<string, unknown>, key: string, where: string): string {
   const value = source[key]
   if (typeof value !== 'string' || value.length === 0)
-    refuse('malformed-payload', `${where}.${key} must be a non-empty string, got ${value === null ? 'null' : typeof value}`)
+    refuse(
+      'malformed-payload',
+      `${where}.${key} must be a non-empty string, got ${value === null ? 'null' : typeof value}`,
+    )
   return value
 }
 
@@ -35,22 +41,30 @@ export const REVISION_MEMBERS = ['environmentId', 'revisionId', 'digest'] as con
 export function revisionRef(raw: unknown, where: string, members: readonly string[]): RevisionRef {
   const source = record(raw, where)
   assertClosedKeys(source, members, where)
-  return { environmentId: text(source, 'environmentId', where), revisionId: text(source, 'revisionId', where), digest: digest(source, 'digest', where) }
+  return {
+    environmentId: text(source, 'environmentId', where),
+    revisionId: text(source, 'revisionId', where),
+    digest: digest(source, 'digest', where),
+  }
 }
 
 export function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
-  return left.environmentId === right.environmentId && left.revisionId === right.revisionId && left.digest === right.digest
+  return (
+    left.environmentId === right.environmentId && left.revisionId === right.revisionId && left.digest === right.digest
+  )
 }
 
 /** The run a fact names, or a refusal naming the run. */
 export function requireRun(state: TaskState, runId: string, where: string): RunState {
   const run = state.runs[runId]
-  if (run === undefined) refuse('unknown-run', `${where} names run "${runId}", which task "${state.taskId}" never started`)
+  if (run === undefined)
+    refuse('unknown-run', `${where} names run "${runId}", which task "${state.taskId}" never started`)
   return run
 }
 
 export function requireContractOf(state: TaskState, where: string, subject: string): TaskContract {
-  if (state.contract === undefined) refuse('illegal-transition', `${where} arrived before task "${subject}" carried a contract`)
+  if (state.contract === undefined)
+    refuse('illegal-transition', `${where} arrived before task "${subject}" carried a contract`)
   return state.contract
 }
 

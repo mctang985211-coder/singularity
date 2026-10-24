@@ -1,5 +1,9 @@
 # G2：任务、审核与运行合同
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
+> 历史设计与施工记录：协议版本和证据范围以各节日期为准；当前行为合同见[架构入口](architecture.md)。
+
 日期：2026-10-15。当前协议 Task v17、Review v4、snapshot v9。
 用户裁定见 [context.md §18](context.md#18-g1g2-接手审核与用户裁定2026-10-11基线-35b0c7c)；剩余顺序只在 [assembly-blueprint.md §9](assembly-blueprint.md#9-剩余构建顺序与检查点) 维护。
 

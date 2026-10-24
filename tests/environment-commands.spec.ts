@@ -40,18 +40,31 @@ describe('the environment revision command', () => {
       manifest: MANIFEST,
     })
 
-    expect([created.kind, environmentOf(live)?.revisions[REVISION]?.contentDigest]).toEqual([ENVIRONMENT_KINDS.revisionCreated, digestOf(MANIFEST)])
+    expect([created.kind, environmentOf(live)?.revisions[REVISION]?.contentDigest]).toEqual([
+      ENVIRONMENT_KINDS.revisionCreated,
+      digestOf(MANIFEST),
+    ])
   })
 
   it('accepts the same content again under the same revision id, leaving the fold as it was', async () => {
     const live = await deployment()
     const commands: EnvironmentCommands = createEnvironmentCommands({ store: live.store, registry: live.registry })
-    await commands.createRevision({ commandId: 'revision', environmentId: ENVIRONMENT, revisionId: REVISION, manifest: MANIFEST })
+    await commands.createRevision({
+      commandId: 'revision',
+      environmentId: ENVIRONMENT,
+      revisionId: REVISION,
+      manifest: MANIFEST,
+    })
     const first = environmentOf(live)
 
     // A second, fully distinct fact that repeats only the content: the command accepts it and the
     // revision still reads what it read, at the moment it was first created.
-    await commands.createRevision({ commandId: 'revision-again', environmentId: ENVIRONMENT, revisionId: REVISION, manifest: SAME_CONTENT })
+    await commands.createRevision({
+      commandId: 'revision-again',
+      environmentId: ENVIRONMENT,
+      revisionId: REVISION,
+      manifest: SAME_CONTENT,
+    })
 
     expect([live.store.load().entries().length, environmentOf(live)]).toEqual([2, first])
   })
@@ -59,15 +72,25 @@ describe('the environment revision command', () => {
   it('refuses different content for a revision id that already exists, and records nothing', async () => {
     const live = await deployment()
     const commands = createEnvironmentCommands({ store: live.store, registry: live.registry })
-    await commands.createRevision({ commandId: 'revision', environmentId: ENVIRONMENT, revisionId: REVISION, manifest: MANIFEST })
+    await commands.createRevision({
+      commandId: 'revision',
+      environmentId: ENVIRONMENT,
+      revisionId: REVISION,
+      manifest: MANIFEST,
+    })
 
     const refusal = await asyncRefusalOf(() =>
-      commands.createRevision({ commandId: 'revision-tampered', environmentId: ENVIRONMENT, revisionId: REVISION, manifest: TAMPERED }),
+      commands.createRevision({
+        commandId: 'revision-tampered',
+        environmentId: ENVIRONMENT,
+        revisionId: REVISION,
+        manifest: TAMPERED,
+      }),
     )
-    expect([refusal.code, live.store.load().entries().length, environmentOf(live)?.revisions[REVISION]?.manifest]).toEqual([
-      'revision-conflict',
-      1,
-      MANIFEST,
-    ])
+    expect([
+      refusal.code,
+      live.store.load().entries().length,
+      environmentOf(live)?.revisions[REVISION]?.manifest,
+    ]).toEqual(['revision-conflict', 1, MANIFEST])
   })
 })

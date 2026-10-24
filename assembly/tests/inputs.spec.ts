@@ -22,21 +22,32 @@ import { attachmentsAt, agentFor, execFor, factsOf, fakeExecution, FakePersisten
 
 const domainDir = fileURLToPath(new URL('../../domain/reference', import.meta.url))
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
 
 async function setup(producerTemplate = 'extract-letters', verified = true) {
   const root = await mkdtemp(join(tmpdir(), 'assembly-inputs-'))
   roots.push(root)
   const medium = new FakePersistence()
   const domain = await loadDomain(domainDir, spawnProcess)
-  const apparatus = await openApparatus('inputs', root, domain, medium as unknown as SessionPersistence, attachmentsAt(root), testProjections,
+  const apparatus = await openApparatus(
+    'inputs',
+    root,
+    domain,
+    medium as unknown as SessionPersistence,
+    attachmentsAt(root),
+    testProjections,
   )
   const agent = agentFor('executor', 'executor-session')
   const caller = callerOf(agent)
   await bindCaller(apparatus, caller)
   const commands = apparatus.tasks.forAgent(caller.agentId)
   const producer = domain.templates.get(producerTemplate)!
-  await commands.admit({ commandId: 'admit-producer', taskId: 'producer', contract: contractFor(domain, producer, producer.goal),
+  await commands.admit({
+    commandId: 'admit-producer',
+    taskId: 'producer',
+    contract: contractFor(domain, producer, producer.goal),
   })
   await commands.assign({ commandId: 'assign-producer', taskId: 'producer', agentId: caller.agentId })
   const run = await startAttempt(apparatus, caller, 'producer', 'producer-run', await seedMethod(apparatus))
@@ -51,7 +62,11 @@ async function setup(producerTemplate = 'extract-letters', verified = true) {
             .join('')
         : '35',
     )
-    const result = await submit(apparatus, fakeExecution(() => undefined), caller, exec,
+    const result = await submit(
+      apparatus,
+      fakeExecution(() => undefined),
+      caller,
+      exec,
       { taskId: 'producer', path: producer.artifact },
       new AbortController().signal,
       fixtureReview(apparatus),
@@ -70,12 +85,19 @@ async function setup(producerTemplate = 'extract-letters', verified = true) {
 
 async function rejectsWithFailedRun(h: Awaited<ReturnType<typeof setup>>, code: string) {
   const before = factsOf(h.medium)
-  await expect(startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(h.apparatus)),
+  await expect(
+    startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(h.apparatus)),
   ).rejects.toMatchObject({
     refusal: { code },
   })
-  expect(factsOf(h.medium).slice(before.length).map(fact => fact.kind)).toEqual(['run/started', 'run/failed'])
-  expect(Object.values(taskStateOf(h.apparatus, 'consumer').runs)).toMatchObject([{ status: 'failed', failureCause: 'runtime' }])
+  expect(
+    factsOf(h.medium)
+      .slice(before.length)
+      .map(fact => fact.kind),
+  ).toEqual(['run/started', 'run/failed'])
+  expect(Object.values(taskStateOf(h.apparatus, 'consumer').runs)).toMatchObject([
+    { status: 'failed', failureCause: 'runtime' },
+  ])
 }
 
 describe('template input binding and sealed preparation', () => {
@@ -94,9 +116,12 @@ describe('template input binding and sealed preparation', () => {
     await h.admit(contractFor(domain, template, template.goal))
     const apparatus = { ...h.apparatus, domain }
     const run = await startAttempt(apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(apparatus))
-    expect(run.bubble!.inputs).toMatchObject([{ name: template.inputs[0]!.name, digest: input.digest, attachment: { attachmentId: 'sha256:' + input.digest } },
+    expect(run.bubble!.inputs).toMatchObject([
+      { name: template.inputs[0]!.name, digest: input.digest, attachment: { attachmentId: 'sha256:' + input.digest } },
     ])
-    expect(await readFile(join(workspaceOf(apparatus, 'consumer', run.runId), template.inputs[0]!.name))).toEqual(frozen)
+    expect(await readFile(join(workspaceOf(apparatus, 'consumer', run.runId), template.inputs[0]!.name))).toEqual(
+      frozen,
+    )
   })
 
   it('pins the method directly and freezes the verified producer bytes without an execution Revision', async () => {
@@ -105,27 +130,40 @@ describe('template input binding and sealed preparation', () => {
     const run = await startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(h.apparatus))
     const producer = taskStateOf(h.apparatus, 'producer').runs[h.producerRunId]!
     expect(run.revision).toEqual(await seedMethod(h.apparatus))
-    expect(run.bubble!.inputs).toMatchObject([{ name: 'in/letters.txt', digest: producer.submission!.artifactDigest,
+    expect(run.bubble!.inputs).toMatchObject([
+      {
+        name: 'in/letters.txt',
+        digest: producer.submission!.artifactDigest,
         producerRunId: h.producerRunId,
         attachment: producer.submission!.files.artifact,
       },
     ])
-    expect(factsOf(h.medium).filter((f) => f.kind === 'revision/created')).toHaveLength(1)
-    expect(await readFile(join(workspaceOf(h.apparatus, 'consumer', run.runId), 'in/letters.txt'))).toEqual(await readFile(h.artifact),
+    expect(factsOf(h.medium).filter(f => f.kind === 'revision/created')).toHaveLength(1)
+    expect(await readFile(join(workspaceOf(h.apparatus, 'consumer', run.runId), 'in/letters.txt'))).toEqual(
+      await readFile(h.artifact),
     )
   })
 
   it('reads the current complete template contract without rebinding its producer or dropping added criteria', async () => {
     const h = await setup()
-    const contract = { ...h.contract, goal: 'Count the chosen producer under the additional bound',
-      criteria: [...h.contract.criteria, { criterionId: 'bounded', statement: 'The count is between zero and 100.' }] }
+    const contract = {
+      ...h.contract,
+      goal: 'Count the chosen producer under the additional bound',
+      criteria: [...h.contract.criteria, { criterionId: 'bounded', statement: 'The count is between zero and 100.' }],
+    }
     await h.admit(contract)
     await startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(h.apparatus))
     const read = await readForAgent(h.apparatus, h.caller.agentId, { kind: 'template', ref: 'count-letters' })
     expect(read).toMatchObject({ contract })
     expect((read as { contract: TaskContract }).contract).toEqual(contract)
     const catalog = await readForAgent(h.apparatus, h.caller.agentId, { kind: 'template' })
-    expect(catalog).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'count-letters', producers: ['extract-letters'] })]))
+    expect(catalog).toMatchObject({
+      entries: expect.arrayContaining([
+        expect.objectContaining({ id: 'count-letters', producers: ['extract-letters'] }),
+      ]),
+      from: 0,
+      complete: true,
+    })
     await h.apparatus.store.close()
   })
 
@@ -153,22 +191,26 @@ describe('template input binding and sealed preparation', () => {
     expect(await readFile(join(workspaceOf(h.apparatus, 'consumer', run.runId), 'in/letters.txt'))).toEqual(sealed)
   })
 
-  it.each(['missing', 'corrupt'] as const)('records a runtime preparation failure when the sealed producer object is %s', async (damage) => {
-    const h = await setup()
-    await h.admit(h.contract)
-    const producer = taskStateOf(h.apparatus, 'producer').runs[h.producerRunId]!
-    const ref = producer.submission!.files.artifact
-    const path = attachmentsAt(h.apparatus.workspaceRoot).fileHostPath(ref)
-    if (damage === 'missing') await rm(path)
-    else {
-      await chmod(path, 0o600)
-      await writeFile(path, Buffer.alloc(ref.bytes, 120))
-    }
-    await expect(startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(h.apparatus)),
+  it.each(['missing', 'corrupt'] as const)(
+    'records a runtime preparation failure when the sealed producer object is %s',
+    async damage => {
+      const h = await setup()
+      await h.admit(h.contract)
+      const producer = taskStateOf(h.apparatus, 'producer').runs[h.producerRunId]!
+      const ref = producer.submission!.files.artifact
+      const path = attachmentsAt(h.apparatus.workspaceRoot).fileHostPath(ref)
+      if (damage === 'missing') await rm(path)
+      else {
+        await chmod(path, 0o600)
+        await writeFile(path, Buffer.alloc(ref.bytes, 120))
+      }
+      await expect(
+        startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(h.apparatus)),
       ).rejects.toMatchObject({
-      code: damage === 'missing' ? 'ATTACHMENT_NOT_FOUND' : 'ATTACHMENT_CORRUPT',
-    })
-    expect(Object.values(taskStateOf(h.apparatus, 'consumer').runs)).toMatchObject([{ status: 'failed', failureCause: 'runtime' },
+        code: damage === 'missing' ? 'ATTACHMENT_NOT_FOUND' : 'ATTACHMENT_CORRUPT',
+      })
+      expect(Object.values(taskStateOf(h.apparatus, 'consumer').runs)).toMatchObject([
+        { status: 'failed', failureCause: 'runtime' },
       ])
     },
   )
@@ -188,7 +230,9 @@ describe('template input binding and sealed preparation', () => {
   it('rejects protected bytes substituted for the template artifact source with a terminal preparation failure', async () => {
     const h = await setup()
     const input = h.domain.inputs[0]!
-    await h.admit({ ...h.contract, inputs: [{ name: 'in/letters.txt', source: { kind: 'protected', ref: input.ref, digest: input.digest } }],
+    await h.admit({
+      ...h.contract,
+      inputs: [{ name: 'in/letters.txt', source: { kind: 'protected', ref: input.ref, digest: input.digest } }],
     })
     await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
@@ -197,7 +241,9 @@ describe('template input binding and sealed preparation', () => {
     const h = await setup()
     const root = h.domain.templates.get(h.domain.rootTemplate!)!
     const contract = contractFor(h.domain, root, root.goal)
-    await h.admit({ ...contract, inputs: [{ name: root.inputs[0]!.name, source: { kind: 'artifact', taskId: 'producer' } }],
+    await h.admit({
+      ...contract,
+      inputs: [{ name: root.inputs[0]!.name, source: { kind: 'artifact', taskId: 'producer' } }],
     })
     await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
@@ -206,8 +252,11 @@ describe('template input binding and sealed preparation', () => {
     const h = await setup()
     const template = h.domain.templates.get(h.domain.rootTemplate!)!
     const contract = contractFor(h.domain, template, template.goal)
-    await h.admit({ ...contract, inputs: [{ name: template.inputs[0]!.name,
-      source: { kind: 'protected', ref: 'source', digest: 'a'.repeat(64) } }],
+    await h.admit({
+      ...contract,
+      inputs: [
+        { name: template.inputs[0]!.name, source: { kind: 'protected', ref: 'source', digest: 'a'.repeat(64) } },
+      ],
     })
     await rejectsWithFailedRun(h, 'evidence-input-mismatch')
   })
@@ -220,15 +269,21 @@ describe('template input binding and sealed preparation', () => {
 
   it('freezes additional child standards in the same contract while retaining every protected standard', async () => {
     const h = await setup()
-    const contract = { ...h.contract, goal: 'Count and explain the verified extraction', criteria: [
-      ...h.contract.criteria, { criterionId: 'explanation', statement: 'Explain the counted source with a reproducible finding' },
-    ] }
+    const contract = {
+      ...h.contract,
+      goal: 'Count and explain the verified extraction',
+      criteria: [
+        ...h.contract.criteria,
+        { criterionId: 'explanation', statement: 'Explain the counted source with a reproducible finding' },
+      ],
+    }
     expect(assertTemplateContract(h.domain, contract)?.id).toBe('count-letters')
     await h.admit(contract)
     await startAttempt(h.apparatus, h.caller, 'consumer', 'consumer-run', await seedMethod(h.apparatus))
     expect(taskStateOf(h.apparatus, 'consumer').contract).toEqual(contract)
-    expect(() => assertTemplateContract(h.domain, { ...contract, criteria: contract.criteria.slice(1) }))
-      .toThrow('pinned template')
+    expect(() => assertTemplateContract(h.domain, { ...contract, criteria: contract.criteria.slice(1) })).toThrow(
+      'pinned template',
+    )
     await h.apparatus.store.close()
   })
 
@@ -237,32 +292,72 @@ describe('template input binding and sealed preparation', () => {
     roots.push(root)
     const original = await loadDomain(domainDir, spawnProcess)
     const secondBytes = Buffer.from('a!')
-    const inputs = [...original.inputs, { ref: 'second', sourcePath: 'second.txt', bytes: secondBytes, digest: sha256(secondBytes) }]
+    const inputs = [
+      ...original.inputs,
+      { ref: 'second', sourcePath: 'second.txt', bytes: secondBytes, digest: sha256(secondBytes) },
+    ]
     const declared = templateDeclaration(original.templates.get(original.rootTemplate!)!)
-    const template = await readTemplate(original.dir, { ...declared, id: 'two-checks',
-      inputs: [...declared.inputs, { name: 'in/second.txt', source: { kind: 'protected', ref: 'second' } }],
-      criteria: [...declared.criteria, { criterionId: 'second-count', statement: 'the report also equals the count of the second input' }],
-      checks: [...declared.checks, { criterionId: 'second-count', verifier: 'letters', input: 'in/second.txt' }],
-    }, original.verifiers, 'two-checks')
+    const template = await readTemplate(
+      original.dir,
+      {
+        ...declared,
+        id: 'two-checks',
+        inputs: [...declared.inputs, { name: 'in/second.txt', source: { kind: 'protected', ref: 'second' } }],
+        criteria: [
+          ...declared.criteria,
+          { criterionId: 'second-count', statement: 'the report also equals the count of the second input' },
+        ],
+        checks: [...declared.checks, { criterionId: 'second-count', verifier: 'letters', input: 'in/second.txt' }],
+      },
+      original.verifiers,
+      'two-checks',
+    )
     const domain = { ...original, inputs, templates: new Map([...original.templates, [template.id, template]]) }
     const medium = new FakePersistence()
-    const apparatus = await openApparatus('checks', root, domain, medium as unknown as SessionPersistence, attachmentsAt(root), testProjections)
-    const agent = agentFor('executor', 'executor-session'), caller = callerOf(agent)
+    const apparatus = await openApparatus(
+      'checks',
+      root,
+      domain,
+      medium as unknown as SessionPersistence,
+      attachmentsAt(root),
+      testProjections,
+    )
+    const agent = agentFor('executor', 'executor-session'),
+      caller = callerOf(agent)
     await bindCaller(apparatus, caller)
     const commands = apparatus.tasks.forAgent(caller.agentId)
-    await commands.admit({ commandId: 'admit', taskId: 'two-checks', contract: contractFor(domain, template, template.goal) })
+    await commands.admit({
+      commandId: 'admit',
+      taskId: 'two-checks',
+      contract: contractFor(domain, template, template.goal),
+    })
     await commands.assign({ commandId: 'assign', taskId: 'two-checks', agentId: caller.agentId })
     const run = await startAttempt(apparatus, caller, 'two-checks', 'run', await seedMethod(apparatus))
-    const count = (Buffer.from(original.inputs[0]!.bytes).toString('utf8').match(/[A-Za-z]/g) ?? []).length
+    const count = (
+      Buffer.from(original.inputs[0]!.bytes)
+        .toString('utf8')
+        .match(/[A-Za-z]/g) ?? []
+    ).length
     await writeFile(join(run.bubble!.workspace.ref, template.artifact), String(count))
-    const result = await submit(apparatus, fakeExecution(() => undefined), caller, execFor(agent, 'submit'),
-      { taskId: 'two-checks', path: template.artifact }, new AbortController().signal, fixtureReview(apparatus))
+    const result = await submit(
+      apparatus,
+      fakeExecution(() => undefined),
+      caller,
+      execFor(agent, 'submit'),
+      { taskId: 'two-checks', path: template.artifact },
+      new AbortController().signal,
+      fixtureReview(apparatus),
+    )
     expect(result.verdict).toBe('fail')
     const evidence = taskStateOf(apparatus, 'two-checks').runs[run.runId]!.evidence
-    expect(evidence.map(({ criterionId, verdict }) => [criterionId, verdict])).toEqual([['letters', 'pass'], ['second-count', 'fail']])
+    expect(evidence.map(({ criterionId, verdict }) => [criterionId, verdict])).toEqual([
+      ['letters', 'pass'],
+      ['second-count', 'fail'],
+    ])
     const checks = JSON.parse(evidence[0]!.detail!).checks
-    expect(checks.map((check: { inputDigests: { name: string }[] }) => check.inputDigests.map(input => input.name)))
-      .toEqual([['in/source.txt'], ['in/second.txt']])
+    expect(
+      checks.map((check: { inputDigests: { name: string }[] }) => check.inputDigests.map(input => input.name)),
+    ).toEqual([['in/source.txt'], ['in/second.txt']])
     await apparatus.store.close()
   })
 })

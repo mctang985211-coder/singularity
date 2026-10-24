@@ -7,7 +7,13 @@ import type { ProtocolRegistry } from '../protocol/registry.ts'
 import { AGENT_PROTOCOL, AGENT_VERSION, type AgentState } from '../agent/protocol.ts'
 import { ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, type EnvironmentState } from '../environment/protocol.ts'
 import { assertPinnedRevision } from '../environment/binding.ts'
-import { TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, type RevisionRef, type RunSubmission, type TaskState,
+import {
+  TASK_KINDS,
+  TASK_PROTOCOL,
+  TASK_VERSION,
+  type RevisionRef,
+  type RunSubmission,
+  type TaskState,
 } from './protocol.ts'
 import { unadjudicatedCriteria, unmetCriteria, verdictFor } from './run.ts'
 import { assertParentage, projectTree, projectPlan, taskWaitingReason, stoppedExplorationOf } from './tree.ts'
@@ -40,59 +46,86 @@ export interface TaskCommandOptions {
   /** The identities this deployment holds, keyed by agent id. An absent agent is not held. */
   readonly agents: ReadonlyMap<string, HeldAgent>
   /** The verifier implementations this deployment can run, by the digest of their own bytes. */
-  readonly implementations: readonly { readonly ref: string
+  readonly implementations: readonly {
+    readonly ref: string
     readonly version: string
-    readonly implementationDigest: string }[]
+    readonly implementationDigest: string
+  }[]
 }
 
 export interface AgentCommands {
-  admit(input: { readonly commandId: string; readonly taskId: string; readonly contract: unknown }, as?: string,
+  admit(
+    input: { readonly commandId: string; readonly taskId: string; readonly contract: unknown },
+    as?: string,
   ): Promise<Envelope>
-  decompose(input: { readonly commandId: string
+  decompose(
+    input: {
+      readonly commandId: string
       readonly parentTaskId: string
-      readonly children: readonly DecompositionChild[] }, as?: string,
+      readonly children: readonly DecompositionChild[]
+    },
+    as?: string,
   ): Promise<Envelope>
-  stopExplorations(input: { readonly commandId: string; readonly parentTaskId: string; readonly taskIds: readonly string[]; readonly reason: string }, as?: string): Promise<Envelope>
-  assign(input: { readonly commandId: string; readonly taskId: string; readonly agentId: string }, as?: string,
+  stopExplorations(
+    input: {
+      readonly commandId: string
+      readonly parentTaskId: string
+      readonly taskIds: readonly string[]
+      readonly reason: string
+    },
+    as?: string,
   ): Promise<Envelope>
-  reassign(input: { readonly commandId: string; readonly taskId: string; readonly from: string; readonly agentId: string }, as?: string,
+  assign(
+    input: { readonly commandId: string; readonly taskId: string; readonly agentId: string },
+    as?: string,
   ): Promise<Envelope>
-  startRun(input: {
-    readonly commandId: string
-    readonly taskId: string
-    readonly runId: string
-    readonly revision: RevisionRef
+  reassign(
+    input: { readonly commandId: string; readonly taskId: string; readonly from: string; readonly agentId: string },
+    as?: string,
+  ): Promise<Envelope>
+  startRun(
+    input: {
+      readonly commandId: string
+      readonly taskId: string
+      readonly runId: string
+      readonly revision: RevisionRef
       readonly purpose: import('./run.ts').RunState['purpose']
       readonly relatedTo?: import('./run.ts').RunState['relatedTo']
       readonly case?: import('./run.ts').RunState['case']
     },
     as?: string,
   ): Promise<Envelope>
-  openBubble(input: {
-    readonly commandId: string
-    readonly taskId: string
-    readonly runId: string
-    readonly inputs: readonly BubbleInput[]
-    readonly workspace: { readonly kind: string; readonly ref: string }
-    readonly model: Bubble['model']
-    readonly tools: readonly BubbleTool[]
-    readonly conditions: readonly string[]
-  }, as?: string,
+  openBubble(
+    input: {
+      readonly commandId: string
+      readonly taskId: string
+      readonly runId: string
+      readonly inputs: readonly BubbleInput[]
+      readonly workspace: { readonly kind: string; readonly ref: string }
+      readonly model: Bubble['model']
+      readonly tools: readonly BubbleTool[]
+      readonly conditions: readonly string[]
+    },
+    as?: string,
   ): Promise<Envelope>
-  submitRun(input: {
-    readonly commandId: string
-    readonly taskId: string
-    readonly runId: string
-    readonly submission: RunSubmission
-  }, as?: string,
+  submitRun(
+    input: {
+      readonly commandId: string
+      readonly taskId: string
+      readonly runId: string
+      readonly submission: RunSubmission
+    },
+    as?: string,
   ): Promise<Envelope>
-  failRun(input: {
-    readonly commandId: string
-    readonly taskId: string
-    readonly runId: string
-    readonly reason?: string
-    readonly cause?: 'runtime' | 'business' | 'cancelled'
-  }, as?: string,
+  failRun(
+    input: {
+      readonly commandId: string
+      readonly taskId: string
+      readonly runId: string
+      readonly reason?: string
+      readonly cause?: 'runtime' | 'business' | 'cancelled'
+    },
+    as?: string,
   ): Promise<Envelope>
 }
 
@@ -102,9 +135,11 @@ export interface TaskCommands extends AgentCommands {
     as?: string,
   ): Promise<Envelope>
   /** Not reachable from `forAgent`: producing a verdict is a verifier's act, not an agent's. */
-  recordVerdict(input: { readonly commandId: string
+  recordVerdict(input: {
+    readonly commandId: string
     readonly taskId: string
-    readonly verdict: VerdictInput }): Promise<Envelope>
+    readonly verdict: VerdictInput
+  }): Promise<Envelope>
   recordConsumption(input: {
     readonly commandId: string
     readonly taskId: string
@@ -140,43 +175,77 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
     holderOf.set(held.as, agentId)
   }
   const commands: TaskCommands = {
-    admit: (input, as) => emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract }, as),
+    admit: (input, as) =>
+      emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract }, as),
 
     decompose: (input, as) =>
-      emitRaw(options, input.commandId, TASK_KINDS.decomposed, input.parentTaskId, { children: input.children }, as, () => {
-        const cut = cutOf(options)
-        const task = cut.task(input.parentTaskId)
-        if (task === undefined) refuse('illegal-transition', 'decomposition requires an admitted parent')
-        assertWorkflowBudget(cut.tasks(), options.store.load().entries(), input.parentTaskId,
-          { nodes: input.children.filter(child => !task.decomposition?.children.some(held => held.taskId === child.taskId)).length, plans: 1 })
-        const hold = taskWaitingReason(cut.tasks(), input.parentTaskId, 'plan')
-        if (hold !== undefined) refuse('illegal-transition', hold)
-        const run = Object.values(task.runs).at(-1)
-        if (run !== undefined && (run.status !== 'running' || run.stage !== 'working'))
-          refuse('illegal-transition', 'decomposition requires a working parent Run')
-        assertParentage(input.parentTaskId, input.children, cut.tasks(), [...cut.reviews().values()]
-          .map((review) => ({ parentId: review.reviewId, children: review.children })))
-      }),
+      emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.decomposed,
+        input.parentTaskId,
+        { children: input.children },
+        as,
+        () => {
+          const cut = cutOf(options)
+          const task = cut.task(input.parentTaskId)
+          if (task === undefined) refuse('illegal-transition', 'decomposition requires an admitted parent')
+          assertWorkflowBudget(cut.tasks(), options.store.load().entries(), input.parentTaskId, {
+            nodes: input.children.filter(
+              child => !task.decomposition?.children.some(held => held.taskId === child.taskId),
+            ).length,
+            plans: 1,
+          })
+          const hold = taskWaitingReason(cut.tasks(), input.parentTaskId, 'plan')
+          if (hold !== undefined) refuse('illegal-transition', hold)
+          const run = Object.values(task.runs).at(-1)
+          if (run !== undefined && (run.status !== 'running' || run.stage !== 'working'))
+            refuse('illegal-transition', 'decomposition requires a working parent Run')
+          assertParentage(
+            input.parentTaskId,
+            input.children,
+            cut.tasks(),
+            [...cut.reviews().values()].map(review => ({ parentId: review.reviewId, children: review.children })),
+          )
+        },
+      ),
 
     stopExplorations: (input, as) =>
-      emitRaw(options, input.commandId, TASK_KINDS.explorationsStopped, input.parentTaskId,
-        { taskIds: input.taskIds, reason: input.reason }, as, () => {
+      emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.explorationsStopped,
+        input.parentTaskId,
+        { taskIds: input.taskIds, reason: input.reason },
+        as,
+        () => {
           const tasks = cutOf(options).tasks()
           const parent = tasks.get(input.parentTaskId)
           const run = parent === undefined ? undefined : Object.values(parent.runs).at(-1)
-          if (run?.status !== 'running' || run.stage !== 'working' || stoppedExplorationOf(tasks, input.parentTaskId) !== undefined)
+          if (
+            run?.status !== 'running' ||
+            run.stage !== 'working' ||
+            stoppedExplorationOf(tasks, input.parentTaskId) !== undefined
+          )
             refuse('illegal-transition', 'only a working parent may stop its exploration branches')
           for (const taskId of input.taskIds)
             if (Object.values(tasks.get(taskId)?.runs ?? {}).some(run => run.status === 'verified'))
               refuse('illegal-transition', `Task ${taskId} already verified; preserve its accepted evidence`)
-        }),
+        },
+      ),
 
     assign: (input, as) => {
       // The identity is filled from the deployment's table, so a caller supplies what it did and
       // never who it is. Holding it is a deployment fact; the node is a log fact.
       const identity = requireHeldBinding(options, input.agentId, `assign task "${input.taskId}"`).identity
-      return emitRaw(options, input.commandId, TASK_KINDS.assigned, input.taskId, { agentId: input.agentId, agentIdentity: identity }, as, () =>
-        requireOpenedNode(cutOf(options), input.agentId, `assign task "${input.taskId}"`),
+      return emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.assigned,
+        input.taskId,
+        { agentId: input.agentId, agentIdentity: identity },
+        as,
+        () => requireOpenedNode(cutOf(options), input.agentId, `assign task "${input.taskId}"`),
       )
     },
 
@@ -194,67 +263,99 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
     },
 
     startRun: (input, as) =>
-      emitRaw(options, input.commandId, TASK_KINDS.runStarted, input.taskId, { runId: input.runId, revision: input.revision,
+      emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.runStarted,
+        input.taskId,
+        {
+          runId: input.runId,
+          revision: input.revision,
           purpose: input.purpose,
           ...(input.case === undefined ? {} : { case: input.case }),
           ...(input.relatedTo === undefined ? {} : { relatedTo: input.relatedTo }),
-        }, as, () => {
-        const cut = cutOf(options)
-        const task = cut.task(input.taskId)
-        if (task === undefined || task.contract === undefined)
-          refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`,
+        },
+        as,
+        () => {
+          const cut = cutOf(options)
+          const task = cut.task(input.taskId)
+          if (task === undefined || task.contract === undefined)
+            refuse(
+              'illegal-transition',
+              `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`,
             )
-        const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
-        assertWorkflowBudget(cut.tasks(), options.store.load().entries(), input.taskId, { runs: 1 })
-        if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
-        // Cross-entity 1: the revision must exist, in the named environment, with the content
-        // the pin claims. This reuses the environment slice's own check, not a second one.
-        assertPinnedRevision(input.revision, cut.environments(), `run "${input.runId}" of task "${input.taskId}"`)
-        // Cross-entity 2: someone must be answerable, and it must be an agent this deployment
-        // holds with an opened node. The identity comparison itself is the reducer's.
-        if (task.responsibility === undefined)
-          refuse(
-            'not-responsible',
-            `cannot start a run for task "${input.taskId}": no agent is responsible for it, so no attempt is answerable`,
-          )
-        requireOpenedNode(cut, task.responsibility.agentId, `start a run for task "${input.taskId}"`)
-        // Cross-entity 3: if a plan declares this task, the plan's gate decides. Readiness
-        // already subsumes dependencies, budget and admission, and carries its own reason.
-        requirePlanAllows(cut, input.taskId)
-      },
+          const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
+          assertWorkflowBudget(cut.tasks(), options.store.load().entries(), input.taskId, { runs: 1 })
+          if (stopped !== undefined)
+            refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
+          // Cross-entity 1: the revision must exist, in the named environment, with the content
+          // the pin claims. This reuses the environment slice's own check, not a second one.
+          assertPinnedRevision(input.revision, cut.environments(), `run "${input.runId}" of task "${input.taskId}"`)
+          // Cross-entity 2: someone must be answerable, and it must be an agent this deployment
+          // holds with an opened node. The identity comparison itself is the reducer's.
+          if (task.responsibility === undefined)
+            refuse(
+              'not-responsible',
+              `cannot start a run for task "${input.taskId}": no agent is responsible for it, so no attempt is answerable`,
+            )
+          requireOpenedNode(cut, task.responsibility.agentId, `start a run for task "${input.taskId}"`)
+          // Cross-entity 3: if a plan declares this task, the plan's gate decides. Readiness
+          // already subsumes dependencies, budget and admission, and carries its own reason.
+          requirePlanAllows(cut, input.taskId)
+        },
       ),
 
     openBubble: (input, as) =>
       // The whole declared context goes through: rebuilding the payload from three of its members is
       // how a required member silently disappears between the caller and the reducer.
-      emitRaw(options, input.commandId, TASK_KINDS.bubbleOpened, input.taskId, {
-        runId: input.runId,
-        inputs: input.inputs,
-        workspace: input.workspace,
-        model: input.model,
-        tools: input.tools,
-        conditions: input.conditions,
-      }, as, () => {
-        const cut = cutOf(options)
-        const task = cut.task(input.taskId)
-        if (task?.contract === undefined)
-          refuse('illegal-transition', `cannot open a bubble for task "${input.taskId}": it has no admitted contract`)
-        const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
-        if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
-        for (const declared of task.contract.inputs) {
-          if (declared.source.kind !== 'artifact') continue
-          const producer = cut.task(declared.source.taskId)
-          const bound = input.inputs.find((bound) => bound.name === declared.name)
-          const run = bound?.producerRunId === undefined ? undefined : producer?.runs[bound.producerRunId]
-          if (run?.status !== 'verified' || run.submission === undefined || run.submission.artifactDigest !== bound?.digest)
-            refuse('evidence-input-mismatch', `input "${declared.name}" requires the exact sealed artifact of verified Task "${declared.source.taskId}" Run "${bound?.producerRunId ?? ''}"`,
+      emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.bubbleOpened,
+        input.taskId,
+        {
+          runId: input.runId,
+          inputs: input.inputs,
+          workspace: input.workspace,
+          model: input.model,
+          tools: input.tools,
+          conditions: input.conditions,
+        },
+        as,
+        () => {
+          const cut = cutOf(options)
+          const task = cut.task(input.taskId)
+          if (task?.contract === undefined)
+            refuse('illegal-transition', `cannot open a bubble for task "${input.taskId}": it has no admitted contract`)
+          const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
+          if (stopped !== undefined)
+            refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
+          for (const declared of task.contract.inputs) {
+            if (declared.source.kind !== 'artifact') continue
+            const producer = cut.task(declared.source.taskId)
+            const bound = input.inputs.find(bound => bound.name === declared.name)
+            const run = bound?.producerRunId === undefined ? undefined : producer?.runs[bound.producerRunId]
+            if (
+              run?.status !== 'verified' ||
+              run.submission === undefined ||
+              run.submission.artifactDigest !== bound?.digest
+            )
+              refuse(
+                'evidence-input-mismatch',
+                `input "${declared.name}" requires the exact sealed artifact of verified Task "${declared.source.taskId}" Run "${bound?.producerRunId ?? ''}"`,
               )
           }
         },
       ),
 
     submitRun: (input, as) =>
-      emitRaw(options, input.commandId, TASK_KINDS.runSubmitted, input.taskId, { runId: input.runId, submission: input.submission }, as,
+      emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.runSubmitted,
+        input.taskId,
+        { runId: input.runId, submission: input.submission },
+        as,
         () => {
           const hold = taskWaitingReason(cutOf(options).tasks(), input.taskId)
           if (hold !== undefined) refuse('illegal-transition', hold)
@@ -267,7 +368,11 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
         input.commandId,
         TASK_KINDS.runFailed,
         input.taskId,
-        { runId: input.runId, cause: input.cause ?? 'runtime', ...(input.reason === undefined ? {} : { reason: input.reason }) },
+        {
+          runId: input.runId,
+          cause: input.cause ?? 'runtime',
+          ...(input.reason === undefined ? {} : { reason: input.reason }),
+        },
         as,
       ),
 
@@ -276,7 +381,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
     // and returns the fact that evidence is.
     settle: (input, as) => options.store.emit(() => settleRequest(options, input, as)) as Promise<Envelope>,
 
-    recordVerdict: (input) => {
+    recordVerdict: input => {
       // Who judged is filled from the criterion rather than passed in. The criterion cannot change
       // after admission - a second `task/admitted` is refused by the reducer, and the record is the
       // reducer's - so this fill cannot disagree with the check handed to the append path below,
@@ -307,8 +412,9 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
           const task = cutOf(options).task(input.taskId)!
           const run = task.runs[input.verdict.runId]!
           const stopped = stoppedExplorationOf(cutOf(options).tasks(), input.taskId)
-          if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
-          const finding = review?.findings?.find((f) => f.criterionId === input.verdict.criterionId)
+          if (stopped !== undefined)
+            refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
+          const finding = review?.findings?.find(f => f.criterionId === input.verdict.criterionId)
           if (
             review?.status !== 'completed' ||
             review.target.kind !== 'acceptance' ||
@@ -322,7 +428,7 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
             refuse('self-reported-evidence', 'acceptance requires the exact completed independent ReviewRun')
           if (
             !options.implementations.some(
-              (entry) =>
+              entry =>
                 entry.ref === input.verdict.verifierRef &&
                 entry.version === input.verdict.verifierVersion &&
                 entry.implementationDigest === input.verdict.implementationDigest,
@@ -333,22 +439,31 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
       )
     },
 
-    recordConsumption: (input) =>
+    recordConsumption: input =>
       // The revision stays the caller's claim rather than being filled from the run's pin: a
       // deployment that recorded consumption against a stale revision gets the reducer's refusal
       // named after that revision, instead of the claim being silently rewritten into a true one.
-      emitRaw(options, input.commandId, TASK_KINDS.methodConsumed, input.taskId, {
-        runId: input.runId,
-        revision: input.revision,
-        method: input.method,
-        mode: input.mode,
-        source: input.source,
-      }, undefined, () => {
-        const stopped = stoppedExplorationOf(cutOf(options).tasks(), input.taskId)
-        if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
-      }),
+      emitRaw(
+        options,
+        input.commandId,
+        TASK_KINDS.methodConsumed,
+        input.taskId,
+        {
+          runId: input.runId,
+          revision: input.revision,
+          method: input.method,
+          mode: input.mode,
+          source: input.source,
+        },
+        undefined,
+        () => {
+          const stopped = stoppedExplorationOf(cutOf(options).tasks(), input.taskId)
+          if (stopped !== undefined)
+            refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
+        },
+      ),
 
-    forAgent: (agentId) => {
+    forAgent: agentId => {
       // The narrow view does not hand back a judging method at all: the boundary is the absence of
       // the method, rather than a rule the agent is trusted to respect. And the surface is bound:
       // every fact it produces stamps this agent's identity, resolved from the deployment's one
@@ -356,15 +471,15 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
       // responsibility check compares the caller against the holder instead of against itself.
       const { as } = requireHeldBinding(options, agentId, `act as agent "${agentId}"`)
       return {
-        admit: (input) => commands.admit(input, as),
-        decompose: (input) => commands.decompose(input, as),
-        stopExplorations: (input) => commands.stopExplorations(input, as),
-        assign: (input) => commands.assign(input, as),
-        reassign: (input) => commands.reassign(input, as),
-        startRun: (input) => commands.startRun(input, as),
-        openBubble: (input) => commands.openBubble(input, as),
-        submitRun: (input) => commands.submitRun(input, as),
-        failRun: (input) => commands.failRun(input, as),
+        admit: input => commands.admit(input, as),
+        decompose: input => commands.decompose(input, as),
+        stopExplorations: input => commands.stopExplorations(input, as),
+        assign: input => commands.assign(input, as),
+        reassign: input => commands.reassign(input, as),
+        startRun: input => commands.startRun(input, as),
+        openBubble: input => commands.openBubble(input, as),
+        submitRun: input => commands.submitRun(input, as),
+        failRun: input => commands.failRun(input, as),
       }
     },
   }
@@ -375,8 +490,8 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
 function cutOf(options: TaskCommandOptions): Cut {
   const cut: ControlReadCut = options.store.load()
   return {
-    task: (taskId) => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
-    agent: (agentId) => cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, agentId),
+    task: taskId => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
+    agent: agentId => cut.stateOf<AgentState>(AGENT_PROTOCOL, AGENT_VERSION, agentId),
     tasks: () => cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION),
     reviews: () => cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION),
     environments: () => cut.statesOf<EnvironmentState>(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION),
@@ -384,7 +499,10 @@ function cutOf(options: TaskCommandOptions): Cut {
 }
 
 /** The binding one held agent's acts stamp, and the identity that binding resolves to. */
-function requireHeldBinding(options: TaskCommandOptions, agentId: string, action: string,
+function requireHeldBinding(
+  options: TaskCommandOptions,
+  agentId: string,
+  action: string,
 ): { as: string; identity: string } {
   const held = options.agents.get(agentId)
   if (held === undefined)
@@ -413,18 +531,21 @@ function requireOpenedNode(cut: Cut, agentId: string, action: string): void {
 function requirePlanAllows(cut: Cut, taskId: string): void {
   const plans = [
     ...projectTree(cut.tasks()),
-    ...[...cut.reviews().values()].map((review) =>
+    ...[...cut.reviews().values()].map(review =>
       projectPlan(review.reviewId, review.criteria, review.children, cut.tasks()),
     ),
   ]
   for (const view of plans) {
-    const child = view.children.find((entry) => entry.taskId === taskId)
+    const child = view.children.find(entry => entry.taskId === taskId)
     if (child === undefined) continue
     const parent = cut.task(view.parentTaskId)
     const run = parent === undefined ? undefined : Object.values(parent.runs).at(-1)
     const review = cut.reviews().get(view.parentTaskId)
-    if (review !== undefined ? review.status !== 'running'
-      : run !== undefined && (run.status !== 'running' || run.stage !== 'working'))
+    if (
+      review !== undefined
+        ? review.status !== 'running'
+        : run !== undefined && (run.status !== 'running' || run.stage !== 'working')
+    )
       refuse('illegal-transition', 'the direct parent Run has settled')
     if (child.status === 'ready') continue
     refuse(
@@ -434,10 +555,11 @@ function requirePlanAllows(cut: Cut, taskId: string): void {
       }`,
     )
   }
-  const own = plans.find((view) => view.parentTaskId === taskId)
+  const own = plans.find(view => view.parentTaskId === taskId)
   if (own === undefined) return
   // A first Run may open a previously declared plan; a retry cannot take pending work back.
-  if (Object.keys(cut.task(taskId)!.runs).length === 0 && !own.children.some((child) => child.status === 'running')) return
+  if (Object.keys(cut.task(taskId)!.runs).length === 0 && !own.children.some(child => child.status === 'running'))
+    return
   const hold = taskWaitingReason(cut.tasks(), taskId)
   if (hold !== undefined) refuse('illegal-transition', hold)
 }
@@ -446,10 +568,13 @@ function requirePlanAllows(cut: Cut, taskId: string): void {
 function requireCriterion(cut: Cut, taskId: string, criterionId: string) {
   const task = cut.task(taskId)
   if (task === undefined || task.contract === undefined)
-    refuse('illegal-transition', `cannot record a verdict for task "${taskId}": it has no admitted contract to decide against`,
+    refuse(
+      'illegal-transition',
+      `cannot record a verdict for task "${taskId}": it has no admitted contract to decide against`,
     )
-  const criterion = task.contract.criteria.find((entry) => entry.criterionId === criterionId)
-  if (criterion === undefined) refuse('unknown-criterion', `task "${taskId}" does not declare criterion "${criterionId}", so nothing decides it`)
+  const criterion = task.contract.criteria.find(entry => entry.criterionId === criterionId)
+  if (criterion === undefined)
+    refuse('unknown-criterion', `task "${taskId}" does not declare criterion "${criterionId}", so nothing decides it`)
   return criterion
 }
 
@@ -461,19 +586,23 @@ function settleRequest(
   const cut = cutOf(options)
   const task = cut.task(input.taskId)
   if (task === undefined || task.contract === undefined)
-    refuse('unknown-run', `cannot settle run "${input.runId}" of task "${input.taskId}": it has no admitted contract, so it never started a run`,
+    refuse(
+      'unknown-run',
+      `cannot settle run "${input.runId}" of task "${input.taskId}": it has no admitted contract, so it never started a run`,
     )
   const run = task.runs[input.runId]
-  if (run === undefined) refuse('unknown-run', `cannot settle run "${input.runId}": task "${input.taskId}" never started it`)
+  if (run === undefined)
+    refuse('unknown-run', `cannot settle run "${input.runId}": task "${input.taskId}" never started it`)
 
   const stopped = stoppedExplorationOf(cut.tasks(), input.taskId)
-  if (stopped !== undefined) refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
+  if (stopped !== undefined)
+    refuse('illegal-transition', `exploration ${stopped.taskId} was stopped: ${stopped.reason}`)
   const unadjudicated = unadjudicatedCriteria(task.contract, run)
   if (unadjudicated.length > 0)
     refuse(
       'unadjudicated-criterion',
       `cannot settle run "${input.runId}": ${unadjudicated
-        .map((criterion) => `"${criterion.criterionId}" has no verdict from independent review`)
+        .map(criterion => `"${criterion.criterionId}" has no verdict from independent review`)
         .join('; ')}; a run settles only once every criterion has been decided`,
     )
 
@@ -484,7 +613,7 @@ function settleRequest(
   // Every criterion without a passing verdict holds a failing one — the unadjudicated were refused
   // above — so the settlement carries the first failure's own words rather than a summary of them.
   // A failing verdict with no detail stays without one: the view reports "none recorded".
-  const failing = unmet.map((criterion) => verdictFor(run, criterion)).find((evidence) => evidence !== undefined)
+  const failing = unmet.map(criterion => verdictFor(run, criterion)).find(evidence => evidence !== undefined)
   const reason = failing?.detail
   return {
     ...common,
@@ -503,7 +632,15 @@ async function emitRaw(
   as?: string,
   require?: () => void,
 ): Promise<Envelope> {
-  return options.store.emit({ commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind, subject, payload, ...(as === undefined ? {} : { as }),
+  return options.store.emit(
+    {
+      commandId,
+      protocol: TASK_PROTOCOL,
+      version: TASK_VERSION,
+      kind,
+      subject,
+      payload,
+      ...(as === undefined ? {} : { as }),
     },
     require,
   ) as Promise<Envelope>

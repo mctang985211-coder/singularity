@@ -39,14 +39,18 @@ export function fixtureReview(apparatus: Apparatus, verdict: Finding['verdict'] 
       })
       review = apparatus.store.load().stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!
     }
-    return submitReview(apparatus, review, review.criteria.map((c) => {
-      const check = checks.find((check) => check.criterionId === c.criterionId)
-      return {
-        criterionId: c.criterionId,
-        verdict: check !== undefined && check.verdict !== 'pass' ? check.verdict : verdict,
-        detail: check?.detail ?? 'Independent fixture judgment',
-        evidence: ['attachment:' + run.submission!.files.artifact.attachmentId],
-      }
-    }))
+    return submitReview(
+      apparatus,
+      review,
+      review.criteria.map(c => {
+        const check = checks.find(check => check.criterionId === c.criterionId)
+        return {
+          criterionId: c.criterionId,
+          verdict: check !== undefined && check.verdict !== 'pass' ? check.verdict : verdict,
+          detail: check?.detail ?? 'Independent fixture judgment',
+          evidence: ['attachment:' + run.submission!.files.artifact.attachmentId],
+        }
+      }),
+    )
   }
 }

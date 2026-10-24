@@ -43,7 +43,13 @@ import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
 import { assertInputsBound, type Bubble } from '../task/bubble.ts'
 import type { VerifierCriterion } from '../task/contract.ts'
-import { TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type RevisionRef, type RunState, type TaskState,
+import {
+  TASK_PROTOCOL,
+  TASK_VERSION,
+  verifierRoleOf,
+  type RevisionRef,
+  type RunState,
+  type TaskState,
 } from '../task/protocol.ts'
 import type { MeasuredTrial } from './execution.ts'
 import {
@@ -84,22 +90,32 @@ export interface MeasureCommandOptions {
   readonly store: ControlSessionStore
   readonly registry: ProtocolRegistry
   /** The implementations this deployment holds, by the digest of their own bytes. */
-  readonly implementations: readonly { readonly ref: string
+  readonly implementations: readonly {
+    readonly ref: string
     readonly version: string
-    readonly implementationDigest: string }[]
+    readonly implementationDigest: string
+  }[]
 }
 
 export interface MeasureCommands {
   openEvaluation(input: EvaluationPlanInput): Promise<Envelope>
-  recordTrial(input: { readonly commandId: string
+  recordTrial(input: {
+    readonly commandId: string
     readonly evaluationId: string
-    readonly trial: TrialInput }): Promise<Envelope>
-  missTrial(input: { readonly commandId: string
+    readonly trial: TrialInput
+  }): Promise<Envelope>
+  missTrial(input: {
+    readonly commandId: string
     readonly evaluationId: string
     readonly slot: number
-    readonly reason: string }): Promise<Envelope>
-  failTrial(input: { readonly commandId: string; readonly evaluationId: string
-    readonly trial: Omit<FailedTrial, 'verifierRef' | 'verifierVersion'> }): Promise<Envelope>
+    readonly reason: string
+    readonly cost?: number
+  }): Promise<Envelope>
+  failTrial(input: {
+    readonly commandId: string
+    readonly evaluationId: string
+    readonly trial: Omit<FailedTrial, 'verifierRef' | 'verifierVersion'>
+  }): Promise<Envelope>
   checkConstraint(input: {
     readonly commandId: string
     readonly evaluationId: string
@@ -112,9 +128,11 @@ export interface MeasureCommands {
      * second judgment: the fact carries the digest of the verdict, and the reducer refuses a citation
      * of a criterion other than this one or of bytes this evaluation did not measure.
      */
-    readonly verdict?: { readonly criterionId: string
+    readonly verdict?: {
+      readonly criterionId: string
       readonly evidenceDigest: string
-      readonly artifactDigest: string }
+      readonly artifactDigest: string
+    }
     readonly detail?: string
   }): Promise<Envelope>
 }
@@ -136,7 +154,7 @@ interface OpenPlan {
 
 export function createMeasureCommands(options: MeasureCommandOptions): MeasureCommands {
   const commands: MeasureCommands = {
-    openEvaluation: (input) => {
+    openEvaluation: input => {
       const action = `open evaluation "${input.evaluationId}"`
       // The context is *read*, never supplied: a caller that could declare the context two candidates
       // are compared under could make them comparable by assertion. The bubble it comes from is
@@ -166,7 +184,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
       )
     },
 
-    recordTrial: (input) => {
+    recordTrial: input => {
       // The metric is read before the payload is built and again inside the commit region. The two
       // reads cannot disagree: a second `evaluation/opened` is refused by the reducer, so a plan
       // that exists at all never changes - the same reason `recordVerdict` may fill its verifier
@@ -207,19 +225,31 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
     failTrial: input => {
       const action = `record failed trial ${input.trial.slot}`
       const plan = requireOpened(cutOf(options), input.evaluationId, action)
-      return emitRaw(options, input.commandId, MEASURE_KINDS.trialFailed, input.evaluationId, {
-        ...input.trial, verifierRef: plan.metric.measured.verifierRef, verifierVersion: plan.metric.measured.verifierVersion,
-      }, () => {
-        const now = requireOpened(cutOf(options), input.evaluationId, action)
-        const run = requireTrialRun(options, now, input.trial.slot, input.trial.run, action)
-        if (run.status !== 'failed' || run.failureCause === 'runtime' || run.submission !== undefined)
-          refuse('evidence-input-mismatch', 'a scored no-artifact failure requires a terminal business Run without a submission')
-        requireHeldImplementation(options, input.trial.implementationDigest, action)
-        requireNotExecutor(options, now.metric.measured, run, action)
-      })
+      return emitRaw(
+        options,
+        input.commandId,
+        MEASURE_KINDS.trialFailed,
+        input.evaluationId,
+        {
+          ...input.trial,
+          verifierRef: plan.metric.measured.verifierRef,
+          verifierVersion: plan.metric.measured.verifierVersion,
+        },
+        () => {
+          const now = requireOpened(cutOf(options), input.evaluationId, action)
+          const run = requireTrialRun(options, now, input.trial.slot, input.trial.run, action)
+          if (run.status !== 'failed' || run.failureCause === 'runtime' || run.submission !== undefined)
+            refuse(
+              'evidence-input-mismatch',
+              'a scored no-artifact failure requires a terminal business Run without a submission',
+            )
+          requireHeldImplementation(options, input.trial.implementationDigest, action)
+          requireNotExecutor(options, now.metric.measured, run, action)
+        },
+      )
     },
 
-    missTrial: (input) => {
+    missTrial: input => {
       const action = `declare trial slot ${input.slot} of evaluation "${input.evaluationId}" missed`
       const plan = requireOpened(cutOf(options), input.evaluationId, action)
       return emitRaw(
@@ -230,6 +260,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
         {
           slot: input.slot,
           reason: input.reason,
+          ...(input.cost === undefined ? {} : { cost: input.cost }),
           verifierRef: plan.metric.measured.verifierRef,
           verifierVersion: plan.metric.measured.verifierVersion,
         },
@@ -240,7 +271,7 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
       )
     },
 
-    checkConstraint: (input) => {
+    checkConstraint: input => {
       const action = `check hard constraint "${input.criterionId}" of evaluation "${input.evaluationId}"`
       const plan = requireOpened(cutOf(options), input.evaluationId, action)
       const criterion = requireJudged(plan, input.evaluationId, input.criterionId, action)
@@ -265,10 +296,11 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
           // The same rule as a trial's numbers, on the fact that decides admissibility: a candidate
           // that measured its own run may not also certify that run's constraints. Without this the
           // non-compensating rule degrades to "…unless the candidate checks itself".
-          const judged = now.judgement.find((entry) => entry.criterionId === input.criterionId)
+          const judged = now.judgement.find(entry => entry.criterionId === input.criterionId)
           // Whether the plan judges that criterion at all is the reducer's rule; this lookup is only
           // to reach the implementation whose identity must not be the run's executor.
-          if (judged !== undefined) requireNotExecutor(options, judged, requireRun(cutOf(options), now.run, action), action)
+          if (judged !== undefined)
+            requireNotExecutor(options, judged, requireRun(cutOf(options), now.run, action), action)
         },
       )
     },
@@ -281,32 +313,65 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
 function cutOf(options: MeasureCommandOptions): Cut {
   const cut: ControlReadCut = options.store.load()
   return {
-    evaluation: (evaluationId) => cut.stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId),
-    task: (taskId) => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
+    evaluation: evaluationId => cut.stateOf<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId),
+    task: taskId => cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, taskId),
   }
 }
 
 /** The open plan of one evaluation, or a refusal naming what is missing. */
 function requireOpened(cut: Cut, evaluationId: string, action: string): OpenPlan {
   const state = cut.evaluation(evaluationId)
-  const plan = state === undefined ? undefined : { run: state.run, metric: state.metric, judgement: state.judgement, matrix: state.matrix, candidate: state.candidate }
+  const plan =
+    state === undefined
+      ? undefined
+      : {
+          run: state.run,
+          metric: state.metric,
+          judgement: state.judgement,
+          matrix: state.matrix,
+          candidate: state.candidate,
+        }
   if (plan === undefined || plan.run === undefined || plan.metric === undefined || plan.judgement === undefined)
-    refuse('illegal-transition', `cannot ${action}: no measurement plan is open for evaluation "${evaluationId}"; open the evaluation before anything is measured in it`,
+    refuse(
+      'illegal-transition',
+      `cannot ${action}: no measurement plan is open for evaluation "${evaluationId}"; open the evaluation before anything is measured in it`,
     )
-  return { run: plan.run, metric: plan.metric, judgement: plan.judgement, ...(plan.matrix === undefined ? {} : { matrix: plan.matrix }), ...(plan.candidate === undefined ? {} : { candidate: plan.candidate }) }
+  return {
+    run: plan.run,
+    metric: plan.metric,
+    judgement: plan.judgement,
+    ...(plan.matrix === undefined ? {} : { matrix: plan.matrix }),
+    ...(plan.candidate === undefined ? {} : { candidate: plan.candidate }),
+  }
 }
 
-function requireTrialRun(options: MeasureCommandOptions, plan: OpenPlan, slot: number, ref: EvaluationRun | undefined, action: string): RunState {
+function requireTrialRun(
+  options: MeasureCommandOptions,
+  plan: OpenPlan,
+  slot: number,
+  ref: EvaluationRun | undefined,
+  action: string,
+): RunState {
   const cut = cutOf(options)
   const actual = requireRun(cut, ref ?? plan.run, action)
   if (plan.matrix !== undefined) {
     if (ref === undefined) refuse('evidence-input-mismatch', 'matrix trial must name its actual Task/Run')
-    const task = cut.task(ref.taskId)!, held = plan.matrix.slots[slot]
-    if (held === undefined || digestOf(task.contract) !== held.contractDigest || digestOf(actual.revision) !== digestOf(plan.candidate))
+    const task = cut.task(ref.taskId)!,
+      held = plan.matrix.slots[slot]
+    if (
+      held === undefined ||
+      digestOf(task.contract) !== held.contractDigest ||
+      digestOf(actual.revision) !== digestOf(plan.candidate)
+    )
       refuse('evidence-input-mismatch', 'trial differs from frozen case or candidate')
     const anchor = requireRun(cut, plan.run, action).bubble
-    if (actual.bubble === undefined || anchor === undefined || digestOf({ model: actual.bubble.model, tools: actual.bubble.tools, conditions: actual.bubble.conditions }) !==
-      digestOf({ model: anchor.model, tools: anchor.tools, conditions: anchor.conditions })) refuse('caliber-mismatch', 'matrix trial changed execution conditions')
+    if (
+      actual.bubble === undefined ||
+      anchor === undefined ||
+      digestOf({ model: actual.bubble.model, tools: actual.bubble.tools, conditions: actual.bubble.conditions }) !==
+        digestOf({ model: anchor.model, tools: anchor.tools, conditions: anchor.conditions })
+    )
+      refuse('caliber-mismatch', 'matrix trial changed execution conditions')
   }
   return actual
 }
@@ -315,7 +380,9 @@ function requireTrialRun(options: MeasureCommandOptions, plan: OpenPlan, slot: n
 function requireRun(cut: Cut, run: EvaluationRun, action: string): RunState {
   const state = cut.task(run.taskId)?.runs[run.runId]
   if (state === undefined)
-    refuse('unknown-run', `cannot ${action}: task "${run.taskId}" never started run "${run.runId}", so there is no execution context to measure in`,
+    refuse(
+      'unknown-run',
+      `cannot ${action}: task "${run.taskId}" never started run "${run.runId}", so there is no execution context to measure in`,
     )
   return state
 }
@@ -333,11 +400,11 @@ function requireBubbledRun(cut: Cut, run: EvaluationRun, action: string): RunSta
 
 /** One hard constraint of the plan, or a refusal listing what the plan does declare. */
 function requireJudged(plan: OpenPlan, evaluationId: string, criterionId: string, action: string): VerifierCriterion {
-  const criterion = plan.judgement.find((entry) => entry.criterionId === criterionId)
+  const criterion = plan.judgement.find(entry => entry.criterionId === criterionId)
   if (criterion === undefined)
     refuse(
       'unknown-criterion',
-      `cannot ${action}: evaluation "${evaluationId}" does not declare hard constraint "${criterionId}" (declared: ${plan.judgement.map((entry) => entry.criterionId).join(', ') || 'none'})`,
+      `cannot ${action}: evaluation "${evaluationId}" does not declare hard constraint "${criterionId}" (declared: ${plan.judgement.map(entry => entry.criterionId).join(', ') || 'none'})`,
     )
   return criterion
 }
@@ -350,8 +417,10 @@ function requireJudged(plan: OpenPlan, evaluationId: string, criterionId: string
  * replaying last month's facts cannot answer it.
  */
 function requireHeldImplementation(options: MeasureCommandOptions, implementationDigest: string, action: string): void {
-  if (!options.implementations.some((entry) => entry.implementationDigest === implementationDigest))
-    refuse('unregistered-verifier', `cannot ${action}: this deployment holds no implementation with digest ${implementationDigest.slice(0, 12)}…, so it cannot have produced this measurement`,
+  if (!options.implementations.some(entry => entry.implementationDigest === implementationDigest))
+    refuse(
+      'unregistered-verifier',
+      `cannot ${action}: this deployment holds no implementation with digest ${implementationDigest.slice(0, 12)}…, so it cannot have produced this measurement`,
     )
 }
 
@@ -365,14 +434,18 @@ function requireHeldImplementation(options: MeasureCommandOptions, implementatio
  * makes the check read the table the stamp comes from: a role it does not resolve never reaches this
  * function, because the append path resolves the emitter role from the same table before it runs.
  */
-function requireNotExecutor(options: MeasureCommandOptions, criterion: VerifierCriterion,
+function requireNotExecutor(
+  options: MeasureCommandOptions,
+  criterion: VerifierCriterion,
   run: RunState,
   action: string,
 ): void {
   const role = verifierRoleOf({ verifierRef: criterion.verifierRef, verifierVersion: criterion.verifierVersion })
   const actor = options.store.identityOf(role)
   if (actor === run.actor)
-    refuse('self-reported-evidence', `cannot ${action}: "${actor}" (role ${role}) started run "${run.runId}" and cannot also measure its criterion "${criterion.criterionId}"`,
+    refuse(
+      'self-reported-evidence',
+      `cannot ${action}: "${actor}" (role ${role}) started run "${run.runId}" and cannot also measure its criterion "${criterion.criterionId}"`,
     )
 }
 
@@ -391,6 +464,8 @@ async function emitRaw(
   payload: unknown,
   require?: () => void,
 ): Promise<Envelope> {
-  return options.store.emit({ commandId, protocol: MEASURE_PROTOCOL, version: MEASURE_VERSION, kind, subject, payload }, require,
+  return options.store.emit(
+    { commandId, protocol: MEASURE_PROTOCOL, version: MEASURE_VERSION, kind, subject, payload },
+    require,
   ) as Promise<Envelope>
 }

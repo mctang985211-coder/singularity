@@ -20,7 +20,11 @@ it('does not finish cancellation before the actual process exits', async () => {
     process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300));
     writeFileSync(${JSON.stringify(ready)}, String(process.pid)); setInterval(() => {}, 100);`
   try {
-    const pending = spawnProcess({ shell: false, argv: [process.execPath, '--input-type=module', '-e', code] }, controller.signal, root)
+    const pending = spawnProcess(
+      { shell: false, argv: [process.execPath, '--input-type=module', '-e', code] },
+      controller.signal,
+      root,
+    )
     await vi.waitFor(() => access(ready))
     controller.abort(new Error('unloading'))
     expect(await pending).toMatchObject({ exitCode: null, failure: expect.any(String) })
@@ -36,7 +40,9 @@ it('does not leave a descendant writing after its submitted process finishes', a
   const parent = `import { spawn } from 'node:child_process';
     const child = spawn(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(child)}], { stdio: 'ignore' }); child.unref();`
   try {
-    expect(await spawnProcess({ shell: false, argv: [process.execPath, '--input-type=module', '-e', parent] })).toMatchObject({ exitCode: 0 })
+    expect(
+      await spawnProcess({ shell: false, argv: [process.execPath, '--input-type=module', '-e', parent] }),
+    ).toMatchObject({ exitCode: 0 })
     await setTimeout(400)
     await expect(access(marker)).rejects.toThrow()
   } finally {

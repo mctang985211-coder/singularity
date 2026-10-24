@@ -8,9 +8,10 @@ import type { DecompositionChild } from '../task/decomposition.ts'
 import { assertDecomposition } from '../task/decomposition.ts'
 import type { Bubble } from '../task/bubble.ts'
 import type { RevisionRef } from '../task/protocol.ts'
+import { nativeEventRef, type NativeEventRef } from './evidence.ts'
 
 export const REVIEW_PROTOCOL = 'review'
-export const REVIEW_VERSION = 5
+export const REVIEW_VERSION = 8
 export const REVIEW_ROLE = 'verifier:independent-review@1'
 export const REVIEW_DIGEST = digestOf({ protocol: REVIEW_PROTOCOL, version: REVIEW_VERSION })
 export const reviewCriterion = (criterion: AcceptanceCriterion): VerifierCriterion => ({
@@ -44,7 +45,7 @@ export interface Finding {
   readonly criterionId: string
   readonly verdict: 'pass' | 'fail' | 'partial' | 'unknown'
   readonly detail: string
-  readonly evidence: readonly string[]
+  readonly evidence: readonly (string | NativeEventRef)[]
 }
 export interface ReviewRun {
   readonly reviewId: string
@@ -67,7 +68,7 @@ export interface ReviewRun {
 export function readFindings(raw: unknown): readonly Finding[] {
   if (!Array.isArray(raw)) refuse('malformed-payload', 'review findings must be an array')
   const ids = new Set<string>()
-  return raw.map((raw) => {
+  return raw.map(raw => {
     const row = record(raw, 'finding')
     assertClosedKeys(row, ['criterionId', 'verdict', 'detail', 'evidence'], 'finding')
     const verdict = row['verdict']
@@ -77,9 +78,13 @@ export function readFindings(raw: unknown): readonly Finding[] {
     if (ids.has(criterionId)) refuse('evidence-conflict', 'duplicate review finding')
     ids.add(criterionId)
     const evidence = row['evidence']
-    if (!Array.isArray(evidence) || evidence.some((ref) => typeof ref !== 'string' || ref.length === 0))
-      refuse('malformed-payload', 'finding evidence must contain references')
-    return { criterionId, verdict, detail: text(row, 'detail', 'finding'), evidence: evidence as string[] }
+    if (!Array.isArray(evidence)) refuse('malformed-payload', 'finding evidence must contain references')
+    const references = evidence.map(ref => {
+      if (typeof ref !== 'string') return nativeEventRef(ref, 'finding.evidence')
+      if (ref.length === 0) refuse('malformed-payload', 'finding evidence must contain nonempty references')
+      return ref
+    })
+    return { criterionId, verdict, detail: text(row, 'detail', 'finding'), evidence: references }
   })
 }
 export function declareReviewProtocol(registry: ProtocolRegistry): void {
@@ -106,13 +111,15 @@ export function declareReviewProtocol(registry: ProtocolRegistry): void {
           const row = record(raw, where)
           const target = record(row['target'], 'review target')
           const kind = text(target, 'kind', 'review target')
-          if (kind !== 'acceptance' && kind !== 'publication' && kind !== 'proposal') refuse('malformed-payload', 'unknown review target')
+          if (kind !== 'acceptance' && kind !== 'publication' && kind !== 'proposal')
+            refuse('malformed-payload', 'unknown review target')
           assertClosedKeys(
             target,
             kind === 'acceptance'
               ? ['kind', 'taskId', 'runId', 'contractDigest', 'artifactDigest']
-              : kind === 'publication' ? ['kind', 'environmentId', 'revisionId', 'draftDigest', 'assetsDigest']
-              : ['kind', 'environmentId', 'revisionId', 'assetsDigest'],
+              : kind === 'publication'
+                ? ['kind', 'environmentId', 'revisionId', 'draftDigest', 'assetsDigest']
+                : ['kind', 'environmentId', 'revisionId', 'assetsDigest'],
             'review target',
           )
           for (const key of Object.keys(target))
@@ -159,7 +166,7 @@ export function declareReviewProtocol(registry: ProtocolRegistry): void {
         emitter: 'scheduler',
         members: ['children'],
         nested: {},
-        parse: (raw) => {
+        parse: raw => {
           const row = record(raw, 'review decomposition')
           if (!Array.isArray(row['children'])) refuse('malformed-payload', 'evidence decomposition requires an array')
           return { children: row['children'] as DecompositionChild[] }
@@ -182,7 +189,7 @@ export function declareReviewProtocol(registry: ProtocolRegistry): void {
         emitter: REVIEW_ROLE,
         members: ['findings', 'result'],
         nested: {},
-        parse: (raw) => {
+        parse: raw => {
           const row = record(raw, 'review completion')
           const result = record(row['result'], 'review result')
           assertClosedKeys(result, ['attachmentId', 'name', 'bytes'], 'review result')
@@ -200,7 +207,7 @@ export function declareReviewProtocol(registry: ProtocolRegistry): void {
             refuse('not-responsible', 'only the assigned reviewer can complete its Run')
           if (
             payload.findings.length !== state.criteria.length ||
-            state.criteria.some((c) => !payload.findings.some((f) => f.criterionId === c.criterionId))
+            state.criteria.some(c => !payload.findings.some(f => f.criterionId === c.criterionId))
           )
             refuse('unadjudicated-criterion', 'review must decide every frozen criterion exactly once')
           return { ...state, status: 'completed', ...payload }
@@ -211,7 +218,7 @@ export function declareReviewProtocol(registry: ProtocolRegistry): void {
         emitter: 'scheduler',
         members: ['reason'],
         nested: {},
-        parse: (raw) => ({ reason: text(record(raw, 'review failure'), 'reason', 'review failure') }),
+        parse: raw => ({ reason: text(record(raw, 'review failure'), 'reason', 'review failure') }),
         reduce: (state, _envelope, payload) => {
           if (state.status !== 'running') refuse('illegal-transition', 'only a running review can fail')
           return { ...state, status: 'failed', failure: payload.reason }

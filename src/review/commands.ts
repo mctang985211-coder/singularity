@@ -33,7 +33,10 @@ export function createReviewCommands(store: ControlSessionStore) {
           if (agent?.sessionId !== input.sessionId || store.identityOf(`agent:${input.agentId}`) !== input.identity)
             refuse('unknown-emitter-role', 'review requires an exact opened agent identity')
           if (input.target.kind === 'acceptance') {
-            if (stoppedExplorationOf(cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), input.target.taskId) !== undefined)
+            if (
+              stoppedExplorationOf(cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION), input.target.taskId) !==
+              undefined
+            )
               refuse('illegal-transition', 'stopped exploration cannot start acceptance review')
             const task = cut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, input.target.taskId)
             const run = task?.runs[input.target.runId]
@@ -50,18 +53,37 @@ export function createReviewCommands(store: ControlSessionStore) {
         },
       ),
     decompose: (commandId: string, reviewId: string, children: readonly DecompositionChild[], as: string) =>
-      store.emit({ commandId, protocol: REVIEW_PROTOCOL, version: REVIEW_VERSION,
-        kind: 'review/decomposed', subject: reviewId, payload: { children }, as }, () => {
-        const cut = store.load(), review = cut.stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!
-        const tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
-        if (review.target.kind !== 'acceptance') refuse('not-responsible', 'method reviews cannot delegate evidence Tasks')
-        if (review.target.kind === 'acceptance' && stoppedExplorationOf(tasks, review.target.taskId) !== undefined)
-          refuse('illegal-transition', 'stopped exploration cannot delegate acceptance evidence')
-        if (!projectPlan(reviewId, review.criteria, review.children, tasks).children.every(childSettled))
-          refuse('illegal-transition', 'delegated review responsibilities are pending')
-        assertParentage(reviewId, children, tasks, [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()]
-          .map((held) => ({ parentId: held.reviewId, children: held.children })))
-      }),
+      store.emit(
+        {
+          commandId,
+          protocol: REVIEW_PROTOCOL,
+          version: REVIEW_VERSION,
+          kind: 'review/decomposed',
+          subject: reviewId,
+          payload: { children },
+          as,
+        },
+        () => {
+          const cut = store.load(),
+            review = cut.stateOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION, reviewId)!
+          const tasks = cut.statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
+          if (review.target.kind !== 'acceptance')
+            refuse('not-responsible', 'method reviews cannot delegate evidence Tasks')
+          if (review.target.kind === 'acceptance' && stoppedExplorationOf(tasks, review.target.taskId) !== undefined)
+            refuse('illegal-transition', 'stopped exploration cannot delegate acceptance evidence')
+          if (!projectPlan(reviewId, review.criteria, review.children, tasks).children.every(childSettled))
+            refuse('illegal-transition', 'delegated review responsibilities are pending')
+          assertParentage(
+            reviewId,
+            children,
+            tasks,
+            [...cut.statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()].map(held => ({
+              parentId: held.reviewId,
+              children: held.children,
+            })),
+          )
+        },
+      ),
     complete: (
       commandId: string,
       reviewId: string,

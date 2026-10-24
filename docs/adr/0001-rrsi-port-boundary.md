@@ -1,5 +1,7 @@
 # Use the RRSI loop through Harness execution
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](../architecture.md)，分类和来源见[文档目录](../documentation-index.md)。
+
 **Status:** accepted (2026-10-09)
 
 **Implementation audit (2026-10-17):** this ADR records the intended boundary, not proof that every regularizer is implemented. The current code lacks several orchestration constraints and uses single-task evaluation; see the [source audit and implementation plan](../task-first-domain-rsi-plan.md), sections 4–7. That plan retains the TypeScript/DSH execution boundary and explicitly schedules the missing work.

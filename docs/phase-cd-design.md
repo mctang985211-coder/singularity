@@ -1,5 +1,7 @@
 # phase-cd-design.md —— C/D 的接口冻结（**先读这份，再动代码**）
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 > 历史 C/D 核心设计；当前方法进化与发布合同见 [assembly-blueprint §7](assembly-blueprint.md#7-g3一条方法进化路径)。 历史正文按基线保留。
 
 > 这份文件是**冻结的接口契约**，不是建议。四个工作流并行时，唯一的协调手段就是它。

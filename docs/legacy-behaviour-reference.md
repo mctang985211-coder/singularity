@@ -1,5 +1,7 @@
 # Legacy behavioural reference (Singularity @ `6a0edde`, frozen read-only)
 
+> 文档归档范围：历史记录。适用协议和证据仅限原文明确记录；未冻结的版本不推断。当前行为见[架构入口](architecture.md)，分类和来源见[文档目录](documentation-index.md)。
+
 Paths are relative to `/home/ROXY/code/bb_work/harness/packages/singularity`. Enforcement class is
 **mechanism** (reducer / fold / CAS / lease / schema), **ordering** (code sequence in one runtime),
 or **convention** (prompt, docstring, comment). Verdicts: **COPY** / **REUSE-DSH** / **DROP**.

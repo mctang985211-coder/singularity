@@ -123,7 +123,10 @@ export function assertLosslessJson(value: unknown, where: string, seen = new Set
     }
     const prototype: unknown = Object.getPrototypeOf(container)
     if (prototype !== Object.prototype && prototype !== null)
-      refuse('not-lossless-json', `${where} is a ${container.constructor?.name ?? 'non-plain object'}, whose members JSON would not restore`)
+      refuse(
+        'not-lossless-json',
+        `${where} is a ${container.constructor?.name ?? 'non-plain object'}, whose members JSON would not restore`,
+      )
     for (const [key, entry] of Object.entries(container)) assertLosslessJson(entry, `${where}.${key}`, seen)
   } finally {
     seen.delete(container)
@@ -173,7 +176,10 @@ export function assertClosedKeys(
 ): void {
   for (const key of Object.keys(record)) {
     if (!allowed.includes(key))
-      refuse(code, `${where} carries unknown member ${JSON.stringify(key)}; the shape is closed (known: ${allowed.join(', ')})`)
+      refuse(
+        code,
+        `${where} carries unknown member ${JSON.stringify(key)}; the shape is closed (known: ${allowed.join(', ')})`,
+      )
   }
 }
 
@@ -239,10 +245,25 @@ export function assertEnvelope(raw: unknown): Envelope {
   if (!DIGEST_PATTERN.test(digest))
     refuse('malformed-envelope', `envelope digest must be a sha256 hex digest, got ${JSON.stringify(digest)}`)
 
-  const body: EnvelopeBody = { protocol, version, kind, subject, commandId, emitter, actor, at, seq, prevDigest, payload }
+  const body: EnvelopeBody = {
+    protocol,
+    version,
+    kind,
+    subject,
+    commandId,
+    emitter,
+    actor,
+    at,
+    seq,
+    prevDigest,
+    payload,
+  }
   const computed = digestOfBody(body)
   if (computed !== digest)
-    refuse('digest-mismatch', `envelope ${protocol}/${kind} #${seq} carries digest ${digest.slice(0, 12)}… but its body reads ${computed.slice(0, 12)}…`)
+    refuse(
+      'digest-mismatch',
+      `envelope ${protocol}/${kind} #${seq} carries digest ${digest.slice(0, 12)}… but its body reads ${computed.slice(0, 12)}…`,
+    )
 
   return { ...body, digest }
 }

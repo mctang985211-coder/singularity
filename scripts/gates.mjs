@@ -6,55 +6,98 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
 import { hostFindings, hostInstall } from './host-config.mjs'
-import { checkBuild } from '../assembly/build.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PROTOCOL_LEDGER = 'protocol-baseline.json'
 const MUTATION_LEDGER = 'mutation-baseline.json'
-const READ_ONLY_FS = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'statSync', 'lstat', 'lstatSync',
-  'realpath', 'realpathSync', 'access', 'accessSync', 'readlink', 'readlinkSync', 'existsSync', 'constants', 'Stats', 'Dirent',
+const READ_ONLY_FS = new Set([
+  'readFile',
+  'readFileSync',
+  'readdir',
+  'readdirSync',
+  'stat',
+  'statSync',
+  'lstat',
+  'lstatSync',
+  'realpath',
+  'realpathSync',
+  'access',
+  'accessSync',
+  'readlink',
+  'readlinkSync',
+  'existsSync',
+  'constants',
+  'Stats',
+  'Dirent',
 ])
 const FS_MODULES = new Set(['node:fs', 'node:fs/promises'])
 
 function treeFiles(directory) {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(directory, entry.name)
-    return entry.isDirectory() ? treeFiles(path) : [path]
-  }).sort()
+  return readdirSync(directory, { withFileTypes: true })
+    .flatMap(entry => {
+      const path = join(directory, entry.name)
+      return entry.isDirectory() ? treeFiles(path) : [path]
+    })
+    .sort()
 }
 
 /** Runtime/control are DSH adapters; every other src module is host-independent. */
 export function boundaryFindings(sources) {
   const findings = []
   for (const { file, text } of sources) {
-    const path = resolve(ROOT, file), name = relative(ROOT, path)
+    const path = resolve(ROOT, file),
+      name = relative(ROOT, path)
     const core = name.startsWith('src/')
     const adapter = name.startsWith('src/runtime/') || name === 'src/control/session-store.ts'
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)
     const check = (node, specifier, typeOnly = false) => {
-      const target = specifier.startsWith('.') || specifier.startsWith('/') ? relative(ROOT, resolve(dirname(path), specifier)) : specifier
-      const report = detail => findings.push(`${name}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1} ${detail}`)
+      const target =
+        specifier.startsWith('.') || specifier.startsWith('/')
+          ? relative(ROOT, resolve(dirname(path), specifier))
+          : specifier
+      const report = detail =>
+        findings.push(`${name}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1} ${detail}`)
       if (core && (target.startsWith('assembly/') || target.startsWith('@dangosys/dsh-singularity-next')))
         report('core cannot depend on assembly')
       if (target.startsWith('domain/') || target.startsWith('domains/') || target.startsWith('deployment/domain/'))
         report('domain implementations belong to external environment packages, never product imports')
-      if (core && !adapter && !typeOnly && (specifier.startsWith('@deepseek-ai/') ||
-        (!specifier.startsWith('node:') && !target.startsWith('src/')) ||
-        target.startsWith('src/runtime/') || target.startsWith('src/control/') || specifier === 'node:module'))
+      if (
+        core &&
+        !adapter &&
+        !typeOnly &&
+        (specifier.startsWith('@deepseek-ai/') ||
+          (!specifier.startsWith('node:') && !target.startsWith('src/')) ||
+          target.startsWith('src/runtime/') ||
+          target.startsWith('src/control/') ||
+          specifier === 'node:module')
+      )
         report('protocol/decision code cannot load a host adapter or external runtime')
     }
     const visit = node => {
-      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      if (
+        (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+        node.moduleSpecifier &&
+        ts.isStringLiteral(node.moduleSpecifier)
+      ) {
         const clause = ts.isImportDeclaration(node) ? node.importClause : undefined
         const bindings = clause?.namedBindings ?? (ts.isExportDeclaration(node) ? node.exportClause : undefined)
-        const typeOnly = clause?.isTypeOnly || (ts.isExportDeclaration(node) && node.isTypeOnly) ||
-          (!clause?.name && bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings)) && bindings.elements.length > 0 && bindings.elements.every(e => e.isTypeOnly))
+        const typeOnly =
+          clause?.isTypeOnly ||
+          (ts.isExportDeclaration(node) && node.isTypeOnly) ||
+          (!clause?.name &&
+            bindings &&
+            (ts.isNamedImports(bindings) || ts.isNamedExports(bindings)) &&
+            bindings.elements.length > 0 &&
+            bindings.elements.every(e => e.isTypeOnly))
         check(node, node.moduleSpecifier.text, !!typeOnly)
       }
       if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal))
         check(node, node.argument.literal.text, true)
-      if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (!node.questionDotToken && ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      if (
+        ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (!node.questionDotToken && ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+      ) {
         const arg = node.arguments[0]
         if (arg && ts.isStringLiteral(arg)) check(node, arg.text)
         else if (core) findings.push(`${name}: core module loading must use literal imports`)
@@ -70,26 +113,38 @@ export function coreWriteFindings(sources) {
   const findings = []
   for (const { file, text } of sources) {
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)
-    const report = (node, detail) => findings.push(`${file}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1} ${detail}`)
-    const visit = (node) => {
-      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) {
+    const report = (node, detail) =>
+      findings.push(`${file}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1} ${detail}`)
+    const visit = node => {
+      if (
+        (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+        node.moduleSpecifier !== undefined &&
+        ts.isStringLiteral(node.moduleSpecifier)
+      ) {
         const specifier = node.moduleSpecifier.text
-        if (specifier === 'node:child_process' || specifier === 'child_process') report(node, 'core cannot execute processes; DSH owns the medium')
+        if (specifier === 'node:child_process' || specifier === 'child_process')
+          report(node, 'core cannot execute processes; DSH owns the medium')
         if (FS_MODULES.has(specifier)) {
           const bindings = ts.isImportDeclaration(node) ? node.importClause?.namedBindings : node.exportClause
-          if (bindings === undefined || ts.isNamespaceImport(bindings) || ts.isNamespaceExport(bindings) ||
+          if (
+            bindings === undefined ||
+            ts.isNamespaceImport(bindings) ||
+            ts.isNamespaceExport(bindings) ||
             (ts.isImportDeclaration(node) && node.importClause?.name !== undefined)
           )
             report(node, 'core filesystem imports must name their read-only members')
-          else for (const element of bindings.elements)
-            if (!READ_ONLY_FS.has((element.propertyName ?? element.name).text)) report(element, 'core cannot import a filesystem writer')
+          else
+            for (const element of bindings.elements)
+              if (!READ_ONLY_FS.has((element.propertyName ?? element.name).text))
+                report(element, 'core cannot import a filesystem writer')
         }
       }
       if (ts.isIdentifier(node) && ['createRequire', 'getBuiltinModule'].includes(node.text))
         report(node, 'core cannot use opaque module loaders')
       if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
         const target = node.arguments[0]
-        if (target === undefined || !ts.isStringLiteral(target)) report(node, 'core dynamic imports must name one literal module')
+        if (target === undefined || !ts.isStringLiteral(target))
+          report(node, 'core dynamic imports must name one literal module')
         else if (FS_MODULES.has(target.text) || ['node:child_process', 'child_process'].includes(target.text))
           report(node, 'core cannot dynamically load filesystem or process capabilities')
       }
@@ -103,9 +158,11 @@ export function coreWriteFindings(sources) {
 export function domainFindings(sources, declarations) {
   const identities = new Set()
   const keys = new Set(['criterionId', 'verifier', 'ref', 'path', 'program', 'artifact', 'inputs'])
-  const collect = (node) => {
-    if (Array.isArray(node)) { for (const item of node) collect(item)
-      return }
+  const collect = node => {
+    if (Array.isArray(node)) {
+      for (const item of node) collect(item)
+      return
+    }
     if (node === null || typeof node !== 'object') return
     for (const [key, value] of Object.entries(node)) {
       if (typeof value === 'string' && keys.has(key)) identities.add(value)
@@ -117,11 +174,18 @@ export function domainFindings(sources, declarations) {
   for (const declaration of declarations) collect(declaration)
   const findings = []
   for (const { file, text } of sources) {
-    const visit = (node) => {
-      if (ts.isStringLiteralLike(node) && identities.has(node.text)) findings.push(`${file} hardcodes domain identity ${JSON.stringify(node.text)}`)
+    const visit = node => {
+      if (ts.isStringLiteralLike(node) && identities.has(node.text))
+        findings.push(`${file} hardcodes domain identity ${JSON.stringify(node.text)}`)
       ts.forEachChild(node, visit)
     }
-    visit(ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TS,
+    visit(
+      ts.createSourceFile(
+        file,
+        text,
+        ts.ScriptTarget.Latest,
+        true,
+        file.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TS,
       ),
     )
   }
@@ -130,27 +194,33 @@ export function domainFindings(sources, declarations) {
 
 export function inventoryFindingsWith(ledger, declared) {
   const findings = []
-  const key = (row) => `${row.protocol}@${row.version}`
-  const actual = new Map(declared.map((row) => [key(row), row]))
-  const listed = new Map(ledger.protocols.map((row) => [key(row), row]))
+  const key = row => `${row.protocol}@${row.version}`
+  const actual = new Map(declared.map(row => [key(row), row]))
+  const listed = new Map(ledger.protocols.map(row => [key(row), row]))
   for (const [id, row] of actual) {
     const record = listed.get(id)
-    if (record === undefined) { findings.push(`${PROTOCOL_LEDGER} omits ${id}`)
-      continue }
+    if (record === undefined) {
+      findings.push(`${PROTOCOL_LEDGER} omits ${id}`)
+      continue
+    }
     for (const field of ['subject', 'producedBy', 'readBy'])
       if (typeof record[field] !== 'string' || record[field].length === 0) findings.push(`${id} has no ${field}`)
-    const actualKinds = new Map(row.kinds.map((kind) => [kind.name, kind.members]))
-    const recordedKinds = new Map(record.kinds.map((kind) => [kind.name, kind.members]))
+    const actualKinds = new Map(row.kinds.map(kind => [kind.name, kind.members]))
+    const recordedKinds = new Map(record.kinds.map(kind => [kind.name, kind.members]))
     for (const [name, members] of actualKinds)
-      if (!Array.isArray(recordedKinds.get(name)) || JSON.stringify([...members].sort()) !== JSON.stringify([...recordedKinds.get(name)].sort()))
+      if (
+        !Array.isArray(recordedKinds.get(name)) ||
+        JSON.stringify([...members].sort()) !== JSON.stringify([...recordedKinds.get(name)].sort())
+      )
         findings.push(`${id} ${name} payload member set differs from ${PROTOCOL_LEDGER}`)
-    for (const name of recordedKinds.keys()) if (!actualKinds.has(name)) findings.push(`${id} records undeclared kind ${name}`)
+    for (const name of recordedKinds.keys())
+      if (!actualKinds.has(name)) findings.push(`${id} records undeclared kind ${name}`)
   }
   for (const id of listed.keys()) if (!actual.has(id)) findings.push(`${PROTOCOL_LEDGER} records undeclared ${id}`)
   return findings
 }
 
-export function mutationFindings(ledger, textOf = (file) => readFileSync(join(ROOT, file), 'utf8')) {
+export function mutationFindings(ledger, textOf = file => readFileSync(join(ROOT, file), 'utf8')) {
   const findings = []
   const ids = new Set()
   for (const claim of ledger.claims) {
@@ -159,15 +229,25 @@ export function mutationFindings(ledger, textOf = (file) => readFileSync(join(RO
     ids.add(claim.id)
     if (!['node', 'vitest'].includes(claim.run?.kind) || !Array.isArray(claim.run.args) || claim.run.args.length === 0)
       findings.push(`${where}: no runnable command`)
-    else for (const arg of claim.run.args) if (!arg.startsWith('-')) {
-      try { textOf(arg) } catch { findings.push(`${where}: missing command input ${arg}`) }
-    }
-    if (typeof claim.witness !== 'string' || claim.witness.length === 0 || claim.witness === '×') findings.push(`${where}: no specific failure witness`)
+    else
+      for (const arg of claim.run.args)
+        if (!arg.startsWith('-')) {
+          try {
+            textOf(arg)
+          } catch {
+            findings.push(`${where}: missing command input ${arg}`)
+          }
+        }
+    if (typeof claim.witness !== 'string' || claim.witness.length === 0 || claim.witness === '×')
+      findings.push(`${where}: no specific failure witness`)
     if (claim.edits.length === 0) findings.push(`${where}: no mutation edits`)
     for (const edit of claim.edits) {
       try {
-        if (textOf(edit.file).split(edit.find).length - 1 !== 1) findings.push(`${where}: stale edit anchor in ${edit.file}`)
-      } catch { findings.push(`${where}: missing edit input ${edit.file}`) }
+        if (textOf(edit.file).split(edit.find).length - 1 !== 1)
+          findings.push(`${where}: stale edit anchor in ${edit.file}`)
+      } catch {
+        findings.push(`${where}: missing edit input ${edit.file}`)
+      }
     }
   }
   if (!ids.has(ledger.commitClaim)) findings.push(`${MUTATION_LEDGER}: commitClaim does not name a runnable mutation`)
@@ -182,67 +262,106 @@ function alignmentFindingsWith(baseline) {
   }
   const generated = JSON.parse(readFileSync(join(ROOT, '.singularity/tsconfig.host.json'), 'utf8'))
   for (const [alias, targets] of Object.entries(generated.compilerOptions.paths))
-    for (const path of targets) if (!path.startsWith(hostInstall() + '/')) findings.push(`${alias} points outside the configured private host`)
+    for (const path of targets)
+      if (!path.startsWith(hostInstall() + '/')) findings.push(`${alias} points outside the configured private host`)
   return findings
 }
 
 async function declaredProtocols() {
-  await import('./dsh-control-runtime.mjs')
   const core = await import('../src/index.ts')
   const registry = new core.ProtocolRegistry()
-  for (const declare of [core.declareAgentProtocol, core.declareTaskProtocol, core.declareEnvironmentProtocol,
+  for (const declare of [
+    core.declareAgentProtocol,
+    core.declareTaskProtocol,
+    core.declareEnvironmentProtocol,
     core.declareReviewProtocol,
     core.declareMeasureProtocol,
     core.declareStrategyProtocol,
     core.declareReleaseProtocol,
-  ]) declare(registry)
-  return registry.protocols().flatMap((protocol) =>
-      registry
-        .versionsOf(protocol)
-        .map((version) => ({ protocol, version,
-    kinds: registry.kindsOf(protocol, version).map((name) => ({ name, members: registry.ruleFor(protocol, version, name).members })),
-        })),
-    )
+  ])
+    declare(registry)
+  return registry.protocols().flatMap(protocol =>
+    registry.versionsOf(protocol).map(version => ({
+      protocol,
+      version,
+      kinds: registry
+        .kindsOf(protocol, version)
+        .map(name => ({ name, members: registry.ruleFor(protocol, version, name).members })),
+    })),
+  )
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (process.argv.includes('--probe')) {
-    execFileSync(process.execPath, [join(ROOT, 'node_modules/vitest/vitest.mjs'), 'run', 'tests/build-gates.spec.ts', 'assembly/tests/build.spec.ts',
+    execFileSync(
+      process.execPath,
+      [
+        join(ROOT, 'node_modules/vitest/vitest.mjs'),
+        'run',
+        'tests/build-gates.spec.ts',
+        'assembly/tests/build.spec.ts',
       ],
       { cwd: ROOT, stdio: 'inherit' },
     )
   } else {
-    const sources = (directory) => treeFiles(join(ROOT, directory)).filter((file) => /\.(ts|tsx|js)$/.test(file))
-        .map((file) => ({ file, text: readFileSync(file, 'utf8') }))
+    const sources = directory =>
+      treeFiles(join(ROOT, directory))
+        .filter(file => /\.(ts|tsx|js)$/.test(file))
+        .map(file => ({ file, text: readFileSync(file, 'utf8') }))
     const ledger = JSON.parse(readFileSync(join(ROOT, MUTATION_LEDGER), 'utf8'))
     const checks = [
-      ['assembly-built', async () => { await checkBuild()
+      [
+        'assembly-built',
+        async () => {
+          const { checkBuild } = await import('../assembly/build.mjs')
+          await checkBuild()
           return []
         },
       ],
       ['core-no-durable-write', () => coreWriteFindings(sources('src'))],
       ['package-boundaries', () => boundaryFindings([...sources('src'), ...sources('assembly/src')])],
-      ['product-domain-free', () => domainFindings([...sources('src'), ...sources('assembly/src'),
-        ...sources('assembly/frontend'),
-        ...['client.js'].map((file) => ({ file: 'assembly/' + file, text: readFileSync(join(ROOT, 'assembly', file), 'utf8'),
+      [
+        'product-domain-free',
+        () =>
+          domainFindings(
+            [
+              ...sources('src'),
+              ...sources('assembly/src'),
+              ...sources('assembly/frontend'),
+              ...['client.js'].map(file => ({
+                file: 'assembly/' + file,
+                text: readFileSync(join(ROOT, 'assembly', file), 'utf8'),
               })),
             ],
-        treeFiles(join(ROOT, 'domain')).filter((file) => file.endsWith('task.json'))
-              .map((file) => JSON.parse(readFileSync(file, 'utf8'))),
+            treeFiles(join(ROOT, 'domain'))
+              .filter(file => file.endsWith('task.json'))
+              .map(file => JSON.parse(readFileSync(file, 'utf8'))),
           ),
       ],
-      ['protocol-inventory', async () => inventoryFindingsWith(JSON.parse(readFileSync(join(ROOT, PROTOCOL_LEDGER), 'utf8')), await declaredProtocols(),
+      [
+        'protocol-inventory',
+        async () =>
+          inventoryFindingsWith(
+            JSON.parse(readFileSync(join(ROOT, PROTOCOL_LEDGER), 'utf8')),
+            await declaredProtocols(),
           ),
       ],
       ['dsh-alignment', () => alignmentFindingsWith(JSON.parse(readFileSync(join(ROOT, 'dsh-baseline.json'), 'utf8')))],
       ['mutation-claims', () => mutationFindings(ledger)],
-      ['mutation-witness', () => { execFileSync(process.execPath, [join(ROOT, 'scripts/mutate.mjs'), ledger.commitClaim], { cwd: ROOT, stdio: 'pipe',
+      [
+        'mutation-witness',
+        () => {
+          execFileSync(process.execPath, [join(ROOT, 'scripts/mutate.mjs'), ledger.commitClaim], {
+            cwd: ROOT,
+            stdio: 'pipe',
           })
           return []
         },
       ],
     ]
     for (const [name, check] of checks) {
+      if (process.argv.includes('--core') && ['assembly-built', 'dsh-alignment', 'mutation-witness'].includes(name))
+        continue
       try {
         const findings = await check()
         if (findings.length > 0) throw new Error(findings.join('\n'))

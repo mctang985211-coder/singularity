@@ -7,7 +7,7 @@
  * implementation it does not hold.
  */
 
-import { AttachmentId, type FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
 import {
   declareTaskProtocol,
@@ -51,7 +51,7 @@ export const SUBJECTS: Readonly<Record<string, string>> = {
 export const BUBBLE_INPUTS = [{ name: 'fixture/words.txt', digest: 'f'.repeat(64) }]
 
 export function fileAttachment(contentDigest: string, name: string, bytes = 0): FileAttachmentRef {
-  return { attachmentId: AttachmentId(`sha256:${contentDigest}`), name, bytes }
+  return { attachmentId: `sha256:${contentDigest}` as FileAttachmentRef['attachmentId'], name, bytes }
 }
 
 /** One revision the run is pinned to, named by its environment and content identity. */
@@ -73,7 +73,8 @@ export function contract(): TaskContract {
     criteria: [
       {
         criterionId: 'correctness',
-        statement: 'counts match the golden file' },
+        statement: 'counts match the golden file',
+      },
       { criterionId: 'limits', statement: 'rejects input over 1 MiB' },
     ],
   }
@@ -97,7 +98,8 @@ export const admitted = (value: TaskContract = contract(), commandId?: string): 
   emit(TASK_KINDS.admitted, { contract: value }, commandId)
 export const assigned = (commandId?: string, agentIdentity: string = SCHEDULER): EmitInput =>
   emit(TASK_KINDS.assigned, { agentId: 'agent-1', agentIdentity }, commandId)
-export const started = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runStarted, { purpose: 'solve', runId, revision: REVISION })
+export const started = (runId = RUN_ID): EmitInput =>
+  emit(TASK_KINDS.runStarted, { purpose: 'solve', runId, revision: REVISION })
 /**
  * The isolation manifest every bubble in these specs declares. One place, because a spec that named
  * a different tool digest in each bubble would be testing a binding it never established.
@@ -135,7 +137,9 @@ export const judged = (
     verdict,
     verifierRef,
     verifierVersion: options.verifierVersion ?? '1',
-    implementationDigest: options.implementationDigest ?? (verifierRef === UNIT_VERIFIER ? UNIT_IMPLEMENTATION : INTEGRATION_IMPLEMENTATION),
+    implementationDigest:
+      options.implementationDigest ??
+      (verifierRef === UNIT_VERIFIER ? UNIT_IMPLEMENTATION : INTEGRATION_IMPLEMENTATION),
     artifactDigest: options.artifactDigest ?? ARTIFACT,
     inputDigests: options.inputDigests ?? BUBBLE_INPUTS,
     ...(options.detail === undefined ? {} : { detail: options.detail }),

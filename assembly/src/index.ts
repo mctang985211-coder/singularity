@@ -14,13 +14,22 @@ import { createExecution } from './execution.ts'
 import { mountBubbleWorld } from './bubble.ts'
 import { spawnProcess } from './process.ts'
 import { parentMemoryCall, mountMemoryCalls } from './memory-call.ts'
-import { methodReviewTools } from './review.ts'
-import { improvementTools } from './improvement.ts'
+import { toolsFor, sectionAllowed } from './tool-policy.ts'
 import { refuse } from '../../src/protocol/refusal.ts'
 import { record as objectRecord, nonEmpty } from './shape.ts'
 export const name = 'singularity-assembly'
 
-export const inject = ['agents', 'tools', 'sessions', 'sessionPersistence', 'sessionProjections', 'tokenMeter', 'attachments', 'agentPresets', 'llm']
+export const inject = [
+  'agents',
+  'tools',
+  'sessions',
+  'sessionPersistence',
+  'sessionProjections',
+  'tokenMeter',
+  'attachments',
+  'agentPresets',
+  'llm',
+]
 
 const CONFIG_MEMBERS = ['controlId', 'domainDir', 'workspaceRoot', 'methodFile', 'evaluationParallelism'] as const
 
@@ -47,14 +56,16 @@ export interface Config {
 export function mountCampaignMemory(ctx: Context): void {
   const memory = mountMemoryCalls(ctx)
   ctx.on('llm/stream', async function* (options, next) {
-    if (parentMemoryCall.getStore() !== undefined && options.sessionId !== undefined) return yield* memory.stream(options, next)
+    if (parentMemoryCall.getStore() !== undefined && options.sessionId !== undefined)
+      return yield* memory.stream(options, next)
     return yield* next()
   })
 }
 export async function apply(ctx: Context, config: Config & Record<string, unknown>): Promise<void> {
   assertClosedKeys(config, CONFIG_MEMBERS, 'the singularity-assembly config')
   const domain = await loadDomain(config.domainDir, spawnProcess)
-  const initialMethod = config.methodFile === undefined ? undefined : JSON.parse(await readFile(config.methodFile, 'utf8'))
+  const initialMethod =
+    config.methodFile === undefined ? undefined : JSON.parse(await readFile(config.methodFile, 'utf8'))
   const driver = await openDriver({
     initialMethod,
     controlId: config.controlId,
@@ -86,37 +97,42 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const prompt = await next()
     if (context.agent !== undefined) {
-      const provider = prompt.variables['provider'], model = prompt.variables['model']
-      if (typeof provider !== 'string' || typeof model !== 'string') refuse('malformed-declaration', 'Singularity prompt has no exact model route')
+      const provider = prompt.variables['provider'],
+        model = prompt.variables['model']
+      if (typeof provider !== 'string' || typeof model !== 'string')
+        refuse('malformed-declaration', 'Singularity prompt has no exact model route')
       routes.set(context.agent, { provider, model })
       const responsibility = driver.responsibility(String(context.agent.id))
       const budget = await driver.stepBudget(String(context.agent.id), context.agent.session)
-      if (budget !== undefined) prompt.contexts.push({ name: 'singularity:budget', text:
-        `Workflow steps used ${budget.steps}/${budget.maxSteps}; remaining ${budget.remainingSteps}, shared with children and acceptance.` })
+      if (budget !== undefined)
+        prompt.contexts.push({
+          name: 'singularity:budget',
+          text: `Workflow steps used ${budget.steps}/${budget.maxSteps}; remaining ${budget.remainingSteps}, shared with children and acceptance.`,
+        })
       const reviewTarget = driver.reviewTarget(String(context.agent.id))
-      if (reviewTarget !== undefined && reviewTarget.kind !== 'acceptance') {
-        prompt.tools = prompt.tools.filter(tool => methodReviewTools.has(tool.name))
-        prompt.sections = prompt.sections.filter(section => !['tool:bash', 'tool:pwsh', 'tool:write', 'tool:edit'].includes(section.name))
-      }
-      if (ctx.agentPresets.serviceFor(context.agent, 'singularityAgentRole') === 'improve')
-        prompt.tools = prompt.tools.filter(tool => improvementTools.has(tool.name))
-      const search = driver.rsiState(String(context.agent.id))
-      if (search !== undefined) {
-        const writable = new Set(['write', 'edit'])
-        prompt.tools = prompt.tools.filter(tool =>
-          (tool.name !== 'singularity_propose_method' || search.canPropose) &&
-          (tool.name !== 'singularity_submit' || search.canSubmit) &&
-          (!writable.has(tool.name) || search.phase === 'ready'))
-      }
-      if (responsibility !== undefined) {
-        // Only the small live budget changes automatically; full responsibility
-        // and relationship projections remain on-demand reads.
-        if (responsibility.waiting !== null) {
-          const readable = new Set(['read', 'read_image', 'glob', 'grep', 'singularity_read', 'singularity_memory',
-            'singularity_answer', 'singularity_ask_parent', 'singularity_stop_explorations', 'singularity_retry_task',
-            ...(responsibility.canPlan ? ['singularity_decompose_task'] : [])])
-          prompt.tools = prompt.tools.filter(tool => readable.has(tool.name))
-        }
+      const role =
+        reviewTarget !== undefined && reviewTarget.kind !== 'acceptance'
+          ? 'method-review'
+          : ctx.agentPresets.serviceFor(context.agent, 'singularityAgentRole')
+      if (role !== undefined) {
+        const allowed = toolsFor({
+          role,
+          waiting: responsibility?.waiting !== null && responsibility?.waiting !== undefined,
+          canPlan: responsibility?.canPlan,
+          closed: responsibility?.closed ?? false,
+          search: driver.rsiState(String(context.agent.id)),
+        })
+        prompt.tools = prompt.tools.filter(tool => allowed.has(tool.name))
+        prompt.sections = prompt.sections.filter(section => sectionAllowed(section.name, allowed))
+        if (responsibility?.waiting)
+          prompt.contexts.push({
+            name: 'singularity:waiting',
+            text:
+              'End this turn after necessary coordination; the host resumes you after the wait. ' +
+              (allowed.has('job_list') && allowed.has('job_kill')
+                ? 'job_list/job_kill may clean up existing background jobs; job_output and execution resume only after the host releases the wait. Background jobs do not deliver or verify Task artifacts.'
+                : ''),
+          })
       }
     }
     return prompt
@@ -133,12 +149,16 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
         await mountBubbleWorld(agent, () => driver.world(String(agent.id)), root)
       })()
       worlds.set(agent, mounting)
-      void mounting.catch(() => { worlds.delete(agent) })
+      void mounting.catch(() => {
+        worlds.delete(agent)
+      })
     }
     return mounting
   }
-  ctx.on('agent/created', async ({ agent }) => { await ensureWorld(agent)
-    return undefined })
+  ctx.on('agent/created', async ({ agent }) => {
+    await ensureWorld(agent)
+    return undefined
+  })
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     await ensureWorld(agent)
     const decision = await next()
@@ -146,11 +166,12 @@ export async function apply(ctx: Context, config: Config & Record<string, unknow
     signal.throwIfAborted()
     const route = routes.get(agent)
     if (route === undefined) refuse('malformed-declaration', 'native admission requires the assembled model route')
-    if (!(await ctx.sessions.flush(agent.session))) refuse('write-not-durable', 'native root session has no durability listener')
+    if (!(await ctx.sessions.flush(agent.session)))
+      refuse('write-not-durable', 'native root session has no durability listener')
     const assignment = await driver.enter(agent, decision.messages, route)
     if (driver.failed(String(agent.id))) return { kind: 'reject' }
     const search = driver.rsiState(String(agent.id))
-    if (search !== undefined && search.phase !== 'ready') return { kind: 'reject' }
+    if (search !== undefined && search.executionPhase !== 'ready') return { kind: 'reject' }
     return assignment === undefined ? decision : { ...decision, messages: [...decision.messages, assignment] }
   })
   mountCampaignMemory(ctx)

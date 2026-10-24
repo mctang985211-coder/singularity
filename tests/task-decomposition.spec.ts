@@ -36,7 +36,9 @@ import {
 import { SUBJECTS, taskRegistry } from './task-fixtures.ts'
 
 /** A parent with a plan, in a log whose registry the caller keeps so it can be folded. */
-async function decomposed(children = plan(), registry: ProtocolRegistry = taskRegistry(),
+async function decomposed(
+  children = plan(),
+  registry: ProtocolRegistry = taskRegistry(),
 ): Promise<ReturnType<typeof treeLog>> {
   const log = treeLog(registry)
   await log.emit(admit(PARENT, parentContract()))
@@ -45,7 +47,9 @@ async function decomposed(children = plan(), registry: ProtocolRegistry = taskRe
   return log
 }
 
-const child = (taskId: string, extra: Partial<{ dependsOn: readonly string[]; supports: readonly string[]; maxRuns: number }> = {},
+const child = (
+  taskId: string,
+  extra: Partial<{ dependsOn: readonly string[]; supports: readonly string[]; maxRuns: number }> = {},
 ) => ({
   taskId,
   dependsOn: extra.dependsOn ?? [],
@@ -65,14 +69,18 @@ describe('a decomposition is one complete fact', () => {
       [[child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })], 'cyclic-dependency'],
       [[child(CHILD_A, { supports: ['unknown'] })], 'unknown-criterion'],
       [[{ ...child(CHILD_A), extra: true }], 'malformed-payload'],
-    ] as const) expect(refusalOf(() => assertDecomposition(children, parentContract(), PARENT)).code).toBe(code)
+    ] as const)
+      expect(refusalOf(() => assertDecomposition(children, parentContract(), PARENT)).code).toBe(code)
   })
 
   it('folds the declared plan onto the parent, and claims business atomicity', async () => {
     const registry = taskRegistry()
     const log = await decomposed(plan(), registry)
     const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, PARENT)
-    expect([state?.decomposition?.children.map((entry) => entry.taskId), state?.decomposition?.children[1]?.dependsOn, typeof state?.decomposition?.at,
+    expect([
+      state?.decomposition?.children.map(entry => entry.taskId),
+      state?.decomposition?.children[1]?.dependsOn,
+      typeof state?.decomposition?.at,
     ]).toEqual([[CHILD_A, CHILD_B], [CHILD_A], 'string'])
 
     // One fact stands for the whole plan, so it declares that it is business-atomic.
@@ -83,7 +91,9 @@ describe('a decomposition is one complete fact', () => {
   it('refuses duplicate children in appended decompositions', async () => {
     const log = await decomposed()
     const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, [child(CHILD_A)])))
-    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('repeats an existing child'),
+    expect(refusal).toMatchObject({
+      code: 'illegal-transition',
+      detail: expect.stringContaining('repeats an existing child'),
     })
   })
 
@@ -107,16 +117,28 @@ describe('a decomposition is one complete fact', () => {
       { label: 'no children', children: [], code: 'malformed-payload' },
       { label: 'the parent as its own child', children: [child(PARENT)], code: 'malformed-payload' },
       { label: 'a duplicate child', children: [child(CHILD_A), child(CHILD_A)], code: 'malformed-payload' },
-      { label: 'a dependency outside the declared set', children: [child(CHILD_A, { dependsOn: ['task-elsewhere'] })], code: 'malformed-payload',
+      {
+        label: 'a dependency outside the declared set',
+        children: [child(CHILD_A, { dependsOn: ['task-elsewhere'] })],
+        code: 'malformed-payload',
       },
       { label: 'a self-dependency', children: [child(CHILD_A, { dependsOn: [CHILD_A] })], code: 'malformed-payload' },
-      { label: 'a repeated dependency', children: [child(CHILD_A, { dependsOn: [CHILD_B, CHILD_B] })], code: 'malformed-payload',
+      {
+        label: 'a repeated dependency',
+        children: [child(CHILD_A, { dependsOn: [CHILD_B, CHILD_B] })],
+        code: 'malformed-payload',
       },
-      { label: 'a cycle', children: [child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })], code: 'cyclic-dependency',
+      {
+        label: 'a cycle',
+        children: [child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })],
+        code: 'cyclic-dependency',
       },
-      { label: 'a criterion the parent does not declare', children: [child(CHILD_A, { supports: ['not-a-criterion'] })], code: 'unknown-criterion',
+      {
+        label: 'a criterion the parent does not declare',
+        children: [child(CHILD_A, { supports: ['not-a-criterion'] })],
+        code: 'unknown-criterion',
       },
-      { label: 'a zero budget', children: [child(CHILD_A, { maxRuns: 0})], code: 'malformed-payload' },
+      { label: 'a zero budget', children: [child(CHILD_A, { maxRuns: 0 })], code: 'malformed-payload' },
       { label: 'a fractional budget', children: [child(CHILD_A, { maxRuns: 1.5 })], code: 'malformed-payload' },
       { label: 'an unknown member', children: [{ ...child(CHILD_A), note: 'extra' }], code: 'malformed-payload' },
     ]
@@ -134,9 +156,12 @@ describe('a decomposition is one complete fact', () => {
     const log = treeLog()
     await log.emit(admit(PARENT, parentContract()))
     await log.emit(assigned(PARENT))
-    const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, [child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })])),
+    const refusal = await asyncRefusalOf(() =>
+      log.emit(decompose(PARENT, [child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })])),
     )
-    expect(refusal).toMatchObject({ code: 'cyclic-dependency', detail: expect.stringContaining(`${CHILD_A} -> ${CHILD_B}`),
+    expect(refusal).toMatchObject({
+      code: 'cyclic-dependency',
+      detail: expect.stringContaining(`${CHILD_A} -> ${CHILD_B}`),
     })
   })
 
@@ -161,10 +186,19 @@ describe('a decomposition is one complete fact', () => {
     await childrenFirst.emit(admit(PARENT, parentContract()))
     await childrenFirst.emit(assigned(PARENT))
     await childrenFirst.emit(decompose(PARENT, plan()))
-    expect([planFirst, childrenFirst].map((log) => foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, PARENT,
-        )?.decomposition?.children.map((entry) => entry.taskId),
+    expect(
+      [planFirst, childrenFirst].map(log =>
+        foldSubject<TaskState>(
+          registry,
+          log.entries(),
+          TASK_PROTOCOL,
+          TASK_VERSION,
+          PARENT,
+        )?.decomposition?.children.map(entry => entry.taskId),
       ),
-    ).toEqual([[CHILD_A, CHILD_B], [CHILD_A, CHILD_B],
+    ).toEqual([
+      [CHILD_A, CHILD_B],
+      [CHILD_A, CHILD_B],
     ])
   })
 })

@@ -16,18 +16,41 @@ export async function openDriverRuntime(options: DriverOptions) {
   const parallelism = options.evaluationParallelism ?? 1
   if (!Number.isSafeInteger(parallelism) || parallelism < 1)
     refuse('malformed-declaration', 'evaluationParallelism must be a positive integer')
-  const apparatus = await openApparatus(options.controlId, options.workspaceRoot, options.domain, options.persistence, options.attachments, options.projections,
+  const apparatus = await openApparatus(
+    options.controlId,
+    options.workspaceRoot,
+    options.domain,
+    options.persistence,
+    options.attachments,
+    options.projections,
   )
   const measurement = apparatus.domain.measurement
-  const criterion = reviewCriterion((apparatus.domain.rootTemplate === undefined ? undefined : apparatus.domain.templates.get(apparatus.domain.rootTemplate))?.criteria[0] ?? { criterionId: 'task-accepted', statement: 'The Task meets its frozen contract' })
+  const criterion = reviewCriterion(
+    (apparatus.domain.rootTemplate === undefined
+      ? undefined
+      : apparatus.domain.templates.get(apparatus.domain.rootTemplate)
+    )?.criteria[0] ?? { criterionId: 'task-accepted', statement: 'The Task meets its frozen contract' },
+  )
   const evaluation: Pick<EvolutionOptions, 'criterion' | 'metric' | 'trials' | 'weights' | 'calibration'> = {
     criterion,
-    metric: { measured: measurement?.criterion ?? { ...criterion, criterionId: `${criterion.criterionId}:quality` },
-      unit: measurement === undefined ? apparatus.domain.suite?.scoring === 'criteria' ? 'criteria fraction' : 'pass'
-        : `${measurement.unit} / baseline`, direction: measurement?.direction ?? 'higher' },
+    metric: {
+      measured: measurement?.criterion ?? { ...criterion, criterionId: `${criterion.criterionId}:quality` },
+      unit:
+        measurement === undefined
+          ? apparatus.domain.suite?.scoring === 'criteria'
+            ? 'criteria fraction'
+            : 'pass'
+          : `${measurement.unit} / baseline`,
+      direction: measurement?.direction ?? 'higher',
+    },
     trials: 1,
-    weights: measurement?.evaluation?.weights ?? (measurement === undefined ? { quality: 1, cost: 1 } : { quality: 100, cost: 15 }),
-    calibration: { floor: measurement?.evaluation?.noiseFloor ?? (measurement === undefined ? 0 : 0.01), source: 'declared' },
+    weights:
+      measurement?.evaluation?.weights ??
+      (measurement === undefined ? { quality: 1, cost: 1 } : { quality: 100, cost: 15 }),
+    calibration: {
+      floor: measurement?.evaluation?.noiseFloor ?? (measurement === undefined ? 0 : 0.01),
+      source: 'declared',
+    },
   }
   const controller = new AbortController(),
     active = new Set<Promise<unknown>>(),
@@ -37,15 +60,19 @@ export async function openDriverRuntime(options: DriverOptions) {
   const tasks = () => apparatus.store.load().statesOf<TaskState>(TASK_PROTOCOL, TASK_VERSION)
   const registry = () =>
     (options.seams.get === undefined ? options.seams.agents : options.seams.get('agents')) as AgentRegistry
-  const owner = (agentId: string) => [...tasks().values()].findLast((t) => t.responsibility?.agentId === agentId)
+  const owner = (agentId: string) => [...tasks().values()].findLast(t => t.responsibility?.agentId === agentId)
   const parentOf = (id: string) =>
-    [...tasks().values()].find((t) => t.decomposition?.children.some((c) => c.taskId === id))?.taskId ??
-    [...apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()].find((r) =>
-      r.children.some((c) => c.taskId === id),
+    [...tasks().values()].find(t => t.decomposition?.children.some(c => c.taskId === id))?.taskId ??
+    [...apparatus.store.load().statesOf<ReviewRun>(REVIEW_PROTOCOL, REVIEW_VERSION).values()].find(r =>
+      r.children.some(c => c.taskId === id),
     )?.reviewId
   const nativeEvents = async (sessionId: string): Promise<readonly SessionEvent[]> => {
     const handle = await apparatus.persistence.open(SessionId(sessionId), 'read')
-    try { return (await handle.read()).events } finally { await handle.close() }
+    try {
+      return (await handle.read()).events
+    } finally {
+      await handle.close()
+    }
   }
   const taskFact = (commandId: string, kind: string, taskId: string, payload: unknown, as?: string) =>
     apparatus.store.emit({
@@ -62,7 +89,9 @@ export async function openDriverRuntime(options: DriverOptions) {
     controller.signal.throwIfAborted()
     const pending = step()
     active.add(pending)
-    void pending.then(() => active.delete(pending), () => active.delete(pending),
+    void pending.then(
+      () => active.delete(pending),
+      () => active.delete(pending),
     )
     return pending
   }
@@ -73,34 +102,54 @@ export async function openDriverRuntime(options: DriverOptions) {
     jobs.set(key, pending)
     void pending.then(
       () => jobs.delete(key),
-      (error) => {
+      error => {
         jobs.delete(key)
         if (!controller.signal.aborted) backgroundErrors.push(error)
       },
     )
   }
   const idle = async (agents: readonly Agent[], signal = controller.signal): Promise<void> => {
-    await Promise.race([
-      Promise.all(agents.map((agent) => agent.whenIdle())),
-      aborted(signal, agents),
-    ])
+    await Promise.race([Promise.all(agents.map(agent => agent.whenIdle())), aborted(signal, agents)])
     signal.throwIfAborted()
-    const sessions = (options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')) as ChildSessionSeams['sessions']
+    const sessions = (
+      options.seams.get === undefined ? options.seams.sessions : options.seams.get('sessions')
+    ) as ChildSessionSeams['sessions']
     for (const agent of agents)
       if (!(await sessions!.flush(agent.session)))
         refuse('write-not-durable', `session ${agent.id} has no durability listener`)
   }
-  const close = (execution: Execution, cancellationReasons: readonly unknown[]) => (closing ??= (async () => {
-    controller.abort(new Error('driver unloading'))
-    scheduler.stop()
-    const results = await Promise.allSettled([execution.close(), scheduler.close(), ...jobs.values(), ...active])
-    await apparatus.store.close()
-    const cancellations = new Set([controller.signal.reason, ...cancellationReasons])
-    const errors = [...backgroundErrors, ...results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])]
-      .filter(error => !cancellations.has(error))
-    if (errors.length) throw new AggregateError(errors, 'driver unload failed')
-  })())
-  return { options, apparatus, parallelism, measurement, evaluation, controller, backgroundErrors,
-    tasks, registry, owner, parentOf, nativeEvents, taskFact, work, scheduler, startJob, idle, close }
+  const close = (execution: Execution, cancellationReasons: readonly unknown[]) =>
+    (closing ??= (async () => {
+      controller.abort(new Error('driver unloading'))
+      scheduler.stop()
+      const results = await Promise.allSettled([execution.close(), scheduler.close(), ...jobs.values(), ...active])
+      await apparatus.store.close()
+      const cancellations = new Set([controller.signal.reason, ...cancellationReasons])
+      const errors = [
+        ...backgroundErrors,
+        ...results.flatMap(result => (result.status === 'rejected' ? [result.reason] : [])),
+      ].filter(error => !cancellations.has(error))
+      if (errors.length) throw new AggregateError(errors, 'driver unload failed')
+    })())
+  return {
+    options,
+    apparatus,
+    parallelism,
+    measurement,
+    evaluation,
+    controller,
+    backgroundErrors,
+    tasks,
+    registry,
+    owner,
+    parentOf,
+    nativeEvents,
+    taskFact,
+    work,
+    scheduler,
+    startJob,
+    idle,
+    close,
+  }
 }
 export type DriverRuntime = Awaited<ReturnType<typeof openDriverRuntime>>

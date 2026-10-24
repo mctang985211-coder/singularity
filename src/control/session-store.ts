@@ -116,7 +116,10 @@ export interface ControlStoreOptions {
 /** The stable session id one control id resolves to. Derived, so two callers cannot disagree. */
 export function controlSessionIdOf(controlId: string): SessionId {
   if (controlId.length === 0)
-    refuse('malformed-declaration', 'a control id must be a non-empty string; it names the session that will carry the facts')
+    refuse(
+      'malformed-declaration',
+      'a control id must be a non-empty string; it names the session that will carry the facts',
+    )
   return SessionId(`singularity:control:${controlId}`)
 }
 
@@ -156,7 +159,13 @@ export class ControlSessionStore {
   #uncertain = false
   #closing: Promise<void> | undefined
 
-  private constructor(handle: SessionHandle, log: MemoryLog, sessionId: SessionId, nextSeq: number, subjects: Record<string, string>) {
+  private constructor(
+    handle: SessionHandle,
+    log: MemoryLog,
+    sessionId: SessionId,
+    nextSeq: number,
+    subjects: Record<string, string>,
+  ) {
     this.#handle = handle
     this.#log = log
     this.#sessionId = sessionId
@@ -178,7 +187,10 @@ export class ControlSessionStore {
     // adds to this very object, which is the one `MemoryLog` already holds — and it has no prototype,
     // so a role named `__proto__` or `toString` is a role like any other and an absent one resolves
     // to `undefined` rather than to a member of `Object.prototype`.
-    const subjects: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, options.subjects)
+    const subjects: Record<string, string> = Object.assign(
+      Object.create(null) as Record<string, string>,
+      options.subjects,
+    )
     let handle: SessionHandle
     try {
       handle = await options.persistence.open(sessionId, 'write')
@@ -199,7 +211,10 @@ export class ControlSessionStore {
         // durability, so adoption first confirms the prefix through the write handle's barrier.
         await handle.flush()
       } catch (error) {
-        refuse('write-not-durable', `control store ${sessionId} cannot confirm its opening durability barrier: ${error instanceof Error ? error.message : String(error)}`)
+        refuse(
+          'write-not-durable',
+          `control store ${sessionId} cannot confirm its opening durability barrier: ${error instanceof Error ? error.message : String(error)}`,
+        )
       }
       const stored = await handle.read()
       // Select our records by type, then decide meaning entirely ourselves: framing, digest, chain
@@ -315,7 +330,10 @@ export class ControlSessionStore {
    * command recomputes the same request and `decide` answers it from the journal instead of recording
    * a second fact. The object form needs neither property: its request is the caller's.
    */
-  async emit<Payload>(input: EmitInput<Payload> | (() => EmitInput<Payload>), require?: () => void): Promise<Envelope<Payload>> {
+  async emit<Payload>(
+    input: EmitInput<Payload> | (() => EmitInput<Payload>),
+    require?: () => void,
+  ): Promise<Envelope<Payload>> {
     const run = this.#queue.then(
       () => this.#commit(input, require),
       () => this.#commit(input, require),
@@ -327,10 +345,17 @@ export class ControlSessionStore {
     return run
   }
 
-  async #commit<Payload>(input: EmitInput<Payload> | (() => EmitInput<Payload>), require?: () => void): Promise<Envelope<Payload>> {
-    if (this.#closed) refuse('write-not-durable', `control store ${this.#sessionId} is closed; a closed store records nothing`)
+  async #commit<Payload>(
+    input: EmitInput<Payload> | (() => EmitInput<Payload>),
+    require?: () => void,
+  ): Promise<Envelope<Payload>> {
+    if (this.#closed)
+      refuse('write-not-durable', `control store ${this.#sessionId} is closed; a closed store records nothing`)
     if (this.#uncertain)
-      refuse('write-not-durable', `control store ${this.#sessionId} has an uncertain storage result; close and reopen it with a successful durability barrier before retrying`)
+      refuse(
+        'write-not-durable',
+        `control store ${this.#sessionId} has an uncertain storage result; close and reopen it with a successful durability barrier before retrying`,
+      )
 
     // The producer runs here, in the serial region: the cut it reads is taken after every earlier
     // commit has recorded, and before this one decides anything.
@@ -377,10 +402,16 @@ export class ControlSessionStore {
       const { events } = await this.#handle.read(this.#nextSeq, 1)
       const readBack = events[0]
       if (readBack === undefined || !isControlEvent(readBack))
-        refuse('write-not-durable', `${label} was written at seq ${this.#nextSeq} but ${this.#sessionId} reads back no control record there`)
+        refuse(
+          'write-not-durable',
+          `${label} was written at seq ${this.#nextSeq} but ${this.#sessionId} reads back no control record there`,
+        )
       const durable = decodeControlEvent(readBack)
       if (durable.digest !== envelope.digest)
-        refuse('write-not-durable', `${label} sealed digest ${envelope.digest} but ${this.#sessionId} reads back ${durable.digest}`)
+        refuse(
+          'write-not-durable',
+          `${label} sealed digest ${envelope.digest} but ${this.#sessionId} reads back ${durable.digest}`,
+        )
 
       // The barrier held, so the fact is durable: record it, and only now is it part of the log.
       // `record` froze the same object it was handed, so this is the stored value.
@@ -389,7 +420,10 @@ export class ControlSessionStore {
       return envelope
     } catch (error) {
       this.#uncertain = true
-      refuse('write-not-durable', `${label} ${phase} failed in ${this.#sessionId}; storage result is uncertain: ${error instanceof Error ? error.message : String(error)}`)
+      refuse(
+        'write-not-durable',
+        `${label} ${phase} failed in ${this.#sessionId}; storage result is uncertain: ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
   }
 
@@ -403,7 +437,10 @@ export class ControlSessionStore {
       this.#closed = true
       await this.#handle.close()
     })
-    this.#queue = this.#closing.then(() => undefined, () => undefined)
+    this.#queue = this.#closing.then(
+      () => undefined,
+      () => undefined,
+    )
     return this.#closing
   }
 }
@@ -425,16 +462,28 @@ function decodeControlEvent(event: SessionEvent<typeof CONTROL_EVENT_TYPE>): Env
   const where = `control event #${event.seq} (${CONTROL_EVENT_TYPE})`
   const data: unknown = event.data
   if (data === null || typeof data !== 'object' || Array.isArray(data))
-    refuse('malformed-payload', `${where} data must be an object, got ${data === null ? 'null' : Array.isArray(data) ? 'an array' : typeof data}`)
+    refuse(
+      'malformed-payload',
+      `${where} data must be an object, got ${data === null ? 'null' : Array.isArray(data) ? 'an array' : typeof data}`,
+    )
   const record = data as Record<string, unknown>
   assertClosedKeys(record, CONTROL_DATA_MEMBERS, `${where} data`)
   if (record['protocol'] !== CONTROL_PROTOCOL)
-    refuse('malformed-payload', `${where} data.protocol must be ${JSON.stringify(CONTROL_PROTOCOL)}, got ${JSON.stringify(record['protocol'] ?? null)}`)
+    refuse(
+      'malformed-payload',
+      `${where} data.protocol must be ${JSON.stringify(CONTROL_PROTOCOL)}, got ${JSON.stringify(record['protocol'] ?? null)}`,
+    )
   if (record['version'] !== CONTROL_VERSION)
-    refuse('version-mismatch', `${where} data.version must be ${CONTROL_VERSION}, got ${JSON.stringify(record['version'] ?? null)}`)
+    refuse(
+      'version-mismatch',
+      `${where} data.version must be ${CONTROL_VERSION}, got ${JSON.stringify(record['version'] ?? null)}`,
+    )
   const kind = record['kind']
   if (typeof kind !== 'string' || kind.length === 0)
-    refuse('malformed-payload', `${where} data.kind must be a non-empty string, got ${kind === null ? 'null' : typeof kind}`)
+    refuse(
+      'malformed-payload',
+      `${where} data.kind must be a non-empty string, got ${kind === null ? 'null' : typeof kind}`,
+    )
 
   const envelope = assertEnvelope(record['payload'])
   if (envelope.kind !== kind)

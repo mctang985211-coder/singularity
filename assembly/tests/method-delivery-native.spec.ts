@@ -5,7 +5,13 @@ import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, {
+  createUserMessage,
+  LlmAdapter,
+  ToolCallId,
+  type GenerateOptions,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -23,9 +29,15 @@ import { propose } from '../src/surfaces.ts'
 import { attachmentsAt } from './seam.ts'
 
 const nativeRequire = hostRequire()
-const { default: SystemPrompt } = await import(nativeRequire.resolve('@deepseek-ai/dsh-system-prompt')) as typeof import('@deepseek-ai/dsh-system-prompt')
-const { default: SessionProjections } = await import(nativeRequire.resolve('@deepseek-ai/dsh-session-projection')) as typeof import('@deepseek-ai/dsh-session-projection')
-const roots: string[] = [], contexts: Context[] = [], apparatuses: Apparatus[] = []
+const { default: SystemPrompt } = (await import(
+  nativeRequire.resolve('@deepseek-ai/dsh-system-prompt')
+)) as typeof import('@deepseek-ai/dsh-system-prompt')
+const { default: SessionProjections } = (await import(
+  nativeRequire.resolve('@deepseek-ai/dsh-session-projection')
+)) as typeof import('@deepseek-ai/dsh-session-projection')
+const roots: string[] = [],
+  contexts: Context[] = [],
+  apparatuses: Apparatus[] = []
 afterEach(async () => {
   for (const apparatus of apparatuses.splice(0)) await apparatus.store.close()
   for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
@@ -42,7 +54,11 @@ class DeliveryAdapter extends LlmAdapter {
       const id = ToolCallId('native-method-read')
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index: 0, id, name: 'read_pinned_method', argumentsDelta: '{}' }
-      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'read_pinned_method', arguments: '{}' } }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: { type: 'tool-call', id, name: 'read_pinned_method', arguments: '{}' },
+      }
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
@@ -54,8 +70,10 @@ class DeliveryAdapter extends LlmAdapter {
 }
 
 it('durably delivers the exact workflow on the first native step and records a later native tool read separately', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'method-delivery-native-')); roots.push(root)
-  const ctx = new Context(); contexts.push(ctx)
+  const root = await mkdtemp(join(tmpdir(), 'method-delivery-native-'))
+  roots.push(root)
+  const ctx = new Context()
+  contexts.push(ctx)
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjections)
@@ -66,15 +84,39 @@ it('durably delivers the exact workflow on the first native step and records a l
   await ctx.plugin(AgentLoop, { agents: [] })
   const adapter = new DeliveryAdapter()
   ctx.llm.registerAdapter(['delivery-fixture'], adapter)
-  const agent = await ctx.agentLoop.create(SessionId('native-method-recipient'), { provider: 'delivery-fixture', model: 'fixture', maxTokens: 128 })
+  const agent = await ctx.agentLoop.create(SessionId('native-method-recipient'), {
+    provider: 'delivery-fixture',
+    model: 'fixture',
+    maxTokens: 128,
+  })
   const domain = await loadDomain(fileURLToPath(new URL('../../domain/reference', import.meta.url)), spawnProcess)
-  const apparatus = await openApparatus('native-delivery', root, domain, ctx.sessionPersistence, attachmentsAt(root), ctx.sessionProjections)
+  const apparatus = await openApparatus(
+    'native-delivery',
+    root,
+    domain,
+    ctx.sessionPersistence,
+    attachmentsAt(root),
+    ctx.sessionProjections,
+  )
   apparatuses.push(apparatus)
   const workflowGuidance = 'Investigate the uncertain interface before choosing independent responsibility boundaries.'
   const method = await createMethod(apparatus, { workflowGuidance, templates: [], skills: [], tools: [] })
-  const contract = { goal: 'Return an independently checked result.', artifact: 'result.txt', inputs: [], criteria: [{ criterionId: 'result', statement: 'Return the required result.' }] }
-  const task = await propose(apparatus, { agentId: String(agent.id), sessionId: String(agent.session.id), model: { provider: 'delivery-fixture', model: 'fixture' } },
-    'native-dispatch', { contract, method })
+  const contract = {
+    goal: 'Return an independently checked result.',
+    artifact: 'result.txt',
+    inputs: [],
+    criteria: [{ criterionId: 'result', statement: 'Return the required result.' }],
+  }
+  const task = await propose(
+    apparatus,
+    {
+      agentId: String(agent.id),
+      sessionId: String(agent.session.id),
+      model: { provider: 'delivery-fixture', model: 'fixture' },
+    },
+    'native-dispatch',
+    { contract, method },
+  )
   const run = taskStateOf(apparatus, task.taskId).runs[task.runId]!
   const modes = () => taskStateOf(apparatus, task.taskId).runs[run.runId]!.consumed.map(use => use.mode)
   const packet = await methodContext(apparatus, task.taskId, run)
@@ -88,12 +130,27 @@ it('durably delivers the exact workflow on the first native step and records a l
     }
     return next()
   })
-  ctx.tools.register(defineTool({ name: 'read_pinned_method', description: 'Read the pinned workflow explicitly.', parameters: {},
-    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    execute: async () => JSON.stringify(await readMethodContext(apparatus, task.taskId, run)),
-  }))
-  const dispatch = schedulerMessage({ kind: 'singularity', purpose: 'dispatch', controlId: apparatus.controlId,
-    parentTaskId: task.taskId, taskId: task.taskId, runId: run.runId, factSeq: 0 }, JSON.stringify({ contract, method: packet }))
+  ctx.tools.register(
+    defineTool({
+      name: 'read_pinned_method',
+      description: 'Read the pinned workflow explicitly.',
+      parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+      execute: async () => JSON.stringify(await readMethodContext(apparatus, task.taskId, run)),
+    }),
+  )
+  const dispatch = schedulerMessage(
+    {
+      kind: 'singularity',
+      purpose: 'dispatch',
+      controlId: apparatus.controlId,
+      parentTaskId: task.taskId,
+      taskId: task.taskId,
+      runId: run.runId,
+      factSeq: 0,
+    },
+    JSON.stringify({ contract, method: packet }),
+  )
   expect(await postIdentifiedMessage(ctx as unknown as ChildSessionSeams, agent, dispatch)).toBe('posted')
   await agent.whenIdle()
   expect(await ctx.sessions.flush(agent.session)).toBe(true)
@@ -104,13 +161,22 @@ it('durably delivers the exact workflow on the first native step and records a l
   const persisted = await ctx.sessionPersistence.open(agent.session.id, 'read')
   try {
     const events = (await persisted.read()).events
-    expect(events.filter(event => event.type === 'agent/inbox/spliced').flatMap(event => event.data.inserted)).toEqual([dispatch])
+    expect(events.filter(event => event.type === 'agent/inbox/spliced').flatMap(event => event.data.inserted)).toEqual([
+      dispatch,
+    ])
     expect(events.filter(event => event.type === 'user/message').map(event => event.data)).toEqual([dispatch])
-  } finally { await persisted.close() }
+  } finally {
+    await persisted.close()
+  }
   expect(await postIdentifiedMessage(ctx as unknown as ChildSessionSeams, agent, dispatch)).toBe('entered')
   expect(adapter.calls).toHaveLength(1)
   adapter.requestRead = true
-  agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Read the pinned method through the provided tool.' }] }))
+  agent.followup(
+    createUserMessage({
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'Read the pinned method through the provided tool.' }],
+    }),
+  )
   await agent.whenIdle()
   expect(modes()).toEqual(['delivered', 'read'])
   expect(adapter.calls).toHaveLength(3)

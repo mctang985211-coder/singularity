@@ -47,7 +47,10 @@ export async function openAgentSession(ctx: RuntimeSeams, request: AgentSessionR
   const registry = service<AgentRegistry>(ctx, 'agents')
   const persisted = await persistence.stat(sessionId)
   if (request.resume !== (persisted !== undefined))
-    refuse('illegal-transition', `session ${sessionId}: ${request.resume ? 'resume requires persisted history' : 'create requires a new identity'}`)
+    refuse(
+      'illegal-transition',
+      `session ${sessionId}: ${request.resume ? 'resume requires persisted history' : 'create requires a new identity'}`,
+    )
   let handle: AgentHandle
   try {
     const options = {
@@ -57,13 +60,22 @@ export async function openAgentSession(ctx: RuntimeSeams, request: AgentSessionR
     }
     handle = request.resume
       ? await registry.resume({ resumeSessionId: sessionId, ...options })
-      : await registry.create({ sessionId, ...options, meta: {
-        ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
-        ...(request.preset === undefined ? {} : { agentPreset: request.preset }),
-        // Native lineage also keeps DSH's top-level Git snapshot recorder off managed children.
-        ...(request.parent === undefined ? {} : { parentSession: request.parent.session.id, origin: 'subagent' as const,
-          delegationDepth: (request.parent.session.header.delegationDepth ?? 0) + 1 }),
-      } })
+      : await registry.create({
+          sessionId,
+          ...options,
+          meta: {
+            ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+            ...(request.preset === undefined ? {} : { agentPreset: request.preset }),
+            // Native lineage also keeps DSH's top-level Git snapshot recorder off managed children.
+            ...(request.parent === undefined
+              ? {}
+              : {
+                  parentSession: request.parent.session.id,
+                  origin: 'subagent' as const,
+                  delegationDepth: (request.parent.session.header.delegationDepth ?? 0) + 1,
+                }),
+          },
+        })
   } catch (error) {
     if (error instanceof SessionAlreadyOwnedError) refuse('concurrent-writer', error.message)
     throw error
@@ -75,8 +87,12 @@ export async function closeAgentSession(agentId: string): Promise<void> {
   const sessionId = agentSessionIdOf(agentId)
   const claim = claims.get(sessionId)
   if (claim === undefined) return
-  claim.closing ??= claim.handle.dispose().then(() => { claims.delete(sessionId) })
-  try { await claim.closing } catch (error) {
+  claim.closing ??= claim.handle.dispose().then(() => {
+    claims.delete(sessionId)
+  })
+  try {
+    await claim.closing
+  } catch (error) {
     delete claim.closing
     refuse('write-not-durable', `session ${sessionId} could not close: ${String(error)}`)
   }

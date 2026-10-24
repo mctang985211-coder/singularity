@@ -2,19 +2,26 @@
 
 以 Task 为一等公民的领域 workflow 与 RSI 内核、DSH 插件。Task 节点表达冻结责任，通过分解、依赖和产物关系组成 workflow，独立 ReviewRun 判断交付。根任务终局后可异步改进 workflow 策略、TaskTemplate、Skill、Tool，经测评和发布审核切换唯一方法指针。
 
-当前协议为 Task v25、Strategy v9、Measure v5、Review v5，读投影为 v13。新协议只用于新图，不提供旧图兼容或迁移。
+当前协议为 Task v27、Strategy v10、Measure v6、Review v8，读投影为 v15。新协议只用于新图，不提供旧图兼容或迁移。
 
-按[终局实施计划](docs/task-first-domain-rsi-plan.md)实现有界搜索、合法无赢家终局、完整 Task 契约、可选模板、workflow 策略及逐节点协调。冻结 suite 可以通过同一原生 Task 路径执行 case × trial 对照；工程检查与领域提升结论分别记录。当前工程与实验出口以计划状态表为准，不把离线测试当作迁移收益。
-| 阅读入口 | 用途 |
-|---|---|
-| [Task / Workflow RSI 终局计划](docs/task-first-domain-rsi-plan.md) | 第 1/6 节架构、第 9 节唯一施工顺序，完整审查与验收反例 |
-| [blueprint](docs/blueprint.md) | 目标、架构与文档导航 |
-| [assembly-blueprint](docs/assembly-blueprint.md) | 现有装配边界与历史施工依据 |
-| [phase-g2-design](docs/phase-g2-design.md) | 当前任务运行合同 |
-| [context](docs/context.md) | 未关闭问题、用户裁定与证据边界 |
-| [standalone-dsh](docs/standalone-dsh.md) | 私有 DSH 环境、构建与验证命令 |
+当前架构、结果语义和验收责任统一见[架构入口](docs/architecture.md)。搜索结果、报告验收、发布状态与业务结果分别投影；报告失败不会改写已测事实。工程检查与领域改善、未见任务迁移分别记录。
 
-开发需要 Linux、Node ≥22.19、pnpm 11.18.0、bubblewrap，以及有权使用的**带补丁 DSH 0.2.0-rc.2 安装**。项目保持私有、未授予开源许可；DSH 可由固定源码和补丁重建。没有该依赖时会明确失败，不会安装 registry 同名包。版本和补丁产物摘要见 [dsh-baseline.json](dsh-baseline.json)，准备步骤见 [standalone-dsh](docs/standalone-dsh.md)。
+| 阅读入口                                           | 用途                                   |
+| -------------------------------------------------- | -------------------------------------- |
+| [当前架构](docs/architecture.md)                   | 事实路径、五项状态、验收责任与验证分层 |
+| [RSI 接口](docs/rsi-agent-contract.md)             | 提案、证据引用和报告合同               |
+| [context](docs/context.md)                         | 未关闭问题、用户裁定与证据边界         |
+| [standalone-dsh](docs/standalone-dsh.md)           | 私有宿主构建与验证命令                 |
+| [历史实施计划](docs/task-first-domain-rsi-plan.md) | 阶段施工与当时的验证范围               |
+
+公开 core 回归不需要私有 DSH 或模型：
+
+```sh
+pnpm install --frozen-lockfile
+pnpm verify:core
+```
+
+完整 native 构建与集成验证需要 Linux、Node ≥22.19、pnpm 11.18.0、bubblewrap，以及有权使用的**带补丁 DSH 0.2.0-rc.2 安装**。项目保持私有、未授予开源许可；DSH 可由固定源码和补丁重建。没有该依赖时会明确失败，不会安装 registry 同名包。版本和补丁产物摘要见 [dsh-baseline.json](dsh-baseline.json)，准备步骤见 [standalone-dsh](docs/standalone-dsh.md)。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -24,18 +31,19 @@ pnpm run doctor
 pnpm verify
 ```
 
-`setup:host` 只验证并生成被 Git 忽略的 `.singularity/` 本地解析配置；checkout 和用户目录可以改变。`pnpm verify` 执行离线 build、测试和 gates，不调用模型。生产效果必须依据[原生实跑证据](docs/e2e-testing.md)。
+`setup:host` 只验证并生成被 Git 忽略的 `.singularity/` 本地解析配置；checkout 和用户目录可以改变。`pnpm verify` 执行完整离线 build、测试和 gates；`pnpm verify:native` 只运行 native 分组，二者都不调用模型。生产效果必须依据[原生实跑证据](docs/e2e-testing.md)。
 
 复杂领域可以先交给一个普通 DSH session，把用户提供的同领域任务整理为 suite、验收标准、评分策略和试分工具，再审核实际文件。builder 不自行编造任务或独立 family；资料不足时报告缺项。默认不生成 Method、Skill、TaskTemplate、独立 Task 文件或审核手册，由 Singularity 从空方法探索 RSI：
 
 ```sh
 export DSH_HOME=/path/to/private-setup-home
-node scripts/singularity.mjs env setup ./environment-request.md \
+node scripts/singularity.mjs env setup ./environment-request.md --interactive \
   --workspace /path/to/new-staging --patch /path/to/model-route-only.yml
+node scripts/singularity.mjs env check /path/to/new-staging
 node scripts/singularity.mjs env approve /path/to/new-staging --reviewer your-name
 ```
 
-该入口使用原生 headless profile，不创建 Singularity Task、Bubble 或 RSI，准备完成即退出等待一次审核。模型路由补丁不能挂载 Singularity。配置清单、审核与冻结摘要见[环境准备说明](docs/env-setup.md)。
+交互入口用普通 DSH Web session 按六项 TODO 填表、验证，并在官方提问窗口补齐选择和收集审核意见；修改留在同一 session。省略 `--interactive` 使用原生 headless 批处理。两者都不启动 Singularity Task 或 RSI，模型路由补丁不能挂载 Singularity。配置清单、审核与冻结摘要见[环境准备说明](docs/env-setup.md)。
 
 部署前在 `deployment/profile/cordis.patch.yml` 配置模型路由和控制标识，通过 `SINGULARITY_DOMAIN` 指定领域目录，并在独立 DSH home 配置凭据。领域外部工具与只读参考路径也必须在本机存在。
 
@@ -90,10 +98,12 @@ Git 回退后应重新执行 `pnpm build`，再部署到独立 home/controlId �
 新宿主可用 `singularity-assembly.methodFile` 指定初始 method JSON：必须显式包含 `workflowGuidance`（可空，最多 8192 UTF-8 字节）、`templates`（可空）、`skills`、`tools`，不含方法级 `rootTemplate`。`scripts/rsi-campaign.mjs` 仅保留为单题连续运行诊断工具，现已使用同一原生 HTTP 客户端；其本地文件只记录诊断脚本进度，正式 suite 实验使用上述 CLI。重复同题不构成迁移验证。
 冻结 Task 的模板来源按原摘要保留，后续方法可修改或删除该模板。业务启动材料携带固定方法的短策略与全局方向；`singularity_read(kind=workflow)` 分页提供同一根内的关系元数据，不扩大产物或会话正文权限。`bound/delivered/read/invoked` 分别记录绑定、宿主送达、读取和调用，不证明模型遵循了策略。RSI 通过 `roots`、`sessions`、`usage`、`steps` 和 `trajectory` 按需查询历史；`subject` 按 UTF-8 字节分页，跟随 `next` 直到 `complete`。提案只写 analysis 和带 value 的 edit.changes，宿主保留未改字段与冻结源码；新批次先对同一份 bytes 做 JSON/schema、派生 Method、实际 diff 与冻结 evolve case/family ID 的纯静态预检，任一文件失败则整批不冻结、不扣槽；通过后才冻结这些 bytes，pending 按附件恢复。每个搜索任务最多冻结 6 个槽、repair=0，冻结后的证据、critic、duplicate 与 smoke 失败仍消耗额度；相同 digest 不重抽，恢复不重置。critic 通过后才加载/selftest，再进入原生评估。没有待处理提案/评估即可如实提交报告，结果为 `improved / no-improvement / insufficient-evidence`；无需为了结束而发布。
 
-RSI 每次开始或恢复读取 `kind=search` 的 phase、next、预算和 authoring 入口；写作模板与规则合并在 `ref=authoring` 页，资产与详细反馈分别按需分页。提案准入立即返回，宿主自动继续冻结批次并恢复作者；待定期间关闭作者写入。审核者直接提交 findings，宿主绑定冻结对象。提案、报告、审核的参数与提交时序见 [RSI agent 工作合同](docs/rsi-agent-contract.md)。
+RSI 每次开始或恢复读取 `kind=search` 的 executionPhase、next、预算和 authoring 入口；写作模板与规则合并在 `ref=authoring` 页，资产与详细反馈分别按需分页。提案准入立即返回，宿主自动继续冻结批次并恢复作者；待定期间关闭作者写入。审核者直接提交 findings，宿主绑定冻结对象。提案、报告、审核的参数与提交时序见 [RSI agent 工作合同](docs/rsi-agent-contract.md)。
 
 模型请求的流式输出、错误分类、重试和最终失败由 DSH 原生 agent loop、`llm-retry` 与 provider `retryPolicy` 负责。当前部署为 normal 模式、最多重试 20 次；退避和可重试错误码按 provider 配置及 DSH 默认值解析。部分推理、文本或未执行的工具调用后发生 TRANSPORT 断流，仍可由原生重试恢复；失败 chunks 保存在 `assistant/attempt`，不会进入成功消息或执行其中的工具。不可重试错误和重试耗尽保留原生 `turn/end` 原因，Task 层按该事实记录当前 Run 失败；取消和 attempt 用量同样遵循原生语义。直接 `ctx.llm.stream()` 的背景摘要仍由原生调用者决定重试。
 
 节点策略唯一源码为 [prompts.ts](assembly/src/prompts.ts)，工具参数与分页说明只在 DSH 原生 schema，dispatch/通知只送运行事实。RSI 删除资产类型探索配额和停滞强制删除；候选仍按证据、独立筛查和冻结测评决定，允许无赢家结束。
 
-委派区分必须验收的 `required` 责任与可择优、可停止的 `exploration` 分支。全局关系与 RSI 状态按需读取；每步仅自动送达已用/总量/剩余共享步数的短状态，含子任务与独立验收。当前责任按需读 `singularity_read(kind=summary)`，任务索引默认每页 20 项，完整关系读 `workflow`。完成通知只发标识和状态，详情按需读取。`singularity_memory()` 首次显式请求才准备本节点的父背景，输入最多 32 KiB、输出额度保留 32768 tokens，后续请求复用 checkpoint；传 ref 只读。单会话压缩由 DSH 原生 BasicCompaction 真正替换上下文，四个 preset 在模型窗口的 70% 触发（本轮 1M 窗口为 700k），保留原生默认尾部策略与 32768 tokens 摘要额度，原始事件不删除。`kind=usage` 的 `audit` 另外披露 memory、compaction 和未知用量，不改原生面板及冻结比较口径。根因与两次真实运行的数据见[上下文与用量审计](docs/runtime-context-audit-20261022.md)。领域规则及外部工具验证属于独立环境包，默认工程回归不执行 EDA、CPU benchmark 或外部领域框架。
+委派区分必须验收的 `required` 责任与可择优、可停止的 `exploration` 分支。全局关系与 RSI 状态按需读取；每步仅自动送达已用/总量/剩余共享步数的短状态，含子任务与独立验收。当前责任按需读 `singularity_read(kind=summary)`，任务索引默认每页 20 项，完整关系读 `workflow`。完成通知只发标识和状态，详情按需读取。`singularity_memory({})` 只读目录，不触发模型；`{prepare:true}` 显式准备本节点继承笔记并直接返回正文，最多一次，失败不重复购买；`{ref}` 只读已有 checkpoint。root/review 不提供 prepare。摘要输入最多 32 KiB、输出额度保留 32768 tokens。单会话压缩由 DSH 原生 BasicCompaction 真正替换上下文，四个 preset 在模型窗口的 70% 触发（本轮 1M 窗口为 700k），保留原生默认尾部策略与 32768 tokens 摘要额度，原始事件不删除。`kind=usage` 的 `audit` 另外披露 memory、compaction 和未知用量，不改原生面板及冻结比较口径。根因与两次真实运行的数据见[上下文与用量审计](docs/runtime-context-audit-20261022.md)。领域规则及外部工具验证属于独立环境包，默认工程回归不执行 EDA、CPU benchmark 或外部领域框架。
+
+工程收尾与实验准备见 [研究工具合同](research/README.md)、[完整上下文审计](docs/context-governance.md) 和 [文档目录](docs/documentation-index.md)。`pnpm lint` / `pnpm format:check` 已进入 core/native/完整 verify；`pnpm coverage:core` 生成用于发现盲区的覆盖率报告，不设数量目标。`experiment:prepare`、`experiment:export`、`experiment:seal`、`experiment:replay` 只处理已有材料，不发起实跑。公开授权仍为 private/UNLICENSED，制品与第三方通知由 `audit:distribution` 核查。
